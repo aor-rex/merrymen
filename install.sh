@@ -98,8 +98,18 @@ if [ "$choice" = "2" ]; then
   # env file so it survives shells + reboots. On a private-LAN box (laptop) the
   # LAN IP already passes; the detected public IP is still allowlisted as a no-op
   # (it also covers NAT'd cloud VPSes with a private NIC IP).
+  primary_ip() {
+    local ip=""
+    if command -v hostname >/dev/null 2>&1; then
+      ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    fi
+    if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
+      ip="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
+    fi
+    printf '%s' "$ip"
+  }
   CFG="$HOME/.merrymen-docker/env"
-  PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  PRIMARY_IP="$(primary_ip)"
   case "$PRIMARY_IP" in
     ""|127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|*:*) LAN=1 ;;
     *) LAN=0 ;;

@@ -33,13 +33,26 @@ if [ -f "$CFG" ]; then
   set +a
 fi
 
-# Where the dashboard prints as reachable: the allowlisted host when one is set
-# (a server install), localhost otherwise. First entry of a comma-separated list.
+# Where the dashboard prints as reachable: the allowlisted host when the box is
+# a server (public primary IP — the whole point of the Docker install), localhost
+# otherwise. On a private-LAN box the allowlisted public IP is NAT'd and NOT
+# reachable from the owner's browser, so never print it as THE url.
 url() {
-  local host
+  local host h primary
   host="${MERRYMEN_ALLOWED_HOSTS%%,*}"
-  if [ -n "$host" ]; then
-    echo "http://$host:3100"
+  primary=""
+  if command -v hostname >/dev/null 2>&1; then
+    primary="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  if [ -z "$primary" ] && command -v ip >/dev/null 2>&1; then
+    primary="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
+  fi
+  case "$primary" in
+    ""|127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|*:*) h="" ;;
+    *) h="$host" ;;
+  esac
+  if [ -n "$h" ]; then
+    echo "http://$h:3100"
   else
     echo "http://localhost:3100"
   fi
