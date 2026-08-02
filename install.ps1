@@ -1,9 +1,14 @@
-# merrymen installer for Windows — installs Node (if needed) + merrymen, fixes PATH.
+# merrymen installer for Windows — local (Node) or Docker, your choice.
 #
 #   irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 #
-# Safe to re-run. Touches only: Node (via winget, with your consent) and your
-# USER PATH. No admin rights required for the merrymen + PATH steps.
+# Asks how you'd like to run merrymen:
+#   1) Local machine — installs Node (if needed) + merrymen via npm.
+#   2) Docker       — clones the source, builds the image locally (no registry),
+#                     installs a `merrymen` wrapper that drives docker.
+#
+# Safe to re-run. Local install touches only: Node (via winget, with your
+# consent) and your USER PATH. No admin rights required.
 
 $ErrorActionPreference = "Stop"
 
@@ -41,11 +46,6 @@ function Enable-LocalScripts {
   }
 }
 
-Write-Host ""
-Say "merrymen -- stand and deliver" "Green"
-Say "setting up your rig..." "DarkGray"
-Write-Host ""
-
 function Test-NodeOk {
   try {
     $v = (& node -v) -replace "^v", ""
@@ -54,6 +54,93 @@ function Test-NodeOk {
   } catch { return $false }
 }
 
+# Get (or refresh) the merrymen source into $dest. Prefers git when present,
+# otherwise downloads and extracts the main-branch tarball — no git needed.
+function Get-MerrymenSource($dest) {
+  $parent = Split-Path $dest -Parent
+  New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  if (Test-Path (Join-Path $dest "Dockerfile")) { return }
+  if (Get-Command git -ErrorAction SilentlyContinue) {
+    if (-not (Test-Path (Join-Path $dest ".git"))) {
+      & git clone --depth 1 https://github.com/millw14/merrymen.git $dest
+    } else {
+      & git -C $dest pull --ff-only
+    }
+    return
+  }
+  $tgz = Join-Path $parent "merrymen.tar.gz"
+  $ext = Join-Path $parent "merrymen-main"
+  Invoke-WebRequest -Uri "https://codeload.github.com/millw14/merrymen/tar.gz/refs/heads/main" -OutFile $tgz
+  tar -xzf $tgz -C $parent
+  if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+  Move-Item $ext $dest
+  Remove-Item -Force $tgz
+}
+
+function Install-Docker {
+  Say "[ok] Docker install" "Green"
+
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Say "Docker isn't installed." "Red"
+    Say "Install Docker Desktop from https://www.docker.com/products/docker-desktop" "DarkGray"
+    Say "then re-run this installer and pick the Docker option." "DarkGray"
+    return
+  }
+  & docker info *> $null
+  if ($LASTEXITCODE -ne 0) {
+    Say "Docker is installed but the daemon isn't running." "Red"
+    Say "Start Docker Desktop, then re-run this installer." "DarkGray"
+    return
+  }
+
+  $src = Join-Path $HOME ".merrymen-docker\src"
+  Say "cloning the merrymen source for the image build..." "Yellow"
+  Get-MerrymenSource $src
+
+  Say "building the image (first build installs deps + builds the dashboard -- a few minutes)..." "Yellow"
+  & docker build -t merrymen:latest $src
+  if ($LASTEXITCODE -ne 0) { throw "docker build failed (exit $LASTEXITCODE)" }
+
+  Say "installing the 'merrymen' wrapper..." "Yellow"
+  $binDir = Join-Path $env:APPDATA "merrymen\bin"
+  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+  Copy-Item (Join-Path $src "scripts\docker\merrymen.ps1") $binDir -Force
+  Copy-Item (Join-Path $src "scripts\docker\merrymen.cmd") $binDir -Force
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if ($userPath -notlike "*$binDir*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
+    $env:Path += ";$binDir"
+    Say "[ok] added $binDir to your PATH" "Green"
+  }
+
+  Write-Host ""
+  Say "the band is ready. next:" "Green"
+  Write-Host "    merrymen onboard   " -NoNewline; Write-Host "# keys, strategy, basket (one-time)" -ForegroundColor DarkGray
+  Write-Host "    merrymen start     " -NoNewline; Write-Host "# dashboard at localhost:3100 + the worker (in Docker)" -ForegroundColor DarkGray
+  Write-Host "    merrymen doctor    " -NoNewline; Write-Host "# check the rig" -ForegroundColor DarkGray
+  Write-Host "    merrymen logs      " -NoNewline; Write-Host "# tail the band's logs" -ForegroundColor DarkGray
+  Write-Host ""
+  Say "(if 'merrymen' isn't found, open a fresh terminal -- PATH updates need one)" "DarkGray"
+  Write-Host ""
+}
+
+Write-Host ""
+Say "merrymen -- stand and deliver" "Green"
+Say "setting up your rig..." "DarkGray"
+Write-Host ""
+
+# ── pick the install method ──────────────────────────────────────────────
+Say "How would you like to run merrymen?" "Green"
+Say "  1) Local machine  (Node 22.12+ + npm install -g)" "DarkGray"
+Say "  2) Docker         (build the image locally, no registry)" "DarkGray"
+$choice = Read-Host "  choice [1/2]"
+
+if ($choice -eq "2" -or $choice -ieq "docker") {
+  Install-Docker
+  return
+}
+
+# ── local install ─────────────────────────────────────────────────────────
 if (Test-NodeOk) {
   Say "[ok] node $(node -v) already installed" "Green"
 } else {

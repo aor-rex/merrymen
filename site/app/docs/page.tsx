@@ -45,9 +45,12 @@ export default function Docs() {
         {/* ── install ── */}
         <h2 id="install">Install</h2>
         <p>
-          Runs on <strong>Linux, macOS, and Windows</strong> — one Node package, no Docker, no clone.
-          Requires <strong>Node 22.12+</strong> (for the built-in SQLite); no Node yet? The one-line
-          installer sets it up and puts merrymen on your PATH.
+          Runs on <strong>Linux, macOS, and Windows</strong> — one Node package, no clone. Requires{" "}
+          <strong>Node 22.12+</strong> (for the built-in SQLite); no Node yet? The one-line installer
+          sets it up and puts merrymen on your PATH. The installer asks how you want to run merrymen:
+          <strong> local</strong> (Node + npm) or <strong>Docker</strong> (the image is built locally,
+          nothing pulled from a registry; your keys and ledger live on your machine in{" "}
+          <code className="inline">~/.merrymen</code>).
         </p>
         <pre className="code">
 {`# Linux / macOS
@@ -62,6 +65,15 @@ irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex`}
 merrymen setup      # checks node / npm / PATH, prints exact fixes
 merrymen start      # dashboard at localhost:3100 + the worker
 merrymen update     # upgrade later (stops the band, installs, restarts)`}
+        </pre>
+        <p>Prefer Docker? Build the image yourself (no registry involved):</p>
+        <pre className="code">
+{`git clone https://github.com/millw14/merrymen.git && cd merrymen
+docker build -t merrymen:latest .
+docker run -d --name merrymen --restart unless-stopped \\
+  -p 3100:3100 -v "$HOME/.merrymen:/app/.merrymen" \\
+  -e MERRYMEN_HOST=0.0.0.0 -e MERRYMEN_HOME=/app/.merrymen \\
+  merrymen:latest`}
         </pre>
         <p>
           On a headless Linux box the dashboard won&apos;t auto-open — it prints{" "}

@@ -81,8 +81,12 @@ Pimlico key and the same wall signs for real. Upgrade any time with
 
 Self-hosted, terminal-first. Install once, run from anywhere. No clone.
 
-**No Node yet? One line does everything** — installs Node if missing, then
-merrymen, and puts it on PATH:
+**One line installs it** — the installer asks how you want to run merrymen:
+
+- **Local machine** — installs Node (if missing), then merrymen, and puts it on PATH.
+- **Docker** — builds the image locally (no registry), installs a `merrymen`
+  wrapper that drives docker. Your keys, ledger, and config live on the host in
+  `~/.merrymen` (mounted into the container), so the container stays disposable.
 
 ```powershell
 # Windows (PowerShell)
@@ -93,7 +97,39 @@ irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 ```
 
-**Already have Node 22.12+?**
+Want Docker without the installer? Build the image yourself:
+
+```bash
+git clone https://github.com/millw14/merrymen.git && cd merrymen
+docker build -t merrymen:latest .
+docker run -d --name merrymen --restart unless-stopped \
+  -p 3100:3100 -v "$HOME/.merrymen:/app/.merrymen" \
+  -e MERRYMEN_HOST=0.0.0.0 -e MERRYMEN_HOME=/app/.merrymen \
+  merrymen:latest
+```
+
+Prefer Compose? The repo ships a `docker-compose.yml` (same local build, same
+volume). One-time data-dir first, then up:
+
+```bash
+mkdir -p ~/.merrymen
+MYUID=$(id -u) MYGID=$(id -g) docker compose up -d   # dashboard at localhost:3100 + the worker
+docker compose logs -f        # tail the band's logs
+docker compose run --rm merrymen node cli/bin.mjs doctor
+```
+
+The container runs as your user so everything it writes to `~/.merrymen` stays
+yours. If that folder is already owned by root (from an earlier Docker run
+without user mapping), fix it once: `sudo chown -R "$(id -u):$(id -g)" ~/.merrymen`.
+
+The dashboard is **LAN-only by default**: the APIs refuse any public-domain
+`Host` header (a DNS-rebinding guard). Hosting it on a VPS behind your own
+domain? Opt that exact hostname in — `MERRYMEN_ALLOWED_HOSTS=band.example.com`
+(comma-separated for more) as an env on the wrapper, in `docker-compose.yml`,
+or in the Docker run. TZ passes through too, so strategy timing matches your
+clock.
+
+**Already have Node 22.12+?** (local install)
 
 ```bash
 npm install -g merrymen            # or: npm i -g github:millw14/merrymen

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# merrymen — Docker-mode CLI shim.
+#
+# Installed by install.sh when the user picks the Docker install. Translates
+# the normal merrymen commands into docker runs against the locally-built
+# image, mounting ~/.merrymen as the persistent data dir — so every file the
+# CLI writes (settings, grant/keys, the SQLite ledger, the heartbeat) lives on
+# the host, exactly as in a local install.
+#
+#   merrymen start        run the band as a detached daemon (dashboard:3100)
+#   merrymen stop         stop the daemon
+#   merrymen restart      restart the daemon
+#   merrymen logs         tail the daemon's logs
+#   merrymen update       rebuild the image from ~/.merrymen-docker/src
+#   merrymen <anything>   one-shot run in a throwaway container (onboard,
+#                         doctor, status, recover, kill, selftest, …)
+set -euo pipefail
+
+IMG="${MERRYMEN_IMAGE:-merrymen:latest}"
+CT="merrymen"
+SRC="${MERRYMEN_DOCKER_SRC:-$HOME/.merrymen-docker/src}"
+VOL="${MERRYMEN_HOME:-$HOME/.merrymen}"
+
+# The bind mount source must exist before docker starts, or docker makes it a
+# root-owned directory.
+mkdir -p "$VOL"
+
+# Run as the host user so files written into the bind mount stay owned by the
+# owner — readable and backuppable without sudo. merrymen writes secrets with
+# 0600 perms, so this stays tight. TZ and MERRYMEN_ALLOWED_HOSTS are forwarded
+# from the host when set (empty otherwise), so a self-hosted dashboard behind a
+# domain keeps working and strategy timing matches the owner's clock.
+mounts=(
+  -v "$VOL:/app/.merrymen"
+  -e MERRYMEN_HOME=/app/.merrymen
+  --user "$(id -u):$(id -g)"
+  -e TZ
+  -e MERRYMEN_ALLOWED_HOSTS
+)
+
+# The daemon: dashboard + supervised worker, detached, auto-restart on boot.
+run_daemon() {
+  docker run -d --name "$CT" --restart unless-stopped \
+    -p 3100:3100 \
+    -e MERRYMEN_HOST=0.0.0.0 \
+    "${mounts[@]}" \
+    "$IMG" node cli/bin.mjs start --no-open
+}
+
+case "${1:-}" in
+  start)
+    if docker ps -a --format '{{.Names}}' | grep -qx "$CT"; then
+      if [ "$(docker inspect -f '{{.State.Running}}' "$CT")" = "true" ]; then
+        echo "  already riding (container '$CT') — restart: merrymen restart · logs: merrymen logs"
+        exit 0
+      fi
+      docker start "$CT" >/dev/null
+      echo "  the band rides again (container '$CT') — dashboard: http://localhost:3100"
+      exit 0
+    fi
+    run_daemon
+    echo "  the band rides out (container '$CT') — dashboard: http://localhost:3100"
+    echo "  logs: merrymen logs · stop: merrymen stop · doctor: merrymen doctor"
+    ;;
+  stop)
+    docker stop "$CT"
+    ;;
+  restart)
+    docker restart "$CT"
+    ;;
+  logs)
+    docker logs -f "$CT"
+    ;;
+  update)
+    if [ ! -d "$SRC" ]; then
+      echo "  no source checkout at $SRC — re-run the installer to pick the Docker install." >&2
+      exit 1
+    fi
+    git -C "$SRC" pull --ff-only
+    docker build -t "$IMG" "$SRC"
+    # A rebuilt image only reaches the daemon through a NEW container —
+    # `docker restart` reuses the old container, which stays pinned to the
+    # image it was created from. So recreate when the band is up.
+    if docker ps -a --format '{{.Names}}' | grep -qx "$CT"; then
+      was_running=false
+      if [ "$(docker inspect -f '{{.State.Running}}' "$CT")" = "true" ]; then
+        was_running=true
+      fi
+      docker rm -f "$CT" >/dev/null
+      if [ "$was_running" = "true" ]; then
+        run_daemon
+        echo "  image rebuilt + the band is back up (container '$CT') — dashboard: http://localhost:3100"
+      else
+        echo "  image rebuilt — old container removed. bring the band up: merrymen start"
+      fi
+    else
+      echo "  image rebuilt — bring the band up: merrymen start"
+    fi
+    ;;
+  "")
+    echo "usage: merrymen <start|stop|restart|logs|update|onboard|doctor|status|…>" >&2
+    exit 1
+    ;;
+  *)
+    # One-shot command. Attach a TTY only when stdin is one — interactive
+    # commands (onboard, recover) need it; piped commands must not choke on it.
+    tty=()
+    if [ -t 0 ]; then tty=(-t); fi
+    exec docker run --rm -i "${tty[@]}" "${mounts[@]}" "$IMG" node cli/bin.mjs "$@"
+    ;;
+esac
