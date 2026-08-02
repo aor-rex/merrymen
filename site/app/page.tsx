@@ -383,7 +383,10 @@ docker run -d --name merrymen --restart unless-stopped \\
             Runs on <b>Linux, macOS, and Windows</b> — one Node package, no clone. The installers ask
             how you want to run merrymen: <b>local</b> (Node + npm) or <b>Docker</b> (the image is
             built locally, nothing is pulled from a registry; your keys and ledger live on your
-            machine in <code className="inline">~/.merrymen</code>). Your band starts in{" "}
+            machine in <code className="inline">~/.merrymen</code>). Pick <b>Docker</b> on a VPS and the
+            installer self-hosts it in one shot — detects the box&apos;s public IP, allowlists it, opens
+            port 3100, starts the band, and prints <code className="inline">http://&lt;ip&gt;:3100</code>.
+            Your band starts in{" "}
             <b>paper mode</b> (live prices, simulated fills, zero funds), so you can watch it trade in
             a couple of minutes. Upgrade any time with <code className="inline">merrymen update</code>.
           </p>

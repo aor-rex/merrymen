@@ -122,12 +122,21 @@ The container runs as your user so everything it writes to `~/.merrymen` stays
 yours. If that folder is already owned by root (from an earlier Docker run
 without user mapping), fix it once: `sudo chown -R "$(id -u):$(id -g)" ~/.merrymen`.
 
+**Self-host on a VPS in one shot?** Pick **Docker** in the installer — it detects
+the box's public IP, allowlists it for the dashboard's host guard (writes
+`MERRYMEN_ALLOWED_HOSTS` to `~/.merrymen-docker/env`, which the `merrymen` wrapper
+sources on every run), opens port 3100 if ufw is around, starts the band, and
+prints the reachable `http://<ip>:3100`. Keys, strategy and basket then go in via
+the dashboard's `/settings` page — no more terminal steps.
+
 The dashboard is **LAN-only by default**: the APIs refuse any public-domain
 `Host` header (a DNS-rebinding guard). Hosting it on a VPS behind your own
 domain? Opt that exact hostname in — `MERRYMEN_ALLOWED_HOSTS=band.example.com`
 (comma-separated for more) as an env on the wrapper, in `docker-compose.yml`,
 or in the Docker run. TZ passes through too, so strategy timing matches your
-clock.
+clock. A reverse proxy (Caddy/nginx) for HTTPS is the recommended follow-up —
+the dashboard has no login and can move funds, so raw `:3100` on the open
+internet is not a long-term home.
 
 **Already have Node 22.12+?** (local install)
 

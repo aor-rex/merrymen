@@ -76,6 +76,16 @@ docker run -d --name merrymen --restart unless-stopped \\
   merrymen:latest`}
         </pre>
         <p>
+          Hosting on a <strong>VPS</strong>? Pick <strong>Docker</strong> in the one-line installer and
+          it becomes a one-shot self-host: it detects the box&apos;s public IP, allowlists it for the
+          dashboard&apos;s host guard (writes <code className="inline">MERRYMEN_ALLOWED_HOSTS</code> to{" "}
+          <code className="inline">~/.merrymen-docker/env</code>), opens port 3100 if ufw is around,
+          starts the band, and prints the reachable{" "}
+          <code className="inline">http://&lt;ip&gt;:3100</code>. Add your keys + strategy at{" "}
+          <code className="inline">/settings</code> in the dashboard. Any <em>other</em> public host is
+          still refused — the DNS-rebinding guard stays intact.
+        </p>
+        <p>
           On a headless Linux box the dashboard won&apos;t auto-open — it prints{" "}
           <code className="inline">localhost:3100</code>; set{" "}
           <code className="inline">MERRYMEN_HOST=0.0.0.0</code> to reach it across a trusted LAN.

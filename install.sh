@@ -91,13 +91,48 @@ if [ "$choice" = "2" ]; then
   mkdir -p "$DOCKER_BIN"
   install -m 755 "$DOCKER_SRC/scripts/docker/merrymen" "$DOCKER_BIN/merrymen"
 
-  echo
-  grn "the band is ready. next:"
-  dim "  merrymen onboard   # keys, strategy, basket (one-time, asks for your keys)"
-  dim "  merrymen start     # dashboard at localhost:3100 + the worker (in Docker)"
-  dim "  merrymen doctor    # check the rig"
-  dim "  merrymen logs      # tail the band's logs"
-  echo
+  # ── make the dashboard reachable ──────────────────────────────────────
+  # The point of the Docker install is a server. The dashboard's host guard only
+  # lets loopback + private IPs through, so on a VPS (a public primary IP) every
+  # /api/* call is 403 unless that IP is allowlisted — persist it to the wrapper's
+  # env file so it survives shells + reboots. On a private-LAN box (laptop) the
+  # LAN IP already passes; the detected public IP is still allowlisted as a no-op
+  # (it also covers NAT'd cloud VPSes with a private NIC IP).
+  CFG="$HOME/.merrymen-docker/env"
+  PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  case "$PRIMARY_IP" in
+    ""|127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|*:*) LAN=1 ;;
+    *) LAN=0 ;;
+  esac
+  SERVER_IP=""
+  if [ "$LAN" = "0" ]; then
+    SERVER_IP="$PRIMARY_IP"
+  elif command -v curl >/dev/null 2>&1; then
+    ylw "[..] detecting the public IP (dashboard host guard)..."
+    SERVER_IP="$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [ -n "$SERVER_IP" ]; then
+    mkdir -p "$(dirname "$CFG")"
+    printf 'MERRYMEN_ALLOWED_HOSTS=%s\n' "$SERVER_IP" > "$CFG"
+    grn "[ok] dashboard host $SERVER_IP allowlisted"
+  else
+    rm -f "$CFG"
+  fi
+
+  # Open the dashboard port when ufw is around (root: do it, else nudge).
+  if command -v ufw >/dev/null 2>&1; then
+    if [ "$(id -u)" = "0" ]; then
+      ufw allow 3100/tcp >/dev/null 2>&1 && grn "[ok] ufw: port 3100/tcp opened"
+    else
+      ylw "Open the dashboard port so it's reachable (and 3100/tcp in your cloud firewall):"
+      dim "  sudo ufw allow 3100/tcp"
+      echo
+    fi
+  fi
+
+  # Start the band now — dashboard + worker — so the installer is done.
+  ylw "[..] starting the band (dashboard + worker in Docker)..."
+  "$DOCKER_BIN/merrymen" start
 
   # nudge about PATH if ~/.local/bin isn't on it (the "command not found" trap)
   if ! printf ':%s:' "$PATH" | grep -q ":$DOCKER_BIN:"; then
@@ -113,6 +148,19 @@ if [ "$choice" = "2" ]; then
     dim "  sudo chown -R \"$(id -u):$(id -g)\" \"$HOME/.merrymen\""
     echo
   fi
+
+  echo
+  if [ "$LAN" = "0" ]; then
+    grn "the band is live — dashboard: http://$SERVER_IP:3100"
+  else
+    grn "the band is live — dashboard: http://localhost:3100 (LAN: http://$PRIMARY_IP:3100)"
+    if [ -n "$SERVER_IP" ]; then
+      dim "  a NAT'd server is also reachable via: http://$SERVER_IP:3100"
+    fi
+  fi
+  dim "  add your keys, strategy + basket at /settings (or: merrymen onboard)"
+  dim "  doctor: merrymen doctor · logs: merrymen logs · stop: merrymen stop"
+  echo
   exit 0
 fi
 

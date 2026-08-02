@@ -20,6 +20,30 @@ IMG="${MERRYMEN_IMAGE:-merrymen:latest}"
 CT="merrymen"
 SRC="${MERRYMEN_DOCKER_SRC:-$HOME/.merrymen-docker/src}"
 VOL="${MERRYMEN_HOME:-$HOME/.merrymen}"
+CFG="${MERRYMEN_CFG:-$HOME/.merrymen-docker/env}"
+
+# Persistent wrapper env — written by install.sh on a server (the VPS public IP
+# for MERRYMEN_ALLOWED_HOSTS, TZ) so a self-hosted dashboard keeps working after
+# the installer exits, across shells and reboots. Shell env vars still win: the
+# ones already set here are not overwritten.
+if [ -f "$CFG" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$CFG"
+  set +a
+fi
+
+# Where the dashboard prints as reachable: the allowlisted host when one is set
+# (a server install), localhost otherwise. First entry of a comma-separated list.
+url() {
+  local host
+  host="${MERRYMEN_ALLOWED_HOSTS%%,*}"
+  if [ -n "$host" ]; then
+    echo "http://$host:3100"
+  else
+    echo "http://localhost:3100"
+  fi
+}
 
 # The bind mount source must exist before docker starts, or docker makes it a
 # root-owned directory.
@@ -55,11 +79,11 @@ case "${1:-}" in
         exit 0
       fi
       docker start "$CT" >/dev/null
-      echo "  the band rides again (container '$CT') — dashboard: http://localhost:3100"
+      echo "  the band rides again (container '$CT') — dashboard: $(url)"
       exit 0
     fi
     run_daemon
-    echo "  the band rides out (container '$CT') — dashboard: http://localhost:3100"
+    echo "  the band rides out (container '$CT') — dashboard: $(url)"
     echo "  logs: merrymen logs · stop: merrymen stop · doctor: merrymen doctor"
     ;;
   stop)
@@ -89,7 +113,7 @@ case "${1:-}" in
       docker rm -f "$CT" >/dev/null
       if [ "$was_running" = "true" ]; then
         run_daemon
-        echo "  image rebuilt + the band is back up (container '$CT') — dashboard: http://localhost:3100"
+        echo "  image rebuilt + the band is back up (container '$CT') — dashboard: $(url)"
       else
         echo "  image rebuilt — old container removed. bring the band up: merrymen start"
       fi
