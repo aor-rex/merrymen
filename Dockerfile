@@ -27,7 +27,7 @@ WORKDIR /app
 # output out of the layer it would otherwise invalidate.
 COPY package.json package-lock.json tsconfig.json ./
 COPY packages packages
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts --no-audit --no-fund && rm -rf /root/.npm /root/.cache
 
 # Source, then the one-time production build of the dashboard.
 COPY cli cli

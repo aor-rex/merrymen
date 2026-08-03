@@ -12,6 +12,8 @@ scripts
 install.sh
 install.ps1
 *.tgz
+**/*.test.ts
+**/*.test.ts.map
 .env
 .env.local
 .env.*.local
