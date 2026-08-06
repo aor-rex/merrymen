@@ -153,10 +153,9 @@ export async function getUpdates(
 
 /**
  * The commands shown in the Telegram "/" menu. Mirrors /help (reads.ts) as
- * Telegram BotCommand entries: 3-32 lowercase alphanumeric/underscore, no
- * leading slash, plain-text descriptions (no HTML). Two-char commands (/ls,
- * /pc) work in chat but can't be menu entries, so they're omitted. PC/control
- * and agent entries are still gated at runtime — the menu merely surfaces them.
+ * Telegram BotCommand entries: 1-32 lowercase alphanumeric/underscore, no
+ * leading slash, plain-text descriptions (no HTML). PC/control and agent
+ * entries are still gated at runtime — the menu merely surfaces them.
  */
 export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "help", description: "list every command" },
@@ -187,6 +186,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "link", description: "pair this chat with a link code" },
   { command: "shot", description: "take a screenshot" },
   { command: "look", description: "what am I looking at?" },
+  { command: "ls", description: "list files in a directory" },
   { command: "open", description: "open an app or URL" },
   { command: "sys", description: "system info" },
   { command: "vol", description: "volume up/down/mute" },
@@ -200,6 +200,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "run", description: "run an allowlisted shell command" },
   { command: "type", description: "type into the active window" },
   { command: "key", description: "press a key combo (ctrl+s)" },
+  { command: "pc", description: "what remote control is enabled" },
   { command: "watch", description: "watch cpu/file/proc" },
   { command: "watchers", description: "list watchers" },
   { command: "unwatch", description: "remove a watcher" },
