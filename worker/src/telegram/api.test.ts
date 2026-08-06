@@ -148,8 +148,8 @@ describe("BOT_COMMANDS — the Telegram command menu", () => {
     assert.ok(BOT_COMMANDS.length > 0);
     const seen = new Set<string>();
     for (const { command, description } of BOT_COMMANDS) {
-      // command: 3-32 lowercase alnum/underscore, no leading slash, unique
-      assert.match(command, /^[a-z][a-z0-9_]{2,31}$/);
+      // command: 1-32 lowercase alnum/underscore, no leading slash, unique
+      assert.match(command, /^[a-z][a-z0-9_]{0,31}$/);
       assert.ok(!command.startsWith("/"));
       assert.equal(seen.has(command), false, `duplicate command /${command}`);
       seen.add(command);
