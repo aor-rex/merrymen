@@ -8,7 +8,7 @@
  * string replaces it. Non-secret fields: null/empty clears back to default.
  */
 
-import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import {
@@ -65,6 +65,8 @@ export interface SettingsView {
    */
   officialCoins: string[];
   strategies: { builtin: string[]; custom: string[] };
+  /** True once first-run setup was finished/skipped on any surface. */
+  webOnboarded: boolean;
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
 }
@@ -155,6 +157,7 @@ export async function GET(req: Request) {
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
+    webOnboarded: safeValues.webOnboarded === true,
   };
   return NextResponse.json(view);
 }
@@ -272,6 +275,9 @@ const BOOL_FIELDS = [
   // MerrymenSettings.officialCoinsEnabled.
   "officialCoinsEnabled",
   "discoveryEnabled",
+  // First-run marker: true = finished/skipped on any surface; false/empty
+  // clears it (re-shows the onboarding surfaces).
+  "webOnboarded",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {
@@ -692,8 +698,12 @@ export async function PUT(req: Request) {
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-    // owner-only perms (0600), not the default world-readable 0644.
-    await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+    // owner-only perms (0600), not the default world-readable 0644. Write to a
+    // temp file then rename, so a crash mid-write can never leave a truncated
+    // settings.json that the worker would silently read as defaults.
+    const tmp = `${SETTINGS_FILE}.tmp`;
+    await writeFile(tmp, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+    await rename(tmp, SETTINGS_FILE);
     await chmod(SETTINGS_FILE, 0o600).catch(() => {});
   }
   return NextResponse.json({
