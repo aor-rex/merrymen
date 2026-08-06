@@ -79,9 +79,10 @@ docker run -d --name merrymen --restart unless-stopped \\
           Hosting on a <strong>VPS</strong>? Pick <strong>Docker</strong> in the one-line installer and
           it becomes a one-shot self-host: it detects the box&apos;s public IP, allowlists it for the
           dashboard&apos;s host guard (writes <code className="inline">MERRYMEN_ALLOWED_HOSTS</code> to{" "}
-          <code className="inline">~/.merrymen-docker/env</code>), opens port 3100 if ufw is around,
+          <code className="inline">~/.merrymen-docker/src/.env</code>), opens port 3100 if ufw is around,
           starts the band, and prints the reachable{" "}
-          <code className="inline">http://&lt;ip&gt;:3100</code>. Add your keys + strategy at{" "}
+          <code className="inline">http://&lt;ip&gt;:3100</code>. The band is managed with docker compose
+          from the installer&apos;s source checkout. Add your keys + strategy at{" "}
           <code className="inline">/settings</code> in the dashboard. Any <em>other</em> public host is
           still refused — the DNS-rebinding guard stays intact.
         </p>

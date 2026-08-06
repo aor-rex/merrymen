@@ -2,10 +2,10 @@
 #
 #   irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 #
-# Asks how you'd like to run merrymen:
-#   1) Local machine — installs Node (if needed) + merrymen via npm.
-#   2) Docker       — clones the source, builds the image locally (no registry),
-#                     installs a `merrymen` wrapper that drives docker.
+# Picks how you'd like to run merrymen :
+#   Local  — installs Node (if needed) + merrymen via npm. `merrymen` is the CLI.
+#   Docker — clones the source, builds the image locally (no registry), and
+#            starts the band via docker compose. 
 #
 # Safe to re-run. Local install touches only: Node (via winget, with your
 # consent) and your USER PATH. No admin rights required.
@@ -101,26 +101,19 @@ function Install-Docker {
   & docker build -t merrymen:latest $src
   if ($LASTEXITCODE -ne 0) { throw "docker build failed (exit $LASTEXITCODE)" }
 
-  Say "installing the 'merrymen' wrapper..." "Yellow"
-  $binDir = Join-Path $env:APPDATA "merrymen\bin"
-  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-  Copy-Item (Join-Path $src "scripts\docker\merrymen.ps1") $binDir -Force
-  Copy-Item (Join-Path $src "scripts\docker\merrymen.cmd") $binDir -Force
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  if ($userPath -notlike "*$binDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
-    $env:Path += ";$binDir"
-    Say "[ok] added $binDir to your PATH" "Green"
-  }
+  # Start the band now via compose — no `merrymen` command is installed for the
+  # Docker path. The bind mount source must exist first, or docker makes it a
+  # root-owned directory the container user can't write into.
+  $vol = Join-Path $HOME ".merrymen"
+  New-Item -ItemType Directory -Force -Path $vol | Out-Null
+  Say "starting the band (dashboard + worker in Docker)..." "Yellow"
+  & docker compose -f (Join-Path $src "docker-compose.yml") up -d
 
   Write-Host ""
-  Say "the band is ready. next:" "Green"
-  Write-Host "    merrymen onboard   " -NoNewline; Write-Host "# keys, strategy, basket (one-time)" -ForegroundColor DarkGray
-  Write-Host "    merrymen start     " -NoNewline; Write-Host "# dashboard at localhost:3100 + the worker (in Docker)" -ForegroundColor DarkGray
-  Write-Host "    merrymen doctor    " -NoNewline; Write-Host "# check the rig" -ForegroundColor DarkGray
-  Write-Host "    merrymen logs      " -NoNewline; Write-Host "# tail the band's logs" -ForegroundColor DarkGray
-  Write-Host ""
-  Say "(if 'merrymen' isn't found, open a fresh terminal -- PATH updates need one)" "DarkGray"
+  Say "the band is live -- dashboard: http://localhost:3100" "Green"
+  Write-Host "    docker compose -f $src\docker-compose.yml logs -f   " -NoNewline; Write-Host "# tail the band's logs" -ForegroundColor DarkGray
+  Write-Host "    docker compose -f $src\docker-compose.yml down      " -NoNewline; Write-Host "# stop the band" -ForegroundColor DarkGray
+  Write-Host "    docker compose -f $src\docker-compose.yml run --rm merrymen node cli/bin.mjs doctor" -NoNewline; Write-Host "   # doctor" -ForegroundColor DarkGray
   Write-Host ""
 }
 
@@ -130,12 +123,68 @@ Say "setting up your rig..." "DarkGray"
 Write-Host ""
 
 # ── pick the install method ──────────────────────────────────────────────
-Say "How would you like to run merrymen?" "Green"
-Say "  1) Local machine  (Node 22.12+ + npm install -g)" "DarkGray"
-Say "  2) Docker         (build the image locally, no registry)" "DarkGray"
-$choice = Read-Host "  choice [1/2]"
+# Arrow-key selector: ↑/↓ to move, Enter to pick. Non-interactive (a piped or
+# headless run) falls back to the first option — Local.
+function Select-InstallMethod {
+  $opts = @(
+    "Local machine   (Node 22.12+ + npm install -g)",
+    "Docker          (build the image locally, no registry)"
+  )
+  $n = $opts.Count
+  $sel = 0
 
-if ($choice -eq "2" -or $choice -ieq "docker") {
+  Write-Host ""
+  Write-Host "How would you like to run merrymen?"
+  Write-Host ""
+  if ([Console]::IsOutputRedirected) { $optTop = 0 } else { $optTop = [Console]::CursorTop }
+
+  $draw = {
+    if (-not [Console]::IsOutputRedirected) {
+      [Console]::SetCursorPosition(0, $optTop)
+    }
+    for ($i = 0; $i -lt $n; $i++) {
+      $line = if ($i -eq $sel) { "  " + [char]0x279C + " " + $opts[$i] } else { "    " + $opts[$i] }
+      $width = if ([Console]::IsOutputRedirected) { 0 } else { [Console]::WindowWidth }
+      $pad = ' ' * [Math]::Max(0, $width - $line.Length)
+      if ($i -eq $sel) {
+        Write-Host ($line + $pad) -ForegroundColor Green
+      } else {
+        Write-Host ($line + $pad) -ForegroundColor DarkGray
+      }
+    }
+  }
+
+  try {
+    & $draw
+    while ($true) {
+      $key = [Console]::ReadKey($true)
+      if ($key.Key -eq 'UpArrow') {
+        if ($sel -gt 0) { $sel-- }
+        & $draw
+      } elseif ($key.Key -eq 'DownArrow') {
+        if ($sel -lt ($n - 1)) { $sel++ }
+        & $draw
+      } elseif ($key.Key -eq 'Enter') {
+        break
+      }
+    }
+    if (-not [Console]::IsOutputRedirected) {
+      [Console]::SetCursorPosition(0, $optTop + $n)
+      Write-Host "  $($opts[$sel])" -ForegroundColor Green
+      Write-Host ""
+    } else {
+      Write-Host "  $($opts[$sel])"
+    }
+  } catch {
+    # no interactive console — pick the default (Local)
+    Write-Host "  $($opts[$sel])"
+  }
+  return $sel
+}
+
+$choice = Select-InstallMethod
+
+if ($choice -eq 1) {
   Install-Docker
   return
 }

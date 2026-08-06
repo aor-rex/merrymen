@@ -3,10 +3,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 #
-# Asks how you'd like to run merrymen:
-#   1) Local machine — installs Node (if needed) + merrymen via npm.
-#   2) Docker       — clones the source, builds the image locally (no registry),
-#                     installs a `merrymen` wrapper that drives docker.
+# Picks how you'd like to run merrymen :
+#   Local  — installs Node (if needed) + merrymen via npm. `merrymen` is the CLI.
+#   Docker — clones the source, builds the image locally (no registry), and
+#            starts the band via docker compose.
 #
 # Safe to re-run. Installs Node only via a package manager you already have
 # (Homebrew / fnm); otherwise it points you to nodejs.org rather than guessing.
@@ -24,30 +24,87 @@ echo
 
 RERUN="curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash"
 DOCKER_SRC="$HOME/.merrymen-docker/src"
-DOCKER_BIN="$HOME/.local/bin"
 
 # ── pick the install method ──────────────────────────────────────────────
-# A piped script (`curl | bash`) has its stdin stolen by the pipe, so read the
-# answer from the controlling terminal directly. No TTY (or a non-interactive
-# run) falls back to the local install.
-echo
-grn "How would you like to run merrymen?"
-dim "  1) Local machine  (Node 22.12+ + npm install -g)"
-dim "  2) Docker         (build the image locally, no registry)"
-choice=""
-while [ -z "$choice" ]; do
-  printf "  choice [1/2]: "
-  if ! read -r choice < /dev/tty; then
-    choice=1 # no TTY — fall back to the local install
-    break
-  fi
-  case "$choice" in
-    1|2) ;;
-    *) ylw "  pick 1 or 2."; choice="" ;;
-  esac
-done
+# A piped script (`curl | bash`) has its stdin stolen by the pipe, so every
+# key is read from the controlling terminal (/dev/tty) directly. Arrow-key
+# menu: ↑/↓ to move, Enter to pick. With no controlling terminal (a
+# non-interactive run, e.g. in CI) it falls back to the first option — Local.
+menu() {
+  local mtitle="$1"; shift
+  local mopts=("$@")
+  local mn=${#mopts[@]}
+  local key first=1
+  local msel=0 lines=$(( mn + 2 ))
 
-if [ "$choice" = "2" ]; then
+  # State lives in globals (a nested bash function can't see the caller's
+  # locals), and the painter is a global function that reads them.
+  __menu_title=$mtitle
+  __menu_opts=("${mopts[@]}")
+  __menu_n=$mn
+  __menu_sel=0
+  __menu_lines=$lines
+  __menu_draw() {
+    local j
+    printf '\r\033[J'
+    printf '%s\n\n' "$__menu_title"
+    for j in "${!__menu_opts[@]}"; do
+      if [ "$j" -eq "$__menu_sel" ]; then
+        printf '  \033[32m➜\033[0m \033[1m%s\033[0m\033[K\n' "${__menu_opts[$j]}"
+      else
+        printf '    %s\033[K\n' "${__menu_opts[$j]}"
+      fi
+    done
+  }
+
+  __menu_draw
+  while :; do
+    if ! IFS= read -rs -n1 key < /dev/tty; then
+      if [ "$first" = 1 ]; then
+        printf '\r\033[J'    # no terminal — pick the default (first option)
+        return 0
+      fi
+      continue
+    fi
+    first=0
+    case "$key" in
+      $'\x1b')
+        IFS= read -rs -n1 key < /dev/tty || true
+        IFS= read -rs -n1 key < /dev/tty || true
+        case "$key" in
+          A)
+            if [ "$__menu_sel" -gt 0 ]; then __menu_sel=$((__menu_sel - 1)); fi
+            printf '\033[%dA' "$__menu_lines"
+            __menu_draw
+            ;;
+          B)
+            if [ "$__menu_sel" -lt "$((__menu_n - 1))" ]; then __menu_sel=$((__menu_sel + 1)); fi
+            printf '\033[%dA' "$__menu_lines"
+            __menu_draw
+            ;;
+        esac
+        ;;
+      # Note: bash `read -rs -n1` returns an EMPTY string for Enter
+          # (\r / \n), not the byte itself — so match '' as well.
+          $'\r'|$'\n'|'')
+            break
+            ;;
+    esac
+  done
+  printf '\033[%dA\033[J' "$__menu_lines"
+  printf '  %s\n' "${__menu_opts[$__menu_sel]}"
+  MENU_SEL=$__menu_sel
+  unset __menu_title __menu_opts __menu_n __menu_sel __menu_lines
+  unset -f __menu_draw
+}
+
+echo
+menu "How would you like to run merrymen?" \
+  "Local machine   (Node 22.12+ + npm install -g)" \
+  "Docker          (build the image locally, no registry)"
+choice=$MENU_SEL
+
+if [ "$choice" = "1" ]; then
   echo
   grn "[ok] Docker install"
 
@@ -64,8 +121,8 @@ if [ "$choice" = "2" ]; then
     exit 1
   fi
 
-  # Get the source for the image build. Prefer git (keeps `merrymen update` a
-  # fast pull); fall back to the main-branch tarball when git is missing.
+  # Get the source for the image build. Prefer git (a re-run is then just a
+  # `git pull`); fall back to the main-branch tarball when git is missing.
   if [ -d "$DOCKER_SRC/.git" ]; then
     ylw "[..] refreshing the merrymen source..."
     git -C "$DOCKER_SRC" pull --ff-only
@@ -87,17 +144,14 @@ if [ "$choice" = "2" ]; then
   ylw "[..] building the image (first build installs deps + builds the dashboard — a few minutes)..."
   docker build -t merrymen:latest "$DOCKER_SRC"
 
-  ylw "[..] installing the 'merrymen' wrapper..."
-  mkdir -p "$DOCKER_BIN"
-  install -m 755 "$DOCKER_SRC/scripts/docker/merrymen" "$DOCKER_BIN/merrymen"
-
   # ── make the dashboard reachable ──────────────────────────────────────
   # The point of the Docker install is a server. The dashboard's host guard only
   # lets loopback + private IPs through, so on a VPS (a public primary IP) every
-  # /api/* call is 403 unless that IP is allowlisted — persist it to the wrapper's
-  # env file so it survives shells + reboots. On a private-LAN box (laptop) the
-  # LAN IP already passes; the detected public IP is still allowlisted as a no-op
-  # (it also covers NAT'd cloud VPSes with a private NIC IP).
+  # /api/* call is 403 unless that IP is allowlisted — persist it to the compose
+  # project's `.env` so it survives shells + reboots. On a private-LAN box
+  # (laptop) the LAN IP already passes; the detected public IP is still
+  # allowlisted as a no-op (it also covers NAT'd cloud VPSes with a private
+  # NIC IP).
   primary_ip() {
     local ip=""
     if command -v hostname >/dev/null 2>&1; then
@@ -108,7 +162,7 @@ if [ "$choice" = "2" ]; then
     fi
     printf '%s' "$ip"
   }
-  CFG="$HOME/.merrymen-docker/env"
+  CFG="$DOCKER_SRC/.env"
   PRIMARY_IP="$(primary_ip)"
   case "$PRIMARY_IP" in
     ""|127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|*:*) LAN=1 ;;
@@ -123,7 +177,7 @@ if [ "$choice" = "2" ]; then
   fi
   if [ -n "$SERVER_IP" ]; then
     mkdir -p "$(dirname "$CFG")"
-    printf 'MERRYMEN_ALLOWED_HOSTS=%s\n' "$SERVER_IP" > "$CFG"
+    { printf 'MERRYMEN_ALLOWED_HOSTS=%s\n' "$SERVER_IP"; } > "$CFG"
     grn "[ok] dashboard host $SERVER_IP allowlisted"
   else
     rm -f "$CFG"
@@ -141,15 +195,12 @@ if [ "$choice" = "2" ]; then
   fi
 
   # Start the band now — dashboard + worker — so the installer is done.
+  # Docker is driven directly with compose: no `merrymen` command is installed
+  # for the Docker path. The bind mount source must exist first, or docker makes
+  # it a root-owned directory the unprivileged container user can't write into.
+  mkdir -p "$HOME/.merrymen"
   ylw "[..] starting the band (dashboard + worker in Docker)..."
-  "$DOCKER_BIN/merrymen" start
-
-  # nudge about PATH if ~/.local/bin isn't on it (the "command not found" trap)
-  if ! printf ':%s:' "$PATH" | grep -q ":$DOCKER_BIN:"; then
-    ylw "Add ~/.local/bin to your PATH (then reopen your shell):"
-    dim "  echo 'export PATH=\"$DOCKER_BIN:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
-    echo
-  fi
+  MYUID="$(id -u)" MYGID="$(id -g)" docker compose -f "$DOCKER_SRC/docker-compose.yml" up -d
 
   # If ~/.merrymen already exists but is owned by root (an earlier Docker run
   # without user mapping), the unprivileged container user can't write to it.
@@ -168,8 +219,8 @@ if [ "$choice" = "2" ]; then
       dim "  a NAT'd server is also reachable via: http://$SERVER_IP:3100"
     fi
   fi
-  dim "  add your keys, strategy + basket at /settings (or: merrymen onboard)"
-  dim "  doctor: merrymen doctor · logs: merrymen logs · stop: merrymen stop"
+  dim "  add your keys, strategy + basket at /settings (or: docker compose run --rm merrymen node cli/bin.mjs onboard)"
+  dim "  logs: docker compose -f $DOCKER_SRC/docker-compose.yml logs -f · stop: docker compose -f $DOCKER_SRC/docker-compose.yml down"
   echo
   exit 0
 fi

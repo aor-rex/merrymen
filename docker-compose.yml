@@ -1,10 +1,14 @@
 # merrymen — self-hosted trading agent, via Docker Compose.
 #
-# Builds the image locally (no registry) and runs the band as a detached
-# daemon: the dashboard on :3100 plus the supervised worker. All persistent
-# state — settings, grant/keys, SQLite ledger, heartbeat — lives on the host
-# in ~/.merrymen, mounted into the container, so the container stays
-# disposable. `docker compose down` never touches that data.
+# This is how the Docker install is driven: install.sh / install.ps1 build the
+# image (no registry) and then `docker compose up -d` from this file. No
+# `merrymen` command is installed for the Docker path — everything is compose.
+#
+# Runs the band as a detached daemon: the dashboard on :3100 plus the
+# supervised worker. All persistent state — settings, grant/keys, SQLite
+# ledger, heartbeat — lives on the host in ~/.merrymen, mounted into the
+# container, so the container stays disposable. `docker compose down` never
+# touches that data.
 #
 #   mkdir -p ~/.merrymen           # first: Docker auto-creates a missing bind
 #                                  # mount source as ROOT, which the unprivileged
