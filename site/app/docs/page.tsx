@@ -76,7 +76,7 @@ docker run -d --name merrymen --restart unless-stopped \\
   merrymen:latest`}
         </pre>
         <p>
-          Hosting on a <strong>VPS</strong>? Pick <strong>Docker</strong> in the one-line installer and
+          Hosting on a <strong>VPS or Local Server</strong>? Pick <strong>Docker</strong> in the one-line installer and
           it becomes a one-shot self-host: it detects the box&apos;s public IP, allowlists it for the
           dashboard&apos;s host guard (writes <code className="inline">MERRYMEN_ALLOWED_HOSTS</code> to{" "}
           <code className="inline">~/.merrymen-docker/src/.env</code>), opens port 3100 if ufw is around,

@@ -103,7 +103,7 @@ one-shot commands with `docker compose run --rm merrymen node cli/bin.mjs doctor
 It runs the container as your user so everything it writes to `~/.merrymen` stays
 yours.
 
-**Self-host on a VPS in one shot?** Pick **Docker** in the installer — it clones
+**Self-host on a VPS or Local Server in one shot?** Pick **Docker** in the installer — it clones
 the source, builds the image, detects the box's public IP and allowlists it for
 the dashboard's host guard (writes `MERRYMEN_ALLOWED_HOSTS` to the compose
 project's `.env`), opens port 3100 if ufw is around, starts the band, and prints
@@ -113,7 +113,7 @@ docker compose from the installer's source checkout:
 `~/.merrymen-docker/src/docker-compose.yml`.
 
 The dashboard is **LAN-only by default**: the APIs refuse any public-domain
-`Host` header (a DNS-rebinding guard). Hosting it on a VPS behind your own
+`Host` header (a DNS-rebinding guard). Hosting it on a VPS or Local Server behind your own
 domain? Opt that exact hostname in — `MERRYMEN_ALLOWED_HOSTS=band.example.com`
 (comma-separated for more) in the compose project's `.env`, in a compose
 override, or in the Docker run. TZ passes through too, so strategy timing
