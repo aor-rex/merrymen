@@ -25,6 +25,34 @@ echo
 RERUN="curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash"
 DOCKER_SRC="$HOME/.merrymen-docker/src"
 
+# Which (repo, ref) the Docker image is built from. Candidates are probed in
+# order — the first whose Dockerfile is actually reachable wins:
+#   1) an explicit MERRYMEN_REPO / MERRYMEN_REF override (for power users)
+#   2) upstream `main`  — the steady state once the Docker PR is merged
+#   3) the PR branch on the fork — so installers work for testers today, and
+#      silently move to main the moment it merges (no script edit, no env var).
+# GLOBALS set: BUILD_REPO ("owner/repo") and BUILD_REF (branch/tag).
+BUILD_REPO="${MERRYMEN_REPO:-millw14/merrymen}"
+BUILD_REF="main"
+pick_a_ref() {
+  local r="$1" ref="$2"
+  if curl -fsSI "https://raw.githubusercontent.com/$r/$ref/Dockerfile" >/dev/null 2>&1; then
+    BUILD_REPO="$r"; BUILD_REF="$ref"; return 0
+  fi
+  return 1
+}
+pick_ref() {
+  if [ -n "${MERRYMEN_REF:-}" ]; then
+    pick_a_ref "$BUILD_REPO" "$MERRYMEN_REF" && return 0
+  fi
+  pick_a_ref "millw14/merrymen" "main" && return 0
+  pick_a_ref "aor-rex/merrymen" "feat/docker-install" && return 0
+  # nothing reachable — build from the repo's default branch and let docker fail
+  # loudly if that proves wrong, rather than silently guessing.
+  BUILD_REPO="${MERRYMEN_REPO:-millw14/merrymen}"; BUILD_REF="main"
+  return 0
+}
+
 # ── pick the install method ──────────────────────────────────────────────
 # A piped script (`curl | bash`) has its stdin stolen by the pipe, so every
 # key is read from the controlling terminal (/dev/tty) directly. Arrow-key
@@ -121,23 +149,40 @@ if [ "$choice" = "1" ]; then
     exit 1
   fi
 
-  # Get the source for the image build. Prefer git (a re-run is then just a
-  # `git pull`); fall back to the main-branch tarball when git is missing.
+  # Get the source for the image build, from whichever (repo, ref) carries a
+  # Dockerfile — upstream main once merged, the fork's PR branch until then.
+  pick_ref
+  ylw "[..] building the image from $BUILD_REPO @ $BUILD_REF"
+
   if [ -d "$DOCKER_SRC/.git" ]; then
-    ylw "[..] refreshing the merrymen source..."
-    git -C "$DOCKER_SRC" pull --ff-only
+    # Re-run: make sure the checkout sits on the freshly-resolved ref, so a
+    # clone made from the fork's PR branch auto-switches to upstream `main` the
+    # day it merges. On a stale/misconfigured src fall back to a plain pull.
+    ylw "[..] refreshing the merrymen source ($BUILD_REF)..."
+    if [ ! -f "$DOCKER_SRC/.merrymen-ref" ] || [ "$(cat "$DOCKER_SRC/.merrymen-ref")" != "$BUILD_REF" ]; then
+      if git -C "$DOCKER_SRC" fetch --depth 1 origin "$BUILD_REF" 2>/dev/null \
+        && git -C "$DOCKER_SRC" checkout -q -B "$BUILD_REF" FETCH_HEAD 2>/dev/null; then
+        printf '%s' "$BUILD_REF" > "$DOCKER_SRC/.merrymen-ref"
+      else
+        ylw "couldn't switch the source to $BUILD_REF — updating the current branch instead."
+        git -C "$DOCKER_SRC" pull --ff-only 2>/dev/null || true
+      fi
+    else
+      git -C "$DOCKER_SRC" pull --ff-only
+    fi
   elif command -v git >/dev/null 2>&1; then
     ylw "[..] cloning the merrymen source for the image build..."
     mkdir -p "$(dirname "$DOCKER_SRC")"
-    git clone --depth 1 https://github.com/millw14/merrymen.git "$DOCKER_SRC"
+    git clone --depth 1 --branch "$BUILD_REF" "https://github.com/$BUILD_REPO.git" "$DOCKER_SRC"
+    printf '%s' "$BUILD_REF" > "$DOCKER_SRC/.merrymen-ref"
   else
     ylw "[..] no git found — downloading the merrymen source tarball instead..."
     TMP_DIR="$(mktemp -d)"
-    curl -fsSL https://codeload.github.com/millw14/merrymen/tar.gz/refs/heads/main -o "$TMP_DIR/merrymen.tar.gz"
+    curl -fsSL "https://codeload.github.com/$BUILD_REPO/tar.gz/refs/heads/$BUILD_REF" -o "$TMP_DIR/merrymen.tar.gz"
     tar -xzf "$TMP_DIR/merrymen.tar.gz" -C "$TMP_DIR"
     rm -rf "$DOCKER_SRC" 2>/dev/null || true
     mkdir -p "$(dirname "$DOCKER_SRC")"
-    mv "$TMP_DIR/merrymen-main" "$DOCKER_SRC"
+    mv "$TMP_DIR/merrymen-${BUILD_REF//\//-}" "$DOCKER_SRC"
     rm -rf "$TMP_DIR"
   fi
 
