@@ -26,7 +26,7 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, answerCallbackQuery, editMessageText, getFileUrl, getMe, getUpdates, sendMessage, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
+import { esc, answerCallbackQuery, editMessageText, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { describePending, executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
@@ -126,6 +126,8 @@ const CONFIRM_MARKUP: TgInlineKeyboard = {
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
+  /** Token whose "/" command menu we've already registered (avoids re-setting every poll). */
+  let commandsRegisteredFor = "";
   const stateRef = deps.stateRef;
   let warnedUnreachable = false;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
@@ -737,6 +739,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const cfg = deps.getCfg();
     if (!cfg.telegramEnabled || !cfg.telegramBotToken) return; // idle until enabled
     stateRef.set(ensureLinkCode(stateRef.get(), cfg.telegramBotToken));
+
+    // Push the "/" command menu once per token (handles enable-after-start and
+    // token changes). Best-effort — a failure logs once, never breaks the poll.
+    if (cfg.telegramBotToken && cfg.telegramBotToken !== commandsRegisteredFor) {
+      commandsRegisteredFor = cfg.telegramBotToken;
+      const menu = await setMyCommands({ token: cfg.telegramBotToken });
+      if (!menu.ok) deps.note("warn", `Telegram: command menu — ${menu.reason}`);
+    }
 
     const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
