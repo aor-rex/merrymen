@@ -32,6 +32,7 @@ import { describePending, executeCommand, type CommandDeps, type PendingAction }
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
+import * as pcp from "../pc/platform";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
 import {
@@ -309,6 +310,25 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           appAllowlist: cfg.telegramAppAllowlist,
           anthropicApiKey: cfg.anthropicApiKey,
           llmModel: cfg.llmModel,
+          requestInstall: (tool) => {
+            // Park an install offer bound to this peer; returns the package
+            // name so pc.ts can format the offer text. The service's parked
+            // detection then attaches the Confirm/Cancel buttons, and the tap
+            // resolves through the same executor path as a typed /confirm.
+            const plan = pcp.installPlanFor(tool);
+            if (!plan) return null;
+            pending.set(key, { kind: "install", tool, package: plan.package, argv: plan.argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to install ${plan.package}`);
+            return plan.package;
+          },
+          requestServiceStart: (tool, argv) => {
+            // Park a daemon-start offer bound to this peer; returns the service
+            // name so pc.ts can format the offer text. Same buttoned/confirmed
+            // path as an install.
+            pending.set(key, { kind: "service", tool, argv, expiresAt: now() + 90 });
+            deps.note("ok", `Telegram: offered to start the ${tool} daemon`);
+            return tool;
+          },
         },
         deps.note,
       ),
@@ -316,12 +336,29 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const on = cfg.telegramPcControlEnabled;
         const caps = new Set(cfg.telegramCapabilities);
         const rows = PC_CAPABILITIES.map((c) => `${caps.has(c) ? "✅" : "▫️"} ${c}`).join("  ");
+        const doc = pcp.pcDoctor();
+        const have = doc.tools.filter((t) => t.present).map((t) => t.name).join(", ");
+        const missing = doc.tools.filter((t) => !t.present).map((t) => t.name).join(", ");
+        const doctorLine =
+          doc.platform === "linux"
+            ? `session: ${doc.session} · have: ${have || "—"} · missing: ${missing || "—"}`
+            : `platform: ${doc.platform} — tools are built in, nothing to probe`;
+        // Typical install path for the detected package manager, for the
+        // NOPASSWD hint below (scoped rules must name the real binary path).
+        const pmPath: Record<string, string> = { pacman: "/usr/bin/pacman", "apt-get": "/usr/bin/apt-get", dnf: "/usr/bin/dnf", apk: "/sbin/apk" };
+        const detectedPm = pcp.detectPm();
+        const nopasswdHint =
+          doc.platform === "linux" && missing && !pcp.canSudoNonInteractive()
+            ? `some tools are missing — set up scoped NOPASSWD (e.g. \`echo '%wheel ALL=(ALL) NOPASSWD: ${detectedPm ? pmPath[detectedPm] ?? "/usr/bin/" + detectedPm : "/usr/bin/<your-pm>"}' | sudo tee /etc/sudoers.d/merrymen-pm\`) and I can install them on /confirm.`
+            : "";
         return [
           `🖥️ <b>remote control</b> — master ${on ? "ON" : "OFF"}`,
           rows,
           on
             ? `enabled: ${[...caps].join(", ") || "(none — turn some on in the dashboard)"}`
             : `turn it on in the dashboard → settings → remote control.`,
+          doctorLine,
+          ...(nopasswdHint ? [nopasswdHint] : []),
           `shell + type + files + power always ask for /confirm first.`,
         ].join("\n");
       },
@@ -514,6 +551,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         },
         note: deps.note,
         remember: (n) => rememberNote(n, now()),
+        offerInstall: (tool) => {
+          const plan = pcp.installPlanFor(tool);
+          if (!plan) return null;
+          const key = `${msg.chatId}:${msg.fromId}`;
+          pending.set(key, { kind: "install", tool, package: plan.package, argv: plan.argv, expiresAt: now() + 90 });
+          const caveat = pcp.installCaveat(tool);
+          void sendMessage({ token }, msg.chatId, `📦 I can install <b>${esc(plan.package)}</b> for you. Tap ✅ to install (or /confirm) — or /cancel.${caveat ? `\n<code>${esc(caveat)}</code>` : ""}`, CONFIRM_MARKUP);
+          deps.note("ok", `Telegram agent: offered to install ${plan.package}`);
+          return plan.package;
+        },
         soulBlock,
         stopFlag,
       }).finally(() => agentRuns.delete(msg.chatId));
@@ -674,7 +721,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
-    const hadPending = pending.has(`${msg.chatId}:${msg.fromId}`);
+    const pendingKey = `${msg.chatId}:${msg.fromId}`;
+    // Snapshot what was parked before this command. A fresh park can come from
+    // a plain command (/type) OR from resolving one (a /confirm that runs typeText
+    // and parks an install offer) — in both cases the user must see buttons, so
+    // "parked" means "the pending slot now holds a DIFFERENT action than before",
+    // not merely "something appeared".
+    const beforePending = pending.get(pendingKey);
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
@@ -682,11 +735,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
-    // If this command just PARKED a fresh action (nothing was pending before and
-    // something is now), attach the Confirm/Cancel buttons so the user can tap
-    // instead of typing /confirm or /cancel. Resolving ones (confirm/cancel)
-    // clear the slot and send plain text.
-    const parked = !hadPending && pending.has(`${msg.chatId}:${msg.fromId}`);
+    const afterPending = pending.get(pendingKey);
+    const parked = !!afterPending && afterPending !== beforePending;
     if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
     await sendMessage({ token }, msg.chatId, reply, parked ? CONFIRM_MARKUP : undefined);
   };
@@ -719,6 +769,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
 
     let reply: string;
+    const beforePending = pending.get(key);
     try {
       reply = await executeCommand(action, buildCmdDeps(cfg, { chatId, fromId }));
     } catch (e) {
@@ -729,8 +780,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     await answerCallbackQuery({ token }, cb.queryId, {
       text: cb.data === "confirm" ? "Confirmed ✓" : "Cancelled",
     });
-    const edited = await editMessageText({ token }, chatId, cb.messageId, reply);
-    if (!edited.ok) await sendMessage({ token }, chatId, reply);
+    // Resolving a confirm can itself park a NEW action (a confirm that runs
+    // typeText and lands on an install offer). When it does, re-attach the
+    // Confirm/Cancel buttons to the edited message so the fresh ask stays
+    // tappable — otherwise the offer appears buttonless and forces a typed
+    // /confirm. Resolution that clears the slot gets plain text (default).
+    const afterPending = pending.get(key);
+    const parkedFresh = !!afterPending && afterPending !== beforePending;
+    const edited = await editMessageText({ token }, chatId, cb.messageId, reply, parkedFresh ? CONFIRM_MARKUP : undefined);
+    if (!edited.ok) await sendMessage({ token }, chatId, reply, parkedFresh ? CONFIRM_MARKUP : undefined);
   };
 
   const pollOnce = async (): Promise<void> => {

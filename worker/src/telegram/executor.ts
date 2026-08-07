@@ -25,7 +25,9 @@ export type PendingAction =
   | { kind: "getfile"; path: string; expiresAt: number }
   | { kind: "type"; text: string; expiresAt: number }
   | { kind: "hotkey"; combo: string; expiresAt: number }
-  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number };
+  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number }
+  | { kind: "install"; tool: string; package: string; argv: string[]; expiresAt: number }
+  | { kind: "service"; tool: string; argv: string[]; expiresAt: number };
 
 /** One short phrase naming what a parked action WOULD do — fed to the LLM so it
  * can tell the owner exactly what's waiting to be confirmed ("press ctrl+s",
@@ -44,6 +46,10 @@ export function describePending(p: PendingAction): string {
       return `press ${p.combo}`;
     case "power":
       return `power ${p.action}`;
+    case "install":
+      return `install ${p.package}`;
+    case "service":
+      return `start the ${p.tool} daemon`;
   }
 }
 
@@ -228,6 +234,14 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "install" || p.kind === "service") {
+        // An install or service-start is a PC action: re-vet the master switch.
+        // Its argv was generated from the fixed map/plan at park time, never
+        // from user text.
+        if (!deps.pcControlEnabled) {
+          deps.clearPending();
+          return "🔒 PC control was turned off before you confirmed — nothing installed or started.";
+        }
       } else {
         const refusal = pcRefusal({ kind: p.kind } as Command, deps);
         if (refusal) {
@@ -249,6 +263,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.hotkey(p.combo);
         case "power":
           return await deps.pc.power(p.action);
+        case "install":
+          return await deps.pc.install({ argv: p.argv, package: p.package });
+        case "service":
+          return await deps.pc.startService({ tool: p.tool, argv: p.argv });
       }
     }
     case "cancel": {

@@ -250,14 +250,17 @@ export async function sendMessage(
 
 /**
  * Replace a message in place — used to resolve a parked confirm/cancel message
- * into its outcome without leaving the buttons behind (an empty inline_keyboard
- * removes them). Mirrors sendMessage's HTML→plain retry discipline.
+ * into its outcome. By default the buttons are removed (an empty inline_keyboard
+ * strips them); pass `markup` to instead attach a fresh keyboard (used when
+ * resolving one parked action parks another, e.g. a confirm that lands on an
+ * install offer). Mirrors sendMessage's HTML→plain retry discipline.
  */
 export async function editMessageText(
   opts: TelegramOpts,
   chatId: number,
   messageId: number,
   text: string,
+  markup?: TgInlineKeyboard,
 ): Promise<{ ok: boolean; reason?: string }> {
   const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
   const params = {
@@ -265,7 +268,7 @@ export async function editMessageText(
     message_id: messageId,
     text: body,
     parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [] },
+    reply_markup: markup ?? { inline_keyboard: [] },
   };
   const html = await call(opts, "editMessageText", params);
   if (html.result != null) return { ok: true };
