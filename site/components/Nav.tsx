@@ -24,6 +24,7 @@ export function Nav() {
         <nav className="nav-links">
           <Link href="/#features" data-text="Features"><span>Features</span></Link>
           <Link href="/memescope" data-text="Memescope"><span>Memescope</span></Link>
+          <Link href="/dashboard" data-text="Dashboard"><span>Dashboard</span></Link>
           <Link href="/watch" data-text="Watch"><span>Watch</span></Link>
           <Link href="/#telegram" data-text="Telegram"><span>Telegram</span></Link>
           <Link href="/token" data-text="Token"><span>Token</span></Link>

@@ -199,3 +199,165 @@ function disambiguate(trades: Trade[]): Trade[] {
       : l;
   return trades.map((t) => ({ ...t, out: t.out.map(mark), in: t.in.map(mark) }));
 }
+
+/* ── holdings ──────────────────────────────────────────────────────────────
+ *
+ * What the account HOLDS, as opposed to what has moved through it. A tape
+ * answers "what did it do"; this answers "what is it sitting on right now",
+ * which is the question anyone actually opens a dashboard to ask.
+ *
+ * Blockscout resolves symbol, decimals AND an exchange rate in one request and
+ * serves it `access-control-allow-origin: *`, so the browser can price a
+ * portfolio with no key, no price feed and no server of ours in the path —
+ * which is the same rule the rest of this file follows.
+ */
+
+export interface Holding {
+  token: string;
+  symbol: string;
+  decimals: number;
+  amount: bigint;
+  /**
+   * USD value, or null when the explorer has no rate for this token.
+   *
+   * NULL IS NOT ZERO, and the difference is the whole point. Most tokens on a
+   * young chain have no listed rate, and quietly folding them in at 0 would
+   * report a portfolio smaller than it is — the exact direction of error that
+   * makes someone think their agent lost money. Unpriced holdings are shown,
+   * counted separately, and excluded from the total that claims to be a total.
+   */
+  usd: number | null;
+}
+
+export interface Portfolio {
+  holdings: Holding[];
+  /** Sum of the holdings that HAVE a rate. Never a guess about the others. */
+  pricedUsd: number;
+  /** How many holdings carry no rate, so the page can say so out loud. */
+  unpricedCount: number;
+}
+
+interface BsBalance {
+  value?: string;
+  token?: {
+    address_hash?: string;
+    address?: string;
+    symbol?: string;
+    decimals?: string | number;
+    exchange_rate?: string | null;
+    type?: string;
+  };
+}
+
+/** Human amount as a float, for multiplying by a rate. Display still uses formatAmount. */
+function toFloat(amount: bigint, decimals: number): number {
+  return Number(amount) / 10 ** decimals;
+}
+
+/**
+ * This endpoint returns EVERY balance in one unpaginated response, and on an
+ * address with a huge airdrop tail it can simply never answer — measured: the
+ * burn address returned 142,968 holdings once and then timed out at 120s having
+ * sent 0 bytes. A dashboard whose spinner runs forever is worse than one that
+ * says it could not read, so the wait is bounded here rather than left to the
+ * caller to remember.
+ */
+const HOLDINGS_TIMEOUT_MS = 20_000;
+
+export async function fetchHoldings(account: string, signal?: AbortSignal): Promise<Portfolio> {
+  const url = `${EXPLORER}/api/v2/addresses/${account}/token-balances`;
+  const timeout = AbortSignal.timeout(HOLDINGS_TIMEOUT_MS);
+  // Either the caller giving up or the ceiling above ends the request.
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const res = await fetch(url, { signal: combined, headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`explorer ${res.status}`);
+  const rows = (await res.json()) as BsBalance[];
+  if (!Array.isArray(rows)) return { holdings: [], pricedUsd: 0, unpricedCount: 0 };
+
+  const holdings: Holding[] = [];
+  for (const r of rows) {
+    // ERC-20 only. An NFT in a trading account is somebody's airdrop, and it has
+    // no amount that means anything next to a token balance.
+    if (r.token?.type && r.token.type !== "ERC-20") continue;
+    const token = (r.token?.address_hash || r.token?.address || "").toLowerCase();
+    if (!token) continue;
+    if (typeof r.value !== "string" || !/^\d+$/.test(r.value)) continue;
+    const amount = BigInt(r.value);
+    if (amount === 0n) continue;
+
+    const d = Number(r.token?.decimals ?? 18);
+    const decimals = Number.isFinite(d) && d >= 0 && d <= 36 ? d : 18;
+    const rate = r.token?.exchange_rate ? Number(r.token.exchange_rate) : NaN;
+    const usd = Number.isFinite(rate) && rate > 0 ? toFloat(amount, decimals) * rate : null;
+
+    holdings.push({ token, symbol: sanitizeSymbol(r.token?.symbol), decimals, amount, usd });
+  }
+
+  // Same impersonation problem as the tape: anyone can deploy a token called
+  // USDG. A holdings list is arguably the worse place to get it wrong, since
+  // that is where someone checks whether their money is where they think.
+  const addrsBySymbol = new Map<string, Set<string>>();
+  for (const h of holdings) {
+    const set = addrsBySymbol.get(h.symbol) ?? new Set<string>();
+    set.add(h.token);
+    addrsBySymbol.set(h.symbol, set);
+  }
+  const colliding = new Set([...addrsBySymbol].filter(([, s]) => s.size > 1).map(([sym]) => sym));
+  const marked = holdings.map((h) =>
+    colliding.has(h.symbol) ? { ...h, symbol: `${h.symbol}·${h.token.slice(2, 6)}` } : h,
+  );
+
+  // Priced first and largest first — the things worth money lead, and the long
+  // tail of unpriced airdrops sorts to the bottom instead of burying them.
+  marked.sort((a, b) => {
+    if ((a.usd === null) !== (b.usd === null)) return a.usd === null ? 1 : -1;
+    return (b.usd ?? 0) - (a.usd ?? 0);
+  });
+
+  return {
+    holdings: marked,
+    pricedUsd: marked.reduce((sum, h) => sum + (h.usd ?? 0), 0),
+    unpricedCount: marked.filter((h) => h.usd === null).length,
+  };
+}
+
+/** Native ETH, which pays for gas and is NOT part of the traded portfolio. */
+export async function fetchGas(account: string, signal?: AbortSignal): Promise<bigint> {
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [account, "latest"] }),
+  });
+  if (!res.ok) throw new Error(`rpc ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message || "rpc error");
+  return BigInt(json.result);
+}
+
+/**
+ * Has the smart account been deployed yet?
+ *
+ * A counterfactual ERC-4337 account reads as code "0x" until its first
+ * operation, which is indistinguishable from a plain EOA by getCode alone. This
+ * is worth surfacing because "funded but never traded" and "wrong address
+ * entirely" look identical otherwise, and the second one is how people lose
+ * money — see the smart-account-vs-owner-EOA confusion in the docs.
+ */
+export async function isDeployed(account: string, signal?: AbortSignal): Promise<boolean> {
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [account, "latest"] }),
+  });
+  if (!res.ok) throw new Error(`rpc ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message || "rpc error");
+  return typeof json.result === "string" && json.result !== "0x" && json.result.length > 2;
+}
+
+/** USD, with cents — the figures here are portfolio-sized, not wei-sized. */
+export function formatUsd(v: number): string {
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
