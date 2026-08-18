@@ -1,0 +1,71 @@
+name: CI
+
+# The gate on `main`. Until this existed the only check reporting on a PR was
+# Vercel's deploy — which has been failing "Authorization required to deploy" on
+# every open PR — so a contributor PR could be merged with nothing having run it.
+# For a project that holds a real key and moves real money, "the maintainer ran
+# the tests on their laptop, probably" is not a merge criterion.
+#
+# `pull_request` (never `pull_request_target`): a fork PR runs with a read-only
+# token and no access to secrets, so a contributor cannot exfiltrate anything by
+# editing this file in their own branch. Actions are pinned to commit SHAs rather
+# than floating tags for the same reason — a moved tag is a supply-chain rewrite.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A force-push shouldn't leave the superseded run burning a runner.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: app
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # package.json engines: >=22.12
+          cache: npm
+
+      # `npm ci` runs the `prepare` hook, which is `node cli/build.mjs` — the full
+      # Next production build. So this step covers install AND build; a build
+      # break surfaces here rather than in a step of its own.
+      - name: Install (also builds via the prepare hook)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck # tsc --noEmit -p worker && -p web
+
+      - name: Test
+        run: npm test # tsx --test worker/src/**/*.test.ts
+
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Separate job: the Hardhat toolchain installs its own solc and has nothing
+    # to do with the app's dependency tree. Kept independent so a slow contracts
+    # install never gates the app result, and vice versa.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install
+        working-directory: contracts
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        working-directory: contracts
+        run: npm test
