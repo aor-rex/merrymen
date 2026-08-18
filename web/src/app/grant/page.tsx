@@ -6,10 +6,12 @@ import { Info } from "@/components/Info";
 import { LogoMark } from "@/components/Logo";
 import {
   explorerFor,
+  grantHasV4,
   isValidCustomToken,
   robinhoodChain,
   robinhoodTestnet,
   tokenCoverage,
+  TRADEABLE_V2,
   uncoveredBasketSymbols,
   type CustomToken,
 } from "@merrymen/core";
@@ -429,8 +431,14 @@ export default function GrantPage() {
                 <>
                   No wallet to connect. merrymen makes a fresh wallet and gives <b>you</b> the key.
                   You set the spending limits below — and the blockchain itself{" "}
-                  <Info>These aren&apos;t honor-system limits. The account contract on the chain rejects any trade over your caps, so even a hacked agent can&apos;t break them.</Info>{" "}
-                  enforces them, so your agent can never spend more than you allow.
+                  <Info>
+                    Not honor-system limits. The size of each trade, how many it may make, how long
+                    the key lives and where value may land are sealed into the signature your
+                    account contract checks, so a hacked agent cannot exceed them. The daily total
+                    and the drawdown breaker are different — those are counted by the software on
+                    your machine. The summary below the sliders spells out which is which.
+                  </Info>{" "}
+                  enforces the important ones — the summary below says exactly which.
                 </>
               ) : (
                 <>
@@ -595,7 +603,25 @@ export default function GrantPage() {
               at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
               and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
               <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
-              These limits are enforced by the blockchain — the agent literally cannot exceed them.
+              <br />
+              <br />
+              {/*
+                This used to read "these limits are enforced by the blockchain — the agent
+                literally cannot exceed them", which was true of three of the five. The signed
+                key carries an expiry, a per-operation rate limit and a call policy; there is no
+                on-chain accumulator for a daily USDG total, and the drawdown breaker is a
+                separate contract this signature does not install. Both of those are counters in
+                the worker — the process a compromise owns. Saying so costs a sentence and is the
+                difference between a promise and a claim.
+              */}
+              <b>What the chain itself enforces:</b> the per-trade cap, the number of trades, the
+              expiry, and the fact that value can only land back in your own account. Those the
+              agent cannot exceed no matter what happens to the software. The{" "}
+              <b>daily total</b> and the <b>drawdown breaker</b> are counters kept by merrymen on
+              your own machine, so an agent that had been tampered with could ignore them and still
+              reach <b>{caps.perTradeUsdg * caps.maxOpsPerDay} USDG</b> in a day before the chain
+              stopped it. If that is the number that matters to you, lower the per-trade cap or the
+              trades-per-day — not the daily figure.
             </div>
 
             {mode === "create" ? (
@@ -724,7 +750,10 @@ export default function GrantPage() {
                     <>⏳ <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
                   Renewing is free and instant — same wallet, same funds, fresh key under the same
-                  caps. Nothing is sent on-chain.
+                  caps. Nothing is sent on-chain. The new key is signed against{" "}
+                  <b>today&apos;s wall</b>, so its permissions can differ from the old one&apos;s —
+                  the &ldquo;what this key carries&rdquo; panel lists them, and a key still holding
+                  the old Uniswap v4 pair loses it here, which is the point.
                   <button className="grant-btn" style={{ marginTop: 10, width: "100%" }} onClick={() => void renewKey()} disabled={renewing}>
                     {renewing ? "renewing…" : "renew the key (free)"}
                   </button>
@@ -878,6 +907,44 @@ export default function GrantPage() {
               <span className="cap"><b>{grant.caps.dailyUsdg} USDG</b>/day</span>
               <span className="cap"><b>{grant.caps.maxOpsPerDay}</b> ops/day</span>
               <span className="cap">breaker <b>{grant.caps.maxDrawdownPct}%</b></span>
+            </div>
+
+            {/*
+              WHAT THIS SIGNATURE ACTUALLY CARRIES.
+              Until now nothing anywhere showed an owner the capabilities sealed into their own
+              key. That mattered once the wall changed: a key signed earlier carries permissions a
+              key signed today does not, both are valid, and the only way to tell them apart was to
+              read the JSON. Capability drift you cannot see is capability drift you cannot act on.
+            */}
+            <div className="grant-summary" style={{ marginTop: 14 }}>
+              <b>What this key carries.</b> A grant is a signature, so it is frozen at the moment it
+              was signed — re-signing is the only way to change it.
+              <ul style={{ margin: "10px 0 0", paddingLeft: 18, lineHeight: 1.7 }}>
+                <li>
+                  <b>Stock list</b> —{" "}
+                  {grant.grantFeatures?.includes(TRADEABLE_V2)
+                    ? "the full tradeable set."
+                    : "the legacy three (QQQ, NVDA, TSLA) only. Renew below to widen it."}
+                </li>
+                <li>
+                  <b>USDG out</b> — none. No withdrawal address is registered, so this key carries no
+                  transfer permission at all; moving money out is the owner key&apos;s job.
+                </li>
+                <li>
+                  <b>Uniswap v4</b> —{" "}
+                  {grantHasV4(grant) ? (
+                    <span style={{ color: "var(--red)" }}>
+                      granted, and worth removing. Keys signed before this was changed carry a
+                      Permit2 + UniversalRouter pair whose recipient the chain cannot check, because
+                      a v4 swap hides it inside opaque calldata. A tampered agent could send your
+                      non-USDG tokens anywhere. <b>Renewing the key</b> re-signs it without the pair
+                      — same wallet, same funds, same address, and free.
+                    </span>
+                  ) : (
+                    "not granted. Swaps route through Uniswap v3, where the chain pins the recipient to your own account."
+                  )}
+                </li>
+              </ul>
             </div>
 
             <div className="grant-actions">
