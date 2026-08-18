@@ -121,9 +121,9 @@ export default function Home() {
           </h1>
           <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
             merrymen is a trading bot you run yourself. It works the market for you on Robinhood Chain —
-            but your keys stay on your machine, and the spending limits you set are enforced by the
-            blockchain itself, so it can never spend more than you allow. Name it, chat with it, and
-            steer it from Telegram.
+            but your keys stay on your machine, and the size of every trade, how often it may trade,
+            how long its key lives and where value can land are enforced by the blockchain itself, not
+            by the bot behaving. Name it, chat with it, and steer it from Telegram.
           </p>
           <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
             <span className="mag" data-magnetic>

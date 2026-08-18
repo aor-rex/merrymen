@@ -56,31 +56,73 @@ const perms = () => buildCallPermissions(CAPS, SELF) as unknown as Perm[];
 const find = (target: string, fn?: string) =>
   perms().filter((p) => p.target.toLowerCase() === target.toLowerCase() && (fn === undefined || p.functionName === fn));
 
-test("the default spenders exclude Rialto, and universalRouter is never one", () => {
+test("the default spenders exclude Rialto and Permit2, and universalRouter is never one", () => {
   // Rialto is opt-in: an approved spender can pull whatever it was approved
   // for, and the stock approvals carry no amount condition, so listing an
   // unused router is a standing licence over every share the agent holds.
   const s = allowedSpenders().map((a) => a.toLowerCase());
-  assert.deepEqual(s, [
-    UNISWAP.swapRouter02.toLowerCase(),
-    MORPHO.steakhouseUsdgVault.toLowerCase(),
-    UNISWAP.permit2.toLowerCase(),
-  ]);
+  assert.deepEqual(s, [UNISWAP.swapRouter02.toLowerCase(), MORPHO.steakhouseUsdgVault.toLowerCase()]);
   assert.equal(
     allowedSpenders(true)[0]!.toLowerCase(),
     RIALTO.routerSnapshot.toLowerCase(),
     "opting in adds Rialto, and only then",
   );
-  // v4 never pulls tokens directly — Permit2 does, on the router's behalf, with a
-  // bounded expiring allowance. Approving the router itself would skip that bound.
-  assert.equal(s.includes(UNISWAP.universalRouter.toLowerCase()), false, "the UniversalRouter must never be an approved spender");
+  // Permit2 is exactly the standing licence the comment above describes, and it
+  // used to be here unconditionally. It only earns its place alongside the v4
+  // CALL permissions, so it rides the same opt-in.
+  assert.equal(s.includes(UNISWAP.permit2.toLowerCase()), false, "Permit2 is not a default spender");
+  assert.equal(
+    allowedSpenders(false, true).map((a) => a.toLowerCase()).includes(UNISWAP.permit2.toLowerCase()),
+    true,
+    "opting into v4 adds Permit2, and only then",
+  );
+  // v4 never pulls tokens directly — Permit2 does, on the router's behalf. Approving
+  // the router itself would skip even that indirection.
+  assert.equal(
+    allowedSpenders(true, true).map((a) => a.toLowerCase()).includes(UNISWAP.universalRouter.toLowerCase()),
+    false,
+    "the UniversalRouter must never be an approved spender, on any setting",
+  );
+});
+
+test("the v4 drain path is absent by default and arrives only as a set", () => {
+  // THE REGRESSION THIS PINS. These two permissions were granted
+  // unconditionally while Permit2 was an unconditional spender and the stock
+  // approvals carry no amount condition. That chain — approve(stock, permit2,
+  // unbounded) -> permit2.approve(stock, universalRouter, max, max) ->
+  // execute(<opaque inputs naming any recipient>) — moved the entire non-USDG
+  // book anywhere, in one UserOp, past a wall the front page says the chain
+  // enforces. The execute permission's own comment claimed Permit2 was "only
+  // ever granted one trade's worth, expiring"; that described what the worker
+  // encodes, not what the policy allows.
+  assert.equal(find(UNISWAP.permit2).length, 0, "no Permit2 permission by default");
+  assert.equal(find(UNISWAP.universalRouter).length, 0, "no UniversalRouter permission by default");
+
+  const v4 = buildCallPermissions(CAPS, SELF, { allowUniswapV4: true }) as unknown as Perm[];
+  const p2 = v4.filter((p) => p.target.toLowerCase() === UNISWAP.permit2.toLowerCase());
+  const ur = v4.filter((p) => p.target.toLowerCase() === UNISWAP.universalRouter.toLowerCase());
+  assert.equal(p2.length, 1, "opting in adds the Permit2 approve");
+  assert.equal(ur.length, 1, "opting in adds the UniversalRouter execute");
+  // And they must arrive TOGETHER with the spender, because each alone is inert
+  // and granting them piecemeal is how this became a hole in the first place.
+  assert.equal(
+    allowedSpenders(false, true).map((a) => a.toLowerCase()).includes(UNISWAP.permit2.toLowerCase()),
+    true,
+    "the call permission and the spender entry are one decision",
+  );
+  // Still true when opted in: the router's calldata is opaque, so this really is
+  // "call anything on this contract" — which is why it is not the default.
+  assert.equal(ur[0]!.args, undefined, "execute stays unconstrainable — that is the point of making it opt-in");
 });
 
 test("USDG approve is capped at ONE TRADE and restricted to the allowed spenders", () => {
   const [p] = find(CASH.USDG, "approve");
   assert.ok(p, "USDG approve permission must exist");
   const [spender, amount] = p.args as [{ condition: number; value: string[] }, { condition: number; value: bigint }];
-  assert.equal(spender.value.length, 3, "the three default spenders — Rialto is opt-in");
+  // Two by default — the swap router and the vault. Rialto and Permit2 are each
+  // opt-in, and every entry here is a standing licence, so the list growing
+  // silently is exactly the regression this asserts against.
+  assert.equal(spender.value.length, 2, "the two default spenders — Rialto and Permit2 are opt-in");
   // The cap is per TRADE, not per day. Using dailyUsdg here would let one approval
   // authorise ten trades' worth.
   assert.equal(amount.value, usdg(CAPS.perTradeUsdg));
@@ -124,9 +166,12 @@ test("every tradeable stock token can be approved, so nothing can be bought but 
   }
 });
 
-test("Permit2 may only ever grant an allowance to the UniversalRouter", () => {
-  const [p] = find(UNISWAP.permit2, "approve");
-  assert.ok(p, "permit2 approve permission must exist");
+test("Permit2, WHEN opted into, may only ever grant an allowance to the UniversalRouter", () => {
+  const optedIn = buildCallPermissions(CAPS, SELF, { allowUniswapV4: true }) as unknown as Perm[];
+  const p = optedIn.find(
+    (x) => x.target.toLowerCase() === UNISWAP.permit2.toLowerCase() && x.functionName === "approve",
+  );
+  assert.ok(p, "permit2 approve permission must exist once opted in");
   const args = p.args as [null, { condition: number; value: string }, null, null];
   // Without this EQUAL condition, this single permission would let the session key
   // hand ANY spender an allowance on ANY token — strictly more power than trading.
@@ -161,7 +206,16 @@ test("the vault deposit is capped, the withdrawal is not — but BOTH land in ou
 
 test("the routers are narrowed to one function each, and Rialto is absent by default", () => {
   assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 1);
-  assert.equal(find(UNISWAP.universalRouter, "execute").length, 1);
+  // The UniversalRouter is absent entirely by default — see the v4 test above.
+  // When opted in it is narrowed to `execute` and no further, because there is
+  // no further: its arguments are opaque bytes.
+  assert.equal(find(UNISWAP.universalRouter).length, 0);
+  const v4 = buildCallPermissions(CAPS, SELF, { allowUniswapV4: true }) as unknown as Perm[];
+  assert.equal(
+    v4.filter((p) => p.target.toLowerCase() === UNISWAP.universalRouter.toLowerCase() && p.functionName === "execute")
+      .length,
+    1,
+  );
   // Rialto's calldata comes from a quote API, so there is no shape to
   // constrain — the permission is effectively "call anything on this
   // contract". It needs an integrator key to work at all, so the default wall
@@ -190,14 +244,17 @@ test("the wall carries exactly the expected permission set — no more, no less"
   const list = perms();
   const stockCount = STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).length;
   // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 + vault
-  // deposit + vault withdraw + permit2 + universalRouter. No USDG transfer and
-  // no Rialto — both are opt-in.
-  assert.equal(list.length, stockCount + 6, "an unexpected permission count means something was added or lost");
-  // ...and each opt-in adds exactly one entry, never more.
+  // deposit + vault withdraw. No USDG transfer, no Rialto and no v4 — all
+  // three are opt-in. This count dropped from stockCount + 6 when Permit2 and
+  // the UniversalRouter stopped being granted unconditionally.
+  assert.equal(list.length, stockCount + 4, "an unexpected permission count means something was added or lost");
+  // ...and each opt-in adds exactly the entries it should, never more.
   const withXfer = buildCallPermissions(CAPS, SELF, { withdrawalAddresses: [SELF] });
   const withRialto = buildCallPermissions(CAPS, SELF, { allowRialto: true });
+  const withV4 = buildCallPermissions(CAPS, SELF, { allowUniswapV4: true });
   assert.equal(withXfer.length, list.length + 1);
   assert.equal(withRialto.length, list.length + 1);
+  assert.equal(withV4.length, list.length + 2, "v4 is a PAIR — Permit2 approve plus UniversalRouter execute");
   // Nothing may authorise sending native value.
   for (const p of list) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
 });

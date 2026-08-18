@@ -157,10 +157,17 @@ async function mintGrant(
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this
   // one with nothing failing when it did. worker/src/wall.test.ts pins its shape.
+  // Uniswap v4 is OFF — see WallOptions.allowUniswapV4. This flag and the
+  // GRANT_V4 marker below MUST move together: the marker is what the worker
+  // reads to decide whether to route through v4, and until now it claimed a
+  // capability the wall granted regardless of it. Deriving both from one
+  // constant is what stops them drifting apart again.
+  const allowUniswapV4: boolean = false;
   const { policies, now, expiresAt } = buildWallPolicies({
     caps,
     smartAccount: sudoOnlyAccount.address,
     extraTokens,
+    allowUniswapV4,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -213,7 +220,7 @@ async function mintGrant(
     // it the worker assumes the legacy three — because a grant signed before the
     // list grew genuinely only has those three in its call policy, and crediting
     // it with more is how a position gets bought and never sold.
-    grantFeatures: ["transfer", TRADEABLE_V2, GRANT_V4],
+    grantFeatures: ["transfer", TRADEABLE_V2, ...(allowUniswapV4 ? [GRANT_V4] : [])],
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what

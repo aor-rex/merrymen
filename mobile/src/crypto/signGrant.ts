@@ -113,10 +113,16 @@ export async function signGrant(args: {
   });
 
   say("assembling the wall");
+  // Uniswap v4 is OFF — see WallOptions.allowUniswapV4. Kept in lockstep with
+  // the GRANT_V4 marker below, and identical to web/src/lib/session.ts: the
+  // phone and the dashboard must seal the same wall or the worker cannot tell
+  // what a signature actually carries.
+  const allowUniswapV4: boolean = false;
   const { policies, now, expiresAt } = buildWallPolicies({
     caps: args.caps,
     smartAccount: sudoOnlyAccount.address,
     extraTokens: args.extraTokens,
+    allowUniswapV4,
   });
 
   say("attaching the permissions");
@@ -164,7 +170,7 @@ export async function signGrant(args: {
       chainId: chain.id,
       // Tells the worker what this signature actually carries, rather than
       // letting it infer capabilities from a constant that may have moved since.
-      grantFeatures: ["transfer", TRADEABLE_V2, GRANT_V4],
+      grantFeatures: ["transfer", TRADEABLE_V2, ...(allowUniswapV4 ? [GRANT_V4] : [])],
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },

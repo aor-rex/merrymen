@@ -70,11 +70,11 @@ export const WALL_POLICY_FLAG = PolicyFlags.NOT_FOR_VALIDATE_SIG;
 /**
  * The only contracts a token approval may ever name as spender.
  *
- * v4 is the reason permit2 is here and universalRouter is not: v4 never pulls
- * tokens directly. The account approves PERMIT2, and Permit2 grants the router a
- * bounded, expiring allowance — so the router itself is approved for nothing.
+ * Permit2 is here only to serve the v4 route, and follows the same opt-in: v4
+ * never pulls tokens directly, so the account approves PERMIT2 and Permit2
+ * grants the router its allowance — the router itself is approved for nothing.
  */
-export function allowedSpenders(allowRialto = false): Address[] {
+export function allowedSpenders(allowRialto = false, allowUniswapV4 = false): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
     // approved spender can pull whatever it was approved for, and the stock
@@ -83,7 +83,12 @@ export function allowedSpenders(allowRialto = false): Address[] {
     ...(allowRialto ? [RIALTO.routerSnapshot as Address] : []),
     UNISWAP.swapRouter02 as Address,
     MORPHO.steakhouseUsdgVault as Address,
-    UNISWAP.permit2 as Address,
+    // Permit2 used to sit here unconditionally, which made the sentence above
+    // literally true of it: with the stock approvals uncapped, the session key
+    // could approve Permit2 for every share it held. Harmless only while the
+    // v4 CALL permissions are absent, so the two are now granted together or
+    // not at all — see WallOptions.allowUniswapV4.
+    ...(allowUniswapV4 ? [UNISWAP.permit2 as Address] : []),
   ];
 }
 
@@ -128,6 +133,34 @@ export interface WallOptions {
    * to work at all, so the default is off and the risk is opt-in.
    */
   allowRialto?: boolean;
+  /**
+   * The Uniswap v4 route — Permit2 plus the UniversalRouter. OFF by default.
+   *
+   * The UniversalRouter takes an opaque `bytes[] inputs`, and the swap
+   * recipient lives inside it. A call policy derives one selector from
+   * `functionName` and can only constrain declared `args`, so there is no
+   * shape here to constrain: granting `execute` is granting "call anything on
+   * this contract". That is the same reasoning as allowRialto, and it should
+   * have carried the same default.
+   *
+   * It did not. These two permissions were granted UNCONDITIONALLY, and
+   * Permit2 was an unconditional approved spender, while the stock approvals
+   * carry no amount condition. Chained — approve(stock, permit2, unbounded),
+   * permit2.approve(stock, universalRouter, max, max), execute(...) — that is
+   * the whole non-USDG book to any address, in one UserOp. The comment on the
+   * execute permission asserted a bound ("Permit2 is only ever granted one
+   * trade's worth, expiring") that described what the worker CHOOSES to
+   * encode, not what the policy PERMITS. Same failure as the vault-withdraw
+   * recipient and the FOR_ALL_VALIDATION default: a comment describing intent
+   * over a policy allowing the opposite.
+   *
+   * Turning it on is a real trade, not a formality: v4 is where new pairs on
+   * this chain launch, so an agent without it cannot buy them — or sell one it
+   * already holds. The stock basket is unaffected; every tradeable symbol has
+   * v3 depth. Off is the honest default because the front page promises the
+   * chain enforces the wall, and with this granted it does not.
+   */
+  allowUniswapV4?: boolean;
 }
 
 /**
@@ -175,7 +208,7 @@ export function buildCallPermissions(
   smartAccount: Address,
   opts: WallOptions = {},
 ) {
-  const spenders = allowedSpenders(opts.allowRialto);
+  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4);
   const extras = usableExtraTokens(opts.extraTokens);
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
@@ -317,27 +350,40 @@ export function buildCallPermissions(
       functionName: "withdraw",
       args: [null, self, null],
     },
-    {
-      // Permit2 may be told to grant an allowance, but ONLY to the
-      // UniversalRouter. Without that EQUAL condition this single permission
-      // would let the session key hand any spender an allowance on any token —
-      // strictly more power than trading.
-      target: UNISWAP.permit2 as Address,
-      valueLimit: 0n,
-      abi: PERMIT2_ABI,
-      functionName: "approve",
-      args: [null, { condition: ParamCondition.EQUAL, value: UNISWAP.universalRouter as Address }, null, null],
-    },
-    {
-      // The UniversalRouter executes opaque command bundles, so a call policy
-      // cannot constrain its calldata. What bounds it is upstream: it can only
-      // move what Permit2 allowed, and Permit2 is only ever granted one trade's
-      // worth, expiring.
-      target: UNISWAP.universalRouter as Address,
-      valueLimit: 0n,
-      abi: UNIVERSAL_ROUTER_ABI,
-      functionName: "execute",
-    },
+    // The v4 pair — OPT-IN, and off by default. See WallOptions.allowUniswapV4
+    // for why, and note these two travel together with the Permit2 spender in
+    // allowedSpenders: any one of the three alone is inert, all three is a
+    // drain. Granting them individually is how this became a hole.
+    ...(opts.allowUniswapV4
+      ? [
+          {
+            // Permit2 may be told to grant an allowance, but ONLY to the
+            // UniversalRouter. Without that EQUAL condition this single
+            // permission would let the session key hand any spender an
+            // allowance on any token — strictly more power than trading.
+            //
+            // The token, the amount and the expiration all stay unconstrained,
+            // so this is a bound on WHO, never on how much or for how long.
+            // That is precisely why the whole pair is opt-in.
+            target: UNISWAP.permit2 as Address,
+            valueLimit: 0n,
+            abi: PERMIT2_ABI,
+            functionName: "approve",
+            args: [null, { condition: ParamCondition.EQUAL, value: UNISWAP.universalRouter as Address }, null, null],
+          },
+          {
+            // The UniversalRouter executes opaque command bundles, so a call
+            // policy cannot constrain its calldata — including the recipient.
+            // Nothing upstream bounds it either: the Permit2 allowance above
+            // is uncapped and non-expiring as far as the POLICY is concerned.
+            // Enabling this grants "move approved tokens anywhere".
+            target: UNISWAP.universalRouter as Address,
+            valueLimit: 0n,
+            abi: UNIVERSAL_ROUTER_ABI,
+            functionName: "execute",
+          },
+        ]
+      : []),
   ];
 }
 
@@ -367,6 +413,7 @@ export function buildWallPolicies(args: {
         extraTokens: args.extraTokens,
         withdrawalAddresses: args.withdrawalAddresses,
         allowRialto: args.allowRialto,
+        allowUniswapV4: args.allowUniswapV4,
       }) as never,
     }),
   ];
