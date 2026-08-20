@@ -4,15 +4,13 @@ import {
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
-  USDG_DECIMALS,
   grantHasV4,
   sellableAssets,
+  usdgUnits,
   type StockToken,
   type StoredGrant,
 } from "../../packages/core/src/index";
 import type { AgentLimits } from "./policy";
-
-const usdg = (value: number): bigint => BigInt(Math.round(value * 10 ** USDG_DECIMALS));
 
 /** Build the off-chain mirror of the limits sealed into a signed grant. */
 export function limitsFromGrant(
@@ -20,8 +18,8 @@ export function limitsFromGrant(
   watchTokens: readonly StockToken[] = STOCK_TOKENS,
 ): AgentLimits {
   return {
-    perTradeUsdg: usdg(grant.caps.perTradeUsdg),
-    dailyUsdg: usdg(grant.caps.dailyUsdg),
+    perTradeUsdg: usdgUnits(grant.caps.perTradeUsdg),
+    dailyUsdg: usdgUnits(grant.caps.dailyUsdg),
     allowedTargets: [
       RIALTO.routerSnapshot as `0x${string}`,
       UNISWAP.swapRouter02 as `0x${string}`,

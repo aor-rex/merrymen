@@ -752,6 +752,17 @@ button { font: inherit; cursor: pointer; }
     stroke-dashoffset: 0;
   }
 }
+
+.playground-curve-wrap {
+  width: 100%;
+  max-width: 640px;
+}
+
+.playground-curve {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 .circle-btn {
   align-self: flex-start;
   font-family: var(--mono); font-size: 11.5px; font-weight: 700; letter-spacing: 0.3px;
@@ -1080,6 +1091,8 @@ button { font: inherit; cursor: pointer; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+  .playground-curve-line { stroke-dashoffset: 0 !important; }
+  .playground-curve-runner { display: none; }
 }
 
 /* ============================================================

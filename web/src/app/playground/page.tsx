@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type {
+  PlaygroundResponse,
+  PlaygroundRunOutput,
+  StrategyName,
+} from "@merrymen/playground-api";
 
 interface SeriesPoint {
   tSec: number;
@@ -40,12 +45,18 @@ function EquityCurve({ series }: { series: CurveSeries[] }) {
     return { ...s, pointsAttr, dPath, length };
   });
 
-return (
-  <div>
-    <svg className="playground-curve" width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-      {lines.map((l) => (
-        <g key={l.key}>
+  return (
+    <div className="playground-curve-wrap">
+      <svg
+        className="playground-curve"
+        viewBox={`0 0 ${w} ${h}`}
+        role="img"
+        aria-label="Backtest equity curve"
+      >
+        {lines.map((l) => (
+          <g key={l.key}>
           <polyline
+            className="playground-curve-line"
             points={l.pointsAttr}
             fill="none"
             strokeWidth={2}
@@ -56,7 +67,7 @@ return (
               animation: "draw-curve 1.4s ease-out forwards",
             }}
           />
-          <circle r={4} fill={l.color}>
+          <circle className="playground-curve-runner" r={4} fill={l.color}>
             <animateMotion dur="1.4s" fill="freeze" calcMode="linear" path={l.dPath} />
           </circle>
           {(() => {
@@ -100,50 +111,27 @@ return (
               );
             });
           })()}
-        </g>
-      ))}
-    </svg>
-    {lines.length > 1 && (
-      <div className="playground-legend mono">
-        {lines.map((l) => (
-          <span key={l.key} className="playground-legend-item">
-            <span className="playground-legend-dot" style={{ background: l.color }} />
-            {l.label}
-          </span>
+          </g>
         ))}
-      </div>
-    )}
-  </div>
-);
-}
-
-interface RunOutput {
-  strategy: "steady-basket" | "weekend-gap";
-  finalEquityUsdg: number;
-  pnlUsdg: number;
-  maxDrawdownBps: number;
-  executed: number;
-  rejected: { rule: string; count: number }[];
-  rejectedEvents: { tSec: number; rule: string }[];
-  equitySeries: SeriesPoint[];
-}
-
-interface PlaygroundResponse {
-  seed: number;
-  limits: {
-    perTradeUsdg: number;
-    dailyUsdg: number;
-    maxDrawdownPct: number;
-    maxOpsPerDay: number;
-  };
-  primary: RunOutput;
-  compare: RunOutput | null;
+      </svg>
+      {lines.length > 1 && (
+        <div className="playground-legend mono">
+          {lines.map((l) => (
+            <span key={l.key} className="playground-legend-item">
+              <span className="playground-legend-dot" style={{ background: l.color }} />
+              {l.label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface Preset {
   id: string;
   label: string;
-  strategy: "steady-basket" | "weekend-gap";
+  strategy: StrategyName;
   symbols: string[];
   days: number;
   startingCash: number;
@@ -166,7 +154,7 @@ function randomSeed(): number {
   return value[0]!;
 }
 
-function ResultStats({ result, label }: { result: RunOutput; label?: string }) {
+function ResultStats({ result, label }: { result: PlaygroundRunOutput; label?: string }) {
   return (
     <div className="playground-result-block">
       {label && <div className="playground-result-label mono">{label}</div>}
@@ -199,7 +187,7 @@ function ResultStats({ result, label }: { result: RunOutput; label?: string }) {
 }
 
 export default function PlaygroundPage() {
-  const [strategy, setStrategy] = useState<"steady-basket" | "weekend-gap">("steady-basket");
+  const [strategy, setStrategy] = useState<StrategyName>("steady-basket");
   const [symbols, setSymbols] = useState<string[]>(["AAPL", "QQQ"]);
   const [days, setDays] = useState(90);
   const [startingCash, setStartingCash] = useState(1000);

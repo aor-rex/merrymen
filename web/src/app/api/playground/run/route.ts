@@ -7,60 +7,31 @@
 import { randomInt } from "node:crypto";
 import { NextResponse } from "next/server";
 import { readStoredGrant } from "@/lib/grant";
-import { CASH, STOCK_TOKENS, UNISWAP, MORPHO } from "@merrymen/core";
+import { CASH, STOCK_TOKENS, UNISWAP, MORPHO, usdgUnits } from "@merrymen/core";
 import { runBacktest } from "@merrymen/backtest";
 import { buildScenario } from "@merrymen/backtest-scenario";
 import { limitsFromGrant } from "@merrymen/limits";
+import {
+  parsePlaygroundRequest,
+  type PlaygroundResponse,
+  type PlaygroundRunOutput,
+  type StrategyName,
+} from "@merrymen/playground-api";
 import { steadyBasketTick, type SteadyBasketConfig } from "@merrymen/strategies/steady-basket";
 import { weekendGapTick, type WeekendGapConfig } from "@merrymen/strategies/weekend-gap";
 
 export const dynamic = "force-dynamic";
 
-type StrategyName = "steady-basket" | "weekend-gap";
-
-interface PlaygroundRequest {
-  strategy: StrategyName;
-  compareStrategy?: StrategyName | null;
-  symbols: string[];
-  days: number;
-  startingCashUsdg: number;
-  seed?: number;
-}
-
-const U = (v: number): bigint => BigInt(Math.round(v * 1e6));
-
-interface RunOutput {
-  strategy: StrategyName;
-  finalEquityUsdg: number;
-  pnlUsdg: number;
-  maxDrawdownBps: number;
-  executed: number;
-  rejected: { rule: string; count: number }[];
-  rejectedEvents: { tSec: number; rule: string }[];
-  equitySeries: { tSec: number; equityUsdg: number }[];
-}
-
 export async function POST(req: Request) {
-  const body = (await req.json()) as PlaygroundRequest;
-  if (body.strategy !== "steady-basket" && body.strategy !== "weekend-gap") {
-    return NextResponse.json({ error: "unknown strategy" }, { status: 400 });
+  let input: unknown;
+  try {
+    input = await req.json();
+  } catch {
+    return NextResponse.json({ error: "request body must be valid JSON" }, { status: 400 });
   }
-  if (
-    body.compareStrategy != null &&
-    body.compareStrategy !== "steady-basket" &&
-    body.compareStrategy !== "weekend-gap"
-  ) {
-    return NextResponse.json({ error: "unknown comparison strategy" }, { status: 400 });
-  }
-  if (!Array.isArray(body.symbols)) {
-    return NextResponse.json({ error: "symbols must be an array" }, { status: 400 });
-  }
-  if (!Number.isInteger(body.days) || body.days < 1 || body.days > 3_650) {
-    return NextResponse.json({ error: "days must be between 1 and 3650" }, { status: 400 });
-  }
-  if (!Number.isFinite(body.startingCashUsdg) || body.startingCashUsdg <= 0) {
-    return NextResponse.json({ error: "starting cash must be positive" }, { status: 400 });
-  }
+  const parsed = parsePlaygroundRequest(input);
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  const body = parsed.value;
 
   const grant = await readStoredGrant();
   if (!grant) {
@@ -68,15 +39,11 @@ export async function POST(req: Request) {
   }
 
   const seed = body.seed ?? randomInt(0, 0x1_0000_0000);
-  if (!Number.isInteger(seed) || seed < 0 || seed > 0xffff_ffff) {
-    return NextResponse.json({ error: "seed must be a 32-bit unsigned integer" }, { status: 400 });
-  }
-
+  const selectedTokens = body.symbols
+    .map((symbol) => STOCK_TOKENS.find((token) => token.symbol === symbol))
+    .filter((token): token is (typeof STOCK_TOKENS)[number] => token !== undefined);
   const legs = new Map<string, `0x${string}`>(
-    body.symbols
-      .map((s) => STOCK_TOKENS.find((t) => t.symbol === s))
-      .filter((t): t is (typeof STOCK_TOKENS)[number] => !!t)
-      .map((t) => [t.symbol, t.address]),
+    selectedTokens.map((token) => [token.symbol, token.address]),
   );
   if (legs.size === 0) {
     return NextResponse.json({ error: "no valid symbols in that basket" }, { status: 400 });
@@ -88,7 +55,7 @@ export async function POST(req: Request) {
   const weightBps = Math.floor(10_000 / legs.size);
   const basketLegs = [...legs.entries()].map(([symbol, token]) => ({ symbol, token, weightBps }));
 
-  const limits = limitsFromGrant(grant);
+  const limits = limitsFromGrant(grant, selectedTokens);
 
   // Same price series for every strategy run in this request — a fair
   // comparison means identical prices, not identical randomness.
@@ -103,7 +70,7 @@ export async function POST(req: Request) {
             weekendGapTick(
               {
                 legs: basketLegs,
-                enterBudgetUsdg: U(
+                enterBudgetUsdg: usdgUnits(
                   Math.min(body.startingCashUsdg * 0.5, (Number(limits.perTradeUsdg) / 1e6) * 0.9),
                 ),
                 swapRouter,
@@ -118,8 +85,8 @@ export async function POST(req: Request) {
             steadyBasketTick(
               {
                 legs: basketLegs,
-                buyPerTickUsdg: U(body.startingCashUsdg * 0.05),
-                idleFloorUsdg: U(body.startingCashUsdg * 0.1),
+                buyPerTickUsdg: usdgUnits(body.startingCashUsdg * 0.05),
+                idleFloorUsdg: usdgUnits(body.startingCashUsdg * 0.1),
                 swapRouter,
                 vault,
                 usdg: CASH.USDG,
@@ -129,13 +96,13 @@ export async function POST(req: Request) {
         };
   }
 
-  async function runOne(name: StrategyName): Promise<RunOutput> {
+  async function runOne(name: StrategyName): Promise<PlaygroundRunOutput> {
     const result = await runBacktest(
       {
         strategy: buildStrategy(name),
         limits,
         legs,
-        initialCashUsdg: U(body.startingCashUsdg),
+        initialCashUsdg: usdgUnits(body.startingCashUsdg),
         collectRejectedEvents: true,
       },
       bars,
@@ -161,7 +128,7 @@ export async function POST(req: Request) {
       ? await runOne(body.compareStrategy)
       : null;
 
-  return NextResponse.json({
+  const response: PlaygroundResponse = {
     seed,
     limits: {
       perTradeUsdg: Number(limits.perTradeUsdg) / 1e6,
@@ -171,5 +138,6 @@ export async function POST(req: Request) {
     },
     primary,
     compare,
-  });
+  };
+  return NextResponse.json(response);
 }

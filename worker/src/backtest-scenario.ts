@@ -24,11 +24,13 @@ export interface ScenarioConfig {
   drift?: number;
   /** Seed for a reproducible run (same seed -> same series). Default 42. */
   seed?: number;
-  /** First bar timestamp. Defaults to `days` ago and is injectable for tests. */
+  /** First bar timestamp. Defaults to a fixed Monday and is injectable for tests. */
   startTimeSec?: number;
 }
 
 const DAY_SEC = 86_400;
+/** Fixed Monday so a seed reproduces the same path across machines and dates. */
+export const DEFAULT_SCENARIO_START_SEC = Date.UTC(2024, 0, 1) / 1000;
 
 /** Small seeded PRNG so a given seed always reproduces the same series. */
 function mulberry32(seed: number) {
@@ -57,7 +59,7 @@ export function buildScenario(cfg: ScenarioConfig): Bar[] {
 
   const price = new Map(cfg.symbols.map((s) => [s, cfg.startPrice[s] ?? 100]));
   const bars: Bar[] = [];
-  const t0 = cfg.startTimeSec ?? Math.floor(Date.now() / 1000) - cfg.days * DAY_SEC;
+  const t0 = cfg.startTimeSec ?? DEFAULT_SCENARIO_START_SEC;
 
   for (let i = 0; i < cfg.days; i++) {
     const tSec = t0 + i * DAY_SEC;
