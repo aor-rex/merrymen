@@ -483,6 +483,7 @@ export const WALLET_TEXT = [
 export const HELP_TEXT = [
   "🏹 <b>merryman — commands</b>",
   "/status · /positions · /pnl · /trades — see what the band's doing",
+  "/depth &lt;SYM&gt; — where the money sits: liquidity, support and resistance, live from the chain",
   "/report — today's campfire report · /brag — your scorecard",
   "/why — why I made my last trade",
   "/name &lt;name&gt; — christen your merryman · /soul — who I am &amp; what I know of you",

@@ -40,6 +40,8 @@ export interface CommandDeps {
   reads: {
     status(): string;
     positions(): string;
+    /** Liquidity depth for one ticker — a chain read, so always async. */
+    depth(symbol: string): Promise<string>;
     pnl(): string;
     trades(): string;
     report(): string | Promise<string>;
@@ -130,6 +132,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.reads.status();
     case "positions":
       return deps.reads.positions();
+    case "depth":
+      return deps.reads.depth(cmd.symbol);
     case "pnl":
       return deps.reads.pnl();
     case "trades":

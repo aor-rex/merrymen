@@ -80,6 +80,9 @@ import { startNotifier } from "./telegram/notifier";
 import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
+import { formatDepth, formatNoDepth } from "./telegram/depth-format";
+import { bestCashPool } from "./venues/pool-price";
+import { readPoolDepth } from "./venues/depth";
 import { ensureSoul, getName } from "./soul";
 import { positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
@@ -1700,6 +1703,65 @@ async function main() {
   }
 
   // ── Telegram bridge — independent long-poll loop, never blocks the tick ──
+  /**
+   * Liquidity depth for one ticker, read live from the chain.
+   *
+   * On demand rather than per tick: this is answered when someone asks, so it
+   * costs nothing in the loop. Three multicall round trips, against the 28 the
+   * routed price read already spends every tick on a feedless token.
+   *
+   * Resolved against watchTokens for the same reason submitChatTrade is — a
+   * memecoin the owner added is one they can ask about, and answering "unknown
+   * symbol" for a token the agent is actively holding reads as a bug.
+   */
+  async function readDepthFor(symbol: string): Promise<string> {
+    const token = watchTokens.find((t) => t.symbol === symbol);
+    if (!token) {
+      const known = watchTokens.map((t) => t.symbol).join(", ");
+      return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}.`;
+    }
+    try {
+      const client = mainnetClient();
+      const cash = CASH.USDG as `0x${string}`;
+      // The SAME pool the price read would pick — see bestCashPool's comment on
+      // why two answers to "which pool counts" must not exist.
+      const best = await bestCashPool(client, { token: token.address as `0x${string}`, cash });
+      if (!best) return formatNoDepth(symbol);
+
+      const depth = await readPoolDepth(client, {
+        pool: best.pool,
+        token: token.address as `0x${string}`,
+        tokenDecimals: token.decimals ?? 18,
+        cashDecimals: USDG_DECIMALS,
+      });
+      if (!depth) return formatNoDepth(symbol);
+
+      // Robinhood's own published quote, as an independent cross-check. Strictly
+      // best-effort: it is a nicety, and a depth map is worth reading whether or
+      // not a third party's API answered in time.
+      let nbboMid: number | null = null;
+      try {
+        const res = await fetch(`https://api.robinhood.com/rhj/prices/${encodeURIComponent(symbol)}`, {
+          signal: AbortSignal.timeout(2500),
+        });
+        if (res.ok) {
+          const body = (await res.json()) as { quotes?: { bid?: string; ask?: string }[] };
+          const q = body.quotes?.[0];
+          const bid = Number(q?.bid);
+          const ask = Number(q?.ask);
+          if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) nbboMid = (bid + ask) / 2;
+        }
+      } catch {
+        /* no quote — the on-chain map stands on its own */
+      }
+
+      return formatDepth({ symbol, depth, nbboMid, fee: best.fee });
+    } catch (e) {
+      console.log(`[depth] ${symbol} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return `couldn't read the ${symbol} pool just now — try again in a moment.`;
+    }
+  }
+
   async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
     // Before the first tick completes, equity is unknown (0n) and the drawdown
@@ -1810,6 +1872,7 @@ async function main() {
     },
     grantPerTradeUsdg: () => active?.grant.caps.perTradeUsdg,
     grantHasTransfer: () => active?.grant.grantFeatures?.includes("transfer") ?? false,
+    readDepth: readDepthFor,
     submitTrade: submitChatTrade,
     submitTransfer: submitChatTransfer,
     onNameChange: (name) => {

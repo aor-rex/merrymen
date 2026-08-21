@@ -32,6 +32,8 @@ export type Command =
   | { kind: "wallet" }
   | { kind: "status" }
   | { kind: "positions" }
+  /** Liquidity depth for one ticker — read-only market colour, no book exists. */
+  | { kind: "depth"; symbol: string }
   | { kind: "pnl" }
   | { kind: "trades" }
   | { kind: "report" }
@@ -157,6 +159,14 @@ export function parseSlash(text: string): Command | null {
     case "positions":
     case "book":
       return { kind: "positions" };
+    case "depth":
+    case "liquidity":
+    case "levels": {
+      // /depth NVDA — one ticker, because a depth map is per-pool and a list of
+      // fourteen of them is a report nobody reads in a chat window.
+      const sym = rest.filter(Boolean).find((p) => /^[A-Za-z]{1,6}$/.test(p))?.toUpperCase();
+      return sym ? { kind: "depth", symbol: sym } : { kind: "unknown", text: "usage: /depth &lt;SYMBOL&gt;" };
+    }
     case "pnl":
       return { kind: "pnl" };
     case "trades":
@@ -397,6 +407,7 @@ const COMMAND_TOOL = {
         enum: [
           "status",
           "positions",
+          "depth",
           "pnl",
           "trades",
           "report",
@@ -687,6 +698,10 @@ export function coerceLlmCommand(input: Record<string, unknown>, userMessage = "
     case "buy":
     case "sell":
       return symbol && usdg > 0 ? { kind, symbol, usdg } : { kind: "chat", reply: `to ${kind}, tell me a ticker and a USDG amount, e.g. '${kind} 10 of QQQ'` };
+    case "depth":
+      return symbol
+        ? { kind: "depth", symbol }
+        : { kind: "chat", reply: "which ticker? e.g. 'where's the liquidity on NVDA'" };
     case "transfer": {
       // DEFENSE IN DEPTH: the recipient must appear VERBATIM in the user's own
       // message. The system prompt asks for this, but a jailbroken/injected model

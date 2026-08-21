@@ -80,6 +80,9 @@ export interface TelegramServiceDeps {
   grantPerTradeUsdg: () => number | undefined;
   /** Does the armed grant carry the on-chain transfer permission? */
   grantHasTransfer: () => boolean;
+  /** Liquidity depth for a ticker, read from the chain. Lives in index.ts because
+   * this file deliberately owns no chain client. */
+  readDepth: (symbol: string) => Promise<string>;
   /** Build a bounded TradeIntent and route it through processIntent. */
   submitTrade: (side: "buy" | "sell", symbol: string, usdg: number) => Promise<string>;
   /** Build a bounded transfer intent and route it through processIntent. */
@@ -352,6 +355,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       reads: {
         status: () => readStatus(statusCtx()),
         positions: () => readPositions(),
+        depth: (symbol: string) => deps.readDepth(symbol),
         pnl: () => readPnl(),
         trades: () => readTrades(),
         report: () => readReport(statusCtx()),

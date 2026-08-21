@@ -288,18 +288,29 @@ export function combineLegs(tokenPerWeth18: bigint, wethPerCash8: bigint): bigin
  * tier with the deepest cash. Returns null when no pool exists or the oracle
  * can't serve the window.
  */
-export async function readPoolPrice(
-  client: PublicClient,
-  args: {
-    token: `0x${string}`;
-    tokenDecimals: number;
-    cash: `0x${string}`;
-    cashDecimals: number;
-    windowSec?: number;
-  },
-): Promise<PoolPrice | null> {
-  const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
+export interface CashPool {
+  fee: number;
+  pool: `0x${string}`;
+  cashInPool: bigint;
+}
 
+/**
+ * The pool a trade would actually route through: the one holding the most cash.
+ *
+ * Selection uses the balance rather than in-range liquidity because it's one
+ * cheap call per tier. Steering this is not a way in: whichever pool is picked
+ * then has its REAL depth measured, so pointing us at a donated-to shell costs
+ * the token its price, it doesn't buy a fake one.
+ *
+ * Exported because the depth reader needs the SAME answer readPoolPrice gets.
+ * Two copies of "which pool counts" could disagree, and then the price and the
+ * depth map on the same screen would be describing different pools without
+ * saying so — the exact silent drift this codebase treats as a defect.
+ */
+export async function bestCashPool(
+  client: PublicClient,
+  args: { token: `0x${string}`; cash: `0x${string}` },
+): Promise<CashPool | null> {
   const pools = await Promise.all(
     FEE_TIERS.map(async (fee) => {
       try {
@@ -323,14 +334,25 @@ export async function readPoolPrice(
     }),
   );
 
-  // Deepest cash wins — that's the pool a trade would actually route through.
-  // Selection uses the balance rather than in-range liquidity because it's one
-  // cheap call per tier. Steering this is not a way in: whichever pool is picked
-  // then has its REAL depth measured below, so pointing us at a donated-to shell
-  // costs the token its price, it doesn't buy a fake one.
-  let best: { fee: number; pool: `0x${string}`; cashInPool: bigint } | null = null;
+  let best: CashPool | null = null;
   for (const p of pools) if (p && (!best || p.cashInPool > best.cashInPool)) best = p;
-  if (!best || best.cashInPool === 0n) return null;
+  return best && best.cashInPool > 0n ? best : null;
+}
+
+export async function readPoolPrice(
+  client: PublicClient,
+  args: {
+    token: `0x${string}`;
+    tokenDecimals: number;
+    cash: `0x${string}`;
+    cashDecimals: number;
+    windowSec?: number;
+  },
+): Promise<PoolPrice | null> {
+  const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
+
+  const best = await bestCashPool(client, { token: args.token, cash: args.cash });
+  if (!best) return null;
 
   try {
     const [token0, slot0, liquidity] = await Promise.all([

@@ -138,6 +138,7 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
     reads: {
       status: () => "STATUS",
       positions: () => "POSITIONS",
+      depth: (symbol: string) => Promise.resolve(`DEPTH ${symbol}`),
       pnl: () => "PNL",
       trades: () => "TRADES",
       report: () => "REPORT",
