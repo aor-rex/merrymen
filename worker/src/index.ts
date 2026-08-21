@@ -83,6 +83,7 @@ import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
 import { readPoolDepth } from "./venues/depth";
+import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName } from "./soul";
 import { positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
@@ -345,6 +346,17 @@ async function main() {
   // window is 15 minutes, so re-reading three pools every 15 seconds buys
   // nothing and costs a great deal of RPC.
   const poolPrices = createPoolPriceReader();
+  // Liquidity depth, on the same "cache the read, never the verdict" discipline
+  // but a longer TTL: a price is what the next trade executes at, depth is the
+  // shape behind it, and capital people have parked moves slower than a quote.
+  // watchTokens is read through a closure because the owner can change the watch
+  // set mid-run — capturing the array once would freeze the universe.
+  const depthReader = createDepthReader({
+    client: mainnetClient(),
+    tokens: () => watchTokens,
+    cash: CASH.USDG as `0x${string}`,
+    cashDecimals: USDG_DECIMALS,
+  });
   // Feedless tokens the guard REFUSED, symbol → reason. Reported when the set
   // changes rather than every tick, and reused to explain why the book can't be
   // valued instead of the useless "has no price feed".
@@ -1644,6 +1656,11 @@ async function main() {
       spendHeadroomUsdg:
         active.limits.dailyUsdg > spentTodayUsdg ? active.limits.dailyUsdg - spentTodayUsdg : 0n,
       perTradeCapUsdg: active.limits.perTradeUsdg,
+      // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
+      // so this costs a few RPC on the ticks where something has gone stale and
+      // nothing on the rest. Absent is a normal state — a cold cache, a pool
+      // that could not be read — and nothing downstream may require it.
+      depth: await depthReader.read(watchTokens.map((t) => t.symbol)),
     };
 
     lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks

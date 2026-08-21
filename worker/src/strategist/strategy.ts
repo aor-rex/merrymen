@@ -47,6 +47,10 @@ export interface LlmStrategistConfig {
   model?: string;
 }
 
+/** Two decimals is plenty for a dollar figure the model reasons about, and it
+ * keeps long floats out of a prompt with a fixed token budget. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): Signals {
   return {
     cashUsdg: Number(snap.cashUsdg) / 1e6,
@@ -70,6 +74,22 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date): S
     maxPerActionUsdg: Number(universe.maxPerActionUsdg) / 1e6,
     utcHour: at.getUTCHours(),
     utcDay: at.getUTCDay(),
+    // Only for symbols the model may actually trade. Depth on something outside
+    // the universe is noise it cannot act on, and it costs prompt budget.
+    // Omitted entirely rather than sent empty: an empty array reads as "no
+    // liquidity anywhere", which is a much stronger claim than "not read yet".
+    ...(() => {
+      const rows = [...(snap.depth?.entries() ?? [])]
+        .filter(([symbol]) => universe.legs.has(symbol))
+        .map(([symbol, d]) => ({
+          symbol,
+          buyUsdg: round2(d.buyUsdg),
+          sellUsdg: round2(d.sellUsdg),
+          supportUsd: d.supportUsd === null ? null : round2(d.supportUsd),
+          resistanceUsd: d.resistanceUsd === null ? null : round2(d.resistanceUsd),
+        }));
+      return rows.length > 0 ? { depth: rows } : {};
+    })(),
   };
 }
 

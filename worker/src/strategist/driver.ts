@@ -23,6 +23,22 @@ export interface Signals {
   maxPerActionUsdg: number;
   utcHour: number;
   utcDay: number;
+  /**
+   * Pool liquidity per symbol, when it has been read. Kept to four numbers a
+   * token on purpose: the model has a 2048-token budget for its whole answer,
+   * and a full tick ladder would spend the reply on a histogram it cannot act
+   * on. These four are the ones that change a decision — how much fits, and
+   * where the next wall is either side.
+   */
+  depth?: {
+    symbol: string;
+    /** USDG buyable before price rises >0.5%. */
+    buyUsdg: number;
+    /** USDG sellable before price falls >0.5%. */
+    sellUsdg: number;
+    supportUsd: number | null;
+    resistanceUsd: number | null;
+  }[];
 }
 
 export interface ProposalDriver {
@@ -44,8 +60,15 @@ vault yield automatically — you do not manage the vault.
 Propose portfolio actions via the propose_trades tool. Discipline rules:
 - Only trade symbols from tradableSymbols. Sizes are in USDG and must respect maxPerActionUsdg.
 - Prefer few, deliberate actions; propose holds when nothing is attractive.
-- You cannot see order books; execution is quote-simulated and slippage-bounded downstream,
-  and every action passes a policy wall you cannot override. Propose intent, not execution.`;
+- There is no order book on this chain, so you cannot see one. When \`depth\` is present it is
+  the next best thing and a different thing: pool liquidity. Per symbol it gives the USDG you
+  could trade before moving the price more than 0.5%, and the nearest prices where liquidity
+  clusters. Size to buyUsdg/sellUsdg — proposing above it moves the price against yourself.
+  Treat support/resistance as context, never as a signal on their own: that liquidity is
+  posted by market makers who can withdraw it in a block, and a cluster is nobody's resting
+  order. A symbol missing from \`depth\` simply has not been read; it is not a warning.
+- Execution is quote-simulated and slippage-bounded downstream, and every action passes a
+  policy wall you cannot override. Propose intent, not execution.`;
 
 const PROPOSE_TOOL = {
   name: "propose_trades",

@@ -7,6 +7,7 @@
 
 import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
+import type { TokenDepth } from "../venues/depth-cache";
 
 /** One current holding, as the strategy sees it. */
 export interface Holding {
@@ -50,6 +51,18 @@ export interface Snapshot {
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;
+  /**
+   * Pool liquidity by symbol — how much can be traded before the price moves,
+   * and where liquidity clusters. See venues/depth.ts; there is no order book on
+   * this chain and this is not one.
+   *
+   * OPTIONAL, and deliberately so. It is context that makes a proposal better
+   * sized, never a permission and never a prerequisite: the backtest replays fed
+   * bars with no chain to read, a cold cache has nothing yet, and a failed read
+   * is simply absent. Anything that would break without it is reaching for the
+   * wrong input — the wall is what decides, and the wall never sees this.
+   */
+  depth?: ReadonlyMap<string, TokenDepth>;
 }
 
 export interface Strategy {

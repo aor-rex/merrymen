@@ -24,7 +24,18 @@ const read = (p: string) => readFileSync(`${HERE}${p}`, "utf8");
 test("policy.ts does not import the depth reader, directly or by name", () => {
   const policy = read("../policy.ts");
   assert.equal(/from\s+["'].*venues\/depth["']/.test(policy), false, "policy.ts must not import ./venues/depth");
-  for (const symbol of ["readPoolDepth", "cashWithinBps", "deriveZones", "PoolDepth", "DepthZone"]) {
+  for (const symbol of [
+    "readPoolDepth",
+    "cashWithinBps",
+    "deriveZones",
+    "PoolDepth",
+    "DepthZone",
+    // Added when depth reached the strategist. The wall's input list did not
+    // grow then and must not grow later.
+    "TokenDepth",
+    "createDepthReader",
+    "depthReader",
+  ]) {
     assert.equal(
       policy.includes(symbol),
       false,
@@ -39,7 +50,9 @@ test("the quarantine scout is likewise depth-blind", () => {
   // number an outside party can move by adding liquidity to a pool.
   const quarantine = read("../quarantine.ts");
   assert.equal(/venues\/depth/.test(quarantine), false, "quarantine.ts must not import the depth reader");
-  assert.equal(quarantine.includes("PoolDepth"), false);
+  for (const symbol of ["PoolDepth", "TokenDepth", "createDepthReader"]) {
+    assert.equal(quarantine.includes(symbol), false, `quarantine.ts must not reference ${symbol}`);
+  }
 });
 
 const LIMITS: AgentLimits = {
