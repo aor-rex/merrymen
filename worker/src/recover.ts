@@ -22,6 +22,7 @@ import {
   erc20Abi,
   formatUnits,
   http,
+  parseAbi,
   type Address,
   type Chain,
 } from "viem";
@@ -29,16 +30,31 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { CASH, STOCK_TOKENS, USDG_DECIMALS } from "../../packages/core/src/index";
+import {
+  CASH,
+  MORPHO,
+  STOCK_TOKENS,
+  USDG_DECIMALS,
+  isValidCustomToken,
+} from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
+
+/** Shares are an ERC-4626 position: priced, never counted. Same reads snapshot.ts uses. */
+const VAULT_READS = parseAbi(["function convertToAssets(uint256 shares) view returns (uint256)"]);
 
 export interface TokenBalance {
   symbol: string;
   address: Address;
   raw: bigint;
   decimals: number;
-  /** Human-readable amount, for display only. */
+  /**
+   * Human-readable amount, for display only. "unknown" when the holding is
+   * real but not expressible — see the vault leg, where the share count is
+   * meaningless and the USDG value could not be read.
+   */
   amount: string;
+  /** Extra context for the owner when the number needs it. */
+  note?: string;
 }
 
 export interface RecoverPlan {
@@ -47,19 +63,88 @@ export interface RecoverPlan {
   /** Every token the account holds with a non-zero balance. */
   balances: TokenBalance[];
   gasWei: bigint;
+  /**
+   * What could not be READ — distinct from what is not held.
+   *
+   * A recovery that reports "this account is empty" because an RPC blinked is
+   * how someone concludes their money is gone. Absence and ignorance are
+   * different facts and this is where they are kept apart; `unreadable` being
+   * non-empty means the plan is incomplete, not that the account is.
+   */
+  unreadable: string[];
 }
 
 export interface RecoverResult extends RecoverPlan {
   /** null when there was nothing to sweep. */
   txHash: `0x${string}` | null;
   to: Address;
+  /** Held, but left behind — with the reason. Never silent. */
+  skipped: { symbol: string; reason: string }[];
 }
 
-/** USDG + every basket stock token, so a recovery never leaves value stranded. */
-const SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
+/**
+ * What EVERY agent can hold without the owner configuring anything.
+ *
+ * The vault leg is not optional and its absence was the worst of this: the
+ * idle-cash sweep parks most of the float in Morpho on the FIRST tick, so an
+ * agent doing exactly what it is designed to do holds almost nothing else — and
+ * recovery reported it as an empty account.
+ *
+ * Vault shares are a plain transferable ERC-20, so they move with the same
+ * transfer() as anything else and the owner redeems them at leisure. Their
+ * decimals are deliberately NOT guessed at 18: nothing in this repo establishes
+ * them, and snapshot.ts goes through convertToAssets precisely to avoid the
+ * question. The amount an owner confirms a sweep against must not be a number
+ * we made up, so the vault row is priced in USDG instead (see planRecovery).
+ */
+const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
   { symbol: "USDG", address: CASH.USDG as Address, decimals: USDG_DECIMALS },
   ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address as Address, decimals: 18 })),
+  { symbol: "vault", address: MORPHO.steakhouseUsdgVault as Address, decimals: USDG_DECIMALS },
 ];
+
+/**
+ * The builtin set plus whatever the owner added themselves.
+ *
+ * Recovery is the escape hatch, and it swept a list frozen at ship time — so
+ * the exact tokens an owner chose, and every quarantined scout position (an
+ * owner-added ERC-20 by definition), were stranded by the one command that
+ * exists to get money out. The wall has nothing to do with it: this path signs
+ * with the sudo validator and can move any ERC-20 the account holds.
+ *
+ * Builtin entries WIN on collision, and collision means symbol OR address —
+ * the rule strategies/registry.ts already applies. Address-only dedupe would
+ * let `{symbol:"AAPL", address:<anything>}` produce two identical-looking AAPL
+ * rows in the confirmation prose with no way for the owner to tell which is
+ * which, on the one screen where they are agreeing to move real money.
+ *
+ * Shape is re-validated here rather than trusted, because a caller reads
+ * settings.json off disk directly. That is also why the parameter is `unknown`
+ * rather than CustomToken: isValidCustomToken is a type guard over unknown, and
+ * demanding a typed value here would only push a cast onto callers holding data
+ * they have not checked — which is how an unvalidated address reaches an atomic
+ * sweep of someone's whole account.
+ */
+export function sweepList(
+  extra: readonly unknown[] = [],
+): { symbol: string; address: Address; decimals: number }[] {
+  const out = [...BUILTIN_SWEEPABLE];
+  const addresses = new Set(out.map((t) => t.address.toLowerCase()));
+  const symbols = new Set(out.map((t) => t.symbol.toUpperCase()));
+  for (const t of extra) {
+    if (!isValidCustomToken(t)) continue;
+    const addr = t.address.toLowerCase();
+    if (addresses.has(addr) || symbols.has(t.symbol.toUpperCase())) continue;
+    addresses.add(addr);
+    symbols.add(t.symbol.toUpperCase());
+    out.push({ symbol: t.symbol, address: t.address as Address, decimals: t.decimals });
+    // The same ceiling settings.ts puts on customTokens. A recovery is one
+    // atomic UserOp, and an unbounded call list is one that runs out of gas
+    // and moves nothing at all.
+    if (out.length >= BUILTIN_SWEEPABLE.length + 50) break;
+  }
+  return out;
+}
 
 /**
  * Rebuild the smart account from the owner key and read what it holds. Read-only
@@ -73,6 +158,8 @@ export async function planRecovery(opts: {
   rpcUrl?: string;
   /** If given, throw when the derived account doesn't match (wrong owner key). */
   expectedSmartAccount?: Address;
+  /** Owner-added tokens from settings. Optional — the builtin set is the floor. */
+  extraTokens?: readonly unknown[];
 }): Promise<RecoverPlan> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
@@ -99,22 +186,98 @@ export async function planRecovery(opts: {
     );
   }
 
-  const [gasWei, ...raws] = await Promise.all([
-    publicClient.getBalance({ address: account.address }).catch(() => 0n),
-    ...SWEEPABLE.map((t) =>
-      publicClient
-        .readContract({ address: t.address, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })
-        .then((v) => v as bigint)
-        .catch(() => 0n),
-    ),
+  const tokens = sweepList(opts.extraTokens);
+  const unreadable: string[] = [];
+
+  // THREE OUTCOMES, NOT TWO. A read can succeed, or find no contract at that
+  // address, or fail. Collapsing the last two into "unreadable" would be just
+  // as wrong as the `.catch(() => 0n)` this replaces — recover-cli accepts
+  // chain 46630, where every address in the registry is an undeployed mainnet
+  // address, so a two-way split would flag all of them and tell the owner to
+  // "rerun before you trust it" about an account that is genuinely empty.
+  //
+  // An EOA-style call to an address with no code returns 0x, which viem raises
+  // as a zero-data error. So on failure, ask the chain whether anything is
+  // deployed there: no code is an honest zero, code plus a failed read is an
+  // honest unknown.
+  const readBalance = async (address: Address, label: string): Promise<bigint | null> => {
+    try {
+      return (await publicClient.readContract({
+        address,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [account.address],
+      })) as bigint;
+    } catch {
+      const code = await publicClient.getCode({ address }).catch(() => undefined);
+      if (code === undefined) {
+        unreadable.push(label);
+        return null;
+      }
+      if (code === "0x" || code === undefined) return 0n; // nothing deployed here
+      unreadable.push(label);
+      return null;
+    }
+  };
+
+  const [gas, ...raws] = await Promise.all([
+    publicClient
+      .getBalance({ address: account.address })
+      .then((v) => v as bigint)
+      .catch(() => {
+        // The gas leg gets the same discipline as the tokens. It is printed to
+        // the owner, and a fabricated 0.000000 ETH is what convinces someone
+        // their recovery cannot possibly work.
+        unreadable.push("eth");
+        return null;
+      }),
+    ...tokens.map((t) => readBalance(t.address, t.symbol)),
   ]);
 
-  const balances: TokenBalance[] = SWEEPABLE.map((t, i) => {
-    const raw = raws[i] ?? 0n;
-    return { symbol: t.symbol, address: t.address, raw, decimals: t.decimals, amount: formatUnits(raw, t.decimals) };
-  }).filter((b) => b.raw > 0n);
+  const held = tokens
+    .map((t, i) => ({ t, raw: raws[i] ?? null }))
+    .filter((x): x is { t: (typeof tokens)[number]; raw: bigint } => x.raw !== null && x.raw > 0n);
 
-  return { smartAccount: account.address, ownerAddress: ownerAccount.address, balances, gasWei };
+  const balances: TokenBalance[] = await Promise.all(
+    held.map(async ({ t, raw }) => {
+      if (t.address.toLowerCase() !== (MORPHO.steakhouseUsdgVault as string).toLowerCase()) {
+        return { symbol: t.symbol, address: t.address, raw, decimals: t.decimals, amount: formatUnits(raw, t.decimals) };
+      }
+      // The vault row is priced, not counted. A raw share figure formatted at a
+      // decimals we invented would be a number the owner confirms a real sweep
+      // against — so ask the vault what the shares are worth, and say plainly
+      // when it will not tell us rather than printing something plausible.
+      const assets = await publicClient
+        .readContract({
+          address: t.address,
+          abi: VAULT_READS,
+          functionName: "convertToAssets",
+          args: [raw],
+        })
+        .then((v) => v as bigint)
+        .catch(() => null);
+      if (assets === null) unreadable.push("vault value");
+      return {
+        symbol: t.symbol,
+        address: t.address,
+        raw,
+        decimals: t.decimals,
+        amount: assets === null ? "unknown" : formatUnits(assets, USDG_DECIMALS),
+        note:
+          assets === null
+            ? "Morpho vault shares — held, but the vault would not price them. They sweep regardless."
+            : "Morpho vault shares, shown at their USDG value. The shares move; redeem them at your leisure.",
+      };
+    }),
+  );
+
+  return {
+    smartAccount: account.address,
+    ownerAddress: ownerAccount.address,
+    balances,
+    gasWei: gas ?? 0n,
+    unreadable,
+  };
 }
 
 /**
@@ -130,16 +293,18 @@ export async function recoverFunds(opts: {
   rpcUrl?: string;
   to: Address;
   expectedSmartAccount?: Address;
+  extraTokens?: readonly unknown[];
 }): Promise<RecoverResult> {
   const plan = await planRecovery({
     chain: opts.chain,
     ownerPrivateKey: opts.ownerPrivateKey,
     rpcUrl: opts.rpcUrl,
     expectedSmartAccount: opts.expectedSmartAccount,
+    extraTokens: opts.extraTokens,
   });
 
   if (plan.balances.length === 0) {
-    return { ...plan, txHash: null, to: opts.to };
+    return { ...plan, txHash: null, to: opts.to, skipped: [] };
   }
 
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
@@ -163,7 +328,56 @@ export async function recoverFunds(opts: {
     userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
   });
 
-  const calls = plan.balances.map((b) => ({
+  // ONE BAD TOKEN MUST NOT STRAND THE REST. The sweep is a single atomic
+  // UserOp, so a token that reverts on transfer — a blacklist, a paused
+  // contract, a hostile scout buy — takes the whole recovery down with it and
+  // there is no partial success to fall back on. So each leg is simulated
+  // first, and the ones that cannot move are reported rather than allowed to
+  // veto everything else.
+  //
+  // TWO THINGS THIS DELIBERATELY DOES NOT DO.
+  //
+  // It does not simulate through viem's `erc20Abi`, whose `transfer` declares a
+  // bool return. Plenty of real ERC-20s return nothing at all (the USDT shape),
+  // and viem raises a zero-data error for those — which would classify exactly
+  // the odd, owner-added memecoins this fix exists to rescue as "reverting" and
+  // strand them permanently. The no-output signature accepts both shapes.
+  //
+  // And it FAILS OPEN: if the simulation itself cannot run — an RPC error, a
+  // timeout — the token is swept anyway. On the escape hatch, attempting a move
+  // that might fail is strictly better than silently leaving money behind
+  // because a network call flaked.
+  const TRANSFER_ANY_RETURN = parseAbi(["function transfer(address,uint256)"]);
+  const skipped: { symbol: string; reason: string }[] = [];
+  const movable: TokenBalance[] = [];
+  for (const b of plan.balances) {
+    try {
+      await publicClient.simulateContract({
+        address: b.address,
+        abi: TRANSFER_ANY_RETURN,
+        functionName: "transfer",
+        args: [opts.to, b.raw],
+        account: account.address,
+      });
+      movable.push(b);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/revert|execution reverted/i.test(msg)) {
+        skipped.push({ symbol: b.symbol, reason: msg.replace(/\s+/g, " ").slice(0, 120) });
+      } else {
+        movable.push(b); // couldn't tell — try it rather than abandon it
+      }
+    }
+  }
+
+  if (movable.length === 0) {
+    // NOT "the account is empty". Everything here is held; none of it would
+    // move. Callers must be able to tell those apart — `skipped` is non-empty
+    // and says why for each one.
+    return { ...plan, txHash: null, to: opts.to, skipped };
+  }
+
+  const calls = movable.map((b) => ({
     to: b.address,
     value: 0n,
     data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [opts.to, b.raw] }),
@@ -174,5 +388,5 @@ export async function recoverFunds(opts: {
   if (!receipt.success) {
     throw new Error(`recovery UserOp reverted on-chain: ${userOpHash}`);
   }
-  return { ...plan, txHash: receipt.receipt.transactionHash, to: opts.to };
+  return { ...plan, balances: movable, txHash: receipt.receipt.transactionHash, to: opts.to, skipped };
 }

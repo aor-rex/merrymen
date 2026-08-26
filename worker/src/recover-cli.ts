@@ -50,22 +50,37 @@ async function main() {
 
   try {
     if (mode === "plan") {
-      const plan = await planRecovery({ chain, ownerPrivateKey: ownerKey, rpcUrl, expectedSmartAccount: expect });
+      const plan = await planRecovery({
+        chain,
+        ownerPrivateKey: ownerKey,
+        rpcUrl,
+        expectedSmartAccount: expect,
+        extraTokens: cfg.customTokens,
+      });
       say(`  smart account : ${plan.smartAccount}`);
       say(`  owner EOA     : ${plan.ownerAddress}   ${"<- what MetaMask shows when you import the key"}`);
       say(`  native gas    : ${(Number(plan.gasWei) / 1e18).toFixed(6)} ETH`);
       if (plan.balances.length === 0) {
-        say("  holdings      : none — this account is empty");
+        // Only claim empty when we actually READ everything. Otherwise say what
+        // we could not see — "this account is empty" is how someone concludes
+        // their money is gone because an RPC blinked.
+        say(
+          plan.unreadable.length
+            ? `  holdings      : none found, but ${plan.unreadable.join(", ")} could not be read — that is NOT a zero balance. Check the RPC and rerun.`
+            : "  holdings      : none — this account is empty",
+        );
       } else {
         say("  holdings:");
-        for (const b of plan.balances) say(`    • ${b.amount} ${b.symbol}`);
+        for (const b of plan.balances) say(`    • ${b.amount} ${b.symbol}${b.note ? `  (${b.note})` : ""}`);
+        if (plan.unreadable.length) say(`  NOT READ      : ${plan.unreadable.join(", ")} — there may be more here than this list shows.`);
       }
       emit({
         ok: true,
         smartAccount: plan.smartAccount,
         ownerAddress: plan.ownerAddress,
         gasWei: plan.gasWei.toString(),
-        balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+        unreadable: plan.unreadable,
+        balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
       });
       process.exit(0);
     }
@@ -86,11 +101,24 @@ async function main() {
       rpcUrl,
       to,
       expectedSmartAccount: expect,
+      extraTokens: cfg.customTokens,
     });
     if (!res.txHash) {
-      say("  nothing to sweep — account is empty");
-      emit({ ok: true, txHash: null, balances: [] });
+      // Three different things reach here and they are NOT the same fact.
+      if (res.skipped.length) {
+        say("  nothing moved — every token held here refused to transfer:");
+        for (const sk of res.skipped) say(`    • ${sk.symbol}: ${sk.reason}`);
+      } else if (res.unreadable.length) {
+        say(`  nothing swept, but ${res.unreadable.join(", ")} could not be read — do not treat this as empty.`);
+      } else {
+        say("  nothing to sweep — account is empty");
+      }
+      emit({ ok: true, txHash: null, balances: [], skipped: res.skipped, unreadable: res.unreadable });
       process.exit(0);
+    }
+    if (res.skipped.length) {
+      say("  left behind (they refused to transfer):");
+      for (const sk of res.skipped) say(`    • ${sk.symbol}: ${sk.reason}`);
     }
     say(`  ✓ swept — tx ${res.txHash}`);
     emit({

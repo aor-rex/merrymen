@@ -85,6 +85,9 @@ export async function GET() {
       ownerPrivateKey: grant.demoOwnerPrivateKey,
       rpcUrl: rpcFor(settings, chainId),
       expectedSmartAccount: grant.smartAccount,
+      // The owner's own tokens, including every quarantined scout buy. Without
+      // these the escape hatch strands exactly what the owner chose to hold.
+      extraTokens: settings.customTokens ?? [],
     });
     return NextResponse.json({
       hasStoredKey: true,
@@ -132,6 +135,7 @@ export async function POST(req: Request) {
         ownerPrivateKey: ownerKey,
         rpcUrl,
         expectedSmartAccount: expected,
+        extraTokens: settings.customTokens ?? [],
       });
       return NextResponse.json({
         smartAccount: plan.smartAccount,
@@ -139,7 +143,9 @@ export async function POST(req: Request) {
         gasWei: plan.gasWei.toString(),
         explorer: explorerFor(chainId),
         chainId,
-        balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+        balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
+        // Absence and ignorance are different facts — the UI must be able to say so.
+        unreadable: plan.unreadable,
       });
     }
 
@@ -161,6 +167,7 @@ export async function POST(req: Request) {
       rpcUrl,
       to: body.to,
       expectedSmartAccount: expected,
+      extraTokens: settings.customTokens ?? [],
     });
     return NextResponse.json({
       txHash: res.txHash,
