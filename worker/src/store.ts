@@ -281,6 +281,9 @@ function getDb(): DatabaseSync {
     // constant applied to a $5 trade and a $5,000 one alike; this is the
     // evidence needed to replace it with something size-aware.
     "ALTER TABLE trades ADD COLUMN fill_slippage_bps INTEGER",
+    // The cash leg of a fill, so an audit can check it against the chain's USDG
+    // movement directly rather than reconstructing it from price × quantity.
+    "ALTER TABLE trades ADD COLUMN fill_cash_usdg REAL",
   ]) {
     try {
       db.exec(ddl);
@@ -358,6 +361,10 @@ export interface TradeRow {
   fill_side?: "buy" | "sell";
   /** 18dp raw units filled, as a decimal string. */
   fill_qty_raw?: string;
+  /** 6dp USDG that actually moved on this fill — paid on a buy, received on a
+   * sell. Stored rather than derived from price × qty so an on-chain check
+   * compares an exact figure against an exact figure. */
+  fill_cash_usdg?: number;
   fill_price_usd?: number;
   /** 6dp-derived USDG booked on this fill (sells only; buys are always 0). */
   realized_pnl_usdg?: number;
@@ -830,8 +837,8 @@ export async function addTrade(row: TradeRow): Promise<void> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -859,6 +866,7 @@ export async function addTrade(row: TradeRow): Promise<void> {
         row.gas_wei ?? null,
         row.fill_slippage_bps ?? null,
         epoch,
+        row.fill_cash_usdg ?? null,
       );
     };
     if (!moved) {
@@ -874,6 +882,11 @@ export async function addTrade(row: TradeRow): Promise<void> {
         basisSource: row.basis_source ?? null,
         buyToken: row.buy_token ?? null,
         decisionId: row.decision_id ?? null,
+        // Both legs, explicitly. An auditor checks the QUANTITY against the
+        // stock-token movement and the CASH against the USDG movement, and
+        // deriving cash from price × qty would compare a rounded product
+        // against an exact on-chain figure and report a mismatch that isn't one.
+        fillCashUsdg: row.fill_cash_usdg ?? null,
         fillPriceUsd: row.fill_price_usd ?? null,
         fillQtyRaw: row.fill_qty_raw ?? null,
         fillSide: row.fill_side ?? null,

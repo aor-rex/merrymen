@@ -184,6 +184,163 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
   return book;
 }
 
+// ── 2. the chain of custody ───────────────────────────────────────────────
+
+/** A receipt as `eth_getTransactionReceipt` returns it, reduced to what we check. */
+export interface FetchedReceipt {
+  /** '0x1' success, '0x0' reverted. */
+  status: string;
+  logs: readonly { address: string; topics: readonly string[]; data: string }[];
+}
+
+/** ERC-20 Transfer. Re-declared here so the verifier depends on nothing. */
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/**
+ * Net movement of each token in or out of `account`, from a receipt's logs.
+ *
+ * Intentionally a second implementation of the same idea as fills.ts. The
+ * verifier must not share code with the thing it verifies any more than it has
+ * to — if the writer's log-parsing is wrong, a verifier importing that same
+ * parser would agree with it and call the record confirmed.
+ */
+export function receiptDeltas(
+  receipt: FetchedReceipt,
+  account: string,
+): Map<string, bigint> {
+  const me = account.toLowerCase();
+  const out = new Map<string, bigint>();
+  for (const log of receipt.logs) {
+    if (log.topics.length < 3 || log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) continue;
+    const from = `0x${log.topics[1]!.slice(-40)}`.toLowerCase();
+    const to = `0x${log.topics[2]!.slice(-40)}`.toLowerCase();
+    if (from !== me && to !== me) continue;
+    let v: bigint;
+    try {
+      v = BigInt(log.data);
+    } catch {
+      continue;
+    }
+    const token = log.address.toLowerCase();
+    let d = out.get(token) ?? 0n;
+    if (to === me) d += v;
+    if (from === me) d -= v;
+    out.set(token, d);
+  }
+  return out;
+}
+
+/** 6dp USDG float → integer units, for comparing against an on-chain amount. */
+function toUsdgUnits(v: number): bigint {
+  return BigInt(Math.round(v * 1e6));
+}
+
+/**
+ * Check ONE record against the transaction it names.
+ *
+ * A tolerance of one unit is allowed on the cash leg because the ledger stores
+ * USDG as a float (REAL columns) while the chain is exact — a difference in the
+ * last 6dp digit is a rounding artifact of our own storage, not a discrepancy.
+ * Anything larger is reported.
+ */
+export function compareRecord(args: {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  receipt: FetchedReceipt | null;
+  account: string;
+  usdgToken: string;
+}): AuditFinding[] {
+  const { seq, kind, payload, receipt, account, usdgToken } = args;
+  const findings: AuditFinding[] = [];
+  const txHash = String(payload.txHash ?? "");
+
+  if (!receipt) {
+    findings.push({ check: "onchain", seq, detail: `${txHash}: no such transaction on this chain` });
+    return findings;
+  }
+  if (receipt.status !== "0x1") {
+    findings.push({
+      check: "onchain",
+      seq,
+      detail: `${txHash}: the chain says this transaction FAILED, but the ledger records it as settled`,
+    });
+    return findings;
+  }
+
+  const deltas = receiptDeltas(receipt, account);
+  const usdgDelta = deltas.get(usdgToken.toLowerCase()) ?? 0n;
+
+  if (kind === "flow") {
+    const claimed = toUsdgUnits(Number(payload.amountUsdg ?? 0));
+    const expected = payload.direction === "in" ? claimed : -claimed;
+    if (absDiff(usdgDelta, expected) > 1n) {
+      findings.push({
+        check: "onchain",
+        seq,
+        detail:
+          `${txHash}: ledger claims a ${String(payload.direction)}flow of ${fmtUsdg(claimed)} USDG, ` +
+          `chain shows ${fmtUsdg(usdgDelta)}`,
+      });
+    }
+    return findings;
+  }
+
+  if (kind === "fill") {
+    // Cash leg.
+    const cash = payload.fillCashUsdg;
+    if (typeof cash === "number") {
+      const claimed = toUsdgUnits(cash);
+      const expected = payload.fillSide === "buy" ? -claimed : claimed;
+      if (absDiff(usdgDelta, expected) > 1n) {
+        findings.push({
+          check: "onchain",
+          seq,
+          detail:
+            `${txHash}: ledger claims ${String(payload.fillSide)} for ${fmtUsdg(claimed)} USDG, ` +
+            `chain shows a USDG movement of ${fmtUsdg(usdgDelta)}`,
+        });
+      }
+    }
+    // Stock leg — the token is whichever side of the swap is not USDG.
+    const stockToken = String(
+      (payload.fillSide === "buy" ? payload.buyToken : payload.sellToken) ?? "",
+    ).toLowerCase();
+    const qty = payload.fillQtyRaw;
+    if (stockToken && typeof qty === "string") {
+      let claimedQty: bigint;
+      try {
+        claimedQty = BigInt(qty);
+      } catch {
+        return findings;
+      }
+      const stockDelta = deltas.get(stockToken) ?? 0n;
+      const expected = payload.fillSide === "buy" ? claimedQty : -claimedQty;
+      // Exact: token quantities are integers on both sides, so any difference
+      // is real. This is the check that would have caught a fill booked from
+      // the quote instead of the receipt.
+      if (stockDelta !== expected) {
+        findings.push({
+          check: "onchain",
+          seq,
+          detail:
+            `${txHash}: ledger claims ${expected} raw units of ${stockToken.slice(0, 10)}…, ` +
+            `chain shows ${stockDelta}`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+function absDiff(a: bigint, b: bigint): bigint {
+  return a > b ? a - b : b - a;
+}
+
+function fmtUsdg(units: bigint): string {
+  return (Number(units) / 1e6).toFixed(6);
+}
+
 /**
  * Does the published equity agree with what the primitives imply?
  *

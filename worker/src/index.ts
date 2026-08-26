@@ -872,7 +872,10 @@ async function main() {
     mode: BasisMode,
     f: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number },
     source: "receipt" | "paper" | "quote",
-  ): Pick<TradeRow, "fill_side" | "fill_qty_raw" | "fill_price_usd" | "realized_pnl_usdg" | "basis_source"> {
+  ): Pick<
+    TradeRow,
+    "fill_side" | "fill_qty_raw" | "fill_cash_usdg" | "fill_price_usd" | "realized_pnl_usdg" | "basis_source"
+  > {
     const prev = getBasis(agentId, mode, f.symbol);
     const r = applyFill(prev, { side: f.side, qtyRaw: f.qtyRaw, cashUsdg: f.cashUsdg });
     setBasis(agentId, mode, f.symbol, r.basis);
@@ -909,6 +912,10 @@ async function main() {
     return {
       fill_side: f.side,
       fill_qty_raw: f.qtyRaw.toString(),
+      // The cash leg, recorded rather than left to be re-derived from
+      // price × quantity: an audit compares this against the chain's own USDG
+      // movement, and a rounded product would mismatch an exact figure.
+      fill_cash_usdg: usdgNum(f.cashUsdg),
       fill_price_usd: f.priceUsd,
       // Left NULL for buys (nothing realized) AND for unbacked sells (cost
       // unknown), so the realized sum only ever contains figures we can defend.

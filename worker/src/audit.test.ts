@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GENESIS, linkHash, reconcile, reconstruct, verifyChain, type ExportedEntry } from "./audit";
+import {
+  GENESIS,
+  compareRecord,
+  linkHash,
+  reconcile,
+  reconstruct,
+  verifyChain,
+  type ExportedEntry,
+} from "./audit";
 
 /** Build a well-formed chain from a list of payloads, the way the store would. */
 function chain(payloads: { kind: string; payload: unknown }[]): ExportedEntry[] {
@@ -111,6 +119,91 @@ describe("reconstruct — the book from primitives", () => {
     assert.equal(book.unanchored.length, 2);
     assert.match(book.unanchored[0]!.why, /inferred/);
     assert.match(book.unanchored[1]!.why, /simulated/);
+  });
+});
+
+describe("compareRecord — the ledger against the chain", () => {
+  const ME = "0x00000000000000000000000000000000000000a1";
+  const ROUTER = "0x00000000000000000000000000000000000000b2";
+  const USDG = "0x0000000000000000000000000000000000000dd0";
+  const NVDA = "0x0000000000000000000000000000000000000ee0";
+  const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const ONE = 10n ** 18n;
+
+  const topic = (a: string) => `0x${"0".repeat(24)}${a.slice(2)}`;
+  const hexv = (v: bigint) => `0x${v.toString(16).padStart(64, "0")}`;
+  const xfer = (token: string, from: string, to: string, v: bigint) => ({
+    address: token,
+    topics: [TRANSFER, topic(from), topic(to)],
+    data: hexv(v),
+  });
+  const ok = (logs: ReturnType<typeof xfer>[]) => ({ status: "0x1", logs });
+
+  const buyPayload = {
+    fillSide: "buy",
+    fillCashUsdg: 50,
+    fillQtyRaw: (ONE / 4n).toString(),
+    buyToken: NVDA,
+    sellToken: USDG,
+    txHash: "0xbuy",
+  };
+  const check = (payload: Record<string, unknown>, receipt: Parameters<typeof compareRecord>[0]["receipt"], kind = "fill") =>
+    compareRecord({ seq: 1, kind, payload, receipt, account: ME, usdgToken: USDG });
+
+  it("confirms a buy whose legs match the chain", () => {
+    const r = ok([xfer(USDG, ME, ROUTER, 50_000_000n), xfer(NVDA, ROUTER, ME, ONE / 4n)]);
+    assert.deepEqual(check(buyPayload, r), []);
+  });
+
+  it("CATCHES a quantity the chain does not support", () => {
+    // The exact failure the receipt work fixed: a fill booked from the quote
+    // records fewer units than actually arrived. An audit now sees it.
+    const r = ok([xfer(USDG, ME, ROUTER, 50_000_000n), xfer(NVDA, ROUTER, ME, ONE / 3n)]);
+    const f = check(buyPayload, r);
+    assert.equal(f.length, 1);
+    assert.match(f[0]!.detail, /raw units/);
+  });
+
+  it("CATCHES a cash amount the chain does not support", () => {
+    const r = ok([xfer(USDG, ME, ROUTER, 40_000_000n), xfer(NVDA, ROUTER, ME, ONE / 4n)]);
+    assert.match(check(buyPayload, r)[0]!.detail, /USDG movement/);
+  });
+
+  it("tolerates a one-unit cash difference — our storage is float, the chain is not", () => {
+    const r = ok([xfer(USDG, ME, ROUTER, 50_000_001n), xfer(NVDA, ROUTER, ME, ONE / 4n)]);
+    assert.deepEqual(check(buyPayload, r), []);
+  });
+
+  it("checks direction, not just magnitude", () => {
+    // Same amounts, opposite way round: a 'buy' whose USDG came IN.
+    const r = ok([xfer(USDG, ROUTER, ME, 50_000_000n), xfer(NVDA, ME, ROUTER, ONE / 4n)]);
+    assert.ok(check(buyPayload, r).length >= 1);
+  });
+
+  it("confirms a deposit, and catches an inflated one", () => {
+    const flow = { direction: "in", amountUsdg: 1000, txHash: "0xdep" };
+    const good = ok([xfer(USDG, ROUTER, ME, 1_000_000_000n)]);
+    assert.deepEqual(check(flow, good, "flow"), []);
+    const short = ok([xfer(USDG, ROUTER, ME, 10_000_000n)]);
+    assert.match(check(flow, short, "flow")[0]!.detail, /claims a inflow of 1000/);
+  });
+
+  it("a transaction that isn't on this chain is a finding, not a pass", () => {
+    assert.match(check(buyPayload, null)[0]!.detail, /no such transaction/);
+  });
+
+  it("a FAILED transaction recorded as settled is a finding", () => {
+    const reverted = { status: "0x0", logs: [] };
+    assert.match(check(buyPayload, reverted)[0]!.detail, /FAILED/);
+  });
+
+  it("ignores transfers between other parties in the same transaction", () => {
+    const r = ok([
+      xfer(USDG, ME, ROUTER, 50_000_000n),
+      xfer(USDG, ROUTER, "0x00000000000000000000000000000000000000cc", 50_000_000n),
+      xfer(NVDA, ROUTER, ME, ONE / 4n),
+    ]);
+    assert.deepEqual(check(buyPayload, r), []);
   });
 });
 
