@@ -974,6 +974,23 @@ async function strategyCmd(sub, name) {
   process.exit(1);
 }
 
+/**
+ * `merrymen preflight` — can this install actually make a REAL trade?
+ *
+ * Distinct from `doctor`, which asks whether the software is installed and
+ * configured. This asks whether the account can trade: balances, the grant's
+ * chain, what the signature can sell, and whether the trade size is above the
+ * point where gas stops dominating. It JUDGES — a testnet grant is a blocker,
+ * not a green line with an interesting number in it.
+ */
+function preflightCmd() {
+  const child = toolSpawn(localBin("tsx"), [path.join(ROOT, "worker", "src", "preflight-cli.ts")], {
+    cwd: ROOT,
+    stdio: "inherit",
+  });
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
 // ──────────────────────────────────────────────────────────────── audit ──
 
 /**
@@ -1425,6 +1442,9 @@ switch (cmd) {
   case "selftest":
     selftest();
     break;
+  case "preflight":
+    preflightCmd();
+    break;
   case "export":
   case "verify":
     auditCmd(cmd, rest);
@@ -1463,6 +1483,7 @@ switch (cmd) {
   ${bold("merrymen strategy new")}   forge your own outlaw in ~/.merrymen/strategies
   ${bold("merrymen strategy list")}  the roster — builtins + your strategies
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
+  ${bold("merrymen preflight")}      can it actually trade? balances, chain, caps, sizing
   ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
   ${bold("merrymen verify")}         check an export — reads only the file you hand it
   ${bold("merrymen service")}        start on login, survive reboots (install/uninstall/status)
