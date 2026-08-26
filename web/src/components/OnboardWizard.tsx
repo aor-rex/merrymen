@@ -31,6 +31,9 @@ function configured(v: SettingsView): boolean {
   // bundlerApiKey (settings.ts:22) — a URL-configured install must not be
   // treated as fresh. v.values.bundlerUrl is redacted but non-empty means set.
   if (v.values.bundlerUrl) return true;
+  // Env vars are first-class config (file wins over env, but env alone means
+  // a live Docker/systemd agent) — don't show the wizard to an env-configured install.
+  if (v.envHasConfig) return true;
   return Boolean(
     v.values.llmProvider ||
       v.groqApiKey.set ||
@@ -63,6 +66,7 @@ export function OnboardWizard() {
   const [basket, setBasket] = useState<string[]>([]);
   const [bundlerKey, setBundlerKey] = useState("");
   const [tgToken, setTgToken] = useState("");
+  const [tgEnabled, setTgEnabled] = useState(true);
   const [tgTest, setTgTest] = useState<string | null>(null);
 
   useEffect(() => {
@@ -98,8 +102,10 @@ export function OnboardWizard() {
   const providerNeedsKey = prov?.needsKey !== false;
 
   // Debounced model fetch — triggers when provider, key, or custom URL changes.
+  // Hoisted gate: a hidden wizard must not probe /api/models with the stored key.
   useEffect(() => {
     if (!view || !prov) return;
+    if (view.webOnboarded || configured(view)) return;
     setAvailableModels([]);
     setModelsLoading(true);
     setModelsError(null);
@@ -164,7 +170,7 @@ export function OnboardWizard() {
       if (bundlerKey.trim()) body.bundlerApiKey = bundlerKey.trim();
       if (tgToken.trim()) {
         body.telegramBotToken = tgToken.trim();
-        body.telegramEnabled = true;
+        body.telegramEnabled = tgEnabled;
       }
     }
     try {
@@ -179,7 +185,6 @@ export function OnboardWizard() {
         setSaving(false);
         return;
       }
-      setTimeout(() => setView((v) => (v ? { ...v, webOnboarded: true } : v)), 600);
       setDone(true);
     } catch {
       setErrors(["could not reach the settings API"]);
@@ -328,6 +333,10 @@ export function OnboardWizard() {
           <button type="button" className="cap" style={{ cursor: "pointer" }} onClick={() => void testTg()}>test</button>
           <span className="field-unit">{tgTest ?? "not verified yet"}</span>
         </Field>
+        <label className="field" style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+          <input type="checkbox" checked={tgEnabled} onChange={(e) => setTgEnabled(e.target.checked)} />
+          <span className="field-hint">start the bot now (enable Telegram polling)</span>
+        </label>
       </div>
       <div className="grant-note">Leave it blank and skip — you can add Telegram anytime in /settings.</div>
     </div>
