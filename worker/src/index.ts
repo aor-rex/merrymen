@@ -120,6 +120,7 @@ import {
   lastKnownEquityUsdg,
   lastKnownCashUsdg,
   openNextEpoch,
+  poolKeysFor,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
@@ -1496,6 +1497,10 @@ async function main() {
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
           v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          // Discovered pool keys make HOOKED pools routable — new launches
+          // live behind hooks findV4Pool cannot guess. Empty for undiscovered
+          // pairs, and inert when the v4 gate above is closed.
+          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
         });
         if (!quote) {
           // Say WHY there is no route when the answer is "your key can't take
@@ -1764,6 +1769,10 @@ async function main() {
               amountIn: probeIn,
               via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
               v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          // Discovered pool keys make HOOKED pools routable — new launches
+          // live behind hooks findV4Pool cannot guess. Empty for undiscovered
+          // pairs, and inert when the v4 gate above is closed.
+          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
             });
             if (ref) {
               bps = impactBps({

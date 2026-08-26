@@ -115,3 +115,19 @@ test("the same intent gets a byte-identical verdict regardless of surrounding ma
   assert.deepEqual(withDepth, base, "no depth-shaped field may change a verdict");
   assert.equal(base.ok, true, "sanity: the honest trade passes, so the test is not vacuously comparing refusals");
 });
+
+test("discovered pool keys are likewise market colour — policy never reads them", () => {
+  // poolKeysFor feeds ROUTING (which pool can fill this trade), and routing is
+  // propose/execute side. The wall's input list did not grow when discovery
+  // learned to capture keys, and must not later: a key row is written from
+  // third-party JSON (Bitquery), and a policy that read it would be a policy
+  // an outsider can shape.
+  const policy = read("../policy.ts");
+  for (const symbol of ["poolKeysFor", "discovered_pools", "PoolCandidate"]) {
+    assert.equal(policy.includes(symbol), false, `policy.ts must not reference ${symbol}`);
+  }
+  const quarantine = read("../quarantine.ts");
+  for (const symbol of ["poolKeysFor", "discovered_pools"]) {
+    assert.equal(quarantine.includes(symbol), false, `quarantine.ts must not reference ${symbol}`);
+  }
+});

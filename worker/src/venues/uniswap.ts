@@ -197,6 +197,14 @@ export async function bestRoute(
      * having considered it.
      */
     v4?: boolean;
+    /**
+     * Discovered v4 PoolKeys for this pair — the HOOKED pools, learned from
+     * Initialize events (store.poolKeysFor). findV4Pool can only ever guess
+     * hookless keys, so without this list the freshest launches are
+     * structurally unreachable. Quoted only when `v4` is on: a key the grant
+     * cannot execute is a route that reverts at the wall.
+     */
+    v4Keys?: readonly PoolKey[];
   },
 ): Promise<Quote | null> {
   const lc = (a: string) => a.toLowerCase();
@@ -219,6 +227,34 @@ export async function bestRoute(
             v4: { key: pool.key },
           };
         })(),
+        // The discovered keys, each its own candidate in the same comparison.
+        // quoteV4 is hooks-agnostic — it always could quote these; nothing
+        // ever FED it one before. Deduped against the hookless guess by pool
+        // id inside pickBestQuote's amountOut comparison (an identical pool
+        // quotes identically, so the duplicate merely ties with itself).
+        //
+        // ENTRY INTO A HOOKED POOL ALSO REQUIRES THE EXIT TO QUOTE. A hook
+        // decides per-swap: one that admits buys and reverts sells is the
+        // no-exit trap one level below the wall, and the wall cannot see it —
+        // the sell permission exists, the pool just refuses to fill it. The
+        // reverse probe is a heuristic (hook behaviour can change after
+        // entry, and that residual is what the scout budget bounds), but a
+        // pool that will not quote the way OUT right now is not a pool to
+        // walk into.
+        ...(args.v4Keys ?? []).map(async (key): Promise<Quote | null> => {
+          const q = await quoteV4(client, { key, tokenIn: args.tokenIn, amountIn: args.amountIn });
+          if (!q) return null;
+          if (lc(key.hooks) !== lc("0x0000000000000000000000000000000000000000")) {
+            const back = await quoteV4(client, { key, tokenIn: args.tokenOut, amountIn: q.amountOut });
+            if (!back || back.amountOut <= 0n) return null;
+          }
+          return {
+            fee: key.fee,
+            amountOut: q.amountOut,
+            gasEstimate: q.gasEstimate,
+            v4: { key },
+          };
+        }),
       ]
     : [];
 
