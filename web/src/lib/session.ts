@@ -60,6 +60,7 @@ import {
   robinhoodTestnet,
   GRANT_MULTIHOP,
   GRANT_V4,
+  GRANT_V4_ADAPTER,
   TRADEABLE_V2,
   USDG_DECIMALS,
   type CustomToken,
@@ -117,6 +118,13 @@ async function mintGrant(
    * adding a token in settings does nothing until a grant covering it is signed.
    */
   extraTokens: readonly CustomToken[] = [],
+  /**
+   * The deployed V4SelfSwap adapter to seal into the wall, or absent for no
+   * v4 route. Per-chain and per-deploy — the caller reads it from /settings
+   * for the chain being signed. The marker and the permission are minted
+   * together below, or not at all.
+   */
+  v4AdapterAddress?: `0x${string}`,
 ): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -169,6 +177,7 @@ async function mintGrant(
     smartAccount: sudoOnlyAccount.address,
     extraTokens,
     allowUniswapV4,
+    v4AdapterAddress,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -234,7 +243,16 @@ async function mintGrant(
     // destination is registered above, and until this signer offers that,
     // money leaves through the owner key (`merrymen recover`) — which is what
     // /grant already tells the owner, and which no wall can block.
-    grantFeatures: [TRADEABLE_V2, GRANT_MULTIHOP, ...(allowUniswapV4 ? [GRANT_V4] : [])],
+    // GRANT_V4_ADAPTER is minted ONLY when the permission was — marker and
+    // wall move together, the same lockstep rule as GRANT_V4 above. The sealed
+    // address rides with it because the marker alone is a claim, not evidence.
+    grantFeatures: [
+      TRADEABLE_V2,
+      GRANT_MULTIHOP,
+      ...(allowUniswapV4 ? [GRANT_V4] : []),
+      ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+    ],
+    ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what
@@ -271,9 +289,10 @@ export async function createAgentWallet(
   onStatus: (status: string) => void,
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
+  v4AdapterAddress?: `0x${string}`,
 ): Promise<Grant> {
   onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens);
+  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress);
 }
 
 /**
@@ -293,9 +312,10 @@ export async function restoreAgentWallet(
   onStatus: (status: string) => void,
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
+  v4AdapterAddress?: `0x${string}`,
 ): Promise<Grant> {
   onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens);
+  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress);
 }
 
 export interface OwnerPreview {

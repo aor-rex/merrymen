@@ -125,6 +125,9 @@ export default function GrantPage() {
   // listed — the tradable set lives inside the signed session key, so listing a
   // token only takes effect when a grant covering it is signed here.
   const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
+  // The deployed V4SelfSwap for this install, read from /settings. Sealed into
+  // the wall at signing — which is why it is read here and not at trade time.
+  const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -138,10 +141,12 @@ export default function GrantPage() {
       .catch(() => setServerArmed(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[] }; defaults?: { basketSymbols?: string[] } } | null) => {
+      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
         setCustomTokens(list as CustomToken[]);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
+        const a = v?.values?.v4AdapterAddress;
+        setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
       })
       .catch(() => {
         setCustomTokens([]);
@@ -206,7 +211,7 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await createAgentWallet(caps, setStatus, chainId, customTokens);
+      const g = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter);
       setGrant(g);
       setStatus(null);
     } catch (e) {
@@ -247,6 +252,7 @@ export default function GrantPage() {
         setStatus,
         chainId,
         customTokens,
+        v4Adapter,
       );
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.

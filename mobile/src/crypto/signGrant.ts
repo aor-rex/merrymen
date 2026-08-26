@@ -8,6 +8,7 @@ import { toECDSASigner } from "@zerodev/permissions/signers";
 import {
   GRANT_MULTIHOP,
   GRANT_V4,
+  GRANT_V4_ADAPTER,
   TRADEABLE_V2,
   buildWallPolicies,
   WALL_POLICY_FLAG,
@@ -53,6 +54,13 @@ export async function signGrant(args: {
   mnemonic: string;
   caps: GrantCaps;
   extraTokens?: readonly CustomToken[];
+  /**
+   * The deployed V4SelfSwap adapter to seal into the wall, or absent for no
+   * v4 route. The phone has no /settings fetch wired yet, so onboarding
+   * passes nothing and phone grants honestly carry no adapter marker — the
+   * lockstep rule: the marker is minted by the permission, never ahead of it.
+   */
+  v4AdapterAddress?: `0x${string}`;
   rpcUrl?: string;
   onProgress?: SignProgress;
 }): Promise<SignedGrant> {
@@ -124,6 +132,7 @@ export async function signGrant(args: {
     smartAccount: sudoOnlyAccount.address,
     extraTokens: args.extraTokens,
     allowUniswapV4,
+    v4AdapterAddress: args.v4AdapterAddress,
   });
 
   say("attaching the permissions");
@@ -175,7 +184,13 @@ export async function signGrant(args: {
       // No "transfer": this signer registers no withdrawal address either, so
       // the wall carries no transfer permission and claiming one would make the
       // off-chain mirror looser than the chain. See the note in session.ts.
-      grantFeatures: [TRADEABLE_V2, GRANT_MULTIHOP, ...(allowUniswapV4 ? [GRANT_V4] : [])],
+      grantFeatures: [
+        TRADEABLE_V2,
+        GRANT_MULTIHOP,
+        ...(allowUniswapV4 ? [GRANT_V4] : []),
+        ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+      ],
+      ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },
