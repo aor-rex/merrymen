@@ -58,6 +58,7 @@ import {
   usableExtraTokens,
   chainForId,
   robinhoodTestnet,
+  GRANT_MULTIHOP,
   GRANT_V4,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -220,7 +221,15 @@ async function mintGrant(
     // it the worker assumes the legacy three — because a grant signed before the
     // list grew genuinely only has those three in its call policy, and crediting
     // it with more is how a position gets bought and never sold.
-    grantFeatures: ["transfer", TRADEABLE_V2, ...(allowUniswapV4 ? [GRANT_V4] : [])],
+    // GRANT_MULTIHOP is unconditional because buildCallPermissions grants
+    // `exactInput` unconditionally — the two must move together, or the worker
+    // either declines a route it could take or takes one that reverts.
+    grantFeatures: [
+      "transfer",
+      TRADEABLE_V2,
+      GRANT_MULTIHOP,
+      ...(allowUniswapV4 ? [GRANT_V4] : []),
+    ],
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what

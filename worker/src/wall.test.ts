@@ -205,27 +205,67 @@ test("the vault deposit is capped, the withdrawal is not — but BOTH land in ou
   assert.equal(wdArgs[2], null, "owner is unconstrained — it can only be us anyway");
 });
 
-test("a MULTI-HOP swap is not permitted, and the worker's gate agrees", () => {
+test("a MULTI-HOP swap IS permitted, and its recipient is pinned at the RIGHT word", () => {
   // `exactInput` (the via-WETH route) is a different selector from
-  // `exactInputSingle`, and the wall grants only the latter. The worker used to
-  // quote multi-hop routes anyway: they logged "simulated ✓ v3 via WETH", were
-  // submitted, and reverted on-chain — burning gas every tick, invisible in
-  // paper mode because paper never builds calldata.
+  // `exactInputSingle`, and the wall used to grant only the latter while the
+  // worker quoted multi-hop routes anyway: they logged "simulated ✓ v3 via
+  // WETH", were submitted, and reverted on-chain — burning gas every tick,
+  // invisible in paper mode because paper never builds calldata.
   //
-  // These two facts must move together, exactly like allowUniswapV4 and the
-  // GRANT_V4 marker. If someone adds the permission below without minting the
-  // marker, the worker stays single-hop for no reason; if they mint the marker
-  // without the permission, the reverts come back.
-  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0, "no multi-hop permission is granted");
+  // Granting it costs nothing beyond what single-hop already grants: the input
+  // is bounded by the USDG approve cap (≤ perTradeUsdg) and the output is
+  // pinned to this account, exactly as asserted below.
+  const [hop] = find(UNISWAP.swapRouter02, "exactInput");
+  assert.ok(hop, "the multi-hop permission exists");
+  const args = hop.args as (null | { condition: number; value: string })[];
+
+  // THREE entries, not seven, and the pin sits at index 2 rather than 3 — THAT
+  // is the trap. ExactInputParams leads with `bytes path`, so the tuple is
+  // DYNAMIC: word 0 is the pointer to the tuple, word 1 the pointer to the
+  // path, and `recipient` lands at word 2. Copying the single-hop mapping would
+  // have constrained `amountIn` and left the recipient free to be anyone.
+  assert.equal(args.length, 3);
+  assert.deepEqual(args[2], { condition: ParamCondition.EQUAL, value: SELF });
+  assert.equal(args[0], null, "word 0 is the tuple pointer");
+  assert.equal(args[1], null, "word 1 is the path pointer");
+
+  // AND PROVE IT against viem's encoder, not against the reasoning above.
+  const OTHER = "0x00000000000000000000000000000000000000ff" as const;
+  const path = `0x${CASH.USDG.slice(2)}000bb8${CASH.WETH.slice(2)}000bb8${OTHER.slice(2)}` as `0x${string}`;
+  const calldata = encodeFunctionData({
+    abi: UNISWAP_SWAP_ROUTER_ABI,
+    functionName: "exactInput",
+    args: [{ path, recipient: SELF, amountIn: 1_000_000n, amountOutMinimum: 0n }],
+  });
+  const body = `0x${calldata.slice(10)}`;
+  const wordAt = (i: number) => `0x${body.slice(2 + i * 64, 2 + (i + 1) * 64)}`;
+  assert.equal(
+    wordAt(2).toLowerCase(),
+    pad(SELF, { size: 32 }).toLowerCase(),
+    "offset 2*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
+  );
+  // The neighbours too, so a shift in EITHER direction fails rather than aliases.
+  assert.equal(BigInt(wordAt(3)), 1_000_000n, "word 3 is amountIn");
+  assert.equal(BigInt(wordAt(1)), 128n, "word 1 is the path OFFSET, not a value");
+
+  // The permission and the grant marker must move together, exactly like
+  // allowUniswapV4 and GRANT_V4. Both signers mint this unconditionally now.
+  assert.equal(
+    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2", "multihop"] }),
+    true,
+    "a grant signed today claims it",
+  );
   assert.equal(
     grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2"] }),
     false,
-    "and no grant claims it can execute one",
+    "one signed before this does not — the worker keeps routing it single-hop",
   );
 });
 
-test("the routers are narrowed to one function each, and Rialto is absent by default", () => {
+test("the routers are narrowed to the two swap entrypoints, and Rialto is absent by default", () => {
   assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 1);
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 1);
+  assert.equal(find(UNISWAP.swapRouter02).length, 2, "and nothing else on that router");
   // The UniversalRouter is absent entirely by default — see the v4 test above.
   // When opted in it is narrowed to `execute` and no further, because there is
   // no further: its arguments are opaque bytes.
@@ -263,11 +303,13 @@ test("owner-added tokens are validated and de-duplicated before becoming policy"
 test("the wall carries exactly the expected permission set — no more, no less", () => {
   const list = perms();
   const stockCount = STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).length;
-  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 + vault
-  // deposit + vault withdraw. No USDG transfer, no Rialto and no v4 — all
-  // three are opt-in. This count dropped from stockCount + 6 when Permit2 and
-  // the UniversalRouter stopped being granted unconditionally.
-  assert.equal(list.length, stockCount + 4, "an unexpected permission count means something was added or lost");
+  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×2
+  // (exactInputSingle and exactInput) + vault deposit + vault withdraw. No USDG
+  // transfer, no Rialto and no v4 — all three are opt-in. This count dropped
+  // from stockCount + 6 when Permit2 and the UniversalRouter stopped being
+  // granted unconditionally, and rose by one when the multi-hop route was
+  // granted rather than quoted-and-reverted.
+  assert.equal(list.length, stockCount + 5, "an unexpected permission count means something was added or lost");
   // ...and each opt-in adds exactly the entries it should, never more.
   const withXfer = buildCallPermissions(CAPS, SELF, { withdrawalAddresses: [SELF] });
   const withRialto = buildCallPermissions(CAPS, SELF, { allowRialto: true });

@@ -331,6 +331,34 @@ export function buildCallPermissions(
       args: [null, null, null, self, null, null, null],
     },
     {
+      // MULTI-HOP, same router, same pin — the route through WETH.
+      //
+      // Roughly three quarters of this chain's pools quote against WETH rather
+      // than USDG, so without this most memecoins are unreachable: there is
+      // simply no direct pair to quote. The worker used to build these calls
+      // anyway; they quoted, submitted, and reverted here, at the wall, burning
+      // gas every tick. That is now gated on the GRANT_MULTIHOP marker, which
+      // this permission is what mints.
+      //
+      // THE OFFSET IS DIFFERENT AND THAT IS THE WHOLE TRAP. ExactInputParams
+      // leads with `bytes path`, so unlike its single-hop sibling the tuple is
+      // DYNAMIC: word 0 is the pointer to the tuple, word 1 the pointer to the
+      // path, and `recipient` lands at word 2 rather than word 3. Reasoning it
+      // out is exactly how a policy ends up constraining the wrong word and
+      // looking strict while permitting anything — so wall.test.ts proves this
+      // against viem's encoder instead.
+      //
+      // What it costs: nothing beyond the single-hop case already grants. The
+      // input is still bounded by the USDG approve cap (≤ perTradeUsdg per op),
+      // and the output still has to come back to this account. A longer path
+      // buys a worse price, not somebody else's tokens.
+      target: UNISWAP.swapRouter02 as Address,
+      valueLimit: 0n,
+      abi: UNISWAP_SWAP_ROUTER_ABI,
+      functionName: "exactInput",
+      args: [null, null, self],
+    },
+    {
       // Morpho vault deposits, capped per call at the daily limit — and the
       // SHARES must come back to the agent's own account.
       //

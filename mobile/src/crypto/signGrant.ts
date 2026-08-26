@@ -6,6 +6,7 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import {
+  GRANT_MULTIHOP,
   GRANT_V4,
   TRADEABLE_V2,
   buildWallPolicies,
@@ -170,7 +171,13 @@ export async function signGrant(args: {
       chainId: chain.id,
       // Tells the worker what this signature actually carries, rather than
       // letting it infer capabilities from a constant that may have moved since.
-      grantFeatures: ["transfer", TRADEABLE_V2, ...(allowUniswapV4 ? [GRANT_V4] : [])],
+      // Kept in step with web/src/lib/session.ts — two signers, one wall.
+      grantFeatures: [
+        "transfer",
+        TRADEABLE_V2,
+        GRANT_MULTIHOP,
+        ...(allowUniswapV4 ? [GRANT_V4] : []),
+      ],
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },
