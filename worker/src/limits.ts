@@ -6,6 +6,7 @@ import {
   UNISWAP,
   grantHasTransfer,
   grantHasV4,
+  grantV4Adapter,
   sellableAssets,
   usdgUnits,
   type StockToken,
@@ -29,6 +30,18 @@ export function limitsFromGrant(
       ...(grantHasV4(grant)
         ? [UNISWAP.permit2 as `0x${string}`, UNISWAP.universalRouter as `0x${string}`]
         : []),
+      // THE V4 ADAPTER, MIRRORED — and mirrored from the GRANT, not from
+      // settings. grantV4Adapter returns the address the swapExactIn
+      // permission was actually sealed against (marker AND address, or null),
+      // so this list can never admit an adapter the chain would refuse. The
+      // transfer-mirror lesson runs in both directions: without this entry a
+      // correctly-granted adapter call dies off-chain at `target-allowlist`,
+      // a route that looks granted and never fires — the multihop bug's
+      // silent sibling.
+      ...((): `0x${string}`[] => {
+        const a = grantV4Adapter(grant);
+        return a ? [a] : [];
+      })(),
     ],
     allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
     sellableAssets: [...sellableAssets(grant)],

@@ -47,6 +47,7 @@ import {
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
   // to the Telegram executor, and the two must not shadow each other.
   grantHasTransfer as grantCarriesTransfer,
+  grantV4Adapter,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -195,6 +196,8 @@ interface ActiveAgent {
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
+  /** The grant-sealed V4SelfSwap has CODE on this chain — see the arm check. */
+  v4AdapterLive: boolean;
 }
 
 async function main() {
@@ -904,6 +907,36 @@ async function main() {
       }
     }
 
+    // The v4 adapter is trusted only when the GRANT-SEALED address has code on
+    // this chain — same discipline as the breaker above, same reason: a call
+    // to a codeless address would fail in ways that read as "no route" rather
+    // than "you deployed to the other chain". The grant is the authority on
+    // WHICH address (the permission was sealed against it); settings only gets
+    // a say here as a mismatch warning, because an owner who just redeployed
+    // and updated settings has not re-signed yet, and should be told so.
+    let v4AdapterLive = false;
+    const sealedAdapter = grantV4Adapter(grant);
+    if (sealedAdapter) {
+      const code = await client.getCode({ address: sealedAdapter }).catch(() => undefined);
+      v4AdapterLive = code !== undefined && code !== "0x";
+      if (!v4AdapterLive) {
+        console.log(`[worker] v4 adapter ${sealedAdapter} has no code on chain ${chain.id} — v4 routing disabled`);
+        await addEvent(
+          agentId,
+          "warn",
+          `v4 adapter has no code on chain ${chain.id} — v4 routing is OFF for this grant. ` +
+            `Deploy the adapter on this chain (or fix v4AdapterAddress) and re-sign.`,
+        );
+      } else if (cfg.v4AdapterAddress && cfg.v4AdapterAddress.toLowerCase() !== sealedAdapter) {
+        await addEvent(
+          agentId,
+          "warn",
+          `settings name a different v4 adapter (${cfg.v4AdapterAddress}) than this grant was sealed against ` +
+            `(${sealedAdapter}). The worker uses the SEALED one — re-sign at /grant to switch.`,
+        );
+      }
+    }
+
     active = {
       grant,
       agentId,
@@ -915,6 +948,7 @@ async function main() {
       orderExecutor: null,
       limits: limitsFromGrant(grant, watchTokens),
       breakerLive,
+      v4AdapterLive,
     };
     // Nothing is in flight at arm time, so clear any stale reservation with it.
     inFlightSpentUsdg = 0n;
