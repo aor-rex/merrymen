@@ -631,21 +631,29 @@ export async function addTrade(row: TradeRow): Promise<void> {
 
 export async function addEquity(
   agentId: string,
-  b: { ethWei: bigint; cashUsdg: number; vaultUsdg: number; positionsUsdg: number },
+  b: {
+    ethWei: bigint;
+    cashUsdg: number;
+    vaultUsdg: number;
+    positionsUsdg: number;
+    /**
+     * The composed total. REQUIRED, and not re-derived here.
+     *
+     * This function used to compute `cash + vault + positions` itself while the
+     * caller judged fees and the drawdown breaker against a figure that also
+     * included quarantined cost — so the curve every surface reads sat below the
+     * number the performance fee ratcheted on, by exactly the quarantined
+     * amount, forever. One definition, in equity.composeEquityUsdg, passed in.
+     */
+    equityUsdg: number;
+  },
 ): Promise<void> {
   try {
     getDb()
       .prepare(
         "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(
-        agentId,
-        b.ethWei.toString(),
-        b.cashUsdg,
-        b.vaultUsdg,
-        b.positionsUsdg,
-        b.cashUsdg + b.vaultUsdg + b.positionsUsdg,
-      );
+      .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg);
   } catch (e) {
     console.error("[store] equity insert failed:", e);
   }

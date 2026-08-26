@@ -54,6 +54,7 @@ import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { bestRoute, buildTradeCalls, minOutWithSlippage } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst } from "./fills";
+import { bookGaps, composeEquityUsdg } from "./equity";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
@@ -1623,7 +1624,11 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
-      unreadBook = [...bal.unread, ...(posRead.readFailed ? ["positions"] : [])];
+      unreadBook = bookGaps({
+        unreadBalances: bal.unread,
+        positionsReadFailed: posRead.readFailed,
+        missingPrice: [], // reported separately below — it has its own message
+      });
     }
 
     // The chain didn't answer. Every zero below would be a placeholder, and
@@ -1718,14 +1723,19 @@ async function main() {
     // quarantined holdings at cost. The cost term is what stops a scout buy from
     // reading as an instant loss: cash left the wallet, so without it equity
     // would drop by the full spend and book a drawdown that never happened.
-    const equityUsdg =
-      balances.cashUsdg + balances.vaultUsdg + positionsUsdg + quarantine.totalCostUsdg;
+    const equityUsdg = composeEquityUsdg({
+      cashUsdg: balances.cashUsdg,
+      vaultUsdg: balances.vaultUsdg,
+      positionsUsdg,
+      quarantinedCostUsdg: quarantine.totalCostUsdg,
+    });
 
-    // Reconcile LIVE cost basis against the chain. Live fills are booked from the
-    // pre-trade quote (we don't parse receipts yet), so the tracked quantity can
-    // drift from what actually settled — and a drifted remainder would otherwise
-    // sit forever as a phantom position whose cost never comes out. The chain is
-    // the truth: a symbol we no longer hold has no basis, full stop.
+    // Reconcile LIVE cost basis against the chain. A live fill is booked from
+    // the receipt where one can be parsed and from the pre-trade quote where it
+    // cannot, so the tracked quantity can still drift from what settled — and a
+    // drifted remainder would otherwise sit forever as a phantom position whose
+    // cost never comes out. The chain is the truth: a symbol we no longer hold
+    // has no basis, full stop.
     if (!paper) {
       // A held-but-unpriceable symbol is absent from `positions` yet very much
       // still owned — closing its basis here would discard the cost of a real
@@ -1824,6 +1834,9 @@ async function main() {
         cashUsdg: usdgNum(balances.cashUsdg),
         vaultUsdg: usdgNum(balances.vaultUsdg),
         positionsUsdg: usdgNum(positionsUsdg),
+        // The SAME total the fee and the breaker are judged against — the row
+        // no longer re-derives its own, lower one.
+        equityUsdg: usdgNum(equityUsdg),
       });
     }
     await setPositions(

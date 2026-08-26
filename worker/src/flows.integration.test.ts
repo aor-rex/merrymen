@@ -160,9 +160,9 @@ describe("readPnl reports the agent's own money", () => {
     // DEFAULTs to 'armed', so B has to be retired explicitly here.
     await setAgentStatus(A, "armed");
     await setAgentStatus(B, "expired");
-    await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778 });
+    await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
     // B is funded and marked to a very different number in the same tables.
-    await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0 });
+    await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
 
     const out = readPnl();
     // The headline is equity MINUS capital: 999.48 − 750 = 249.48. It used to be
@@ -184,7 +184,7 @@ describe("readPnl reports the agent's own money", () => {
     await ensureAgent(grant(C));
     await setAgentStatus(A, "expired");
     await setAgentStatus(C, "armed");
-    await addEquity(C, { ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0 });
+    await addEquity(C, { ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 999.48 });
 
     assert.equal(await getNetContributionsUsdg(C), null);
     const out = readPnl();
