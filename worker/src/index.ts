@@ -735,6 +735,9 @@ async function main() {
         liquidityUsd: d.liquidityUsdg === null ? 0 : Number(d.liquidityUsdg) / 1e6,
         fdvUsd: d.fdvUsd ?? 0,
         firstSeen: 0, // the store stamps this itself
+        // The PoolKey rides along when the Initialize event carried one — this
+        // is the moment a hooked pool becomes routable, and the only one.
+        ...(d.key ? { key: d.key } : {}),
       });
       const line = describeDiscovery(d);
       console.log(`[discovery] ${line}`);
