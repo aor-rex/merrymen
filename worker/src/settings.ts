@@ -41,6 +41,7 @@ export interface ResolvedConfig {
   strategy: string;
   swapVenue: "uniswap" | "rialto";
   slippageBps: number;
+  maxImpactBps: number;
   perfFeeBps: number;
   tickSeconds: number;
   basketSymbols: string[];
@@ -232,6 +233,9 @@ export function mergeSettings(
     })(),
     swapVenue: oneOf(file.swapVenue, env.MERRYMEN_SWAP_VENUE, ["uniswap", "rialto"], d.swapVenue),
     slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, 5_000),
+    // Floor of 0 is meaningful here: it turns the guard off. Ceiling of 10_000
+    // is 100% impact, past which the number stops meaning anything.
+    maxImpactBps: num(file.maxImpactBps, env.MERRYMEN_MAX_IMPACT_BPS, d.maxImpactBps, 0, 10_000),
     perfFeeBps: num(file.perfFeeBps, env.MERRYMEN_PERF_FEE_BPS, d.perfFeeBps, 0, 5_000),
     tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, 3_600),
     basketSymbols,

@@ -55,7 +55,8 @@ import {
   type StoredGrant,
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
-import { bestRoute, buildTradeCalls, minOutWithSlippage } from "./venues/uniswap";
+import { impactBps, judgeImpact, probeAmountIn } from "./impact";
+import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst } from "./fills";
 import { bookGaps, composeEquityUsdg } from "./equity";
@@ -1472,6 +1473,64 @@ async function main() {
           });
           return;
         }
+        // ── impact guard ───────────────────────────────────────────────────
+        // What this pool charges for THIS size, measured by re-pricing the same
+        // route at a small probe. minOut below cannot do this job: it is
+        // derived from the very quote in question, so a fill forty percent
+        // through the book gets a floor one percent under its own forty percent
+        // and executes happily. minOut defends against the price moving before
+        // the fill; nothing defended against the quote itself.
+        //
+        // requoteRoute, not bestRoute: at a probe size bestRoute would re-select
+        // and might pick a different tier, so the "impact" measured would just
+        // be the artefact of switching pools.
+        //
+        // Exits use limits.cashToken rather than a hardcoded USDG, matching how
+        // the drawdown breaker decides the same question — stock→stock swaps are
+        // explicitly supported here, and hardcoding cash would misfile them as
+        // buys and refuse them whenever the probe failed.
+        const isExit =
+          active.limits.cashToken !== undefined &&
+          intent.buyToken.toLowerCase() === active.limits.cashToken.toLowerCase();
+        let impact: number | null = null;
+        const probeIn = probeAmountIn(intent.sellAmountRaw);
+        if (probeIn !== null) {
+          const probeOut = await requoteRoute(active.client, quote, {
+            tokenIn: intent.sellToken,
+            tokenOut: intent.buyToken,
+            amountIn: probeIn,
+          });
+          if (probeOut !== null) {
+            impact = impactBps({
+              amountIn: intent.sellAmountRaw,
+              amountOut: quote.amountOut,
+              probeIn,
+              probeOut,
+            });
+          }
+        }
+        const verdict = judgeImpact({ bps: impact, maxBps: cfg.maxImpactBps, isExit });
+        if (!verdict.ok) {
+          console.log(`[impact] ${verdict.rule}: ${verdict.detail}`);
+          await addEvent(agentId, "warn", `${verdict.detail} (${intent.buyToken})`);
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: verdict.rule,
+            sim_quote_out: quote.amountOut.toString(),
+            sim_fee_tier: quote.fee,
+          });
+          return;
+        }
+        // An exit above the cap still goes through, but it does not go through
+        // quietly — the tape has to show what getting out cost.
+        if (verdict.note) await addEvent(agentId, "warn", verdict.note);
+
         const minOut = minOutWithSlippage(quote.amountOut, cfg.slippageBps);
         sim = {
           sim_quote_out: quote.amountOut.toString(),
@@ -1600,6 +1659,83 @@ async function main() {
             reject_rule: "no-quote",
           });
           return;
+        }
+        // ── impact guard, Rialto ───────────────────────────────────────────
+        // This branch executes API-supplied calldata with NO minOut of any kind
+        // — the only figure it holds is buyAmountRaw, which rialto.ts sets to
+        // null on any parse failure and which nothing validated. So it was the
+        // least protected path in the system, not the most.
+        //
+        // A null buyAmountRaw is refused outright: executing a swap when we
+        // cannot say what comes back is not a trade, it is a donation.
+        //
+        // Impact cannot be decomposed the way it can on Uniswap — a probe would
+        // return different calldata for a different route — so the marginal
+        // reference is taken from Uniswap on the same pair instead. That makes
+        // this a FLOOR CHECK rather than a precise impact figure: the two venues
+        // may charge different fees, so the number is slightly conservative and
+        // catches "much worse than marginal" regardless of whether the cause is
+        // depth or a bad route. Better a conservative guard on the unguarded
+        // path than none.
+        if (quote.buyAmountRaw === null || quote.buyAmountRaw <= 0n) {
+          await addEvent(
+            agentId,
+            "warn",
+            "Rialto returned calldata but no readable output amount — refusing to execute a swap whose result we cannot state.",
+          );
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "impact-unknown",
+          });
+          return;
+        }
+        {
+          const isExit =
+            active.limits.cashToken !== undefined &&
+            intent.buyToken.toLowerCase() === active.limits.cashToken.toLowerCase();
+          let bps: number | null = null;
+          const probeIn = probeAmountIn(intent.sellAmountRaw);
+          if (probeIn !== null) {
+            const ref = await bestRoute(active.client, {
+              tokenIn: intent.sellToken,
+              tokenOut: intent.buyToken,
+              amountIn: probeIn,
+              via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
+              v4: grantHasV4(active.grant),
+            });
+            if (ref) {
+              bps = impactBps({
+                amountIn: intent.sellAmountRaw,
+                amountOut: quote.buyAmountRaw,
+                probeIn,
+                probeOut: ref.amountOut,
+              });
+            }
+          }
+          const verdict = judgeImpact({ bps, maxBps: cfg.maxImpactBps, isExit });
+          if (!verdict.ok) {
+            console.log(`[impact] rialto ${verdict.rule}: ${verdict.detail}`);
+            await addEvent(agentId, "warn", `${verdict.detail} (${intent.buyToken}, via Rialto)`);
+            await recordTrade({
+              agent_id: agentId,
+              kind: intent.kind,
+              target: intent.target,
+              sell_token: intent.sellToken,
+              buy_token: intent.buyToken,
+              amount_usdg: usdgNum(notional),
+              status: "rejected",
+              reject_rule: verdict.rule,
+              sim_quote_out: quote.buyAmountRaw.toString(),
+            });
+            return;
+          }
+          if (verdict.note) await addEvent(agentId, "warn", verdict.note);
         }
         sim = { sim_quote_out: quote.buyAmountRaw?.toString() };
         const approve = {

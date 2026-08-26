@@ -73,6 +73,18 @@ export interface MerrymenSettings {
   swapVenue?: "uniswap" | "rialto";
   /** Max slippage vs the pre-trade quote, bps. */
   slippageBps?: number;
+  /**
+   * Refuse a BUY whose own size would move the pool more than this, in bps.
+   *
+   * Distinct from slippageBps, which bounds the price MOVING between the quote
+   * and the fill. This bounds what the quote itself already costs you: a large
+   * order into a thin pool is quoted, sized and executed at whatever the pool
+   * gives, and minOut is derived from that same bad quote so it never objects.
+   *
+   * Exits are never refused on it — getting out is not discretionary — though a
+   * costly one is reported. 0 disables the guard.
+   */
+  maxImpactBps?: number;
   /** Performance fee on profit above HWM, bps (accrual-only). */
   perfFeeBps?: number;
   /** Worker tick cadence, seconds. */
@@ -270,6 +282,11 @@ export const SETTINGS_DEFAULTS = {
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,
   slippageBps: 100,
+  // 3%. Comfortably above what a healthy pool charges for a normal ticket, and
+  // well below the point where a fill is being eaten. An owner who wants "any
+  // amount" raises this or sets it to 0; the honest default refuses the trade
+  // that would quietly cost more than the strategy could ever make back.
+  maxImpactBps: 300,
   perfFeeBps: 1000,
   tickSeconds: 60,
   // A handful of the deepest names, NOT the whole tradable set — spreading a
