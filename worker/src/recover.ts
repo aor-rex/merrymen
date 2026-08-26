@@ -146,6 +146,54 @@ export function sweepList(
   return out;
 }
 
+export type BalanceOutcome =
+  | { kind: "read"; raw: bigint }
+  /** Nothing is deployed at that address here. An honest zero. */
+  | { kind: "absent" }
+  /** We could not find out. NOT a zero — see RecoverPlan.unreadable. */
+  | { kind: "unreadable" };
+
+/**
+ * THREE OUTCOMES, NOT TWO, and the middle one is the whole point.
+ *
+ * The original code was `.catch(() => 0n)`, which made an RPC failure
+ * indistinguishable from an empty wallet — and a recovery that says "this
+ * account is empty" because the network blinked is how somebody concludes their
+ * money is gone.
+ *
+ * But a plain two-way ok/failed split is just as wrong in the other direction.
+ * recover-cli accepts chain 46630, where every address in the registry is an
+ * undeployed MAINNET address, so every read fails — and a two-way split would
+ * flag all twenty-seven as "could not be read, that is NOT a zero balance",
+ * which is false, alarming, and unactionable about an account that really is
+ * empty. So a failed read asks the chain whether anything is deployed there at
+ * all.
+ *
+ * THE TRAP, and the reason this is injectable rather than inline: viem's
+ * getCode returns `undefined` — not "0x" — for an address with no contract; it
+ * normalises "0x" away. So writing the probe as `.catch(() => undefined)` makes
+ * "nothing is deployed" and "the probe itself failed" the SAME VALUE, and the
+ * three-way split silently collapses back into the two-way one. That is exactly
+ * the bug this function was extracted to make testable, and recover.test.ts
+ * covers all four paths.
+ */
+export async function classifyBalance(io: {
+  balanceOf: () => Promise<bigint>;
+  getCode: () => Promise<string | undefined>;
+}): Promise<BalanceOutcome> {
+  try {
+    return { kind: "read", raw: await io.balanceOf() };
+  } catch {
+    const probe = await io.getCode().then(
+      (code) => ({ reached: true as const, code }),
+      () => ({ reached: false as const, code: undefined }),
+    );
+    if (!probe.reached) return { kind: "unreadable" }; // we could not even ask
+    if (probe.code === undefined || probe.code === "0x") return { kind: "absent" };
+    return { kind: "unreadable" }; // a contract IS there, but it would not answer
+  }
+}
+
 /**
  * Rebuild the smart account from the owner key and read what it holds. Read-only
  * — no bundler, no signing. Use this to show the user what recovery will move
@@ -201,23 +249,20 @@ export async function planRecovery(opts: {
   // deployed there: no code is an honest zero, code plus a failed read is an
   // honest unknown.
   const readBalance = async (address: Address, label: string): Promise<bigint | null> => {
-    try {
-      return (await publicClient.readContract({
-        address,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [account.address],
-      })) as bigint;
-    } catch {
-      const code = await publicClient.getCode({ address }).catch(() => undefined);
-      if (code === undefined) {
-        unreadable.push(label);
-        return null;
-      }
-      if (code === "0x" || code === undefined) return 0n; // nothing deployed here
-      unreadable.push(label);
-      return null;
-    }
+    const outcome = await classifyBalance({
+      balanceOf: () =>
+        publicClient.readContract({
+          address,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [account.address],
+        }) as Promise<bigint>,
+      getCode: () => publicClient.getCode({ address }),
+    });
+    if (outcome.kind === "read") return outcome.raw;
+    if (outcome.kind === "absent") return 0n;
+    unreadable.push(label);
+    return null;
   };
 
   const [gas, ...raws] = await Promise.all([
