@@ -191,7 +191,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         return "🔒 transfers from chat are off. Turn on “allow transfers” for Telegram in the dashboard first.";
       }
       if (!deps.grantHasTransfer) {
-        return "🧱 your permission wall predates transfers — discard the grant and re-create your wallet at /grant to add the (capped) transfer permission.";
+        // The old text told the owner to DESTROY their grant and re-create the
+        // wallet to gain a permission the new wall would not contain either —
+        // advice that costs a session key and delivers nothing. Worded to
+        // match what checkPolicy says for the same refusal, so the two read
+        // alike wherever the owner meets them.
+        return "🧱 this wall carries no transfer permission — no withdrawal address was registered when it was signed, so the chain would refuse the send. Move funds with your owner key: `merrymen recover`.";
       }
       let usdg = cmd.usdg;
       let note = "";

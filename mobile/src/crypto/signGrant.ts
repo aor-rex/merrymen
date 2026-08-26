@@ -172,12 +172,10 @@ export async function signGrant(args: {
       // Tells the worker what this signature actually carries, rather than
       // letting it infer capabilities from a constant that may have moved since.
       // Kept in step with web/src/lib/session.ts — two signers, one wall.
-      grantFeatures: [
-        "transfer",
-        TRADEABLE_V2,
-        GRANT_MULTIHOP,
-        ...(allowUniswapV4 ? [GRANT_V4] : []),
-      ],
+      // No "transfer": this signer registers no withdrawal address either, so
+      // the wall carries no transfer permission and claiming one would make the
+      // off-chain mirror looser than the chain. See the note in session.ts.
+      grantFeatures: [TRADEABLE_V2, GRANT_MULTIHOP, ...(allowUniswapV4 ? [GRANT_V4] : [])],
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },

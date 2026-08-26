@@ -224,12 +224,17 @@ async function mintGrant(
     // GRANT_MULTIHOP is unconditional because buildCallPermissions grants
     // `exactInput` unconditionally — the two must move together, or the worker
     // either declines a route it could take or takes one that reverts.
-    grantFeatures: [
-      "transfer",
-      TRADEABLE_V2,
-      GRANT_MULTIHOP,
-      ...(allowUniswapV4 ? [GRANT_V4] : []),
-    ],
+    // NO "transfer" HERE, and that is not an omission. This list carried it
+    // unconditionally while buildWallPolicies was called without
+    // withdrawalAddresses — so the wall emitted no transfer permission at all
+    // and the worker was told it had one. /transfer then built a UserOp the
+    // chain refused: gas spent on a revert whose reason said nothing.
+    //
+    // The marker is minted BY THE PERMISSION. It belongs here only if a
+    // destination is registered above, and until this signer offers that,
+    // money leaves through the owner key (`merrymen recover`) — which is what
+    // /grant already tells the owner, and which no wall can block.
+    grantFeatures: [TRADEABLE_V2, GRANT_MULTIHOP, ...(allowUniswapV4 ? [GRANT_V4] : [])],
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what

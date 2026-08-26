@@ -44,6 +44,9 @@ import {
   pimlicoBundlerUrl,
   robinhoodTestnet,
   grantHasMultihop,
+  // Aliased: `grantHasTransfer` is also the name of the dep this file passes
+  // to the Telegram executor, and the two must not shadow each other.
+  grantHasTransfer as grantCarriesTransfer,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -2483,7 +2486,9 @@ async function main() {
       return { ok: false, reason: `no builtin and no strategies/${name} file` };
     },
     grantPerTradeUsdg: () => active?.grant.caps.perTradeUsdg,
-    grantHasTransfer: () => active?.grant.grantFeatures?.includes("transfer") ?? false,
+    // The shared reader, not a bare string match — the chat gate and the policy
+    // mirror must answer this question the same way or one of them is lying.
+    grantHasTransfer: () => grantCarriesTransfer(active?.grant),
     readDepth: readDepthFor,
     submitTrade: submitChatTrade,
     submitTransfer: submitChatTransfer,

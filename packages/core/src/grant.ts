@@ -55,6 +55,28 @@ export function grantHasMultihop(grant: Pick<StoredGrant, "grantFeatures"> | nul
   return grant?.grantFeatures?.includes(GRANT_MULTIHOP) ?? false;
 }
 
+export const GRANT_TRANSFER = "transfer";
+
+/**
+ * Does this signature carry an on-chain USDG transfer permission?
+ *
+ * READ, NEVER WRITTEN — and that asymmetry is the whole point.
+ * buildCallPermissions emits a transfer permission ONLY for withdrawal
+ * addresses registered at signing time, and neither signer registers any. So
+ * no grant minted today carries this marker, and none should: a grant that
+ * claims it while the wall omits the permission is a mirror LOOSER than the
+ * chain, which is the one direction that is never safe. The worker believes
+ * it can send, builds the UserOp, and the account contract refuses it — gas
+ * spent to be told no, with a revert reason that explains nothing.
+ *
+ * It is still honoured for grants signed BEFORE the withdrawal allowlist
+ * landed, whose transfer permission had a free-form recipient. Absent means
+ * absent; it does not mean legacy.
+ */
+export function grantHasTransfer(grant: Pick<StoredGrant, "grantFeatures"> | null | undefined): boolean {
+  return grant?.grantFeatures?.includes(GRANT_TRANSFER) ?? false;
+}
+
 export interface GrantCaps {
   perTradeUsdg: number;
   dailyUsdg: number;

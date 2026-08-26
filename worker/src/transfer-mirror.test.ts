@@ -1,0 +1,104 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { limitsFromGrant } from "./limits";
+import { checkPolicy, type AgentState, type TradeIntent } from "./policy";
+import { buildCallPermissions, CASH, GRANT_TRANSFER, usdgUnits, type StoredGrant } from "../../packages/core/src/index";
+
+/**
+ * THE MIRROR MAY NEVER BE LOOSER THAN THE CHAIN.
+ *
+ * packages/core/src/wall.ts emits a USDG `transfer` permission only for
+ * withdrawal addresses registered at signing, and NEITHER signer registers any
+ * — so no grant this repo can mint carries one. Both signers nonetheless wrote
+ * the literal string "transfer" into grantFeatures, and limits.ts never set
+ * `withdrawalAddresses` at all, which policy.ts reads as "pre-allowlist grant,
+ * still free-form" and permits.
+ *
+ * So the worker believed it could send, built the UserOp, and the account
+ * contract refused it: gas spent to be told no, with a revert reason that
+ * explains nothing. Exactly the failure family as quoting a multi-hop route the
+ * key could not execute — a mirror describing intent rather than the policy.
+ *
+ * These tests assert the two halves against each other, not against prose.
+ */
+
+const grantWith = (features: string[]): StoredGrant =>
+  ({
+    smartAccount: "0x00000000000000000000000000000000000000a1",
+    owner: "0x00000000000000000000000000000000000000b1",
+    sessionKeyAddress: "0x00000000000000000000000000000000000000c1",
+    serialized: "x",
+    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+    grantedAt: 1_000_000,
+    expiresAt: Math.floor(Date.now() / 1000) + 86_400,
+    chainId: 4663,
+    grantFeatures: features,
+  }) as unknown as StoredGrant;
+
+const CALM: AgentState = {
+  spentTodayUsdg: 0n,
+  opsToday: 0,
+  equityUsdg: 1_000_000_000n,
+  highWaterMarkUsdg: 1_000_000_000n,
+  nowSec: Math.floor(Date.now() / 1000),
+};
+
+const sendTo = (recipient: `0x${string}`): TradeIntent => ({
+  kind: "transfer",
+  target: CASH.USDG as `0x${string}`,
+  recipient,
+  amountUsdg: usdgUnits(10),
+});
+
+test("the default wall grants NO transfer permission — the fact everything else follows from", () => {
+  // Read from the real builder with the options both signers actually pass.
+  const SELF = "0x00000000000000000000000000000000000000a1" as const;
+  const CAPS = { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 };
+  const perms = buildCallPermissions(CAPS as never, SELF) as unknown as { functionName?: string }[];
+  assert.equal(
+    perms.filter((p) => p.functionName === "transfer").length,
+    0,
+    "no signer registers a withdrawal address, so the chain refuses every send",
+  );
+});
+
+test("a grant minted today cannot transfer, and the mirror agrees", () => {
+  // What both signers now produce: no "transfer" marker.
+  const limits = limitsFromGrant(grantWith(["tradeable-v2", "multihop"]));
+  assert.deepEqual(limits.withdrawalAddresses, [], "EMPTY, not undefined — undefined means 'free-form, permit it'");
+  const verdict = checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM);
+  assert.equal(verdict.ok, false, "refused off-chain, before a UserOp is built and gas is spent");
+  assert.equal(verdict.rule, "transfer-not-permitted");
+});
+
+test("even sending to YOURSELF is refused — it is the permission that is missing, not the destination", () => {
+  const limits = limitsFromGrant(grantWith(["tradeable-v2"]));
+  const verdict = checkPolicy(sendTo("0x00000000000000000000000000000000000000a1"), limits, CALM);
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.rule, "transfer-not-permitted");
+});
+
+test("a pre-allowlist grant still works — absent must not be read as legacy", () => {
+  // Grants signed before the withdrawal allowlist landed DO carry a transfer
+  // permission, with a free-form recipient. Tightening them here would make the
+  // mirror stricter than the chain, which breaks a working wallet.
+  const limits = limitsFromGrant(grantWith([GRANT_TRANSFER, "tradeable-v2"]));
+  assert.equal(limits.withdrawalAddresses, undefined, "left free-form, exactly as before");
+  const verdict = checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM);
+  assert.equal(verdict.ok, true, "a legacy grant keeps the capability its signature actually carries");
+});
+
+test("swaps and vault moves are untouched by any of this", () => {
+  // Narrowing the transfer path must not narrow the trading path with it.
+  const limits = limitsFromGrant(grantWith(["tradeable-v2"]));
+  const verdict = checkPolicy(
+    {
+      kind: "vault-deposit",
+      target: limits.allowedTargets[2]!,
+      amountUsdg: usdgUnits(10),
+    } as never,
+    limits,
+    CALM,
+  );
+  assert.equal(verdict.ok, true, "parking cash is not a withdrawal");
+});

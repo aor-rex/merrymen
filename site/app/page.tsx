@@ -94,7 +94,7 @@ const CAPS: [IconName, string, string][] = [
   ["calendar", "Built-in strategies", "steady-basket DCA, weekend-gap that trades the close→open gap, or a hot-reloaded bot you write yourself."],
   ["shield", "On-chain caps", "Per-trade, daily, ops/day, drawdown breaker, key expiry — enforced by the account contract on every operation."],
   ["beaker", "Simulate first", "Every swap gets a live quote before it is signed. Minimum-out is met, or nothing moves."],
-  ["transfer", "Chat transfers", "Send USDG out from Telegram — off by default, amount-capped on-chain, and always behind an explicit confirm."],
+  ["transfer", "Chat transfers", "Refused. A wallet signed today registers no withdrawal address, so its wall carries no transfer permission — nothing leaves through chat. Money comes home with your owner key."],
   ["ledger", "Honest scoreboard", "Rejections shown with the same weight as wins. A simulation receipt attached to every trade."],
   ["bell", "Proactive pings", "Trades landing, drawdown, gas and expiry warnings, your price alerts, a daily report at your hour."],
   ["eye", "Voice & vision", "Send a voice note; ask what is on your screen. Powered by your own Anthropic key."],

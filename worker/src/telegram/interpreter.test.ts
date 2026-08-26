@@ -436,10 +436,18 @@ describe("executeCommand — transfer confirm flow", () => {
     assert.deepEqual(d.calls, []);
   });
 
-  it("transfers are blocked when the grant predates the transfer permission", async () => {
+  it("transfers are blocked when the wall carries no transfer permission — and the advice is actionable", async () => {
+    // This is now the NORMAL case, not a legacy one: neither signer registers a
+    // withdrawal address, so buildCallPermissions emits no transfer permission
+    // for any grant this repo can mint.
     const d = deps({ grantHasTransfer: false });
     const r = await executeCommand({ kind: "transfer", to: ADDR, usdg: 20 }, d);
-    assert.match(r, /re-create your wallet/i);
+    assert.match(r, /no transfer permission/i);
+    // It must NOT tell the owner to re-create the wallet. That used to be the
+    // advice, and it cost a session key to obtain a permission the new wall
+    // would not contain either. The owner key is the real answer.
+    assert.doesNotMatch(r, /re-create your wallet/i);
+    assert.match(r, /merrymen recover/i, "point at the path that actually works");
     assert.deepEqual(d.calls, []);
   });
 

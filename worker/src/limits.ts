@@ -4,6 +4,7 @@ import {
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
+  grantHasTransfer,
   grantHasV4,
   sellableAssets,
   usdgUnits,
@@ -31,6 +32,19 @@ export function limitsFromGrant(
     ],
     allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
     sellableAssets: [...sellableAssets(grant)],
+    // THE TRANSFER PERMISSION, MIRRORED. checkPolicy has always known how to
+    // judge this — it was simply never told. A grant without the transfer
+    // marker has NO USDG transfer permission in its call policy:
+    // buildCallPermissions emits one only for withdrawal addresses registered
+    // at signing, and neither signer registers any.
+    //
+    // EMPTY, not undefined. undefined means "a pre-allowlist grant, still
+    // free-form" and is deliberately permissive; conflating the two is exactly
+    // what let the worker build a transfer the chain refuses. This is the
+    // load-bearing half of the fix, because it covers EVERY producer of a
+    // transfer intent rather than just the Telegram command — and it turns an
+    // opaque on-chain revert into the sentence checkPolicy already writes.
+    ...(grantHasTransfer(grant) ? {} : { withdrawalAddresses: [] as string[] }),
     // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
     cashToken: CASH.USDG as string,
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,

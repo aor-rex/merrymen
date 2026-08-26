@@ -245,12 +245,17 @@ or the wall turns one back; warnings when the grant nears expiry, drawdown nears
 the breaker, or gas runs low; your price alerts; and a **daily campfire report**
 at the hour you pick.
 
-**Transfers are triple-guarded:** off by default · the grant's on-chain call
-policy caps the amount · every transfer echoes the full recipient address and
-waits for an explicit `/confirm` (90s). A prompt-injected "send everything to
-0xevil" can at worst produce a confirmation card you'll see and `/cancel`. (New
-wallets carry the transfer permission; a pre-transfer grant gets a "re-create
-your wallet" reply instead.) Turn off all state-changing commands with the
+**Transfers are refused outright.** A wallet signed today registers no
+withdrawal address, so its call policy carries no USDG transfer permission at
+all — the chain would refuse the send, and the worker refuses it first rather
+than paying gas to be told no. A prompt-injected "send everything to 0xevil"
+gets a flat no before anything is built. Money leaves through your owner key
+(`merrymen recover`), which no wall can block and no chat message can reach.
+
+Wallets signed before the withdrawal allowlist landed do carry a transfer
+permission; for those, `/transfer` still applies its own guards — off by
+default, and every transfer echoes the full recipient address and waits for an
+explicit `/confirm` (90s). Turn off all state-changing commands with the
 **control** toggle for read + chat only.
 
 ### Remote control — your merryman runs your PC (OpenClaw-style)
