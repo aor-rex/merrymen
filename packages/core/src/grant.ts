@@ -34,6 +34,27 @@ export function grantHasV4(grant: Pick<StoredGrant, "grantFeatures"> | null | un
   return grant?.grantFeatures?.includes(GRANT_V4) ?? false;
 }
 
+/**
+ * grantFeatures marker meaning "this signature can execute a MULTI-HOP swap".
+ *
+ * A route through WETH is not the same call as a direct one: the router takes
+ * `exactInput(bytes path, …)` rather than `exactInputSingle(…)`, and the wall
+ * grants exactly one selector on that target. So a via-WETH route quoted fine,
+ * logged "simulated ✓ v3 via WETH", was submitted, and reverted on-chain —
+ * burning gas every tick with an opaque reason, and invisible in paper mode
+ * because paper never builds calldata.
+ *
+ * Same rule the v4 marker exists for: quoting a route the key cannot reach is
+ * worse than never having considered it. Until a grant carries this, the router
+ * is asked for single-hop quotes only.
+ */
+export const GRANT_MULTIHOP = "multihop";
+
+/** Can this signature actually execute a multi-hop (e.g. via-WETH) swap? */
+export function grantHasMultihop(grant: Pick<StoredGrant, "grantFeatures"> | null | undefined): boolean {
+  return grant?.grantFeatures?.includes(GRANT_MULTIHOP) ?? false;
+}
+
 export interface GrantCaps {
   perTradeUsdg: number;
   dailyUsdg: number;

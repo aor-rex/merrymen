@@ -43,6 +43,7 @@ import {
   effectivePerfFeeBps,
   pimlicoBundlerUrl,
   robinhoodTestnet,
+  grantHasMultihop,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -1297,17 +1298,29 @@ async function main() {
           tokenOut: intent.buyToken,
           amountIn: intent.sellAmountRaw,
           // Most of this chain's memecoins have no direct USDG pool at all, so
-          // direct-only quoting left them permanently untradable. The router
-          // holds the intermediate leg, so this needs no extra approval.
-          via: CASH.WETH as `0x${string}`,
+          // direct-only quoting leaves them untradable — but a multi-hop route
+          // is `exactInput`, a DIFFERENT selector from the `exactInputSingle`
+          // the wall grants. It needs no extra APPROVAL, which is what the old
+          // comment here got right, and a call permission it does not have,
+          // which is what it missed: the trade quoted, submitted, and reverted
+          // on-chain, burning gas every tick. Same gate as v4 for the same
+          // reason — quoting a route this key cannot reach is worse than never
+          // having considered it.
+          via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
           v4: grantHasV4(active.grant),
         });
         if (!quote) {
+          // Say WHY there is no route when the answer is "your key can't take
+          // the only one that exists" — otherwise a token with a healthy
+          // WETH pool reads as having no liquidity at all.
+          const hopHint = grantHasMultihop(active.grant)
+            ? ""
+            : ` (only single-hop routes were considered — this key can't execute a multi-hop swap; re-sign at /grant to cover it)`;
           console.log(`[quote] no executable Uniswap route for ${intent.buyToken} — skipped`);
-          await addEvent(agentId, "warn", `no Uniswap route for ${intent.buyToken} — swap skipped`);
+          await addEvent(agentId, "warn", `no Uniswap route for ${intent.buyToken} — swap skipped${hopHint}`);
           await recordTrade({
             agent_id: agentId,
             kind: intent.kind,

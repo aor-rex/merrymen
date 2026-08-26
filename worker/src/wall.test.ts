@@ -14,6 +14,7 @@ import {
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
+  grantHasMultihop,
   WALL_POLICY_FLAG,
   usableExtraTokens,
   type GrantCaps,
@@ -202,6 +203,25 @@ test("the vault deposit is capped, the withdrawal is not — but BOTH land in ou
   assert.equal(wdArgs[0], null, "size stays unbounded");
   assert.deepEqual(wdArgs[1], { condition: ParamCondition.EQUAL, value: SELF });
   assert.equal(wdArgs[2], null, "owner is unconstrained — it can only be us anyway");
+});
+
+test("a MULTI-HOP swap is not permitted, and the worker's gate agrees", () => {
+  // `exactInput` (the via-WETH route) is a different selector from
+  // `exactInputSingle`, and the wall grants only the latter. The worker used to
+  // quote multi-hop routes anyway: they logged "simulated ✓ v3 via WETH", were
+  // submitted, and reverted on-chain — burning gas every tick, invisible in
+  // paper mode because paper never builds calldata.
+  //
+  // These two facts must move together, exactly like allowUniswapV4 and the
+  // GRANT_V4 marker. If someone adds the permission below without minting the
+  // marker, the worker stays single-hop for no reason; if they mint the marker
+  // without the permission, the reverts come back.
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0, "no multi-hop permission is granted");
+  assert.equal(
+    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2"] }),
+    false,
+    "and no grant claims it can execute one",
+  );
 });
 
 test("the routers are narrowed to one function each, and Rialto is absent by default", () => {
