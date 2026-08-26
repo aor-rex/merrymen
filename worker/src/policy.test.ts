@@ -103,6 +103,59 @@ describe("checkPolicy", () => {
     assert.equal(!v.ok && v.rule, "drawdown-breaker");
   });
 
+  describe("a tripped breaker must never lock the exit", () => {
+    // The breaker brakes RISK; it does not bar the doors. Applied to every
+    // kind it rejected the sell that would clear the position, the vault
+    // withdrawal that would pull cash back, and the transfer home — while the
+    // high-water mark only ratchets up, so nothing the agent could do cleared
+    // it. The account was stuck until a human intervened, and the escape the
+    // code actually offered was to DEPOSIT MORE.
+    const tripped = { highWaterMarkUsdg: 1_000_000_000n, equityUsdg: 800_000_000n }; // 20%
+
+    it("still refuses a BUY — that is the whole point of the breaker", () => {
+      const v = checkPolicy(swap(), limits({ cashToken: USDG }), state(tripped));
+      assert.equal(!v.ok && v.rule, "drawdown-breaker");
+    });
+
+    it("ALLOWS the de-risking sell — swapping back into cash", () => {
+      const sell = swap({ sellToken: AAPL, buyToken: USDG });
+      const v = checkPolicy(sell, limits({ cashToken: USDG }), state(tripped));
+      assert.deepEqual(v, { ok: true });
+    });
+
+    it("ALLOWS pulling cash back out of the vault", () => {
+      const v = checkPolicy(
+        { kind: "vault-withdraw", target: VAULT, amountUsdg: 100_000_000n },
+        limits({ cashToken: USDG }),
+        state(tripped),
+      );
+      assert.deepEqual(v, { ok: true });
+    });
+
+    it("ALLOWS sending money home to a pinned recipient", () => {
+      const v = checkPolicy(
+        { kind: "transfer", target: USDG, recipient: EVIL, amountUsdg: 10_000_000n },
+        // EVIL is only "evil" elsewhere; here it stands for a registered
+        // withdrawal address the wall already pinned at signing time.
+        limits({ cashToken: USDG, withdrawalAddresses: [EVIL] }),
+        state(tripped),
+      );
+      assert.deepEqual(v, { ok: true });
+    });
+
+    it("without a cashToken it stays STRICT — a fixture must not silently widen the wall", () => {
+      const sell = swap({ sellToken: AAPL, buyToken: USDG });
+      const v = checkPolicy(sell, limits(), state(tripped)); // no cashToken
+      assert.equal(!v.ok && v.rule, "drawdown-breaker");
+    });
+
+    it("an exit is still subject to every OTHER rule — this is not a bypass", () => {
+      const sell = swap({ sellToken: AAPL, buyToken: USDG });
+      const v = checkPolicy(sell, limits({ cashToken: USDG }), state({ ...tripped, nowSec: NOW + 999_999 }));
+      assert.equal(!v.ok && v.rule, "expiry");
+    });
+  });
+
   it("does not trip the breaker just below the threshold", () => {
     const v = checkPolicy(
       swap(),

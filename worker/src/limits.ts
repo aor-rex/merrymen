@@ -31,6 +31,8 @@ export function limitsFromGrant(
     ],
     allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
     sellableAssets: [...sellableAssets(grant)],
+    // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
+    cashToken: CASH.USDG as string,
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,
     expiresAt: grant.expiresAt,
     maxOpsPerDay: grant.caps.maxOpsPerDay,

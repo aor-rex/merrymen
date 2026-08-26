@@ -64,6 +64,16 @@ export interface AgentLimits {
    * conflating them would make this mirror stricter than the chain.
    */
   withdrawalAddresses?: readonly string[];
+  /**
+   * The cash token (USDG). Passed in rather than imported so this file stays
+   * free of the token registry — it is a judge, not a market participant.
+   *
+   * Used to recognise a de-risking SELL: a swap whose buy side is cash is money
+   * coming home, and the drawdown breaker must never block that. Undefined
+   * disables that recognition, so a fixture without it keeps the old, stricter
+   * behaviour rather than silently widening.
+   */
+  cashToken?: string;
   /** Drawdown (bps from high-water mark) at which the breaker pauses the agent. */
   maxDrawdownBps: number;
   /** Unix seconds after which the session key is dead regardless of anything. */
@@ -331,10 +341,32 @@ export function checkPolicy(
     }
   }
 
-  // Unknown equity is not low equity. Every other rule above still applies —
-  // caps, allowlists, expiry, budgets — but a drawdown can only be measured
-  // against a book we can actually total.
-  if (state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
+  // AN EXIT MUST ALWAYS BE ATTEMPTABLE.
+  //
+  // The breaker is a brake on taking RISK, not a lock on the doors. Applied to
+  // every kind, it rejected the sell that would clear the position, the vault
+  // withdrawal that would pull cash back, and the transfer that would send
+  // money home — while the high-water mark only ever ratchets up, so nothing
+  // the agent could do would clear it. The account was locked in a losing
+  // position until a human re-signed a looser grant or swept it with the owner
+  // key, and the perverse escape the code actually offered was to DEPOSIT MORE
+  // (which lifts the mark and shrinks the ratio).
+  //
+  // So the same shape `no-exit` already uses: judge the direction of travel by
+  // what is being BOUGHT. Money coming home is never blocked.
+  //   • vault-withdraw → cash returning from Morpho to the account
+  //   • transfer       → to a recipient the wall already pinned at signing
+  //   • swap into USDG → the de-risking sell itself
+  // Buys stay blocked, which is the entire point of the breaker.
+  const isExit =
+    intent.kind === "vault-withdraw" ||
+    intent.kind === "transfer" ||
+    (intent.kind === "swap" &&
+      limits.cashToken !== undefined &&
+      lc(intent.buyToken) === lc(limits.cashToken)) ||
+    (intent.kind === "equity-order" && intent.side === "sell");
+
+  if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(
       ((state.highWaterMarkUsdg - state.equityUsdg) * 10_000n) / state.highWaterMarkUsdg,
     );
