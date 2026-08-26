@@ -60,7 +60,7 @@ function AgentRow({ a }: { a: ScoreboardAgent }) {
           )}
         </span>
         <span>
-          max dd <b>{(a.max_drawdown_bps / 100).toFixed(2)}%</b>
+          max dd <b>{a.max_drawdown_bps === null ? "—" : `${(a.max_drawdown_bps / 100).toFixed(2)}%`}</b>
         </span>
         <span>
           hwm <b>{a.hwm_usdg.toFixed(2)}</b>

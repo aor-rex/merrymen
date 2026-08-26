@@ -159,6 +159,33 @@ export async function GET() {
     // Every query is scoped to that agent. A ledger with no agent row at all
     // (an un-armed first run) has nothing to report anyway.
     const scope = agentId ?? "";
+    // …and to the current RUN of that agent. Everything written before the
+    // accounting was fixed stays epoch 1: no flow records, fills booked off a
+    // slippage floor rather than a receipt, and an equity curve that can hold a
+    // phantom crater from a failed balance read. The first arm after the fix
+    // opens epoch 2. Charting the two together draws a cliff that never
+    // happened — a 200 USDG live book after a 1,000 USDG paper one reads as an
+    // 80% collapse — and every derived figure inherits it. Epoch 1 is kept for
+    // forensics and never mixed into a number anyone is shown.
+    //
+    // A CLAUSE, not a constant: this app can be running against a database an
+    // older worker wrote, where `epoch` does not exist. Referencing a missing
+    // column throws at prepare(), and the surrounding catch would blank the
+    // whole panel — strictly worse than showing a pre-epoch ledger unfiltered,
+    // since every row in one is epoch 1 by definition.
+    let epochWhere = "";
+    let epochArg: number[] = [];
+    try {
+      const erow = db
+        .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
+        .get(scope) as { epoch: number } | undefined;
+      epochWhere = " AND epoch = ?";
+      epochArg = [erow?.epoch ?? 1];
+    } catch {
+      /* epoch arrives with a worker migration — leave every row visible */
+    }
+    // `events` and `positions` are deliberately NOT epoch-filtered below:
+    // neither table has the column, so agent scoping is all they support.
     try {
       events = db
         .prepare(
@@ -173,10 +200,10 @@ export async function GET() {
       equity = db
         .prepare(
           `SELECT cash_usdg, vault_usdg, equity_usdg, datetime(at, 'unixepoch') AS at
-           FROM (SELECT * FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 288)
+           FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 288)
            ORDER BY at ASC, id ASC`,
         )
-        .all(scope) as unknown as EquityPoint[];
+        .all(scope, ...epochArg) as unknown as EquityPoint[];
     } catch {
       /* table not created yet */
     }
@@ -211,18 +238,24 @@ export async function GET() {
           `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
                   sim_quote_out, sim_min_out, sim_fee_tier, sim_gas,
                   datetime(created_at, 'unixepoch') AS created_at
-           FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 30`,
+           FROM trades WHERE agent_id = ?${epochWhere} ORDER BY created_at DESC, id DESC LIMIT 30`,
         )
-        .all(scope) as unknown as TradeRecord[];
+        .all(scope, ...epochArg) as unknown as TradeRecord[];
     } catch {
       /* table not created yet */
     }
     try {
       const row = db
         .prepare(
-          "SELECT name, hwm_usdg, accrued_fee_usdg FROM agents ORDER BY created_at DESC LIMIT 1",
+          // SCOPED, and with the SAME tie-break the agent resolution above
+          // uses. This read was neither: it took the newest row by created_at
+          // alone, so on a re-grant the name and high-water mark shown could
+          // belong to a different agent than every other number on the page —
+          // and the HWM is what the drawdown breaker and the fee accrual are
+          // measured against.
+          `SELECT name, hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?`,
         )
-        .get() as ({ name: string } & AgentFinancials) | undefined;
+        .get(scope) as ({ name: string } & AgentFinancials) | undefined;
       if (row) {
         financials = { hwm_usdg: row.hwm_usdg, accrued_fee_usdg: row.accrued_fee_usdg };
         if (typeof row.name === "string" && row.name) name = row.name;
@@ -235,9 +268,9 @@ export async function GET() {
         .prepare(
           `SELECT COUNT(*) AS n,
                   COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-             FROM flows WHERE agent_id = ?`,
+             FROM flows WHERE agent_id = ?${epochWhere}`,
         )
-        .get(scope) as { n: number; net: number } | undefined;
+        .get(scope, ...epochArg) as { n: number; net: number } | undefined;
       netContributionsUsdg = !row || row.n === 0 ? null : row.net;
     } catch {
       /* flows arrives with a worker migration — null, never zero */
@@ -247,9 +280,9 @@ export async function GET() {
         .prepare(
           `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                   SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-             FROM trades WHERE agent_id = ? AND status = 'landed'`,
+             FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
         )
-        .get(scope) as { usdg: number; unpriced: number | null } | undefined;
+        .get(scope, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
       gasUsdg = row?.usdg ?? 0;
       gasUnpricedTrades = row?.unpriced ?? 0;
     } catch {

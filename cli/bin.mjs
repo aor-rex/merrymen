@@ -842,8 +842,30 @@ async function status() {
     const acct = grant?.smartAccount ?? null;
     const where = acct ? " WHERE agent_id = ?" : "";
     const arg = acct ? [acct] : [];
-    const t = db.prepare(`SELECT COUNT(*) AS n, SUM(status='landed') AS landed FROM trades${where}`).get(...arg);
-    const eq = db.prepare(`SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity${where} ORDER BY at DESC, id DESC LIMIT 1`).get(...arg);
+    // …and to the current RUN of it. Everything written before the accounting
+    // was fixed stays epoch 1: no flow records, fills booked off a slippage
+    // floor, and an equity curve that can hold a phantom crater from a failed
+    // balance read. The first arm after the fix opens epoch 2. Splicing the two
+    // draws a cliff that never happened, and every derived figure inherits it.
+    //
+    // A CLAUSE, not a constant, because this CLI routinely runs against a
+    // ledger an older worker wrote, where the column does not exist —
+    // referencing it would throw at prepare() and the outer catch would replace
+    // the entire readout with "no ledger yet". A pre-epoch ledger is all
+    // epoch 1 by definition, so leaving it unfiltered loses nothing.
+    let epochWhere = "";
+    let epochArg = [];
+    if (acct) {
+      try {
+        const row = db.prepare("SELECT epoch FROM agents WHERE smart_account = ?").get(acct);
+        epochWhere = " AND epoch = ?";
+        epochArg = [row?.epoch ?? 1];
+      } catch {
+        /* pre-epoch ledger — every row in it is epoch 1 */
+      }
+    }
+    const t = db.prepare(`SELECT COUNT(*) AS n, SUM(status='landed') AS landed FROM trades${where}${epochWhere}`).get(...arg, ...epochArg);
+    const eq = db.prepare(`SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity${where}${epochWhere} ORDER BY at DESC, id DESC LIMIT 1`).get(...arg, ...epochArg);
     // `flows` arrives with a worker migration, and this CLI routinely runs
     // against a ledger the upgraded worker hasn't opened yet. Losing the whole
     // status readout over a missing table would be a worse bug than the missing
@@ -852,9 +874,18 @@ async function status() {
     try {
       flow = db
         .prepare(
-          `SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount_usdg ELSE -amount_usdg END),0) AS net FROM flows${where}`,
+          // COUNT(*) is load-bearing. The SUM is wrapped in COALESCE, so this
+          // statement returns a row with net = 0 even when there is not a
+          // single flow record — which made an EMPTY flows table
+          // indistinguishable from a MISSING one, and the `if (flow)` guard
+          // below passed. On this very install that printed
+          // "p&l: +999.48 USDG (you put in 0.00)" for an agent with 0 landed
+          // trades out of 1,311: the entire figure was the owner's own
+          // bankroll, reported as profit. The comment below always had the
+          // right rule; it was the test for it that was wrong.
+          `SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction='in' THEN amount_usdg ELSE -amount_usdg END),0) AS net FROM flows${where}${epochWhere}`,
         )
-        .get(...arg);
+        .get(...arg, ...epochArg);
     } catch {
       /* pre-migration ledger */
     }
@@ -865,10 +896,12 @@ async function status() {
       // Equity is not performance. Say what was put in so the two are never
       // read as the same number. Without a flow ledger there is no honest P&L
       // to state, so say nothing rather than restate equity as profit.
-      if (flow) {
+      if (flow && Number(flow.n ?? 0) > 0) {
         const net = Number(flow.net ?? 0);
         const pnl = Number(eq.equity_usdg) - net;
         console.log(`  p&l:    ${pnl >= 0 ? "+" : "−"}${Math.abs(pnl).toFixed(2)} USDG ${dim(`(you put in ${net.toFixed(2)})`)}`);
+      } else {
+        console.log(dim("  p&l:    no record of deposits yet — equity above is not profit"));
       }
     }
     if (events.length) {

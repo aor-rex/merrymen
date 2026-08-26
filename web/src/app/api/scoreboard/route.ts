@@ -35,7 +35,12 @@ export interface ScoreboardAgent {
   /** Gas charged against that figure, and fills whose gas could not be priced. */
   gas_usdg: number;
   gas_unpriced_trades: number;
-  max_drawdown_bps: number;
+  /**
+   * Deepest peak-to-trough in this epoch. NULL when there is no equity history
+   * to measure — an epoch with no rows has no drawdown, and publishing 0.00%
+   * would read as a flawless run rather than as an empty one.
+   */
+  max_drawdown_bps: number | null;
   trades: { landed: number; rejected: number; reverted: number; volume_usdg: number };
 }
 
@@ -67,15 +72,37 @@ export async function GET() {
     const agents: ScoreboardAgent[] = rows.map((row) => {
       const account = row.smart_account as string;
 
+      // WHICH RUN. Everything before the accounting fix stays epoch 1 — no flow
+      // records, fills booked off a slippage floor, and an equity curve that can
+      // hold a phantom crater from a failed balance read. The first arm after
+      // the fix opens epoch 2, and splicing a 200 USDG live book onto a 1,000
+      // USDG paper one publishes an 80% collapse that never happened. On a
+      // PUBLIC scoreboard.
+      //
+      // A clause, not a constant: a database written by an older worker has no
+      // epoch column, and referencing it would throw at prepare() and empty the
+      // whole board. Every row in such a ledger is epoch 1 anyway.
+      let epochWhere = "";
+      let epochArg: number[] = [];
+      try {
+        const e = db
+          .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
+          .get(account) as { epoch: number } | undefined;
+        epochWhere = " AND epoch = ?";
+        epochArg = [e?.epoch ?? 1];
+      } catch {
+        /* pre-epoch ledger */
+      }
+
       let equity: ScoreboardEquityPoint[] = [];
       try {
         equity = db
           .prepare(
             `SELECT equity_usdg, datetime(at, 'unixepoch') AS at
-             FROM (SELECT * FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 500)
+             FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 500)
              ORDER BY at ASC, id ASC`,
           )
-          .all(account) as unknown as ScoreboardEquityPoint[];
+          .all(account, ...epochArg) as unknown as ScoreboardEquityPoint[];
       } catch {
         /* table not created yet */
       }
@@ -94,9 +121,9 @@ export async function GET() {
           .prepare(
             `SELECT COUNT(*) AS n,
                     COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?`,
+               FROM flows WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account) as { n: number; net: number } | undefined;
+          .get(account, ...epochArg) as { n: number; net: number } | undefined;
         contributed = !row || row.n === 0 ? null : row.net;
       } catch {
         /* flows arrives with a worker migration */
@@ -111,9 +138,9 @@ export async function GET() {
           .prepare(
             `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                     SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-               FROM trades WHERE agent_id = ? AND status = 'landed'`,
+               FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
           )
-          .get(account) as { usdg: number; unpriced: number | null } | undefined;
+          .get(account, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
         gasUsdg = row?.usdg ?? 0;
         gasUnpriced = row?.unpriced ?? 0;
       } catch {
@@ -123,20 +150,43 @@ export async function GET() {
       let latestEquity: number | null = null;
       try {
         const row = db
-          .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 1")
-          .get(account) as { equity_usdg: number } | undefined;
+          .prepare(`SELECT equity_usdg FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1`)
+          .get(account, ...epochArg) as { equity_usdg: number } | undefined;
         latestEquity = row?.equity_usdg ?? null;
       } catch {
         /* table not created yet */
       }
 
-      let peak = 0;
-      let maxDdBps = 0;
-      for (const p of equity) {
-        peak = Math.max(peak, p.equity_usdg);
-        if (peak > 0 && p.equity_usdg < peak) {
-          maxDdBps = Math.max(maxDdBps, Math.round(((peak - p.equity_usdg) / peak) * 10_000));
-        }
+      // THE DRAWDOWN, COMPUTED OVER THE WHOLE EPOCH — not over `equity`, which
+      // is the 500-point display window. This loop used to run on that array,
+      // which is precisely the thing the comment forty lines above forbids: a
+      // sliding window has a peak that drifts forward, so a published number
+      // silently changed meaning once an agent passed 500 snapshots, and the
+      // deepest drawdown of a long run simply fell off the back and vanished.
+      // Windowing the chart is fine. Windowing the arithmetic is the bug.
+      //
+      // The running peak is a SQL window function so the full series never has
+      // to be read into memory. NULL when there are no rows — an epoch with no
+      // equity history has no drawdown to report, and 0.00% would read as
+      // "flawless" rather than "nothing happened yet".
+      let maxDdBps: number | null = null;
+      try {
+        const dd = db
+          .prepare(
+            `SELECT MAX(CASE WHEN peak > 0 AND equity_usdg < peak
+                             THEN CAST(((peak - equity_usdg) / peak) * 10000 AS INTEGER)
+                             ELSE 0 END) AS bps
+               FROM (SELECT equity_usdg,
+                            MAX(equity_usdg) OVER (
+                              ORDER BY at ASC, id ASC
+                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                            ) AS peak
+                       FROM equity WHERE agent_id = ?${epochWhere})`,
+          )
+          .get(account, ...epochArg) as { bps: number | null } | undefined;
+        maxDdBps = dd?.bps ?? null;
+      } catch {
+        /* pre-migration ledger, or a SQLite without window functions */
       }
 
       let trades = { landed: 0, rejected: 0, reverted: 0, volume_usdg: 0 };
@@ -148,9 +198,9 @@ export async function GET() {
                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
                SUM(CASE WHEN status = 'reverted' THEN 1 ELSE 0 END) AS reverted,
                COALESCE(SUM(CASE WHEN status = 'landed' AND kind != 'vault-withdraw' THEN amount_usdg ELSE 0 END), 0) AS volume
-             FROM trades WHERE agent_id = ?`,
+             FROM trades WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account) as { landed: number; rejected: number; reverted: number; volume: number };
+          .get(account, ...epochArg) as { landed: number; rejected: number; reverted: number; volume: number };
         trades = {
           landed: t.landed ?? 0,
           rejected: t.rejected ?? 0,
