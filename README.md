@@ -44,6 +44,14 @@ their discretion — the safety story is a terms-of-service. merrymen inverts it
   block explorer, and its **prove the wall** button fires malicious intents
   (an oversized trade, a "send everything to 0xevil" transfer, an expired key)
   through the live policy so you can watch each one bounce.
+- **The numbers are auditable too, not just the wall.** Every fact that moves
+  money is mirrored into a hash-chained journal, so an edited record breaks
+  every hash after it and a deleted one leaves a visible gap. `merrymen export`
+  writes it out; `merrymen verify <file>` checks it — and reads nothing but the
+  file it is handed, so it proves something to someone who does not trust you.
+  Records that *cannot* be checked against a chain (a simulated fill, a deposit
+  inferred from a balance change) are listed as such rather than quietly
+  counted.
 
 You verify; it trades.
 

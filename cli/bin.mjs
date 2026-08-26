@@ -974,6 +974,28 @@ async function strategyCmd(sub, name) {
   process.exit(1);
 }
 
+// ──────────────────────────────────────────────────────────────── audit ──
+
+/**
+ * `merrymen export` writes the hash-chained journal to stdout; `merrymen verify`
+ * checks a file someone handed you. Verify reads ONLY that file — not
+ * ~/.merrymen, not settings — because a verifier that consults the operator's
+ * own machine is only checking the ledger against itself.
+ */
+function auditCmd(which, extraArgs) {
+  const args = [...extraArgs];
+  // Resolve a file path against the user's cwd, not the package root.
+  if (which === "verify" && args[0] && !args[0].startsWith("--")) {
+    args[0] = path.resolve(process.cwd(), args[0]);
+  }
+  const child = toolSpawn(
+    localBin("tsx"),
+    [path.join(ROOT, "worker", "src", "audit-cli.ts"), which, ...args],
+    { cwd: ROOT, stdio: "inherit" },
+  );
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
 // ────────────────────────────────────────────────────────── selftest/kill ──
 
 function selftest() {
@@ -1403,6 +1425,10 @@ switch (cmd) {
   case "selftest":
     selftest();
     break;
+  case "export":
+  case "verify":
+    auditCmd(cmd, rest);
+    break;
   case "service":
     await serviceCmd(rest[0]);
     break;
@@ -1437,6 +1463,8 @@ switch (cmd) {
   ${bold("merrymen strategy new")}   forge your own outlaw in ~/.merrymen/strategies
   ${bold("merrymen strategy list")}  the roster — builtins + your strategies
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
+  ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
+  ${bold("merrymen verify")}         check an export — reads only the file you hand it
   ${bold("merrymen service")}        start on login, survive reboots (install/uninstall/status)
   ${bold("merrymen kill")}           call the band home (kill switch)
   ${bold("merrymen wallets")}        every wallet on this machine + what it holds

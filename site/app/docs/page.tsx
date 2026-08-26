@@ -267,9 +267,16 @@ merrymen kill       # kill switch — destroys the grant`}
         <p>
           Put your merryman&apos;s activity live on its page at <strong>app.virtuals.io</strong>. When
           you turn it on, every <strong>landed trade</strong> and the <strong>daily campfire
-          report</strong> are posted to your agent&apos;s public Virtuals Terminal — a running,
-          verifiable trading journal (rejections aren&apos;t posted one-by-one; the daily report
+          report</strong> are posted to your agent&apos;s public Virtuals Terminal — a running
+          activity log (rejections aren&apos;t posted one-by-one; the daily report
           summarizes them).
+        </p>
+        <p>
+          It is a <em>log</em>, not a proof: anyone reading it is taking your word for the numbers.
+          What they can check independently is the audit export — <code>merrymen export</code>
+          writes the hash-chained journal, and <code>merrymen verify</code> checks it against
+          nothing but itself and the chain. Share that if you want to be believed rather than
+          trusted.
         </p>
         <ol>
           <li>Grab your <strong>Virtuals API key</strong> from your agent&apos;s page on app.virtuals.io.</li>

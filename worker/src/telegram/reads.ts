@@ -64,6 +64,24 @@ function currentAgentId(db: DatabaseSync): string | null {
 }
 
 /**
+ * The epoch this agent reports on. Rows from before the accounting was fixed
+ * live in epoch 1 and are excluded from every figure below — they have no flow
+ * records, their fills were booked from a slippage floor, and their equity
+ * curve can contain a phantom crater from a failed balance read. Kept for
+ * forensics, never mixed into a number anyone is shown.
+ */
+function agentEpoch(db: DatabaseSync, agentId: string): number {
+  try {
+    const row = db
+      .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
+      .get(agentId) as { epoch: number } | undefined;
+    return row?.epoch ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
  * Capital the owner put in, less what they took out. Subtracting this from
  * equity is the difference between "the account is worth more than it was" and
  * "the agent made money" — the two were the same number until 2026-08-26, which
@@ -71,13 +89,14 @@ function currentAgentId(db: DatabaseSync): string | null {
  */
 function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
   try {
+    const epoch = agentEpoch(db, agentId);
     const sql =
       `SELECT COUNT(*) AS n,
               COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-         FROM flows WHERE agent_id = ?` + (sinceUnix !== undefined ? " AND at >= ?" : "");
+         FROM flows WHERE agent_id = ? AND epoch = ?` + (sinceUnix !== undefined ? " AND at >= ?" : "");
     const stmt = db.prepare(sql);
     const row = (
-      sinceUnix !== undefined ? stmt.get(agentId, sinceUnix) : stmt.get(agentId)
+      sinceUnix !== undefined ? stmt.get(agentId, epoch, sinceUnix) : stmt.get(agentId, epoch)
     ) as { n: number; net: number } | undefined;
     // No rows is NOT zero. A ledger written before the flows table existed knows
     // nothing about what was put in, and calling that zero republishes the very
@@ -201,9 +220,10 @@ export function readPnl(): string {
   try {
     const agentId = currentAgentId(db);
     if (!agentId) return "📈 no agent yet — grant one at localhost:3100/grant.";
+    const epoch = agentEpoch(db, agentId);
     const eq = db
-      .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at ASC, id ASC")
-      .all(agentId) as { equity_usdg: number }[];
+      .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
+      .all(agentId, epoch) as { equity_usdg: number }[];
     const fee = db
       .prepare("SELECT COALESCE(SUM(fee_usdg),0) AS f FROM fee_accruals WHERE agent_id = ?")
       .get(agentId) as { f: number } | undefined;
@@ -352,16 +372,17 @@ interface EquityPoint {
 
 function equitySeries(db: DatabaseSync, agentId: string, sinceUnix?: number): EquityPoint[] {
   try {
+    const epoch = agentEpoch(db, agentId);
     const rows =
       sinceUnix !== undefined
         ? db
             .prepare(
-              "SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND at >= ? ORDER BY at ASC, id ASC",
+              "SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at ASC, id ASC",
             )
-            .all(agentId, sinceUnix)
+            .all(agentId, epoch, sinceUnix)
         : db
-            .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? ORDER BY at ASC, id ASC")
-            .all(agentId);
+            .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
+            .all(agentId, epoch);
     return rows as unknown as EquityPoint[];
   } catch {
     return [];

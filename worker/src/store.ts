@@ -6,7 +6,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 
@@ -109,6 +109,34 @@ function getDb(): DatabaseSync {
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS flows_agent_time ON flows (agent_id, at DESC);
+    -- The audit record: an append-only, hash-chained mirror of every fact that
+    -- moves money, written in the SAME transaction as the row it mirrors so the
+    -- two cannot diverge.
+    --
+    -- Why it exists. The tables above are a plain sqlite file on the operator's
+    -- own disk. Anyone can rewrite them with the sqlite3 CLI in ten seconds, and
+    -- the equity curve is not derivable from anything else — it is a series of
+    -- point-in-time balance readings written by the same process being audited.
+    -- "Verifiable, not claimed" was in the README while the ledger could prove
+    -- nothing to anyone.
+    --
+    -- What the chain buys: each entry carries the hash of the one before it, so
+    -- an edited or deleted record breaks every hash after it. 'seq' is
+    -- monotonic, so a DELETED record is visible as a gap — silence is as
+    -- detectable as tampering. It is NOT signed: a signature proves the machine
+    -- holding the key wrote it, which the chain plus the on-chain cross-check
+    -- already establish, without introducing a key to manage.
+    CREATE TABLE IF NOT EXISTS journal (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      epoch INTEGER NOT NULL,
+      kind TEXT NOT NULL,           -- 'fill' | 'flow' | 'mark' | 'fee'
+      payload_json TEXT NOT NULL,   -- canonical JSON (sorted keys) of the fact
+      prev_hash TEXT NOT NULL,
+      hash TEXT NOT NULL,           -- sha256(prev_hash + payload_json)
+      at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS journal_agent_epoch ON journal (agent_id, epoch, seq);
     CREATE TABLE IF NOT EXISTS positions (
       agent_id TEXT NOT NULL,
       symbol TEXT NOT NULL,
@@ -236,6 +264,18 @@ function getDb(): DatabaseSync {
     // sim_gas holds QuoterV2's estimate for the SWAP CALL only, unmultiplied by
     // any gas price, so realized P&L was gross of gas forever.
     "ALTER TABLE trades ADD COLUMN gas_wei TEXT",
+    // EPOCH. Everything written before the accounting was fixed stays epoch 1
+    // and is excluded from performance reporting — kept for forensics, never
+    // presented as measured. The first tick after the fix opens epoch 2. This
+    // is the "new epoch, keep history" decision enforced by the schema rather
+    // than by convention, so no reconstructed figure can leak into a published
+    // number by someone forgetting.
+    "ALTER TABLE trades ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE equity ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE flows ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    // The epoch this agent is currently writing into.
+    "ALTER TABLE agents ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // Measured execution quality: quoted-out vs received-out, in bps, positive
     // when the fill was worse than quoted. The slippage SETTING is one flat 1%
     // constant applied to a $5 trade and a $5,000 one alike; this is the
@@ -248,7 +288,10 @@ function getDb(): DatabaseSync {
       // column already exists
     }
   }
-  console.log(`[store] sqlite at ${DB_FILE}`);
+  // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
+  // and a diagnostic line landing in the middle of it corrupts the file. A log
+  // is not data.
+  console.error(`[store] sqlite at ${DB_FILE}`);
   return db;
 }
 
@@ -444,6 +487,171 @@ export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promis
   }
 }
 
+// ── the audit journal ─────────────────────────────────────────────────────
+
+/** The chain's anchor. A verifier starts here and must arrive at the last hash. */
+export const JOURNAL_GENESIS = "0".repeat(64);
+
+/**
+ * Deterministic JSON: keys sorted at every level, bigints as decimal strings.
+ *
+ * The hash is only reproducible if an independent verifier serialises the same
+ * bytes we did. Object key order in JS is insertion order, which is a property
+ * of whichever code path built the object — so `{a,b}` and `{b,a}` are the same
+ * fact and would otherwise hash differently, and the chain would "fail" on a
+ * ledger nobody touched.
+ */
+export function canonicalJson(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (typeof v === "bigint") return v.toString();
+    if (Array.isArray(v)) return v.map(norm);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        const inner = (v as Record<string, unknown>)[k];
+        if (inner !== undefined) out[k] = norm(inner);
+      }
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(norm(value));
+}
+
+/** One link: sha256(prev ‖ canonical payload). Pure, so a verifier can redo it. */
+export function journalHash(prevHash: string, payloadJson: string): string {
+  return createHash("sha256").update(prevHash).update(payloadJson).digest("hex");
+}
+
+export type JournalKind = "fill" | "flow" | "mark" | "fee";
+
+export interface JournalEntry {
+  seq: number;
+  agent_id: string;
+  epoch: number;
+  kind: string;
+  payload_json: string;
+  prev_hash: string;
+  hash: string;
+  at: number;
+}
+
+/**
+ * Append one fact to the chain. Callers pass the DOMAIN row they just wrote (or
+ * are about to), and this mirrors it.
+ *
+ * Not exported for casual use: it takes an open transaction from
+ * `journaled()` so the mirror and the row it mirrors commit together. A journal
+ * that can be half-written is not evidence of anything.
+ */
+function appendJournalRow(agentId: string, epoch: number, kind: JournalKind, payload: unknown): void {
+  const db = getDb();
+  const prev = db
+    .prepare("SELECT hash FROM journal WHERE agent_id = ? AND epoch = ? ORDER BY seq DESC LIMIT 1")
+    .get(agentId, epoch) as { hash: string } | undefined;
+  const prevHash = prev?.hash ?? JOURNAL_GENESIS;
+  const payloadJson = canonicalJson(payload);
+  db.prepare(
+    `INSERT INTO journal (agent_id, epoch, kind, payload_json, prev_hash, hash)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(agentId, epoch, kind, payloadJson, prevHash, journalHash(prevHash, payloadJson));
+}
+
+/**
+ * Run a domain write and its journal entry as ONE transaction.
+ *
+ * The worker is the single writer, so this is about crash-atomicity rather than
+ * concurrency: a process that dies between the two writes must leave neither,
+ * not a ledger whose chain has a hole in it or a journal claiming a trade the
+ * trades table never got.
+ */
+export function journaled(
+  agentId: string,
+  epoch: number,
+  kind: JournalKind,
+  payload: unknown,
+  write: () => void,
+): void {
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    write();
+    appendJournalRow(agentId, epoch, kind, payload);
+    db.exec("COMMIT");
+  } catch (e) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* the transaction may already be gone */
+    }
+    throw e;
+  }
+}
+
+/** Every entry for one epoch, oldest first — what `merrymen export` emits. */
+export async function readJournal(agentId: string, epoch: number): Promise<JournalEntry[]> {
+  try {
+    return getDb()
+      .prepare(
+        `SELECT seq, agent_id, epoch, kind, payload_json, prev_hash, hash, at
+           FROM journal WHERE agent_id = ? AND epoch = ? ORDER BY seq ASC`,
+      )
+      .all(agentId, epoch) as unknown as JournalEntry[];
+  } catch {
+    return [];
+  }
+}
+
+/** Synchronous epoch lookup — the write paths below are sync and can't await. */
+function epochOf(agentId: string): number {
+  try {
+    const row = getDb()
+      .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
+      .get(agentId) as { epoch: number } | undefined;
+    return row?.epoch ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** The epoch this agent writes into now. */
+export async function getAgentEpoch(agentId: string): Promise<number> {
+  try {
+    const row = getDb()
+      .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
+      .get(agentId) as { epoch: number } | undefined;
+    return row?.epoch ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * Does this agent have rows from before the audit work? Used once, at the first
+ * arm, to decide whether an epoch boundary is needed. A brand-new agent has
+ * nothing to quarantine and stays in epoch 1.
+ */
+export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
+  try {
+    const row = getDb()
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1)
+              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1) AS n`,
+      )
+      .get(agentId, agentId) as { n: number } | undefined;
+    return (row?.n ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Close the current epoch and open the next. Everything before stays, untouched. */
+export async function openNextEpoch(agentId: string): Promise<number> {
+  const next = (await getAgentEpoch(agentId)) + 1;
+  getDb().prepare("UPDATE agents SET epoch = ? WHERE smart_account = ?").run(next, agentId);
+  return next;
+}
+
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
 export type FlowSource = "chain-log" | "transfer-intent" | "inferred";
 
@@ -456,22 +664,39 @@ export interface FlowRow {
   blockNumber?: number;
 }
 
-/** Record money crossing the account boundary. */
+/** Record money crossing the account boundary, and mirror it into the journal. */
 export async function addFlow(flow: FlowRow): Promise<void> {
   try {
-    getDb()
-      .prepare(
-        `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        flow.agentId,
-        flow.direction,
-        Math.abs(flow.amountUsdg),
-        flow.txHash ?? null,
-        flow.blockNumber ?? null,
-        flow.source,
-      );
+    const epoch = epochOf(flow.agentId);
+    const amount = Math.abs(flow.amountUsdg);
+    journaled(
+      flow.agentId,
+      epoch,
+      "flow",
+      {
+        amountUsdg: amount,
+        blockNumber: flow.blockNumber ?? null,
+        direction: flow.direction,
+        source: flow.source,
+        txHash: flow.txHash ?? null,
+      },
+      () => {
+        getDb()
+          .prepare(
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            flow.agentId,
+            flow.direction,
+            amount,
+            flow.txHash ?? null,
+            flow.blockNumber ?? null,
+            flow.source,
+            epoch,
+          );
+      },
+    );
   } catch (e) {
     console.error("[store] flow insert failed:", e);
   }
@@ -550,14 +775,17 @@ export async function addFeeAccrual(
   a: { profitUsdg: number; feeUsdg: number; hwmBeforeUsdg: number; hwmAfterUsdg: number },
 ): Promise<void> {
   try {
-    const db = getDb();
-    db.prepare(
-      `INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).run(agentId, a.profitUsdg, a.feeUsdg, a.hwmBeforeUsdg, a.hwmAfterUsdg);
-    db.prepare(
-      "UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?",
-    ).run(a.feeUsdg, agentId);
+    const epoch = epochOf(agentId);
+    journaled(agentId, epoch, "fee", { ...a, epoch }, () => {
+      const db = getDb();
+      db.prepare(
+        `INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg, epoch)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(agentId, a.profitUsdg, a.feeUsdg, a.hwmBeforeUsdg, a.hwmAfterUsdg, epoch);
+      db.prepare(
+        "UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?",
+      ).run(a.feeUsdg, agentId);
+    });
   } catch (e) {
     console.error("[store] fee accrual failed:", e);
   }
@@ -590,13 +818,20 @@ export async function addEvent(
 
 export async function addTrade(row: TradeRow): Promise<void> {
   try {
-    getDb()
+    const epoch = epochOf(row.agent_id);
+    // Only money-moving rows enter the hash chain. A rejection changes no
+    // balance, so its absence cannot distort a performance claim — and there
+    // are thousands of them. They stay in `trades` (and in the export, as
+    // context) without being part of the tamper-evident record.
+    const moved = row.status === "landed" || row.status === "paper";
+    const writeRow = () => {
+      getDb()
       .prepare(
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -623,7 +858,37 @@ export async function addTrade(row: TradeRow): Promise<void> {
         row.settlement_status ?? null,
         row.gas_wei ?? null,
         row.fill_slippage_bps ?? null,
+        epoch,
       );
+    };
+    if (!moved) {
+      writeRow();
+      return;
+    }
+    journaled(
+      row.agent_id,
+      epoch,
+      "fill",
+      {
+        amountUsdg: row.amount_usdg,
+        basisSource: row.basis_source ?? null,
+        buyToken: row.buy_token ?? null,
+        decisionId: row.decision_id ?? null,
+        fillPriceUsd: row.fill_price_usd ?? null,
+        fillQtyRaw: row.fill_qty_raw ?? null,
+        fillSide: row.fill_side ?? null,
+        gasWei: row.gas_wei ?? null,
+        kind: row.kind,
+        realizedPnlUsdg: row.realized_pnl_usdg ?? null,
+        sellToken: row.sell_token ?? null,
+        slippageBps: row.fill_slippage_bps ?? null,
+        status: row.status,
+        target: row.target,
+        txHash: row.tx_hash ?? null,
+        userOpHash: row.user_op_hash ?? null,
+      },
+      writeRow,
+    );
   } catch (e) {
     console.error("[store] trade insert failed:", e);
   }
@@ -646,14 +911,47 @@ export async function addEquity(
      * amount, forever. One definition, in equity.composeEquityUsdg, passed in.
      */
     equityUsdg: number;
+    /**
+     * The prices this valuation was made at, and how good each one is.
+     *
+     * Without them a historical equity figure cannot be re-derived by anyone,
+     * including us: `positions` carries price/source/staleness but is UPSERTED
+     * every tick, so each snapshot destroys the last. The equity row kept only
+     * the resulting scalar, which is an assertion, not a derivation.
+     */
+    marks?: readonly { symbol: string; priceUsd: number; source: string; stale: boolean }[];
+    /** Block the balances were read at — the anchor an auditor re-reads from. */
+    blockNumber?: bigint;
   },
 ): Promise<void> {
   try {
-    getDb()
-      .prepare(
-        "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg);
+    const epoch = epochOf(agentId);
+    journaled(
+      agentId,
+      epoch,
+      "mark",
+      {
+        blockNumber: b.blockNumber?.toString() ?? null,
+        cashUsdg: b.cashUsdg,
+        equityUsdg: b.equityUsdg,
+        ethWei: b.ethWei.toString(),
+        marks: (b.marks ?? []).map((m) => ({
+          priceUsd: m.priceUsd,
+          source: m.source,
+          stale: m.stale,
+          symbol: m.symbol,
+        })),
+        positionsUsdg: b.positionsUsdg,
+        vaultUsdg: b.vaultUsdg,
+      },
+      () => {
+        getDb()
+          .prepare(
+            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch);
+      },
+    );
   } catch (e) {
     console.error("[store] equity insert failed:", e);
   }

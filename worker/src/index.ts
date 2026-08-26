@@ -106,7 +106,10 @@ import {
   type BudgetRail,
   addFlow,
   adjustAgentHwm,
+  getAgentEpoch,
   getAgentFinancials,
+  hasEpochOneHistory,
+  openNextEpoch,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
@@ -783,6 +786,23 @@ async function main() {
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
     await refreshBudget(agentId);
+
+    // ── epoch boundary ───────────────────────────────────────────────────
+    // Everything written before the accounting was fixed is epoch 1: no flow
+    // records, fills booked from a slippage floor, equity rows that may contain
+    // a phantom crater from a failed read. Those rows are kept — they are the
+    // evidence this work was based on — but they must never be mixed into a
+    // performance figure or an audit export, so the first arm on a ledger that
+    // has epoch-1 rows opens epoch 2 and reporting starts clean.
+    if ((await getAgentEpoch(agentId)) === 1 && (await hasEpochOneHistory(agentId))) {
+      const opened = await openNextEpoch(agentId);
+      await addEvent(
+        agentId,
+        "ok",
+        `opened epoch ${opened} — earlier rows are kept for forensics but excluded from performance reporting ` +
+          `(they predate flow tracking and receipt-derived fills, so they cannot be audited)`,
+      );
+    }
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
@@ -1837,6 +1857,18 @@ async function main() {
         // The SAME total the fee and the breaker are judged against — the row
         // no longer re-derives its own, lower one.
         equityUsdg: usdgNum(equityUsdg),
+        // The prices this valuation was made at, journalled so the figure can
+        // be re-derived rather than merely believed. `positions` carries these
+        // but is overwritten every tick, so without this each snapshot destroyed
+        // the evidence for the one before it.
+        marks: positions.map((p) => ({
+          symbol: p.symbol,
+          priceUsd: Number(p.price8) / 1e8,
+          source: p.priceSource,
+          stale: p.priceStale,
+        })),
+        // The block the balances were read at — where an auditor re-reads from.
+        blockNumber: market.blockNumber,
       });
     }
     await setPositions(
