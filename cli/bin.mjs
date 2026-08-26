@@ -119,14 +119,40 @@ function writeSecret(file, data) {
   }
 }
 
+function uniqueTmp(target) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${target}.tmp.${process.pid}.${rand}`;
+}
 function writeSettings(next) {
   ensureHome();
   // settings.json holds plaintext API keys — write to a temp file then rename,
   // so a crash mid-write can never leave a truncated file that the worker would
   // silently read as defaults. rename is atomic on POSIX.
-  const tmp = `${SETTINGS}.tmp`;
-  writeSecret(tmp, JSON.stringify(next, null, 2));
-  renameSync(tmp, SETTINGS);
+  const tmp = uniqueTmp(SETTINGS);
+  const data = JSON.stringify(next, null, 2);
+  try {
+    writeSecret(tmp, data);
+    // Windows refuses rename over an open handle (editor/antivirus/reader) —
+    // retry a few times with backoff before giving up.
+    let lastErr;
+    for (let i = 0; i < 5; i++) {
+      try { renameSync(tmp, SETTINGS); lastErr = null; break; }
+      catch (e) {
+        lastErr = e;
+        // EPERM on Windows when target is open; also handle EBUSY
+        const code = e && typeof e.code === "string" ? e.code : "";
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (i + 1));
+      }
+    }
+    if (lastErr) throw lastErr;
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`\n  ✗ couldn't save settings: ${msg}`);
+    console.error(`  Your entries were not written — try again. The temp file was cleaned up.`);
+    process.exit(1);
+  }
 }
 
 /**
@@ -137,10 +163,15 @@ function writeSettings(next) {
 function hasMeaningfulConfig() {
   const s = readJson(SETTINGS) ?? {};
   // bundlerUrl takes precedence over bundlerApiKey (settings.ts:22), so a
-  // URL-configured install counts too. A funded agent (grant.json) has also
-  // unambiguously onboarded — never nag someone with a live wallet.
+  // URL-configured install counts too. Env vars are first-class config (file
+  // wins over env, but env alone means a live Docker/systemd agent). A funded
+  // agent (grant.json) has also unambiguously onboarded.
   if (s.bundlerUrl) return true;
   if (existsSync(GRANT)) return true;
+  if (process.env.MERRYMEN_BUNDLER_URL || process.env.MERRYMEN_BUNDLER_API_KEY ||
+      process.env.GROQ_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.MERRYMEN_LLM_API_KEY ||
+      process.env.MERRYMEN_TELEGRAM_BOT_TOKEN || process.env.MERRYMEN_LLM_PROVIDER ||
+      process.env.MERRYMEN_STRATEGY) return true;
   return Boolean(
     s.llmProvider || s.groqApiKey || s.anthropicApiKey || s.llmApiKey ||
       s.bundlerApiKey || s.telegramBotToken || s.strategy,
@@ -555,8 +586,9 @@ async function onboard() {
   const tgToken = (await p.askSecret(`  Telegram bot token${keep(current.telegramBotToken)}: `)).trim();
   if (tgToken) {
     current.telegramBotToken = tgToken;
-    current.telegramEnabled = true;
-    ok("telegram enabled — you'll link your chat from the dashboard");
+    const enable = (await p.ask(`  Start the bot now? [Y/n]: `)).trim().toLowerCase();
+    current.telegramEnabled = enable !== "n" && enable !== "no";
+    ok(current.telegramEnabled ? "telegram enabled — you'll link your chat from the dashboard" : "telegram token saved (bot stays off until you enable it)");
   }
 
   p.close();

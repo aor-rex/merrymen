@@ -239,6 +239,13 @@ describe("onboarding gate — bundlerUrl and webOnboarded", () => {
     assert.equal(configured({}, {} as never), false);
   });
 
+  it("treats env-configured installs as onboarded (Docker/systemd)", () => {
+    // Env vars are first-class config — a Docker install with only env should not show the wizard.
+    assert.equal(mergeSettings({}, { MERRYMEN_BUNDLER_URL: "https://pimlico.example" }).bundlerUrl, "https://pimlico.example");
+    assert.equal(mergeSettings({}, { GROQ_API_KEY: "gsk_..." }).groqApiKey, "gsk_...");
+    assert.equal(mergeSettings({}, { MERRYMEN_TELEGRAM_BOT_TOKEN: "123:abc" }).telegramBotToken, "123:abc");
+  });
+
   it("webOnboarded round-trips as a boolean flag", () => {
     // Simulates the API route's BOOL_FIELDS handling for webOnboarded.
     function applyPut(stored: Record<string, unknown>, body: Record<string, unknown>): Record<string, unknown> {
