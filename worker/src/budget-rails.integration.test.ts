@@ -105,6 +105,30 @@ describe("paper and live budgets are separate books", () => {
     assert.equal(await getOpsToday(AGED, "paper"), 0);
     assert.equal(await getSpentTodayUsdg(AGED, "live"), 0);
   });
+
+  it("a router-migrated skip costs nothing — which is what makes recording it the fix", async () => {
+    // The Rialto router-migration branch used to `return` bare from inside the
+    // execution try, reaching neither release path and pinning an op in
+    // inFlightOps for the life of the arm. It now writes this row instead, and
+    // recordTrade's release is what unwinds the reservation.
+    //
+    // That only works while 'rejected' stays off both rails: if it ever became
+    // spend, every skipped swap would start charging the owner's daily
+    // allowance for a trade that never happened. This is the fix's guard rail,
+    // not a restatement of the case above.
+    await addTrade({
+      agent_id: AGED,
+      kind: "swap",
+      target: "0x4444444444444444444444444444444444444444",
+      amount_usdg: 25,
+      status: "rejected",
+      reject_rule: "router-migrated",
+    });
+    assert.equal(await getOpsToday(AGED, "live"), 0);
+    assert.equal(await getOpsToday(AGED, "paper"), 0);
+    assert.equal(await getSpentTodayUsdg(AGED, "live"), 0);
+    assert.equal(await getSpentTodayUsdg(AGED, "paper"), 0);
+  });
 });
 
 describe("the budget window actually rolls", () => {

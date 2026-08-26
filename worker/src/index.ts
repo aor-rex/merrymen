@@ -1146,37 +1146,49 @@ async function main() {
       const placed = await orderExec.place(order, review);
       // Counters move on the REVIEWED notional — the amount the wall approved.
       // Held as a reservation until this order's row reaches the ledger below.
-      reserveBudget(review.notionalUsdg);
-      console.log(`[order] ${review.detail} (${placed.status}, ${placed.orderId})`);
-      await addEvent(agentId, "ok", `📜 ${review.detail} — inside the wall, nothing signed`);
-      // Paper fills are exact, so basis and realized P&L are the real thing —
-      // same 'paper' mode and 1e18-per-share convention as the EVM paper path.
-      // The 'brokerage' BasisMode (and the brokerage cash ledger) arrive with
-      // step 5; until then paper equities are basis-tracked, not cash-tracked.
-      const booked = placed.fill
-        ? bookFill(
-            agentId,
-            "paper",
-            {
-              side: placed.fill.side,
-              symbol: placed.fill.symbol,
-              qtyRaw: placed.fill.qtyRaw1e18,
-              cashUsdg: placed.fill.cashUsdg,
-              priceUsd: placed.fill.priceUsd,
-            },
-            "paper",
-          )
-        : null;
-      await recordTrade({
-        agent_id: agentId,
-        kind: intent.kind,
-        target: tradeTarget,
-        amount_usdg: usdgNum(review.notionalUsdg),
-        status: "paper",
-        sim_quote_out: review.detail,
-        ...(booked ?? {}),
-      });
-      return;
+      // The reservation covers the window between here and the row landing.
+      // Only recordTrade releases it, and the awaited store writes in between
+      // can throw — which would leak an op into inFlightOps for the LIFE OF THE
+      // ARM, since refreshBudget rebuilds only the settled halves and nothing
+      // else ever reclaims one. Same class of bug as the Rialto skip above,
+      // reached by a throw rather than by a return. releaseBudget is
+      // idempotent, so on the normal path recordTrade has already released and
+      // this is a no-op.
+      try {
+        reserveBudget(review.notionalUsdg);
+        console.log(`[order] ${review.detail} (${placed.status}, ${placed.orderId})`);
+        await addEvent(agentId, "ok", `📜 ${review.detail} — inside the wall, nothing signed`);
+        // Paper fills are exact, so basis and realized P&L are the real thing —
+        // same 'paper' mode and 1e18-per-share convention as the EVM paper path.
+        // The 'brokerage' BasisMode (and the brokerage cash ledger) arrive with
+        // step 5; until then paper equities are basis-tracked, not cash-tracked.
+        const booked = placed.fill
+          ? bookFill(
+              agentId,
+              "paper",
+              {
+                side: placed.fill.side,
+                symbol: placed.fill.symbol,
+                qtyRaw: placed.fill.qtyRaw1e18,
+                cashUsdg: placed.fill.cashUsdg,
+                priceUsd: placed.fill.priceUsd,
+              },
+              "paper",
+            )
+          : null;
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          amount_usdg: usdgNum(review.notionalUsdg),
+          status: "paper",
+          sim_quote_out: review.detail,
+          ...(booked ?? {}),
+        });
+        return;
+      } finally {
+        releaseBudget();
+      }
     }
     if (!executor) {
       if (!cfg.paperTradingEnabled) {
@@ -1232,47 +1244,59 @@ async function main() {
         hwmUsdg: bookRow.hwmUsdg,
         shares: Object.fromEntries(fill.positions.map((p) => [p.symbol, { token: p.token, shares: p.shares }])),
       });
-      reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
-      console.log(`[paper] ${fill.receipt}`);
-      await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
-      // Book the fill against the running cost basis. Paper fills are EXACT (we
-      // know the shares and the cash), so realized P&L here is the real thing.
-      const booked = fill.fill
-        ? bookFill(
-            agentId,
-            "paper",
-            {
-              side: fill.fill.side,
-              symbol: fill.fill.symbol,
-              // Paper carries no ERC-8056 multiplier (1 share = 1e18 raw), the same
-              // convention the tick uses when it values the paper book.
-              qtyRaw: BigInt(Math.round(fill.fill.shares * 1e18)),
-              cashUsdg: usdg(fill.fill.cashUsdg),
-              priceUsd: fill.fill.priceUsd,
-            },
-            "paper",
-          )
-        : null;
-      // The paper book rounds share counts to 6dp while basis tracks exact raw
-      // units, so a fully-closed position can leave sub-dust basis behind. The
-      // book is the source of truth for what's held: if the symbol is gone from
-      // it, the basis is flat too — otherwise stale dust would silently become
-      // the cost of the NEXT position in that symbol.
-      if (fill.fill && !fill.positions.some((p) => p.symbol === fill.fill!.symbol)) {
-        setBasis(agentId, "paper", fill.fill.symbol, { qtyRaw: 0n, costUsdg: 0n });
+      // The reservation covers the window between here and the row landing.
+      // Only recordTrade releases it, and the awaited store writes in between
+      // can throw — which would leak an op into inFlightOps for the LIFE OF THE
+      // ARM, since refreshBudget rebuilds only the settled halves and nothing
+      // else ever reclaims one. Same class of bug as the Rialto skip above,
+      // reached by a throw rather than by a return. releaseBudget is
+      // idempotent, so on the normal path recordTrade has already released and
+      // this is a no-op.
+      try {
+        reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
+        console.log(`[paper] ${fill.receipt}`);
+        await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
+        // Book the fill against the running cost basis. Paper fills are EXACT (we
+        // know the shares and the cash), so realized P&L here is the real thing.
+        const booked = fill.fill
+          ? bookFill(
+              agentId,
+              "paper",
+              {
+                side: fill.fill.side,
+                symbol: fill.fill.symbol,
+                // Paper carries no ERC-8056 multiplier (1 share = 1e18 raw), the same
+                // convention the tick uses when it values the paper book.
+                qtyRaw: BigInt(Math.round(fill.fill.shares * 1e18)),
+                cashUsdg: usdg(fill.fill.cashUsdg),
+                priceUsd: fill.fill.priceUsd,
+              },
+              "paper",
+            )
+          : null;
+        // The paper book rounds share counts to 6dp while basis tracks exact raw
+        // units, so a fully-closed position can leave sub-dust basis behind. The
+        // book is the source of truth for what's held: if the symbol is gone from
+        // it, the basis is flat too — otherwise stale dust would silently become
+        // the cost of the NEXT position in that symbol.
+        if (fill.fill && !fill.positions.some((p) => p.symbol === fill.fill!.symbol)) {
+          setBasis(agentId, "paper", fill.fill.symbol, { qtyRaw: 0n, costUsdg: 0n });
+        }
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: intent.target,
+          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          amount_usdg: usdgNum(notional),
+          status: "paper",
+          sim_quote_out: fill.receipt,
+          ...(booked ?? {}),
+        });
+        return;
+      } finally {
+        releaseBudget();
       }
-      await recordTrade({
-        agent_id: agentId,
-        kind: intent.kind,
-        target: intent.target,
-        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
-        amount_usdg: usdgNum(notional),
-        status: "paper",
-        sim_quote_out: fill.receipt,
-        ...(booked ?? {}),
-      });
-      return;
     }
 
     // ── gas pre-flight ───────────────────────────────────────────────────
@@ -1448,6 +1472,32 @@ async function main() {
             "warn",
             `Rialto router migrated to ${router} — re-issue the grant to trade; swap skipped`,
           );
+          // RECORD the skip, don't just return. A bare `return` from inside this
+          // try reaches NEITHER release path — not recordTrade's, not the
+          // catch's — so the reservation taken above stayed pinned in
+          // inFlightOps for the life of the arm (only a re-arm clears it, and
+          // syncGrant short-circuits on an unchanged grant). The router is
+          // re-read every tick, so the same intent leaked another op and
+          // another notional every tick, ratcheting toward ops-cap and
+          // daily-cap — neither of which has the exit exemption the drawdown
+          // breaker got, so a long enough leak blocks the SELL that would
+          // clear the position.
+          //
+          // A 'rejected' row is not spend on either rail (RAIL_STATUSES in
+          // store.ts, pinned by budget-rails.integration.test.ts), so this
+          // releases the reservation without booking anything — and a swap the
+          // wall would have refused is exactly what the ledger is for. Both
+          // siblings in this same try (no-route, no-quote) already do it.
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            sell_token: intent.sellToken,
+            buy_token: intent.buyToken,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "router-migrated",
+          });
           return;
         }
         const { quote, reason } = await fetchRialtoQuote(
@@ -1652,6 +1702,20 @@ async function main() {
         // failure worth studying was the one we recorded nothing about.
         ...sim,
       });
+    } finally {
+      // LAST LINE OF DEFENCE, not the primary release. Nothing may leave this
+      // block still holding a reservation: an unreleased op is charged against
+      // every later tick's allowance for the life of the arm. A `return` from
+      // inside a try runs neither the catch nor recordTrade — that is exactly
+      // how the Rialto router-migration skip above leaked before it recorded a
+      // row.
+      //
+      // releaseBudget is idempotent (`if (!reserved) return`), so on every
+      // normal path this is a no-op. It must NOT replace the explicit release
+      // inside recordTrade: the order there is load-bearing — refreshBudget has
+      // to see the written row before the reservation is dropped, or the op is
+      // missed by both halves at once.
+      releaseBudget();
     }
   }
 
