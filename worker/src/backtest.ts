@@ -90,7 +90,13 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
     }
     prevT = bar.tSec;
 
-    // New day → the daily spend/ops budget refills, exactly as it does live.
+    // New day → the daily spend/ops budget refills. Live is a TRAILING 24h
+    // window re-read from the ledger each tick, not a calendar-day reset, so
+    // this is an approximation: a backtest refills all at once at midnight
+    // where live refills continuously as individual ops age out. It errs
+    // toward fewer trades early in a day and more late, and that is the whole
+    // difference. (It used to claim it matched live "exactly"; live in fact
+    // never refilled at all until 2026-08-26.)
     const barDay = Math.floor(bar.tSec / 86_400);
     if (dayIndex === null || barDay !== dayIndex) {
       dayIndex = barDay;

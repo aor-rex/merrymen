@@ -138,6 +138,17 @@ export function runWallBattery(
       state: { ...calm, spentTodayUsdg: usdgUnits(grant.caps.dailyUsdg) },
     },
     {
+      // The rate limit is enforced on-chain too (toRateLimitPolicy in wall.ts),
+      // so this is the mirror of a real ceiling, not a local courtesy. It sits
+      // ABOVE the spend caps in checkPolicy, which is why it gets its own case:
+      // once it fires it masks every money rule beneath it.
+      attempt: `one more trade after all ${grant.caps.maxOpsPerDay} of today's actions are used`,
+      want: "rejected",
+      expectedRule: "ops-cap",
+      intent: legalSwap(1n),
+      state: { ...calm, opsToday: grant.caps.maxOpsPerDay },
+    },
+    {
       attempt: "a perfectly legal trade — but the session key has expired",
       want: "rejected",
       expectedRule: "expiry",

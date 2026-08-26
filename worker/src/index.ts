@@ -101,6 +101,7 @@ import {
   newDecisionId,
   ensureAgent,
   type BasisMode,
+  type BudgetRail,
   getAgentFinancials,
   getOpsToday,
   getPaperBook,
@@ -288,8 +289,36 @@ async function main() {
     if (active) await noteTokenCoverage(active.agentId);
   }
 
-  let spentTodayUsdg = 0n;
-  let opsToday = 0;
+  // ── the daily budget, in two halves ───────────────────────────────────────
+  // SETTLED is what the ledger already knows about, re-read from sqlite each
+  // tick so ops age out of the trailing-24h window on their own. IN-FLIGHT is
+  // the live path's optimistic reservation (see processIntent): an op is
+  // reserved BEFORE the await and its row isn't written until after, so a bare
+  // re-read would drop it and let a second intent through the same allowance.
+  //
+  // These were one monotonic counter until 2026-08-26, seeded only at arm time.
+  // Since syncGrant short-circuits on an unchanged grant, nothing ever re-read
+  // it: once it touched maxOpsPerDay it stayed there for the life of the arm,
+  // and every subsequent tick wrote a rejection. The window rolled; the counter
+  // did not.
+  let settledSpentUsdg = 0n;
+  let settledOps = 0;
+  let inFlightSpentUsdg = 0n;
+  let inFlightOps = 0;
+  const spentToday = () => settledSpentUsdg + inFlightSpentUsdg;
+  const opsTodayCount = () => settledOps + inFlightOps;
+  /** Which book the budget is being spent from — paper and live never share one. */
+  const budgetRail = (): BudgetRail => (paperActive() ? "paper" : "live");
+  /**
+   * Re-read the settled halves from the ledger. Cheap (two indexed aggregates on
+   * `trades`), and the only thing that lets an op age out of the trailing-24h
+   * window without a restart. Never touches the in-flight halves.
+   */
+  const refreshBudget = async (agentId: string): Promise<void> => {
+    const rail = budgetRail();
+    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
+    settledOps = await getOpsToday(agentId, rail);
+  };
   let highWaterMarkUsdg = 0n;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
   // performance-fee discount. Starts as the outsider (no discount) until read.
@@ -676,8 +705,10 @@ async function main() {
       limits: limitsFromGrant(grant, watchTokens),
       breakerLive,
     };
-    spentTodayUsdg = usdg(await getSpentTodayUsdg(agentId));
-    opsToday = await getOpsToday(agentId);
+    // Nothing is in flight at arm time, so clear any stale reservation with it.
+    inFlightSpentUsdg = 0n;
+    inFlightOps = 0;
+    await refreshBudget(agentId);
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
@@ -686,7 +717,8 @@ async function main() {
       agentId,
       "ok",
       `grant armed — executor ${executor ? "live" : "stubbed"}, ` +
-        `spent ${fmt(spentTodayUsdg)} USDG / ${opsToday} ops in trailing 24h`,
+        `spent ${fmt(spentToday())} USDG / ${opsTodayCount()} ops in trailing 24h ` +
+        `(${budgetRail()} book)`,
     );
     // A fresh grant may have widened (or narrowed) what it covers — re-evaluate
     // against the current settings rather than carrying the old verdict forward.
@@ -821,12 +853,35 @@ async function main() {
     if (!active) return;
     const { agentId, limits, executor } = active;
     const decision_id = intent.decisionId;
+    // This intent's reservation against the daily budget, held only while its
+    // trade row does NOT yet exist in the ledger. Once the row is written the
+    // settled counters can see it, so the reservation must be dropped in the
+    // same breath — hold both and the op is counted twice.
+    let reserved: { ops: number; spendUsdg: bigint } | null = null;
+    const reserveBudget = (spendUsdg: bigint) => {
+      reserved = { ops: 1, spendUsdg };
+      inFlightOps += 1;
+      inFlightSpentUsdg += spendUsdg;
+    };
+    /** Drop the reservation. The row either landed (caller refreshes first) or never will. */
+    const releaseBudget = () => {
+      if (!reserved) return;
+      inFlightOps -= reserved.ops;
+      inFlightSpentUsdg -= reserved.spendUsdg;
+      reserved = null;
+    };
     // Every trade this intent writes — approved, rejected, paper, landed, reverted —
     // carries the same decision link, so the ledger is joinable to the reasoning.
-    const recordTrade = (row: TradeRow) => addTrade({ ...row, decision_id });
+    // Writing the row is also the moment a reservation becomes settled fact.
+    const recordTrade = async (row: TradeRow) => {
+      const written = await addTrade({ ...row, decision_id });
+      await refreshBudget(agentId);
+      releaseBudget();
+      return written;
+    };
     const state: AgentState = {
-      spentTodayUsdg,
-      opsToday,
+      spentTodayUsdg: spentToday(),
+      opsToday: opsTodayCount(),
       highWaterMarkUsdg,
       equityUsdg,
       equityKnown,
@@ -908,8 +963,8 @@ async function main() {
 
       const placed = await orderExec.place(order, review);
       // Counters move on the REVIEWED notional — the amount the wall approved.
-      spentTodayUsdg += review.notionalUsdg;
-      opsToday += 1;
+      // Held as a reservation until this order's row reaches the ledger below.
+      reserveBudget(review.notionalUsdg);
       console.log(`[order] ${review.detail} (${placed.status}, ${placed.orderId})`);
       await addEvent(agentId, "ok", `📜 ${review.detail} — inside the wall, nothing signed`);
       // Paper fills are exact, so basis and realized P&L are the real thing —
@@ -980,8 +1035,7 @@ async function main() {
         hwmUsdg: bookRow.hwmUsdg,
         shares: Object.fromEntries(fill.positions.map((p) => [p.symbol, { token: p.token, shares: p.shares }])),
       });
-      if (intent.kind !== "vault-withdraw") spentTodayUsdg += notional;
-      opsToday += 1;
+      reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
       console.log(`[paper] ${fill.receipt}`);
       await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
       // Book the fill against the running cost basis. Paper fills are EXACT (we
@@ -1027,10 +1081,11 @@ async function main() {
     // Reserve spend/ops BEFORE the await-heavy execution and roll back on
     // failure. Incrementing only after success opens a TOCTOU window: a chat
     // trade interleaved with a tick could both pass checkPolicy against the
-    // same stale spentTodayUsdg and overshoot the daily cap by one action.
+    // same stale spend figure and overshoot the daily cap by one action.
+    // The reservation is released when the trade row lands (recordTrade) or
+    // when execution throws (below) — never both, never neither.
     const countsSpend = intent.kind !== "vault-withdraw";
-    if (countsSpend) spentTodayUsdg += notional;
-    opsToday += 1;
+    reserveBudget(countsSpend ? notional : 0n);
 
     try {
       let txHash: `0x${string}`;
@@ -1244,9 +1299,11 @@ async function main() {
         ...(booked ?? {}),
       });
     } catch (e) {
-      // Roll back the optimistic reservation — the money didn't move.
-      if (countsSpend) spentTodayUsdg -= notional;
-      opsToday -= 1;
+      // Roll back the optimistic reservation — the money didn't move. The
+      // 'reverted' row written below goes through recordTrade, which would
+      // release it anyway; doing it here keeps the counters honest for the
+      // window in between, and releaseBudget is idempotent.
+      releaseBudget();
       const msg = e instanceof Error ? e.message : String(e);
       // Distinguish a genuine on-chain revert (executor threw "reverted on-chain…")
       // from a failure BEFORE submission (bundler/RPC/gas error), so the user isn't
@@ -1305,6 +1362,13 @@ async function main() {
 
     if (!armed || !active) return;
     const { grant, agentId, client } = active;
+
+    // Re-read the settled budget every tick, so ops and spend age out of the
+    // trailing-24h window on their own. syncGrant short-circuits on an
+    // unchanged grant, so before this existed the counters were seeded once at
+    // arm time and only ever climbed — a worker that hit the cap stayed there
+    // until it was restarted.
+    await refreshBudget(agentId);
 
     if (Math.floor(Date.now() / 1000) >= grant.expiresAt) {
       console.log("[expiry] session key expired — agent retired");
@@ -1626,7 +1690,7 @@ async function main() {
       // What the wall will still accept today, so strategies size to reality
       // instead of re-proposing oversized intents every tick.
       spendHeadroomUsdg:
-        active.limits.dailyUsdg > spentTodayUsdg ? active.limits.dailyUsdg - spentTodayUsdg : 0n,
+        active.limits.dailyUsdg > spentToday() ? active.limits.dailyUsdg - spentToday() : 0n,
       perTradeCapUsdg: active.limits.perTradeUsdg,
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and

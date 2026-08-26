@@ -521,21 +521,54 @@ export async function setPositions(
 }
 
 /**
- * Executed-op count in the trailing 24h — seeds the ops-cap counter across
- * restarts. 'submitted' counts: a brokerage order that has left the building is
- * an op whether or not it has filled yet, and excluding it would let a restart
- * forget in-flight orders and overshoot the ops cap. Step 6's reconciler
- * resolves each 'submitted' to landed/reverted; a reverted resolution is the
- * one case the seed then over-counts until the row flips, which is the
- * conservative direction — budgets may under-spend, never over-spend.
+ * Which book a budget question is about. Paper money and real money are not the
+ * same money, and they must not share a budget.
+ *
+ * They used to. Both counters below asked for status IN ('landed','paper',
+ * 'submitted'), so a paper run spent the LIVE 48-op allowance and then refused
+ * itself for the rest of the day. That is not hypothetical: it is what happened
+ * on 2026-07-15 — 48 simulated fills exhausted the cap in 21 minutes, and the
+ * remaining 11.7 hours of the run are 1,242 identical 'ops-cap' rejections.
+ *
+ * Paper still counts against the cap on its OWN rail, deliberately. The point of
+ * paper mode is that it behaves like live; an unbudgeted paper run would prove
+ * nothing about what live would do.
  */
-export async function getOpsToday(agentId: string): Promise<number> {
+export type BudgetRail = "live" | "paper";
+
+/**
+ * 'submitted' counts on the live rail: a brokerage order that has left the
+ * building is an op whether or not it has filled yet, and excluding it would let
+ * a restart forget in-flight orders and overshoot the ops cap. Step 6's
+ * reconciler resolves each 'submitted' to landed/reverted; a reverted
+ * resolution is the one case the seed then over-counts until the row flips,
+ * which is the conservative direction — budgets may under-spend, never
+ * over-spend.
+ */
+const RAIL_STATUSES: Record<BudgetRail, readonly string[]> = {
+  live: ["landed", "submitted"],
+  paper: ["paper"],
+};
+
+/** `IN (?, ?)` placeholders for a rail's status set. */
+function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] } {
+  const params = RAIL_STATUSES[rail];
+  return { sql: params.map(() => "?").join(", "), params };
+}
+
+/**
+ * Executed-op count on one rail in the trailing 24h — seeds the ops-cap counter
+ * across restarts, and (since the counter no longer only ever climbs) re-reads
+ * it as ops age out of the window.
+ */
+export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
+  const { sql, params } = railFilter(rail);
   const row = getDb()
     .prepare(
       `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status IN ('landed', 'paper', 'submitted') AND created_at > unixepoch() - 86400`,
+       WHERE agent_id = ? AND status IN (${sql}) AND created_at > unixepoch() - 86400`,
     )
-    .get(agentId) as { n: number } | undefined;
+    .get(agentId, ...params) as { n: number } | undefined;
   return row?.n ?? 0;
 }
 
@@ -560,15 +593,20 @@ export async function getTransferredTodayUsdg(agentId: string): Promise<number> 
   return row?.spent ?? 0;
 }
 
-/** Sum of landed spend in the trailing 24h — seeds the daily-cap counter across restarts. */
-export async function getSpentTodayUsdg(agentId: string): Promise<number> {
+/**
+ * Sum of spend on one rail in the trailing 24h — seeds the daily-cap counter.
+ * Same rail split as getOpsToday, and for the same reason: simulated spend must
+ * not consume a real allowance.
+ */
+export async function getSpentTodayUsdg(agentId: string, rail: BudgetRail = "live"): Promise<number> {
+  const { sql, params } = railFilter(rail);
   const row = getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN ('landed', 'paper', 'submitted') AND kind != 'vault-withdraw'
+       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'
          AND created_at > unixepoch() - 86400`,
     )
-    .get(agentId) as { spent: number } | undefined;
+    .get(agentId, ...params) as { spent: number } | undefined;
   return row?.spent ?? 0;
 }
 

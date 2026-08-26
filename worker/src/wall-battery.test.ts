@@ -42,7 +42,7 @@ describe("runWallBattery", () => {
     it(`holds every exact rule for an unexpired ${name} grant`, () => {
       const result = runWallBattery(grant([...features]), NOW);
       assert.equal(result.allHeld, true);
-      assert.equal(result.cases.length, 9);
+      assert.equal(result.cases.length, 10);
       assert.deepEqual(
         result.cases.map((entry) => entry.rule ?? "approved"),
         [
@@ -51,6 +51,7 @@ describe("runWallBattery", () => {
           "target-allowlist",
           "asset-allowlist",
           "daily-cap",
+          "ops-cap",
           "expiry",
           "drawdown-breaker",
           "approved",
