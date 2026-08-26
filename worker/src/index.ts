@@ -110,6 +110,7 @@ import {
   getAgentEpoch,
   getAgentFinancials,
   hasEpochOneHistory,
+  lastKnownCashUsdg,
   openNextEpoch,
   getOpsToday,
   getPaperBook,
@@ -376,12 +377,29 @@ async function main() {
     };
 
     if (lastCashUsdg === null) {
-      // First funded observation. Booking the opening balance as a flow (rather
-      // than special-casing the HWM seed, as this used to) means the very first
-      // deposit is the same kind of fact as every one after it, and the flow
-      // ledger is complete from row one.
+      // Nothing observed in THIS process yet. Two very different situations,
+      // and conflating them was a real bug:
+      //
+      //   • a genuinely new agent (no HWM) — the balance is the opening
+      //     deposit, booked as a flow so the ledger is complete from row one;
+      //
+      //   • a RESTART of a funded agent (HWM persisted, so > 0) — here the old
+      //     code did nothing at all, because `lastCashUsdg` is a process-
+      //     lifetime variable that resets to null on every start. A top-up made
+      //     while the worker was stopped was therefore invisible: the next tick
+      //     handed the higher equity to accrueAboveHwm, which called it profit
+      //     and took a 10% performance fee on the owner's own capital, and
+      //     netContributions stayed understated forever.
+      //
+      // Stop worker → top up → start worker is the most natural thing a first-
+      // day owner does. Seeding from the last persisted cash reading closes it.
       if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
         await record(equityUsdg, "opening balance");
+      } else {
+        const prior = await lastKnownCashUsdg(agentId);
+        if (prior !== null) {
+          await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
+        }
       }
     } else if (ledgerWrites === ledgerWritesAtSnapshot) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");

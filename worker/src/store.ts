@@ -791,6 +791,31 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
   }
 }
 
+/**
+ * Cash as of the most recent equity row for this agent's current epoch.
+ *
+ * The worker's in-memory `lastCashUsdg` resets to null on every restart, so
+ * without this a top-up made while the worker was stopped is invisible to flow
+ * reconciliation — and an invisible deposit is booked as profit and charged a
+ * performance fee. This is the durable half of that memory.
+ *
+ * Returns null when there is no prior observation, which is genuinely different
+ * from "cash was zero": a brand-new agent has nothing to compare against.
+ */
+export async function lastKnownCashUsdg(agentId: string): Promise<number | null> {
+  try {
+    const epoch = epochOf(agentId);
+    const row = getDb()
+      .prepare(
+        "SELECT cash_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+      )
+      .get(agentId, epoch) as { cash_usdg: number } | undefined;
+    return row ? row.cash_usdg : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The flow record itself, newest first — for the audit export and /pnl's detail line. */
 export async function listFlows(agentId: string, limit = 200): Promise<
   { direction: string; amount_usdg: number; source: string; tx_hash: string | null; at: number }[]

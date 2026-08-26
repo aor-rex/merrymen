@@ -28,6 +28,7 @@ const {
   ensureAgent,
   getAgentFinancials,
   getNetContributionsUsdg,
+  lastKnownCashUsdg,
   listFlows,
   setAgentStatus,
 } = await import("./store");
@@ -43,6 +44,17 @@ const { DatabaseSync } = await import("node:sqlite");
  * "which agent is current" assertion below would answer with theirs. Clear the
  * tables these tests reason about so the fixture is the fixture.
  */
+/** Retire every agent, so a test can name the one it means to report on. */
+function retireAllAgents(): void {
+  const db = new DatabaseSync(homePaths.db());
+  try {
+    db.exec("UPDATE agents SET status = 'expired'");
+  } catch {
+    /* no agents table yet */
+  }
+  db.close();
+}
+
 function clearLedger(): void {
   const db = new DatabaseSync(homePaths.db());
   for (const table of ["agents", "equity", "flows", "trades", "fee_accruals"]) {
@@ -153,13 +165,64 @@ describe("a deposit is never profit (the fee regression)", () => {
   });
 });
 
+describe("a top-up made while the worker was STOPPED", () => {
+  // The restart hole. `lastCashUsdg` is a process-lifetime variable that resets
+  // to null on every start, and the HWM is persisted — so on the first tick
+  // after a restart the old code took neither branch: the deposit was
+  // swallowed, accrueAboveHwm saw the higher equity as profit, and a 10% fee
+  // came out of the owner's own capital. "Stop worker → top up → start worker"
+  // is the most natural thing a first-day owner does.
+  const R = "0x000000000000000000000000000000000000000d";
+
+  it("is recoverable from the ledger — the worker is not the only memory", async () => {
+    await ensureAgent(grant(R));
+    // A tick before the restart recorded cash of 500.
+    await addEquity(R, { ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
+    assert.equal(await lastKnownCashUsdg(R), 500);
+  });
+
+  it("a brand-new agent has NO prior reading — null, not zero", async () => {
+    // Zero would make the first funding look like a 500 USDG deposit on top of
+    // an existing balance, which is a different fact.
+    const fresh = "0x000000000000000000000000000000000000000e";
+    await ensureAgent(grant(fresh));
+    assert.equal(await lastKnownCashUsdg(fresh), null);
+  });
+
+  it("the restart sequence accrues ZERO fee once the gap is booked as a flow", async () => {
+    // Worker stopped at cash 500 / hwm 500. Owner adds 250. Worker restarts and
+    // sees 750: the difference is a FLOW, so the mark moves with it and there is
+    // no profit to charge for.
+    // The opening 500 was itself a flow, so the mark already sits at 500.
+    await addFlow({ agentId: R, direction: "in", amountUsdg: 500, source: "inferred" });
+    await adjustAgentHwm(R, 500);
+
+    const priorCash = await lastKnownCashUsdg(R);
+    assert.equal(priorCash, 500);
+
+    const observed = usdg(750);
+    const delta = observed - usdg(priorCash!);
+    assert.equal(delta, usdg(250));
+
+    await addFlow({ agentId: R, direction: "in", amountUsdg: 250, source: "inferred" });
+    await adjustAgentHwm(R, 250); // capital moves the mark, before any judgement
+
+    const { hwmUsdg } = await getAgentFinancials(R);
+    const accrual = accrueAboveHwm(observed, usdg(hwmUsdg), 1_000); // 10%
+    assert.equal(accrual.feeUsdg, 0n);
+    assert.equal(accrual.profitUsdg, 0n);
+    assert.equal(await getNetContributionsUsdg(R), 750);
+  });
+});
+
 describe("readPnl reports the agent's own money", () => {
   it("subtracts what was put in, rather than calling it profit", async () => {
     // The real shape of the July ledger: money in, worth 999.48 now.
     // One armed agent at a time — a re-grant retires the last one. `status`
-    // DEFAULTs to 'armed', so B has to be retired explicitly here.
+    // DEFAULTs to 'armed', so every other agent this file creates has to be
+    // retired explicitly, or "which agent is current" answers with the newest.
+    retireAllAgents();
     await setAgentStatus(A, "armed");
-    await setAgentStatus(B, "expired");
     await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
     // B is funded and marked to a very different number in the same tables.
     await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
