@@ -3,9 +3,20 @@ import "@nomicfoundation/hardhat-viem";
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.28",
-    settings: {
-      optimizer: { enabled: true, runs: 200 },
+    // The `compilers` array form, not the `version`/`settings` shorthand:
+    // hardhat only honours `overrides` alongside `compilers`.
+    compilers: [{ version: "0.8.28", settings: { optimizer: { enabled: true, runs: 200 } } }],
+    // V4SelfSwap's re-entrancy flag is `bool private transient`, which needs
+    // Cancun's TSTORE/TLOAD. Everything else here compiles to the default
+    // (paris) and MUST keep doing so: BreakerRegistry and KernelBreakerPolicy
+    // may already be deployed, and recompiling them under a different EVM
+    // version produces different bytecode than what was verified on-chain.
+    // Hence a per-file override rather than flipping evmVersion globally.
+    overrides: {
+      "contracts/V4SelfSwap.sol": {
+        version: "0.8.28",
+        settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "cancun" },
+      },
     },
   },
   // Deploy targets (deployment itself waits for a funded key):
