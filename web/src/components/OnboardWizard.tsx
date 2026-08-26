@@ -27,6 +27,10 @@ const STEPS = [
 ] as const;
 
 function configured(v: SettingsView): boolean {
+  // bundlerUrl is the advanced bundler override that takes precedence over
+  // bundlerApiKey (settings.ts:22) — a URL-configured install must not be
+  // treated as fresh. v.values.bundlerUrl is redacted but non-empty means set.
+  if (v.values.bundlerUrl) return true;
   return Boolean(
     v.values.llmProvider ||
       v.groqApiKey.set ||
@@ -362,7 +366,7 @@ export function OnboardWizard() {
         {done ? (
           <>
             <h1 className="onboard-title">the band is mustered. 🏹</h1>
-            <p className="grant-sub">{errors.length ? "…but something didn&apos;t save:" : "your board is set and riding in paper mode — go live whenever you like."}</p>
+            <p className="grant-sub">{errors.length ? "…but something didn't save:" : "your board is set and riding in paper mode — go live whenever you like."}</p>
             {errors.length > 0 && <div className="grant-note err">{errors.join(", ")}</div>}
             <Link href="/" className="onboard-next">to the band →</Link>
           </>
