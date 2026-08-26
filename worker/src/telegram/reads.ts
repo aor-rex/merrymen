@@ -260,6 +260,28 @@ export function readPnl(): string {
     }
     if (realizedLine) lines.push(realizedLine);
     lines.push(`• fees accrued: $${(fee?.f ?? 0).toFixed(2)}`);
+    // Gas is a real cost paid in ETH, and equity_usdg is cash + vault +
+    // positions — so every figure above is GROSS OF GAS. Said out loud rather
+    // than converted at an invented rate: there is no ETH/USD feed here.
+    try {
+      const g = db
+        .prepare("SELECT gas_wei FROM trades WHERE agent_id = ? AND gas_wei IS NOT NULL")
+        .all(agentId) as { gas_wei: string }[];
+      let wei = 0n;
+      for (const r of g) {
+        try {
+          wei += BigInt(r.gas_wei);
+        } catch {
+          /* skip a malformed row rather than lose the total */
+        }
+      }
+      if (wei > 0n) {
+        const eth = Number(wei) / 1e18;
+        lines.push(`• gas paid: ${eth.toFixed(6)} ETH (not included above — the figures are gross of gas)`);
+      }
+    } catch {
+      /* gas_wei arrives with a worker migration */
+    }
     return lines.join("\n");
   } catch {
     return "📈 no P&L yet.";

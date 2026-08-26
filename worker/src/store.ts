@@ -231,6 +231,16 @@ function getDb(): DatabaseSync {
     // off the wire — DESIGN.md §11 Q5). Both NULL on every EVM and paper row.
     "ALTER TABLE trades ADD COLUMN order_id TEXT",
     "ALTER TABLE trades ADD COLUMN settlement_status TEXT",
+    // Gas actually paid on a landed UserOp, wei. The account self-pays with no
+    // paymaster, so this is a real cost of every trade — and it was invisible:
+    // sim_gas holds QuoterV2's estimate for the SWAP CALL only, unmultiplied by
+    // any gas price, so realized P&L was gross of gas forever.
+    "ALTER TABLE trades ADD COLUMN gas_wei TEXT",
+    // Measured execution quality: quoted-out vs received-out, in bps, positive
+    // when the fill was worse than quoted. The slippage SETTING is one flat 1%
+    // constant applied to a $5 trade and a $5,000 one alike; this is the
+    // evidence needed to replace it with something size-aware.
+    "ALTER TABLE trades ADD COLUMN fill_slippage_bps INTEGER",
   ]) {
     try {
       db.exec(ddl);
@@ -254,6 +264,14 @@ export interface TradeRow {
   sell_token?: string;
   buy_token?: string;
   amount_usdg: number;
+  /**
+   * OUR UserOperation hash — the only id that identifies this trade on a 4337
+   * explorer. The bundled `tx_hash` may carry other people's operations too.
+   *
+   * This column, its type field and its INSERT placeholder all existed for
+   * months while NO call site ever supplied a value: a landed trade could not
+   * be traced back to the operation that produced it. Populated since 2026-08-26.
+   */
   user_op_hash?: string;
   tx_hash?: string;
   /**
@@ -300,8 +318,19 @@ export interface TradeRow {
   fill_price_usd?: number;
   /** 6dp-derived USDG booked on this fill (sells only; buys are always 0). */
   realized_pnl_usdg?: number;
-  /** 'paper' (exact) or 'quote' (live swap, from the pre-trade simulation). */
-  basis_source?: "paper" | "quote";
+  /**
+   * How the fill figures were obtained, in descending order of evidence:
+   *   'receipt' — read off the settled transaction's Transfer logs. The fact.
+   *   'paper'   — exact, but simulated at the oracle price. Not real money.
+   *   'quote'   — the pre-trade QuoterV2 bound. An ESTIMATE, and the fallback
+   *               when a receipt cannot be parsed. Never mix it with 'receipt'
+   *               in analysis without saying so.
+   */
+  basis_source?: "receipt" | "paper" | "quote";
+  /** Gas actually paid, wei, as a decimal string. Real cost; not in equity_usdg. */
+  gas_wei?: string;
+  /** Measured execution quality: how far the fill landed from the quote, in bps (+ is worse). */
+  fill_slippage_bps?: number;
 }
 
 /** One row in the decisions table — the proposal, its reasoning, and its fate. */
@@ -470,6 +499,33 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
   return row.net;
 }
 
+/**
+ * Total gas paid on landed operations, in wei.
+ *
+ * Reported SEPARATELY rather than folded into equity, deliberately. Gas leaves
+ * the account in ETH and there is no ETH/USD feed configured — only a WETH pool
+ * — so converting it would mean inventing a price for the one figure whose job
+ * is to be beyond dispute. equity_usdg is cash + vault + positions and excludes
+ * ETH entirely, which means realized P&L is GROSS OF GAS; this is the number
+ * that says by how much.
+ */
+export async function getGasPaidWei(agentId: string): Promise<bigint> {
+  try {
+    const rows = getDb()
+      .prepare("SELECT gas_wei FROM trades WHERE agent_id = ? AND gas_wei IS NOT NULL")
+      .all(agentId) as { gas_wei: string }[];
+    return rows.reduce((sum, r) => {
+      try {
+        return sum + BigInt(r.gas_wei);
+      } catch {
+        return sum;
+      }
+    }, 0n);
+  } catch {
+    return 0n; // pre-migration ledger
+  }
+}
+
 /** The flow record itself, newest first — for the audit export and /pnl's detail line. */
 export async function listFlows(agentId: string, limit = 200): Promise<
   { direction: string; amount_usdg: number; source: string; tx_hash: string | null; at: number }[]
@@ -539,8 +595,8 @@ export async function addTrade(row: TradeRow): Promise<void> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -565,6 +621,8 @@ export async function addTrade(row: TradeRow): Promise<void> {
         row.basis_source ?? null,
         row.order_id ?? null,
         row.settlement_status ?? null,
+        row.gas_wei ?? null,
+        row.fill_slippage_bps ?? null,
       );
   } catch (e) {
     console.error("[store] trade insert failed:", e);

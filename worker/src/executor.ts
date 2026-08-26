@@ -23,11 +23,35 @@ export interface Call {
   data: Hex;
 }
 
+/**
+ * What actually happened on-chain. This used to be a bare tx hash, and the
+ * receipt — logs, gas, the UserOp hash already in hand — was dropped on the
+ * floor. Everything downstream then had to be built on the PRE-TRADE quote:
+ * cost basis, realized P&L and the equity curve were all estimates of a
+ * settled fact we were holding and threw away.
+ */
+export interface ExecutionResult {
+  /** The bundled transaction. Shared with other users' ops — not unique to us. */
+  txHash: `0x${string}`;
+  /** OUR operation. The only id that identifies this trade on a 4337 explorer. */
+  userOpHash: `0x${string}`;
+  /** Emitted logs — the real swap amounts live here (see fills.ts). */
+  logs: readonly { address: string; topics: readonly string[]; data: string }[];
+  /**
+   * Gas actually paid, in wei. The account self-pays with no paymaster, so this
+   * is a real cost of the trade and it was invisible to P&L: `equity_usdg` is
+   * cash + vault + positions, and ETH is not in it.
+   */
+  gasWei: bigint;
+  /** Block the operation landed in — an anchor for anyone re-deriving this later. */
+  blockNumber: bigint;
+}
+
 export interface AgentExecutor {
   /** Counterfactual smart-account address (deploys itself on first op). */
   address: `0x${string}`;
-  /** Send a batch of calls as one UserOperation; resolves to the tx hash. */
-  execute(calls: Call[]): Promise<`0x${string}`>;
+  /** Send a batch of calls as one UserOperation and report what settled. */
+  execute(calls: Call[]): Promise<ExecutionResult>;
 }
 
 export async function createAgentExecutor(opts: {
@@ -68,7 +92,21 @@ export async function createAgentExecutor(opts: {
         const reason = (receipt as { reason?: string }).reason;
         throw new Error(`reverted on-chain${reason ? `: ${reason}` : ""} (${userOpHash})`);
       }
-      return receipt.receipt.transactionHash;
+      // actualGasCost is the ERC-4337 field: what the EntryPoint charged the
+      // account, verification included. gasUsed × effectiveGasPrice covers only
+      // the bundled transaction and would under-count our share of it, so it is
+      // a fallback for bundlers that omit the former, not a preference.
+      const gasWei =
+        typeof receipt.actualGasCost === "bigint"
+          ? receipt.actualGasCost
+          : (receipt.receipt.gasUsed ?? 0n) * (receipt.receipt.effectiveGasPrice ?? 0n);
+      return {
+        txHash: receipt.receipt.transactionHash,
+        userOpHash,
+        logs: receipt.logs ?? [],
+        gasWei,
+        blockNumber: receipt.receipt.blockNumber ?? 0n,
+      };
     },
   };
 }

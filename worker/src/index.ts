@@ -52,7 +52,8 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { bestRoute, buildTradeCalls, minOutWithSlippage } from "./venues/uniswap";
-import { createAgentExecutor, type AgentExecutor } from "./executor";
+import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
+import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst } from "./fills";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
@@ -849,7 +850,7 @@ async function main() {
     agentId: string,
     mode: BasisMode,
     f: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number },
-    source: "paper" | "quote",
+    source: "receipt" | "paper" | "quote",
   ): Pick<TradeRow, "fill_side" | "fill_qty_raw" | "fill_price_usd" | "realized_pnl_usdg" | "basis_source"> {
     const prev = getBasis(agentId, mode, f.symbol);
     const r = applyFill(prev, { side: f.side, qtyRaw: f.qtyRaw, cashUsdg: f.cashUsdg });
@@ -869,12 +870,19 @@ async function main() {
       if (f.side === "sell" && r.basis.qtyRaw <= 0n) clearTrenchEntry(agentId, mode, f.symbol);
     }
     if (r.basisUnknown) {
-      // A holding with no tracked cost (opened before basis existed, or drifted).
-      // Say so rather than reporting a number we can't stand behind.
+      // Two very different causes, and the old message asserted the wrong one.
+      // NOTHING tracked → the position predates basis tracking, which is what it
+      // said. But SOME tracked and the sell exceeded it means the buy under-
+      // recorded what it received — for a year that was every live buy, because
+      // quantity came from minOut rather than the receipt. Blaming "predates
+      // basis tracking" for that sent debugging in exactly the wrong direction.
+      const partial = prev.qtyRaw > 0n;
       void addEvent(
         agentId,
         "warn",
-        `sold ${f.symbol} with no cost basis on record — P&L for that trade isn't attributable (position predates basis tracking)`,
+        partial
+          ? `sold more ${f.symbol} than the ledger had cost for (held ${f.qtyRaw}, tracked ${prev.qtyRaw}) — P&L for that trade isn't attributable; the buy under-recorded what it received`
+          : `sold ${f.symbol} with no cost basis on record — P&L for that trade isn't attributable (position predates basis tracking)`,
       );
     }
     return {
@@ -1077,6 +1085,21 @@ async function main() {
     if (!executor) {
       if (!cfg.paperTradingEnabled) {
         console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler, paper trading off)`);
+        // Leave a trace. This used to return with only a console line, so
+        // "the wall approved N trades the agent had no way to execute" was
+        // unrecoverable from the ledger — the record simply had a hole in it
+        // exactly where practice mode ran. Recorded as rejected (nothing moved)
+        // with a rule that names the real reason.
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: "no-executor",
+        });
         return;
       }
       // ── PAPER FILL: same wall, simulated execution at the live oracle px ──
@@ -1165,13 +1188,18 @@ async function main() {
     const countsSpend = intent.kind !== "vault-withdraw";
     reserveBudget(countsSpend ? notional : 0n);
 
+    // Declared OUTSIDE the try so the revert path can still record it — the
+    // quote is what makes a failed trade worth anything after the fact.
+    let sim: Pick<TradeRow, "sim_quote_out" | "sim_min_out" | "sim_fee_tier" | "sim_gas"> = {};
     try {
-      let txHash: `0x${string}`;
-      let sim: Pick<TradeRow, "sim_quote_out" | "sim_min_out" | "sim_fee_tier" | "sim_gas"> = {};
-      // Fill economics for cost basis, taken from the pre-trade quote (we don't
-      // parse receipts yet) — recorded as basis_source 'quote' so analysis never
-      // mistakes an estimate for a settled figure.
+      let exec: ExecutionResult;
+      // Fill economics for cost basis. Computed from the pre-trade quote here as
+      // a FALLBACK, then replaced with the receipt's real amounts once the op
+      // settles (see below). basis_source records which one we ended up with,
+      // so analysis never mistakes an estimate for a settled figure.
       let liveFill: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number } | null = null;
+      // The pair this trade is about, kept so the receipt can be attributed.
+      let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint } | null = null;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -1223,10 +1251,17 @@ async function main() {
           if (sellIsUsdg !== buyIsUsdg) {
             const stockToken = sellIsUsdg ? intent.buyToken : intent.sellToken;
             const symbol = symbolOfToken(stockToken);
+            if (symbol) fillPair = { stockToken, symbol, quotedOut: quote.amountOut };
             // Quantity is always the STOCK side (18dp); cash always the USDG side (6dp).
             // The RECEIVED side uses minOut, not the quote: the fill can come in
             // worse than quoted but never better, so this is the conservative
             // figure. Erring optimistic here would understate every loss.
+            //
+            // This is now only the FALLBACK, for when the receipt can't be
+            // parsed. As the booked figure it was a quiet disaster: the tracked
+            // quantity came out ~slippageBps BELOW the real chain balance, so
+            // every full exit sold more than the basis knew about, tripped
+            // partlyUnbacked, and wrote NULL realized P&L.
             const qtyRaw = sellIsUsdg ? minOut : intent.sellAmountRaw;
             const cashUsdg = sellIsUsdg ? intent.sellAmountRaw : minOut;
             if (symbol && qtyRaw > 0n) {
@@ -1256,7 +1291,7 @@ async function main() {
           minAmountOut: minOut,
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
-        txHash = await executor.execute(calls);
+        exec = await executor.execute(calls);
         const venue = quote.v4 ? "v4" : quote.path ? "v3 via WETH" : "v3 direct";
         await addEvent(
           agentId,
@@ -1311,7 +1346,7 @@ async function main() {
             args: [router, intent.sellAmountRaw],
           }),
         };
-        txHash = await executor.execute([approve, { to: quote.to, value: 0n, data: quote.data }]);
+        exec = await executor.execute([approve, { to: quote.to, value: 0n, data: quote.data }]);
       } else if (intent.kind === "swap") {
         // Rialto venue without an API key: approval leg only until onboarding;
         // swap calldata comes from that API. Bundler estimation still simulates.
@@ -1320,7 +1355,7 @@ async function main() {
           functionName: "approve",
           args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountRaw],
         });
-        txHash = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
+        exec = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
       } else if (intent.kind === "transfer") {
         // USDG leaving the wall — user-confirmed in chat, amount capped by the
         // grant's on-chain transfer permission AND the per-trade/daily caps
@@ -1330,14 +1365,14 @@ async function main() {
           functionName: "transfer",
           args: [intent.recipient, intent.amountUsdg],
         });
-        txHash = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
+        exec = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
       } else if (intent.kind === "vault-deposit") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
           functionName: "deposit",
           args: [intent.amountUsdg, executor.address],
         });
-        txHash = await executor.execute([
+        exec = await executor.execute([
           {
             to: CASH.USDG as `0x${string}`,
             value: 0n,
@@ -1355,15 +1390,47 @@ async function main() {
           functionName: "withdraw",
           args: [intent.amountUsdg, executor.address, executor.address],
         });
-        txHash = await executor.execute([
+        exec = await executor.execute([
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
       }
 
+      const txHash = exec.txHash;
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
+
+      // ── what the chain says actually moved ───────────────────────────────
+      // Prefer the receipt over the quote. The quote is what we hoped for; the
+      // receipt is what happened, and only the receipt's quantity matches the
+      // balance a later sell will try to dispose of.
+      let basisSource: "receipt" | "quote" = "quote";
+      let slippageBps: number | null = null;
+      if (fillPair) {
+        const deltas = netTokenDeltas(exec.logs, executor.address);
+        const measured = fillFromDeltas({
+          deltas,
+          usdgToken: CASH.USDG as string,
+          stockToken: fillPair.stockToken,
+          symbol: fillPair.symbol,
+        });
+        if (measured) {
+          liveFill = measured;
+          basisSource = "receipt";
+          // Execution quality, measured rather than assumed. The received side
+          // is the stock leg on a buy and the cash leg on a sell.
+          const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
+          slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
+        } else {
+          await addEvent(
+            agentId,
+            "warn",
+            `couldn't read the fill off the receipt for ${fillPair.symbol} — cost basis booked from the quote (an estimate)`,
+          );
+        }
+      }
+
       // Only a LANDED swap moves the basis — a revert must never book P&L.
-      const booked = liveFill ? bookFill(agentId, "live", liveFill, "quote") : null;
+      const booked = liveFill ? bookFill(agentId, "live", liveFill, basisSource) : null;
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -1372,6 +1439,9 @@ async function main() {
         buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
         amount_usdg: usdgNum(notional),
         tx_hash: txHash,
+        user_op_hash: exec.userOpHash,
+        gas_wei: exec.gasWei.toString(),
+        ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
         ...sim,
         ...(booked ?? {}),
@@ -1416,9 +1486,16 @@ async function main() {
         agent_id: agentId,
         kind: intent.kind,
         target: intent.target,
+        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
         amount_usdg: usdgNum(notional),
         status: "reverted",
         reject_rule: reason,
+        // KEEP the simulation. This row is the single most informative one in
+        // the ledger — the trade we quoted, sized and submitted, that the chain
+        // then refused — and it used to be written without any of it. The one
+        // failure worth studying was the one we recorded nothing about.
+        ...sim,
       });
     }
   }

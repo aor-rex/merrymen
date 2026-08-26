@@ -8,9 +8,22 @@
  * exactInputSingle through SwapRouter02.
  *
  * LIQUIDITY REALITY (2026-07): stock-token v3 pools are seed-sized. The quoter
- * tells us the truth about impact before any money moves — a missing pool or
- * dust liquidity shows up as no-quote/terrible-quote and the trade is skipped
- * by the impact guard upstream.
+ * tells us the truth about impact before any money moves — a missing pool shows
+ * up as no-quote and the trade is skipped.
+ *
+ * A TERRIBLE quote is NOT skipped, and this comment used to claim it was, by
+ * "the impact guard upstream". There is no such guard. The two settings that
+ * sound like one — minPoolLiquidityUsdg and maxPriceDivergenceBps — gate
+ * whether a FEEDLESS token can be PRICED (see venues/pool-price.ts); they have
+ * nothing to say about whether a trade can be SIZED. A quote 40% through the
+ * book gets a minOut 1% below itself and executes.
+ *
+ * The only real defence today is minOut itself, and it is a flat percentage
+ * with no knowledge of size or depth: the swap reverts, gas is burned, and the
+ * quote is lost. Trades now record fill_slippage_bps (quoted vs received), so
+ * the constant can eventually be replaced by a measured distribution — the
+ * depth engine in venues/depth.ts already computes the right number, and is
+ * deliberately barred from reaching policy (see depth.invariant.test.ts).
  */
 
 import { encodeFunctionData, erc20Abi, parseAbi, type Hex, type PublicClient } from "viem";
