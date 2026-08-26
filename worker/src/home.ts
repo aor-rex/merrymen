@@ -30,6 +30,16 @@ export const homePaths = {
   paused: () => path.join(merrymenHome(), "paused"),
   /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */
   scratch: () => path.join(merrymenHome(), "scratch"),
+  /**
+   * Where a grant is kept BEFORE anything destroys it.
+   *
+   * grant.json is single-slot, and for a grant that has never been replaced it
+   * is the only on-disk copy of the owner key — the key that `merrymen recover`
+   * needs to sweep funds out of a smart account. The CLI and the web API both
+   * archive here before deleting; the worker had no such path at all, so its
+   * own kill switch was the one destructive route with no copy taken.
+   */
+  grantsArchive: () => path.join(merrymenHome(), "grants"),
 };
 
 let ensured = false;

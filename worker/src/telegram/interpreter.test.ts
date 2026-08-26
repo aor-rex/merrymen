@@ -271,14 +271,43 @@ describe("executeCommand — code disposes", () => {
     assert.match(r, /trimmed to your 25 USDG/);
   });
 
-  it("pause/resume/strategy/kill/link perform their one effect", async () => {
+  it("pause/resume/strategy/link perform their one effect", async () => {
     const d = deps();
     await executeCommand({ kind: "pause" }, d);
     await executeCommand({ kind: "resume" }, d);
     await executeCommand({ kind: "strategy", name: "weekend-gap" }, d);
-    await executeCommand({ kind: "kill" }, d);
     await executeCommand({ kind: "link", code: "ABC123" }, d);
-    assert.deepEqual(d.calls, ["setPaused:true", "setPaused:false", "setStrategy:weekend-gap", "kill", "link:ABC123"]);
+    assert.deepEqual(d.calls, ["setPaused:true", "setPaused:false", "setStrategy:weekend-gap", "link:ABC123"]);
+  });
+
+  it("KILL ASKS FIRST — it parks, it does not destroy the grant on one message", async () => {
+    // It used to fire immediately. The grant file is, for a grant that has
+    // never been replaced, the only on-disk copy of the owner key — so a
+    // misread instruction was a permanent loss of funds. A $5 transfer asks
+    // first; ending the agent should too.
+    const d = deps();
+    const asked = await executeCommand({ kind: "kill" }, d);
+    assert.deepEqual(d.calls, ["pend:kill"]);
+    assert.doesNotMatch(asked, /destroyed/);
+    assert.match(asked, /confirm kill/i);
+  });
+
+  it("kill fires only after /confirm, and says where the owner key went", async () => {
+    const d = deps();
+    await executeCommand({ kind: "kill" }, d);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.ok(d.calls.includes("kill"));
+    assert.match(done, /KILL SWITCH/);
+  });
+
+  it("kill is refused at confirm time if control was turned off in between", async () => {
+    // Same re-vetting a parked transfer gets: the gate is checked when the
+    // action fires, not only when it was parked.
+    const d = deps();
+    await executeCommand({ kind: "kill" }, d);
+    const refused = await executeCommand({ kind: "confirm" }, { ...d, controlEnabled: false });
+    assert.match(refused, /control was turned off/);
+    assert.ok(!d.calls.includes("kill"));
   });
 
   it("a prompt-injection message produces NO trade and NO side effect", async () => {

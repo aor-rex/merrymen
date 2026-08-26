@@ -59,7 +59,7 @@ import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
-import { loadGrantFile } from "./grant";
+import { archiveCurrentGrant, loadGrantFile } from "./grant";
 import { limitsFromGrant } from "./limits";
 import { ensureHome, homePaths } from "./home";
 import { resolveLlm } from "./llm";
@@ -2236,8 +2236,23 @@ async function main() {
     kill: () => {
       try {
         if (!loadGrantFile()) return { ok: false, reason: "no grant" };
+        // ARCHIVE FIRST. grant.json is a single slot and, for a grant that has
+        // never been replaced, the only on-disk copy of the owner key — the key
+        // `merrymen recover` needs to sweep the account. Deleting it without a
+        // copy strands the funds permanently, and this path is reachable from a
+        // Telegram message. The CLI and the web API have archived for months;
+        // the worker was the one destructive route that did not.
+        const archived = archiveCurrentGrant();
         rmSync(homePaths.grant(), { force: true });
-        return { ok: true };
+        if (archived) {
+          void addEvent(
+            active?.agentId ?? archived,
+            "warn",
+            `kill switch — grant destroyed. The owner key was archived to ~/.merrymen/grants/ first; ` +
+              `\`merrymen recover\` can still sweep the funds.`,
+          );
+        }
+        return { ok: true, archived };
       } catch (e) {
         return { ok: false, reason: e instanceof Error ? e.message : String(e) };
       }

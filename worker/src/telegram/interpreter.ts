@@ -427,7 +427,11 @@ const COMMAND_TOOL = {
           "name",
           "remember",
           "forget",
-          "kill",
+          // "kill" is deliberately ABSENT. It destroys the grant, and a model
+          // reading "kill it" / "shut it down" / "that's enough" out of ordinary
+          // conversation must not be able to reach it. Same treatment
+          // confirm/cancel already have: /kill parses through parseSlash only,
+          // and then still asks for /confirm.
           "screenshot",
           "look",
           "open",
@@ -634,7 +638,6 @@ export function coerceLlmCommand(input: Record<string, unknown>, userMessage = "
     case "pause":
     case "resume":
     case "alerts":
-    case "kill":
     // PC read/no-arg kinds
     case "screenshot":
     case "sysinfo":

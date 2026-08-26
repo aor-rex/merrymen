@@ -25,7 +25,16 @@ export type PendingAction =
   | { kind: "getfile"; path: string; expiresAt: number }
   | { kind: "type"; text: string; expiresAt: number }
   | { kind: "hotkey"; combo: string; expiresAt: number }
-  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number };
+  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number }
+  /**
+   * The kill switch, parked for confirmation like a transfer.
+   *
+   * It used to fire on a single message. It destroys the grant file, which for
+   * a grant that has never been replaced is the only on-disk copy of the owner
+   * key — so a misread instruction was a permanent loss of funds. A transfer of
+   * $5 asks first; ending the agent should too.
+   */
+  | { kind: "kill"; expiresAt: number };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -51,7 +60,8 @@ export interface CommandDeps {
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
-  kill(): { ok: boolean; reason?: string };
+  /** Destroy the grant. Archives the owner key first — `archived` names the account kept. */
+  kill(): { ok: boolean; reason?: string; archived?: string | null };
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
@@ -212,6 +222,14 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "kill") {
+        // Kill is a control command, not a PC capability — re-vet the control
+        // switch rather than running it through pcRefusal, which knows nothing
+        // about it and would let it through.
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — the grant is untouched.";
+        }
       } else {
         const refusal = pcRefusal({ kind: p.kind } as Command, deps);
         if (refusal) {
@@ -233,6 +251,17 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.hotkey(p.combo);
         case "power":
           return await deps.pc.power(p.action);
+        case "kill": {
+          const r = deps.kill();
+          if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
+          return (
+            `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.\n` +
+            (r.archived
+              ? `Owner key archived to <code>~/.merrymen/grants/</code> — <code>merrymen recover</code> can still sweep the funds.`
+              : `⚠️ nothing could be archived — if this account held funds, check ~/.merrymen/grants/ before re-granting.`) +
+            `\nRe-grant in the dashboard to ride again.`
+          );
+        }
       }
     }
     case "cancel": {
@@ -326,10 +355,13 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "unwatch":
       return deps.removeWatcher(cmd.id);
     case "kill": {
-      const r = deps.kill();
-      return r.ok
-        ? "🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick. Re-grant in the dashboard to ride again."
-        : `nothing to kill: ${r.reason ?? "no grant"}`;
+      deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
+      return (
+        `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
+        `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +
+        `<code>merrymen recover</code> can still sweep the funds.\n\n` +
+        `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
+      );
     }
     case "chat":
       return cmd.reply;
