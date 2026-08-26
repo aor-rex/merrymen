@@ -60,7 +60,7 @@ import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { limitsFromGrant } from "./limits";
 import { ensureHome, homePaths } from "./home";
 import { resolveLlm } from "./llm";
@@ -751,6 +751,40 @@ async function main() {
   }
 
   /**
+   * One owner for "this grant is over".
+   *
+   * Retiring used to live only in the tick, AFTER syncGrant had already armed:
+   * status 'armed' plus a "grant armed" event, then status 'expired' plus a
+   * warn, then `active = null`. Clearing `active` is exactly what defeats
+   * syncGrant's unchanged short-circuit, so the next tick re-armed the same
+   * dead grant and retired it again — forever, every tickSeconds, each round
+   * paying for a fresh deserializePermissionAccount. And the arm path re-emits
+   * its other undeduped warns too (bundler chain mismatch, breaker has no code
+   * on chain), so steady state was up to five event rows a minute. The
+   * dashboard feed reads the last 40 events, so an expired grant meant the
+   * entire visible history was the flap. Same failure family as the ops-cap
+   * storm.
+   *
+   * WHAT IS DEDUPED AND WHAT IS NOT is the whole subtlety here. Only the
+   * announcement is keyed — the status write and clearing `active` run every
+   * time. `grantedAt` is whole seconds, so re-signing the same account inside
+   * one second produces an identical key; gating the status write on it would
+   * leave a dead grant reading 'armed' in the roster forever. An idempotent
+   * UPDATE per tick is cheap. Convergence must never be conditional on a
+   * dedup key.
+   */
+  let retiredGrantKey: string | null = null;
+  async function retireGrant(agentId: string, grant: StoredGrant): Promise<void> {
+    active = null;
+    await setAgentStatus(agentId, "expired");
+    const key = grantKey(grant);
+    if (key === retiredGrantKey) return;
+    retiredGrantKey = key;
+    console.log("[expiry] session key expired — agent retired");
+    await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
+  }
+
+  /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
    * armed after the sync. Kill switch = grant file deleted by web's DELETE.
    */
@@ -768,6 +802,21 @@ async function main() {
         );
         active = null;
       }
+      return false;
+    }
+
+    // AN EXPIRED GRANT MUST NEVER ARM. Checked BEFORE the unchanged
+    // short-circuit, so it also catches a key that lapsed while armed — that
+    // ordering is the fix: the tick's expiry branch nulled `active`, which made
+    // `unchanged` falsy, which re-armed the corpse next tick. It is checked
+    // before the executor and breaker reads too, so a dead grant costs one
+    // sqlite upsert per tick instead of a bundler handshake.
+    //
+    // Re-arming still works: a newly signed grant has a future expiresAt and
+    // falls straight through, and because `active` is null `unchanged` is
+    // falsy, so it arms on the very next tick exactly as before.
+    if (grantExpired(grant, Math.floor(Date.now() / 1000))) {
+      await retireGrant(await ensureAgent(grant), grant);
       return false;
     }
 
@@ -1763,11 +1812,11 @@ async function main() {
     // until it was restarted.
     await refreshBudget(agentId);
 
-    if (Math.floor(Date.now() / 1000) >= grant.expiresAt) {
-      console.log("[expiry] session key expired — agent retired");
-      await setAgentStatus(agentId, "expired");
-      await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
-      active = null;
+    if (grantExpired(grant, Math.floor(Date.now() / 1000))) {
+      // syncGrant checked at the top of this same tick, so reaching here means
+      // the clock crossed expiresAt mid-tick. retireGrant owns the status write
+      // and the single warn; this branch only has to stop the tick.
+      await retireGrant(agentId, grant);
       return;
     }
 

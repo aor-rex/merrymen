@@ -50,3 +50,31 @@ export function archiveCurrentGrant(): string | null {
     return null; // nothing to keep
   }
 }
+
+/**
+ * Is this session key past its expiry?
+ *
+ * `>=` rather than `>` deliberately: `expiresAt` is the first second at which
+ * the on-chain timestamp policy refuses, so a grant is dead AT its expiry, not
+ * one second after. Getting that boundary wrong means the worker submits one
+ * last op that the account contract rejects.
+ */
+export function grantExpired(grant: StoredGrant, nowSec: number): boolean {
+  return nowSec >= grant.expiresAt;
+}
+
+/**
+ * Identity of a signature, for deduping one-shot announcements about it.
+ *
+ * Keyed on the pair rather than the account, because re-signing yields the SAME
+ * smart account (the address derives from the owner key alone) with a new
+ * `grantedAt`. A newly signed key that is itself already lapsed is a different
+ * fact from the one before it and deserves to be reported again.
+ *
+ * `grantedAt` is whole seconds, so two grants minted inside the same second
+ * collide. That is why nothing which must CONVERGE — a status write, clearing
+ * the armed handle — may be gated on this key; only the announcement may.
+ */
+export function grantKey(grant: StoredGrant): string {
+  return `${grant.smartAccount}:${grant.grantedAt}`;
+}
