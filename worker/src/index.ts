@@ -61,6 +61,7 @@ import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
+import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { limitsFromGrant } from "./limits";
 import { ensureHome, homePaths } from "./home";
 import { resolveLlm } from "./llm";
@@ -147,11 +148,20 @@ function swapRouterFor(cfg: ResolvedConfig): `0x${string}` {
   return (cfg.swapVenue === "uniswap" ? UNISWAP.swapRouter02 : RIALTO.routerSnapshot) as `0x${string}`;
 }
 
-/** A policy-legal no-op: approve a dust allowance to the allowlisted router. */
-function selfTestIntent(): TradeIntent {
+/**
+ * A policy-legal no-op: approve a dust allowance to the allowlisted router.
+ *
+ * The target is the router the install will ACTUALLY use, not a fixed one. It
+ * used to approve Rialto unconditionally, which meant a green selftest said
+ * nothing about the default (Uniswap) path — and worse, Rialto is opt-in in the
+ * wall and neither signer passes allowRialto, so RIALTO.routerSnapshot is
+ * absent from allowedSpenders on every grant this repo can produce. The probe
+ * was violating the call policy on 100%% of grants and reporting success.
+ */
+function selfTestIntent(cfg: ResolvedConfig): TradeIntent {
   return {
     kind: "swap",
-    target: CASH.USDG as `0x${string}`,
+    target: swapRouterFor(cfg),
     sellToken: CASH.USDG as `0x${string}`,
     buyToken: CASH.USDG as `0x${string}`,
     sellAmountRaw: 1n, // 0.000001 USDG
@@ -417,6 +427,8 @@ async function main() {
   let lastCashUsdg: bigint | null = null;
   let ledgerWrites = 0;
   let ledgerWritesAtSnapshot = 0;
+  /** The last row recordTrade wrote — see the comment there for why this exists. */
+  let lastTradeOutcome = null as { status: TradeRow["status"]; rejectRule?: string } | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
@@ -1099,6 +1111,18 @@ async function main() {
     // carries the same decision link, so the ledger is joinable to the reasoning.
     // Writing the row is also the moment a reservation becomes settled fact.
     const recordTrade = async (row: TradeRow) => {
+      // What actually happened, for callers that must not mistake "did not
+      // throw" for "worked". processIntent absorbs EVERY failure — a policy
+      // rejection, no-route, no-gas, a bundler refusal, an on-chain revert all
+      // record a row and return normally — so the absence of an exception
+      // carries no information at all. selftest used to read exactly that
+      // absence and print PASSED.
+      //
+      // Widened at the initializer on purpose (`null as T | null`): this is the
+      // first `last*` in this file read from main()'s own body rather than from
+      // inside another closure, and with only nested assignments TypeScript
+      // keeps the initializer's narrowing and resolves the reads to `never`.
+      lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
       const written = await addTrade({ ...row, decision_id });
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
@@ -1591,7 +1615,7 @@ async function main() {
         const data = encodeFunctionData({
           abi: erc20Abi,
           functionName: "approve",
-          args: [RIALTO.routerSnapshot as `0x${string}`, intent.sellAmountRaw],
+          args: [swapRouterFor(cfg), intent.sellAmountRaw],
         });
         exec = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
       } else if (intent.kind === "transfer") {
@@ -2235,11 +2259,58 @@ async function main() {
       console.error("[selftest] needs a grant AND a bundler key (a Pimlico key in /settings, or MERRYMEN_BUNDLER_API_KEY / MERRYMEN_BUNDLER_URL)");
       process.exit(1);
     }
+    // Say up front when the answer cannot mean what it looks like.
+    if ((active as ActiveAgent).grant.chainId !== TRADEABLE_CHAIN_ID) {
+      console.log(
+        `[selftest] NOTE: this grant is on chain ${(active as ActiveAgent).grant.chainId}. ` +
+          `Every token and router address merrymen knows is a chain ${TRADEABLE_CHAIN_ID} deployment, so ` +
+          `an approve here calls an address with no code — it succeeds without approving anything. ` +
+          `This can prove the grant, the wall and the bundler; it cannot prove a trade.`,
+      );
+    }
+    if (cfg.swapVenue === "rialto") {
+      console.log(
+        "[selftest] NOTE: swapVenue is 'rialto', but no grant this repo signs carries a Rialto spender " +
+          "or CALL permission — allowRialto is opt-in and neither signer passes it. Expect the wall to " +
+          "refuse. Switch to swapVenue 'uniswap' or re-sign a grant that opts in.",
+      );
+    }
     console.log("[selftest] sending policy-legal no-op through the full pipeline…");
-    const probe = selfTestIntent();
+    const probe = selfTestIntent(cfg);
     await ensureDecision(probe, "selftest", "pipeline probe (approve dust) — not a market view");
-    await processIntent(probe, 0n);
-    console.log("[selftest] done");
+    // equityKnown: false, not equity 0. The probe knows nothing about the book
+    // and must not claim a zero — that is the invariant this whole codebase
+    // runs on. It happens to be inert right now because the probe buys USDG and
+    // the breaker exempts exits, but it is a false statement in the state
+    // record and becomes a hard drawdown-breaker rejection the moment the probe
+    // stops being a swap into cash.
+    await processIntent(probe, 0n, false);
+    // READ THE LEDGER, not the absence of an exception. processIntent records
+    // every failure and returns normally, so `await` completing tells you
+    // nothing — this used to print "done" and exit 0 for a UserOp the wall had
+    // just refused. It is onboarding step 4, "prove the shot lands".
+    const outcome = lastTradeOutcome;
+    if (!outcome) {
+      console.error("[selftest] FAILED — the probe never reached the ledger at all.");
+      process.exit(1);
+    }
+    if (outcome.status !== "landed") {
+      console.error(
+        `[selftest] FAILED — the probe was ${outcome.status}` +
+          (outcome.rejectRule ? `: ${outcome.rejectRule}` : "") +
+          ". Nothing was proved; fix this before funding the account.",
+      );
+      process.exit(1);
+    }
+    // Say exactly what green means. This proves the approve leg — the first
+    // call of every real swap — reached the chain under the wall. It does NOT
+    // prove `exactInputSingle`: that would need an estimate-only pass through
+    // the bundler, which runs validation without submitting, and that is a
+    // feature on the executor rather than something to imply here.
+    console.log(
+      `[selftest] PASSED — approve(${swapRouterFor(cfg)}, 0.000001 USDG) landed on-chain. ` +
+        "The grant, the wall, the bundler and the ledger all work. The swap call itself is not covered.",
+    );
     process.exit(0);
   }
 
