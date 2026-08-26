@@ -12,7 +12,9 @@ import {
   STOCK_TOKENS,
   TRADEABLE_SYMBOLS,
   TRADEABLE_V2,
+  GRANT_V4_ADAPTER,
   builtinGrantTargets,
+  grantV4Adapter,
   sellableAssets,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -200,5 +202,47 @@ describe("sellableAssets", () => {
     assert.equal(set.has(stock("NVDA").address.toLowerCase()), true);
     assert.equal(set.has(stock("AAPL").address.toLowerCase()), false);
     assert.equal(set.has(CATE.address), false);
+  });
+});
+
+describe("grantV4Adapter", () => {
+  // The GRANT_TRANSFER lesson, applied BEFORE the wound this time: a marker is
+  // a claim, and a claim the wall does not back means the worker builds a
+  // UserOp the account contract refuses — gas spent to be told no. So the
+  // reader demands both halves, and anything less is a flat null.
+  const ADDR = "0x00000000000000000000000000000000000000AD";
+
+  it("marker + valid address = the address, lowercased", () => {
+    const a = grantV4Adapter({ grantFeatures: [GRANT_V4_ADAPTER], v4AdapterAddress: ADDR });
+    assert.equal(a, ADDR.toLowerCase());
+  });
+
+  it("marker alone is a claim, not a permission", () => {
+    assert.equal(grantV4Adapter({ grantFeatures: [GRANT_V4_ADAPTER] }), null);
+  });
+
+  it("address alone is a leftover, not a permission", () => {
+    assert.equal(grantV4Adapter({ grantFeatures: ["tradeable-v2"], v4AdapterAddress: ADDR }), null);
+  });
+
+  it("a junk address is refused even with the marker", () => {
+    for (const bad of ["0xnothex", "0x1234", "", "not-an-address", ADDR + "00"]) {
+      assert.equal(
+        grantV4Adapter({ grantFeatures: [GRANT_V4_ADAPTER], v4AdapterAddress: bad }),
+        null,
+        `"${bad}" must not become a call target`,
+      );
+    }
+  });
+
+  it("null and undefined grants are null, not a throw", () => {
+    assert.equal(grantV4Adapter(null), null);
+    assert.equal(grantV4Adapter(undefined), null);
+  });
+
+  it("GRANT_V4 (the legacy Permit2 route) does NOT satisfy the adapter reader", () => {
+    // The permission sets are disjoint. Conflating the markers would tell the
+    // worker a route exists that the signature does not carry.
+    assert.equal(grantV4Adapter({ grantFeatures: ["v4"], v4AdapterAddress: ADDR }), null);
   });
 });
