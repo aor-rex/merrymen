@@ -170,6 +170,17 @@ describe("readPositions — a held holding is never silently valued at zero", ()
     assert.deepEqual(r.positions, []);
     assert.deepEqual(r.missingPrice, []);
     assert.deepEqual(r.unpricedByDesign, []);
+    // …and SAYS SO. Reporting nothing held is only safe if the caller can tell
+    // it apart from holding nothing; without this flag the tick sailed on and
+    // booked positionsUsdg = 0 for a held book — a phantom 100% crater from one
+    // RPC hiccup, which is the 30% drawdown row sitting in the July ledger.
+    assert.equal(r.readFailed, true);
+  });
+
+  it("a successful read is marked as one, so an empty book is believable", async () => {
+    const r = await readPositions(client([good(0n), good(ONE)]), ACCT, [AAPL], new Map());
+    assert.deepEqual(r.positions, []);
+    assert.equal(r.readFailed, false);
   });
 });
 

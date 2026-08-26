@@ -1395,6 +1395,10 @@ async function main() {
     // Held assets with no feed AT ALL (every memecoin). Separate from the above
     // because this never resolves — see the structural-gap branch below.
     let unpricedByDesign: string[] = [];
+    // Balances/positions the chain refused to tell us about this tick. Distinct
+    // from missingPrice: there the holding is known and the PRICE is missing;
+    // here the holding itself is unknown, so there is nothing to value.
+    let unreadBook: string[] = [];
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -1445,6 +1449,21 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
+      unreadBook = [...bal.unread, ...(posRead.readFailed ? ["positions"] : [])];
+    }
+
+    // The chain didn't answer. Every zero below would be a placeholder, and
+    // booking one writes a phantom crater into the equity curve that becomes
+    // the baseline for every P&L figure afterwards. Same fail-closed posture as
+    // the missing-price branch below — hold and retry.
+    if (unreadBook.length) {
+      console.log(`[tick] could not read ${unreadBook.join(",")}; holding (equity + breaker skipped, not a real loss)`);
+      await addEvent(
+        agentId,
+        "warn",
+        `couldn't read ${unreadBook.join(", ")} this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`,
+      );
+      return;
     }
 
     // TRANSIENT gap: a feed exists but didn't read this tick. A held position we

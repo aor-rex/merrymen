@@ -111,13 +111,30 @@ export interface AccountBalances {
   cashUsdg: bigint;
   /** USDG value of Morpho vault shares (6dp). 0 where the vault isn't deployed. */
   vaultUsdg: bigint;
+  /**
+   * Which balances could NOT be read this call ("cash" | "vault" | "eth").
+   * Empty means every figure above is an observation.
+   *
+   * A non-empty list means the corresponding zero is a PLACEHOLDER, not a
+   * reading, and the caller must not book it. positions.ts has reported its
+   * gaps this way since the equity-crater bug; balances did not, so a failed
+   * multicall collapsed into cashUsdg = 0n — indistinguishable from an empty
+   * wallet, and it wrote a ~0 equity row that then became the baseline for
+   * every last-minus-first P&L reader, permanently.
+   */
+  unread: string[];
 }
 
 export async function readAccountBalances(
   client: PublicClient,
   account: `0x${string}`,
 ): Promise<AccountBalances> {
-  const ethWei = await client.getBalance({ address: account });
+  const unread: string[] = [];
+
+  const ethWei = await client.getBalance({ address: account }).catch(() => {
+    unread.push("eth");
+    return 0n;
+  });
 
   const results = await client
     .multicall({
@@ -128,22 +145,38 @@ export async function readAccountBalances(
     })
     .catch(() => null);
 
-  const cashUsdg =
-    results?.[0]?.status === "success" ? (results[0].result as bigint) : 0n;
-  const shares =
-    results?.[1]?.status === "success" ? (results[1].result as bigint) : 0n;
+  // A reverted call and a dead RPC are both "we don't know", and neither is a
+  // zero balance. USDG genuinely isn't deployed on some chains — but that reads
+  // as a SUCCESSFUL call returning 0, which is why absence has to be signalled
+  // separately rather than inferred from the number.
+  let cashUsdg = 0n;
+  if (results?.[0]?.status === "success") cashUsdg = results[0].result as bigint;
+  else unread.push("cash");
+
+  let shares = 0n;
+  let sharesKnown = false;
+  if (results?.[1]?.status === "success") {
+    shares = results[1].result as bigint;
+    sharesKnown = true;
+  } else {
+    unread.push("vault");
+  }
 
   let vaultUsdg = 0n;
-  if (shares > 0n) {
-    vaultUsdg = (await client
+  if (sharesKnown && shares > 0n) {
+    const assets = await client
       .readContract({
         address: MORPHO.steakhouseUsdgVault as `0x${string}`,
         abi: VAULT_READS,
         functionName: "convertToAssets",
         args: [shares],
       })
-      .catch(() => 0n)) as bigint;
+      .catch(() => null);
+    // Holding shares we can't convert is the worst case to zero: it silently
+    // erases the whole vault leg from equity.
+    if (assets === null) unread.push("vault");
+    else vaultUsdg = assets as bigint;
   }
 
-  return { ethWei, cashUsdg, vaultUsdg };
+  return { ethWei, cashUsdg, vaultUsdg, unread };
 }

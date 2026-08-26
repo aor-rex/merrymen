@@ -79,6 +79,17 @@ export interface PositionsRead {
    * The caller must not value these, but must also not freeze because of them.
    */
   unpricedByDesign: string[];
+  /**
+   * The whole balance read failed, so we cannot tell held from unheld and the
+   * empty `positions` above means NOTHING KNOWN, not "nothing owned".
+   *
+   * This used to be silent. The read returned three empty arrays, the caller's
+   * `missingPrice.length` guard therefore never fired, and the tick sailed on to
+   * write an equity row with positionsUsdg = 0 — a held book cratering to zero
+   * on one RPC hiccup, which is exactly the phantom 30% drawdown sitting in the
+   * July ledger. An unknown must never be representable as a zero.
+   */
+  readFailed: boolean;
 }
 
 /**
@@ -207,7 +218,7 @@ export async function readPositions(
     .catch(() => null)) as CallResult[] | null;
   // Whole read failed — we can't tell held from unheld. Report nothing valued and
   // no coverage; the tick can't trust this, but "" avoids a per-symbol miss list.
-  if (!results) return { positions: [], missingPrice: [], unpricedByDesign: [] };
+  if (!results) return { positions: [], missingPrice: [], unpricedByDesign: [], readFailed: true };
 
   const positions: Position[] = [];
   const missingPrice: string[] = [];
@@ -259,5 +270,5 @@ export async function readPositions(
       }),
     });
   }
-  return { positions, missingPrice, unpricedByDesign };
+  return { positions, missingPrice, unpricedByDesign, readFailed: false };
 }
