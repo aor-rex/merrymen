@@ -57,6 +57,14 @@ export interface MerrymenSettings {
   // ── contracts ──────────────────────────────────────────────────────────
   /** Deployed BreakerRegistry; a tripped breaker halts all intents. */
   breakerAddress?: string;
+  /**
+   * Deployed V4SelfSwap adapter — the contract that makes Uniswap v4
+   * constrainable by the wall. Per-chain (testnet and mainnet deploys have
+   * different addresses), and SETTING IT DOES NOTHING BY ITSELF: the address
+   * is sealed into the grant at signing time, so it only takes effect after a
+   * re-sign. The worker executes against the grant-sealed address, never this.
+   */
+  v4AdapterAddress?: string;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as
