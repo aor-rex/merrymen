@@ -19,16 +19,22 @@ const config: HardhatUserConfig = {
       },
     },
   },
-  // Deploy targets (deployment itself waits for a funded key):
-  // Robinhood Chain testnet 46630 / mainnet 4663.
+  // Deploy targets: Robinhood Chain testnet 46630 / mainnet 4663.
+  //
+  // The deployer key comes from the ENVIRONMENT, never a file: set
+  // MERRYMEN_DEPLOYER_PRIVATE_KEY in the shell that runs the deploy, and close
+  // that shell afterwards. When it is absent, `accounts` is empty and
+  // compile/test behave exactly as before — nothing in CI needs the key.
   networks: {
     robinhoodTestnet: {
       url: "https://rpc.testnet.chain.robinhood.com",
       chainId: 46630,
+      accounts: process.env.MERRYMEN_DEPLOYER_PRIVATE_KEY ? [process.env.MERRYMEN_DEPLOYER_PRIVATE_KEY] : [],
     },
     robinhood: {
       url: "https://rpc.mainnet.chain.robinhood.com",
       chainId: 4663,
+      accounts: process.env.MERRYMEN_DEPLOYER_PRIVATE_KEY ? [process.env.MERRYMEN_DEPLOYER_PRIVATE_KEY] : [],
     },
   },
 };
