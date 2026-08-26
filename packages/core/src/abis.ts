@@ -113,3 +113,37 @@ export const CHAINLINK_ABI = [
     outputs: [{ type: "uint8" }],
   },
 ] as const;
+
+/**
+ * V4SelfSwap — contracts/contracts/V4SelfSwap.sol, the adapter that makes
+ * Uniswap v4 constrainable by the wall.
+ *
+ * ONE ABI, SHARED by the wall (which derives the call-policy selector and the
+ * argument offsets from it) and the worker's execution path (which encodes the
+ * live calldata with it). Two copies would be two chances for the policy and
+ * the call to disagree about the same function — the exact drift
+ * UNISWAP_SWAP_ROUTER_ABI exists here to prevent.
+ *
+ * All eight parameters are STATIC on purpose: the call policy maps args[i] to
+ * calldata word i with no ABI awareness, and a flat static list is the only
+ * shape it can actually read. The recipient is not among them — it is
+ * msg.sender in the contract's bytecode, which is the whole point.
+ */
+export const V4SELFSWAP_ABI = [
+  {
+    type: "function",
+    name: "swapExactIn",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "tokenIn", type: "address" },
+      { name: "tokenOut", type: "address" },
+      { name: "fee", type: "uint24" },
+      { name: "tickSpacing", type: "int24" },
+      { name: "hooks", type: "address" },
+      { name: "amountIn", type: "uint128" },
+      { name: "minAmountOut", type: "uint128" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+] as const;

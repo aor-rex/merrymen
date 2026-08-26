@@ -2,7 +2,7 @@ import { erc20Abi, parseAbi, type Address } from "viem";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toRateLimitPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
-import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI } from "./abis";
+import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
@@ -86,7 +86,11 @@ export const WALL_POLICY_FLAG = PolicyFlags.NOT_FOR_VALIDATE_SIG;
  * never pulls tokens directly, so the account approves PERMIT2 and Permit2
  * grants the router its allowance — the router itself is approved for nothing.
  */
-export function allowedSpenders(allowRialto = false, allowUniswapV4 = false): Address[] {
+export function allowedSpenders(
+  allowRialto = false,
+  allowUniswapV4 = false,
+  v4AdapterAddress?: Address,
+): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
     // approved spender can pull whatever it was approved for, and the stock
@@ -101,6 +105,15 @@ export function allowedSpenders(allowRialto = false, allowUniswapV4 = false): Ad
     // v4 CALL permissions are absent, so the two are now granted together or
     // not at all — see WallOptions.allowUniswapV4.
     ...(allowUniswapV4 ? [UNISWAP.permit2 as Address] : []),
+    // The V4SelfSwap adapter pulls tokenIn with a plain transferFrom, so it
+    // must be nameable as a spender. That is ALL it gets here: joining this
+    // list puts it inside the existing capped USDG approve (buy-side bound)
+    // and the per-token approves (sell-side, over exactly the sealed set) —
+    // zero new approve permissions. Its own call permission is added below,
+    // and the licence-to-move-shares caveat above is answered by the contract
+    // itself: everything it pulls it settles into the pool, and everything
+    // that comes out lands with msg.sender. See contracts/V4SelfSwap.sol.
+    ...(v4AdapterAddress ? [v4AdapterAddress] : []),
   ];
 }
 
@@ -173,6 +186,22 @@ export interface WallOptions {
    * chain enforces the wall, and with this granted it does not.
    */
   allowUniswapV4?: boolean;
+  /**
+   * The V4SelfSwap adapter to grant, or absent for none — the CLOSED default,
+   * like everything here.
+   *
+   * This is the route that replaces allowUniswapV4: instead of Permit2 plus a
+   * router whose calldata the policy cannot read, one contract with one
+   * declared selector whose eight arguments are all static words — and whose
+   * recipient is `msg.sender` in bytecode, so the one thing the old route
+   * could never constrain simply does not exist as a parameter.
+   *
+   * An ADDRESS rather than a boolean because the adapter is per-deploy and
+   * per-chain: the wall must name the exact contract the signature covers,
+   * and the grant records it (StoredGrant.v4AdapterAddress) so the worker
+   * calls that address and no other.
+   */
+  v4AdapterAddress?: Address;
 }
 
 /**
@@ -220,8 +249,30 @@ export function buildCallPermissions(
   smartAccount: Address,
   opts: WallOptions = {},
 ) {
-  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4);
+  // The adapter address is validated HERE, at the last point before it
+  // becomes on-chain policy — a malformed address in a call permission is a
+  // policy that can never match anything, i.e. a bricked route that looks
+  // granted. Throwing beats sealing garbage into a signature.
+  let adapter: Address | undefined;
+  if (opts.v4AdapterAddress !== undefined) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(opts.v4AdapterAddress)) {
+      throw new Error(`v4AdapterAddress is not an address: ${JSON.stringify(opts.v4AdapterAddress)}`);
+    }
+    adapter = opts.v4AdapterAddress.toLowerCase() as Address;
+  }
+  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter);
   const extras = usableExtraTokens(opts.extraTokens);
+  // Every asset this signature may hold a leg in: USDG plus everything the
+  // approve permissions below cover. This is what the adapter's tokenIn and
+  // tokenOut are pinned to — same source, same call, so the approve set and
+  // the swap set cannot drift apart within one grant.
+  const adapterAssets: Address[] = [
+    CASH.USDG as Address,
+    ...STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).map(
+      (t) => t.address as Address,
+    ),
+    ...extras.map((t) => t.address as Address),
+  ];
   const self = { condition: ParamCondition.EQUAL, value: smartAccount } as const;
   // Deduped and lowercased so a list with the same address twice doesn't bloat
   // the on-chain policy, and a case difference can't read as a second address.
@@ -358,6 +409,58 @@ export function buildCallPermissions(
       functionName: "exactInput",
       args: [null, null, self],
     },
+    // ── the V4SelfSwap adapter, when the owner opted in ──────────────────
+    //
+    // ONE permission, and STRICTER than the v3 routes above it. `swapExactIn`
+    // has eight all-static arguments, so each maps to its own calldata word
+    // and each is individually pinnable — proven against viem's encoder in
+    // wall.test.ts, the same way the two routes above are.
+    //
+    // tokenIn and tokenOut are pinned ONE_OF over the same asset set the
+    // approve targets derive from — USDG plus every token this signature can
+    // approve for a sell. Computed inside this same call from the same
+    // `extras`, so the two lists cannot drift within one grant. That closes
+    // the attack the v3 routes still accept: a stolen session key minting a
+    // worthless token and swapping the whole approved balance into it costs
+    // the attacker only gas. Here, both legs must be assets the OWNER named.
+    // The cost of that strictness is zero, not small: a new token needs a
+    // re-sign to be SELLABLE anyway (the no-exit rule), so being pinned here
+    // adds no friction that does not already exist.
+    //
+    // The words left null are null for stated reasons. amountIn (word 5) is
+    // denominated in tokenIn's own units — a USDG-derived cap would be
+    // meaningless on a sell — and the approve caps above are the real bound:
+    // the adapter can only pull what was approved, and pulls are further
+    // bounded by its own PullExceedsAmountIn check. minAmountOut (word 6) is
+    // denominated in the OUTPUT token, so no single figure means anything
+    // across pairs; the adapter's NoOutput guard is what stops a null here
+    // meaning "zero is acceptable". hooks (word 4) is null DELIBERATELY:
+    // hooked pools are the entire point (new pairs launch through them), and
+    // a hostile hook is inside the adapter's tested threat model — it can
+    // worsen a price, never redirect the output or overdraw the pull.
+    //
+    // And the word that is not here at all is the reason this contract
+    // exists: there is no recipient argument. It is msg.sender, in bytecode.
+    ...(adapter
+      ? [
+          {
+            target: adapter,
+            valueLimit: 0n,
+            abi: V4SELFSWAP_ABI,
+            functionName: "swapExactIn",
+            args: [
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              null, // fee — any tier the pool actually has
+              null, // tickSpacing — pool identity, bounded by the quote
+              null, // hooks — see above
+              null, // amountIn — bounded by the approve caps
+              null, // minAmountOut — see above
+              null, // deadline
+            ],
+          } as const,
+        ]
+      : []),
     {
       // Morpho vault deposits, capped per call at the daily limit — and the
       // SHARES must come back to the agent's own account.
@@ -454,6 +557,7 @@ export function buildWallPolicies(args: {
         withdrawalAddresses: args.withdrawalAddresses,
         allowRialto: args.allowRialto,
         allowUniswapV4: args.allowUniswapV4,
+        v4AdapterAddress: args.v4AdapterAddress,
       }) as never,
     }),
   ];
