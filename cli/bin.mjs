@@ -136,6 +136,11 @@ function writeSettings(next) {
  */
 function hasMeaningfulConfig() {
   const s = readJson(SETTINGS) ?? {};
+  // bundlerUrl takes precedence over bundlerApiKey (settings.ts:22), so a
+  // URL-configured install counts too. A funded agent (grant.json) has also
+  // unambiguously onboarded — never nag someone with a live wallet.
+  if (s.bundlerUrl) return true;
+  if (existsSync(GRANT)) return true;
   return Boolean(
     s.llmProvider || s.groqApiKey || s.anthropicApiKey || s.llmApiKey ||
       s.bundlerApiKey || s.telegramBotToken || s.strategy,
@@ -193,7 +198,17 @@ function localBin(name) {
 
 function makePrompter() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = (q) => new Promise((res) => rl.question(q, res));
+  const ask = (q) =>
+    new Promise((res) => {
+      let done = false;
+      const onClose = () => {
+        if (!done) { done = true; res(null); }
+      };
+      rl.once("close", onClose);
+      rl.question(q, (answer) => {
+        if (!done) { done = true; rl.off("close", onClose); res(answer); }
+      });
+    });
   const askSecret = (q) =>
     new Promise((res) => {
       const orig = rl._writeToOutput.bind(rl);
@@ -606,21 +621,30 @@ async function start() {
   // installer's local/Docker choice. No TTY (headless/Docker) skips straight to
   // the browser path — the wizard will be there.
   const firstRun = !hasMeaningfulConfig() && readJson(SETTINGS)?.webOnboarded !== true;
-  if (firstRun && process.stdin.isTTY) {
+  const interactive = process.stdin.isTTY && !process.env.CI && process.env.MERRYMEN_NONINTERACTIVE !== "1";
+  if (firstRun && interactive) {
     console.log(`\n  ${bold("first run — how do you want to gather your band?")}`);
     console.log(dim("  1) in the browser — the dashboard wizard (localhost:3100)"));
     console.log(dim("  2) right here in the terminal (merrymen onboard)"));
     const p = makePrompter();
     let choice = "";
+    let eof = false;
     while (choice !== "1" && choice !== "2") {
-      choice = (await p.ask(`  choice [1/2]: `)).trim();
+      const raw = await p.ask(`  choice [1/2]: `);
+      if (raw === null || raw === undefined) { eof = true; break; }
+      choice = raw.trim();
+      if (choice === "") { eof = true; break; }
       if (choice !== "1" && choice !== "2") {
         warn("pick 1 or 2.");
         choice = "";
       }
     }
     p.close();
-    if (choice === "2") await onboard();
+    if (eof) {
+      console.log(dim("  (no input — opening the browser setup)"));
+    } else if (choice === "2") {
+      await onboard();
+    }
   }
 
   const web = path.join(ROOT, "web");
