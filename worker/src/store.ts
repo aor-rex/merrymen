@@ -80,6 +80,35 @@ function getDb(): DatabaseSync {
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS fee_accruals_agent_time ON fee_accruals (agent_id, at DESC);
+    -- Money crossing the account's boundary: the owner funding it, or taking
+    -- money back out. NOT trades, and NOT vault moves (those are equity-neutral
+    -- shuffles inside the wall).
+    --
+    -- Without this table equity is a bare balance reading with no flow term, so
+    -- a deposit is arithmetically indistinguishable from a gain: /pnl reported
+    -- +999.48 on a book that was down 0.52, and the performance fee charged the
+    -- owner on their own principal. Every performance figure is now measured
+    -- against (equity - netContributions) instead of against equity.
+    --
+    -- 'source' records HOW we know, in the same spirit as trades.basis_source
+    -- and positions.price_source. The three are not equally good evidence:
+    --   'chain-log'       a Transfer log naming this account. Exact, has a tx.
+    --   'transfer-intent' our own outbound transfer. Exact, has a tx.
+    --   'inferred'        a cash change no fill explains. Honest guesswork; only
+    --                     ever recorded when NO trade ran in the interval, so it
+    --                     cannot be confused with a fill, and it carries no tx.
+    -- An audit that needs a chain-verifiable figure keeps the first two.
+    CREATE TABLE IF NOT EXISTS flows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      direction TEXT NOT NULL,       -- 'in' | 'out'
+      amount_usdg REAL NOT NULL,     -- always positive; direction carries the sign
+      tx_hash TEXT,                  -- null only when source = 'inferred'
+      block_number INTEGER,
+      source TEXT NOT NULL,
+      at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS flows_agent_time ON flows (agent_id, at DESC);
     CREATE TABLE IF NOT EXISTS positions (
       agent_id TEXT NOT NULL,
       symbol TEXT NOT NULL,
@@ -362,6 +391,93 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<voi
   } catch (e) {
     console.error("[store] hwm update failed:", e);
   }
+}
+
+/**
+ * Move the HWM by a signed amount, floored at zero — the ONE exception to its
+ * monotonicity, and only ever for capital crossing the boundary.
+ *
+ * The HWM is monotonic with respect to PERFORMANCE: recovering to a previous
+ * peak is not profit and must not be charged for. It cannot be monotonic with
+ * respect to CAPITAL. A 1,000 USDG deposit lifts equity by 1,000 without
+ * earning a penny, so the peak it is measured against has to lift too, or the
+ * next tick books the owner's own money as profit and takes a fee on it. A
+ * withdrawal is the mirror: leave the peak up and the account is permanently
+ * "in drawdown" by the amount its owner took home, which trips the breaker.
+ */
+export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
+  try {
+    getDb()
+      .prepare("UPDATE agents SET hwm_usdg = MAX(0, hwm_usdg + ?) WHERE smart_account = ?")
+      .run(deltaUsdg, agentId);
+  } catch (e) {
+    console.error("[store] hwm adjust failed:", e);
+  }
+}
+
+/** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
+export type FlowSource = "chain-log" | "transfer-intent" | "inferred";
+
+export interface FlowRow {
+  agentId: string;
+  direction: "in" | "out";
+  amountUsdg: number;
+  source: FlowSource;
+  txHash?: string;
+  blockNumber?: number;
+}
+
+/** Record money crossing the account boundary. */
+export async function addFlow(flow: FlowRow): Promise<void> {
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        flow.agentId,
+        flow.direction,
+        Math.abs(flow.amountUsdg),
+        flow.txHash ?? null,
+        flow.blockNumber ?? null,
+        flow.source,
+      );
+  } catch (e) {
+    console.error("[store] flow insert failed:", e);
+  }
+}
+
+/**
+ * Capital the owner has put in, less what they have taken out. Subtract it from
+ * equity and what remains is the only thing that deserves to be called P&L.
+ */
+export async function getNetContributionsUsdg(agentId: string): Promise<number> {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+       FROM flows WHERE agent_id = ?`,
+    )
+    .get(agentId) as { net: number } | undefined;
+  return row?.net ?? 0;
+}
+
+/** The flow record itself, newest first — for the audit export and /pnl's detail line. */
+export async function listFlows(agentId: string, limit = 200): Promise<
+  { direction: string; amount_usdg: number; source: string; tx_hash: string | null; at: number }[]
+> {
+  return getDb()
+    .prepare(
+      `SELECT direction, amount_usdg, source, tx_hash, at FROM flows
+       WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT ?`,
+    )
+    .all(agentId, limit) as {
+    direction: string;
+    amount_usdg: number;
+    source: string;
+    tx_hash: string | null;
+    at: number;
+  }[];
 }
 
 /** Record one accrual event and roll it into the agent's running total. */

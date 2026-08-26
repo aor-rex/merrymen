@@ -102,6 +102,8 @@ import {
   ensureAgent,
   type BasisMode,
   type BudgetRail,
+  addFlow,
+  adjustAgentHwm,
   getAgentFinancials,
   getOpsToday,
   getPaperBook,
@@ -319,7 +321,77 @@ async function main() {
     settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
     settledOps = await getOpsToday(agentId, rail);
   };
+
+  /**
+   * Notice money crossing the account boundary and move the high-water mark with
+   * it, BEFORE anything judges performance.
+   *
+   * Capital is not profit. A deposit lifts equity without earning anything, so
+   * the peak it is measured against has to lift too — otherwise the next tick
+   * books the owner's own money as a gain and charges a fee on it. A withdrawal
+   * is the mirror: leave the peak up and the account sits permanently "in
+   * drawdown" by whatever its owner took home, which trips the breaker.
+   *
+   * WHAT THIS CAN AND CANNOT SEE. Only two cases are recorded, both narrow on
+   * purpose:
+   *   • the first funded observation — an account going from nothing to
+   *     something is being funded, there is no other explanation;
+   *   • a cash change with NO ledger row written in between — no fill, no vault
+   *     move, no transfer, so nothing internal can account for it.
+   * A deposit that lands in the same tick as a fill is NOT inferred, because
+   * separating the two would mean trusting fill economics that are currently
+   * taken from a pre-trade bound rather than a receipt. Reading USDG Transfer
+   * logs makes this exact and gives every flow a tx hash; until then an inferred
+   * flow says so in its `source`, and an audit can drop it on sight.
+   */
+  const reconcileFlows = async (
+    agentId: string,
+    cashUsdg: bigint,
+    equityUsdg: bigint,
+  ): Promise<void> => {
+    const record = async (deltaUsdg: bigint, why: string) => {
+      if (deltaUsdg === 0n) return;
+      const inbound = deltaUsdg > 0n;
+      const amount = inbound ? deltaUsdg : -deltaUsdg;
+      await addFlow({
+        agentId,
+        direction: inbound ? "in" : "out",
+        amountUsdg: usdgNum(amount),
+        source: "inferred",
+      });
+      await adjustAgentHwm(agentId, usdgNum(deltaUsdg));
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      await addEvent(
+        agentId,
+        "ok",
+        `${inbound ? "📥 funded" : "📤 withdrawn"} ${fmt(amount)} USDG (${why}) — ` +
+          `capital, not performance: the high-water mark moved with it`,
+      );
+    };
+
+    if (lastCashUsdg === null) {
+      // First funded observation. Booking the opening balance as a flow (rather
+      // than special-casing the HWM seed, as this used to) means the very first
+      // deposit is the same kind of fact as every one after it, and the flow
+      // ledger is complete from row one.
+      if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
+        await record(equityUsdg, "opening balance");
+      }
+    } else if (ledgerWrites === ledgerWritesAtSnapshot) {
+      await record(cashUsdg - lastCashUsdg, "no trade explains this");
+    }
+
+    lastCashUsdg = cashUsdg;
+    ledgerWritesAtSnapshot = ledgerWrites;
+  };
   let highWaterMarkUsdg = 0n;
+  // Cash as of the last live snapshot, and how many rows the ledger had then.
+  // Together they are the whole basis for inferring an external flow: if cash
+  // moved and NOTHING was written to the ledger in between, the money came from
+  // outside. Deliberately narrow — see reconcileFlows.
+  let lastCashUsdg: bigint | null = null;
+  let ledgerWrites = 0;
+  let ledgerWritesAtSnapshot = 0;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
@@ -875,6 +947,12 @@ async function main() {
     // Writing the row is also the moment a reservation becomes settled fact.
     const recordTrade = async (row: TradeRow) => {
       const written = await addTrade({ ...row, decision_id });
+      // A landed or simulated row is an internal explanation for a cash change.
+      // Flow inference keys off this: if the count didn't move, nothing the
+      // agent did can account for the money, so it came from outside.
+      if (row.status === "landed" || row.status === "paper" || row.status === "submitted") {
+        ledgerWrites += 1;
+      }
       await refreshBudget(agentId);
       releaseBudget();
       return written;
@@ -1298,6 +1376,25 @@ async function main() {
         ...sim,
         ...(booked ?? {}),
       });
+      // A transfer is the one intent that moves money OUT of the account, so it
+      // is a flow, not a trade — the only outbound flow we know exactly, with a
+      // tx hash, because we signed it ourselves. Without this the owner taking
+      // profit home reads as a loss of precisely that size, and the drawdown
+      // breaker eventually fires on it.
+      if (intent.kind === "transfer") {
+        await addFlow({
+          agentId,
+          direction: "out",
+          amountUsdg: usdgNum(intent.amountUsdg),
+          source: "transfer-intent",
+          txHash,
+        });
+        await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
+        highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+        // The next tick's cash reading already reflects this, and it now has an
+        // explanation, so inference must not double-count it.
+        if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
+      }
     } catch (e) {
       // Roll back the optimistic reservation — the money didn't move. The
       // 'reverted' row written below goes through recordTrade, which would
@@ -1601,15 +1698,15 @@ async function main() {
       }
       highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
     } else {
-      // The first funded observation is COST BASIS, not profit. Seed the HWM to
-      // it so the performance fee only ever accrues on gains ABOVE what was put
-      // in — otherwise a fresh agent (HWM 0) books its entire initial deposit as
-      // "profit" and accrues a fee on the user's own money (e.g. 15.49 on a 154.87
-      // deposit at 10%). Persist it so a restart doesn't re-seed from 0.
-      if (highWaterMarkUsdg === 0n && equityUsdg > 0n) {
-        highWaterMarkUsdg = equityUsdg;
-        await setAgentHwm(agentId, usdgNum(equityUsdg));
-      }
+      // Capital first, performance second. Any deposit or withdrawal since the
+      // last look moves the high-water mark with it, so what follows can only
+      // ever see money the agent actually made.
+      //
+      // This replaces a one-shot seed that fired only while the HWM was still
+      // zero. It fixed the FIRST deposit and no other: every later top-up was
+      // booked as profit and charged a fee — 150 USDG of fees on zero trades,
+      // for an owner who funded 154.87 and then added 1,000 and 500.
+      await reconcileFlows(agentId, balances.cashUsdg, equityUsdg);
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);

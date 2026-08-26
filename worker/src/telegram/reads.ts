@@ -24,6 +24,63 @@ function usd(n: number): string {
   return `${n >= 0 ? "" : "−"}$${Math.abs(n).toFixed(2)}`;
 }
 
+/**
+ * Whose numbers these are. merrymen is one agent per install, but re-granting
+ * mints a NEW smart account and leaves the old one's rows in the same tables —
+ * and every figure in this file used to read the lot, unfiltered, so two
+ * agents' equity curves interleaved and last-minus-first spanned both.
+ *
+ * The armed agent wins; failing that the newest, so a killed or expired agent
+ * still reports on itself rather than on its predecessor.
+ */
+function currentAgentId(db: DatabaseSync): string | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT smart_account FROM agents
+          ORDER BY (status = 'armed') DESC, created_at DESC LIMIT 1`,
+      )
+      .get() as { smart_account: string } | undefined;
+    if (row?.smart_account) return row.smart_account;
+  } catch {
+    /* no agents table on a pre-migration ledger — fall through */
+  }
+  try {
+    // A ledger with trades but no agent record still deserves an answer;
+    // reporting nothing would be a worse failure than reporting on the only
+    // agent present.
+    const row = db
+      .prepare("SELECT agent_id FROM trades ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get() as { agent_id: string } | undefined;
+    return row?.agent_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Capital the owner put in, less what they took out. Subtracting this from
+ * equity is the difference between "the account is worth more than it was" and
+ * "the agent made money" — the two were the same number until 2026-08-26, which
+ * is how /pnl came to report a 1,000 USDG deposit as a 1,000 USDG profit.
+ */
+function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number {
+  try {
+    const sql =
+      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+         FROM flows WHERE agent_id = ?` + (sinceUnix !== undefined ? " AND at >= ?" : "");
+    const stmt = db.prepare(sql);
+    const row = (
+      sinceUnix !== undefined ? stmt.get(agentId, sinceUnix) : stmt.get(agentId)
+    ) as { net: number } | undefined;
+    return row?.net ?? 0;
+  } catch {
+    // Pre-migration ledger: no flows table. Zero is the honest answer — it just
+    // means nothing is known to have crossed the boundary.
+    return 0;
+  }
+}
+
 export interface StatusContext {
   /** The merryman's user-given name (soul IDENTITY.md). */
   name: string;
@@ -133,10 +190,14 @@ export function readPnl(): string {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
+    const agentId = currentAgentId(db);
+    if (!agentId) return "📈 no agent yet — grant one at localhost:3100/grant.";
     const eq = db
-      .prepare("SELECT equity_usdg FROM equity ORDER BY at ASC, id ASC")
-      .all() as { equity_usdg: number }[];
-    const fee = db.prepare("SELECT COALESCE(SUM(fee_usdg),0) AS f FROM fee_accruals").get() as { f: number } | undefined;
+      .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at ASC, id ASC")
+      .all(agentId) as { equity_usdg: number }[];
+    const fee = db
+      .prepare("SELECT COALESCE(SUM(fee_usdg),0) AS f FROM fee_accruals WHERE agent_id = ?")
+      .get(agentId) as { f: number } | undefined;
     // Realized = closed round trips, booked against weighted-average cost. Split
     // out from the equity swing so an open position's paper gain isn't mistaken
     // for money actually taken off the table. Reported independently of equity
@@ -149,10 +210,11 @@ export function readPnl(): string {
       const rows = db
         .prepare(
           `SELECT status, COALESCE(SUM(realized_pnl_usdg),0) AS pnl, COUNT(*) AS n
-             FROM trades WHERE realized_pnl_usdg IS NOT NULL AND status IN ('paper','landed')
+             FROM trades WHERE agent_id = ? AND realized_pnl_usdg IS NOT NULL
+               AND status IN ('paper','landed')
             GROUP BY status`,
         )
-        .all() as { status: string; pnl: number; n: number }[];
+        .all(agentId) as { status: string; pnl: number; n: number }[];
       const parts = rows
         .filter((r) => r.n > 0)
         .map(
@@ -164,14 +226,24 @@ export function readPnl(): string {
       /* pre-migration ledger — no realized column yet */
     }
 
-    if (eq.length < 2) {
+    if (eq.length < 1) {
       return realizedLine
         ? `📈 <b>P&amp;L</b>\n${realizedLine}\n• equity curve: not enough history yet — check back after a few ticks.`
         : "📈 not enough history yet — check back after a few ticks.";
     }
-    const delta = eq[eq.length - 1]!.equity_usdg - eq[0]!.equity_usdg;
-    const pct = eq[0]!.equity_usdg > 0 ? (delta / eq[0]!.equity_usdg) * 100 : 0;
-    const lines = [`📈 <b>P&amp;L</b>`, `• change: ${usd(delta)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`];
+    // P&L is what the account is worth MINUS what was put into it. It used to be
+    // last-minus-first over the equity curve, which counts every deposit as a
+    // gain and every withdrawal as a loss: on a book that was down 0.52 USDG
+    // after a 1,000 USDG deposit, this line read +999.48.
+    const equityNow = eq[eq.length - 1]!.equity_usdg;
+    const contributed = netContributions(db, agentId);
+    const delta = equityNow - contributed;
+    const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
+    const lines = [
+      `📈 <b>P&amp;L</b>`,
+      `• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`,
+      `• equity ${usd(equityNow)} · you put in ${usd(contributed)}`,
+    ];
     if (realizedLine) lines.push(realizedLine);
     lines.push(`• fees accrued: $${(fee?.f ?? 0).toFixed(2)}`);
     return lines.join("\n");
@@ -242,12 +314,18 @@ interface EquityPoint {
   at: number;
 }
 
-function equitySeries(db: DatabaseSync, sinceUnix?: number): EquityPoint[] {
+function equitySeries(db: DatabaseSync, agentId: string, sinceUnix?: number): EquityPoint[] {
   try {
     const rows =
       sinceUnix !== undefined
-        ? db.prepare("SELECT equity_usdg, at FROM equity WHERE at >= ? ORDER BY at ASC, id ASC").all(sinceUnix)
-        : db.prepare("SELECT equity_usdg, at FROM equity ORDER BY at ASC, id ASC").all();
+        ? db
+            .prepare(
+              "SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND at >= ? ORDER BY at ASC, id ASC",
+            )
+            .all(agentId, sinceUnix)
+        : db
+            .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? ORDER BY at ASC, id ASC")
+            .all(agentId);
     return rows as unknown as EquityPoint[];
   } catch {
     return [];
@@ -267,29 +345,41 @@ export function readReport(ctx: StatusContext): string {
   const lines: string[] = ["🔥 <b>campfire report</b>"];
   if (!db) return "🔥 no ledger yet — the band hasn't ridden. Nothing to report.";
   try {
-    const all = equitySeries(db);
-    const today = equitySeries(db, localMidnightUnix());
+    const agentId = currentAgentId(db);
+    if (!agentId) return "🔥 no agent yet — grant one at localhost:3100/grant.";
+    const midnight = localMidnightUnix();
+    const all = equitySeries(db, agentId);
+    const today = equitySeries(db, agentId, midnight);
     if (all.length >= 1) {
       const eq = all[all.length - 1]!.equity_usdg;
       lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
     }
+    // Both windows net out capital that crossed the boundary inside them, so a
+    // deposit doesn't read as a day's winnings.
     if (today.length >= 2) {
-      const d = today[today.length - 1]!.equity_usdg - today[0]!.equity_usdg;
-      const pct = today[0]!.equity_usdg > 0 ? (d / today[0]!.equity_usdg) * 100 : 0;
+      const d =
+        today[today.length - 1]!.equity_usdg -
+        today[0]!.equity_usdg -
+        netContributions(db, agentId, midnight);
+      const base = today[0]!.equity_usdg;
+      const pct = base > 0 ? (d / base) * 100 : 0;
       lines.push(`• today: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     } else {
       lines.push(`• today: not enough ticks yet`);
     }
-    if (all.length >= 2) {
-      const d = all[all.length - 1]!.equity_usdg - all[0]!.equity_usdg;
-      const pct = all[0]!.equity_usdg > 0 ? (d / all[0]!.equity_usdg) * 100 : 0;
+    if (all.length >= 1) {
+      const contributed = netContributions(db, agentId);
+      const d = all[all.length - 1]!.equity_usdg - contributed;
+      const pct = contributed > 0 ? (d / contributed) * 100 : 0;
       lines.push(`• all-time: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     }
     // Positions — biggest and smallest holdings.
     try {
       const pos = db
-        .prepare("SELECT symbol, value_usdg FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC")
-        .all() as { symbol: string; value_usdg: number }[];
+        .prepare(
+          "SELECT symbol, value_usdg FROM positions WHERE agent_id = ? AND value_usdg > 0 ORDER BY value_usdg DESC",
+        )
+        .all(agentId) as { symbol: string; value_usdg: number }[];
       if (pos.length) {
         const top = pos[0]!;
         lines.push(`• biggest holding: ${esc(top.symbol)} ($${top.value_usdg.toFixed(2)})${pos.length > 1 ? ` of ${pos.length} positions` : ""}`);
@@ -303,9 +393,9 @@ export function readReport(ctx: StatusContext): string {
     try {
       const t = db
         .prepare(
-          "SELECT SUM(CASE WHEN status='landed' THEN 1 ELSE 0 END) AS landed, SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected FROM trades WHERE created_at >= ?",
+          "SELECT SUM(CASE WHEN status='landed' THEN 1 ELSE 0 END) AS landed, SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected FROM trades WHERE agent_id = ? AND created_at >= ?",
         )
-        .get(localMidnightUnix()) as { landed: number | null; rejected: number | null } | undefined;
+        .get(agentId, midnight) as { landed: number | null; rejected: number | null } | undefined;
       lines.push(`• arrows today: ${t?.landed ?? 0} landed · ${t?.rejected ?? 0} turned back by the wall`);
     } catch {
       /* no trades table yet */
@@ -313,8 +403,10 @@ export function readReport(ctx: StatusContext): string {
     // What the strategist was thinking (last event).
     try {
       const ev = db
-        .prepare("SELECT message FROM events ORDER BY created_at DESC, id DESC LIMIT 1")
-        .get() as { message: string } | undefined;
+        .prepare(
+          "SELECT message FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .get(agentId) as { message: string } | undefined;
       if (ev) lines.push(`• last word from camp: ${esc(ev.message.slice(0, 160))}`);
     } catch {
       /* no events table yet */
@@ -331,12 +423,18 @@ export function readBrag(ctx: StatusContext): string {
   const db = openRO();
   if (!db) return "🏹 no ledger yet — nothing to brag about (yet).";
   try {
-    const all = equitySeries(db);
+    const agentId = currentAgentId(db);
+    if (!agentId) return "🏹 no agent yet — grant one at localhost:3100/grant.";
+    const all = equitySeries(db, agentId);
     if (all.length < 2) return "🏹 the band just saddled up — give it a few ticks, then we'll brag.";
     const first = all[0]!;
     const last = all[all.length - 1]!;
-    const delta = last.equity_usdg - first.equity_usdg;
-    const pct = first.equity_usdg > 0 ? (delta / first.equity_usdg) * 100 : 0;
+    // The scorecard people SHARE. Getting this one wrong doesn't just mislead
+    // the owner, it misleads everyone they show it to — so it nets out capital
+    // like every other figure rather than bragging about a deposit.
+    const contributed = netContributions(db, agentId);
+    const delta = last.equity_usdg - contributed;
+    const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
     const days = Math.max(1, Math.round((last.at - first.at) / 86400));
     const bar = pct >= 0 ? "🟩".repeat(Math.max(1, Math.min(8, Math.ceil(Math.abs(pct))))) : "🟥".repeat(Math.max(1, Math.min(8, Math.ceil(Math.abs(pct)))));
     let best = "";
