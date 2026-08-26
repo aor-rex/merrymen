@@ -173,6 +173,36 @@ describe("buildTradeCalls — the priced route is the executed route", () => {
     assert.equal(targets(v4).includes((UNISWAP.swapRouter02 as string).toLowerCase()), false);
   });
 
+  it("v4 WITH an adapter: two calls, through the adapter, Permit2 nowhere", () => {
+    // The dispatch rule the whole grant model rides on: the sealed adapter is
+    // passed only when the grant carries one, and then the v4 route stops
+    // touching Permit2 and the UniversalRouter entirely.
+    const ADAPTER = "0x00000000000000000000000000000000000000d4" as const;
+    const calls = buildTradeCalls({ ...base, quote: q({ v4: { key: V4KEY } }), v4Adapter: ADAPTER });
+    assert.equal(calls.length, 2);
+    const approve = decodeFunctionData({ abi: erc20Abi, data: calls[0]!.data });
+    assert.equal((approve.args as readonly [string, bigint])[0].toLowerCase(), ADAPTER);
+    assert.equal(calls[1]!.to.toLowerCase(), ADAPTER);
+    const targets = calls.map((c) => c.to.toLowerCase());
+    assert.equal(targets.includes((UNISWAP.permit2 as string).toLowerCase()), false, "no Permit2");
+    assert.equal(targets.includes((UNISWAP.universalRouter as string).toLowerCase()), false, "no UniversalRouter");
+  });
+
+  it("no adapter: the legacy 3-call route, byte-identical to before the adapter existed", () => {
+    // Pre-adapter GRANT_V4 grants must keep working unchanged.
+    const witho = buildTradeCalls({ ...base, quote: q({ v4: { key: V4KEY } }) });
+    assert.equal(witho.length, 3);
+    assert.equal(witho[2]!.to.toLowerCase(), (UNISWAP.universalRouter as string).toLowerCase());
+  });
+
+  it("a v3 quote ignores the adapter entirely", () => {
+    const ADAPTER = "0x00000000000000000000000000000000000000d4" as const;
+    const calls = buildTradeCalls({ ...base, quote: q(), v4Adapter: ADAPTER });
+    assert.equal(calls.map((c) => c.to.toLowerCase()).includes(ADAPTER), false, "the adapter is a v4 fact");
+    assert.equal(calls[1]!.to.toLowerCase(), (UNISWAP.swapRouter02 as string).toLowerCase());
+  });
+
+
   it("carries the same minOut into whichever venue it picked", () => {
     const v4 = buildTradeCalls({ ...base, quote: q({ v4: { key: V4KEY } }) });
     const d = decodeFunctionData({ abi: UNIVERSAL_ROUTER_ABI, data: v4[2]!.data });

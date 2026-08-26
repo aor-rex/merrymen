@@ -35,7 +35,7 @@
 
 import { encodeFunctionData, erc20Abi, parseAbi, type Hex, type PublicClient } from "viem";
 import { UNISWAP, UNISWAP_SWAP_ROUTER_ABI } from "../../../packages/core/src/index";
-import { buildV4SwapCalls, findV4Pool, quoteV4, type PoolKey } from "./uniswap-v4";
+import { buildV4AdapterSwapCalls, buildV4SwapCalls, findV4Pool, quoteV4, type PoolKey } from "./uniswap-v4";
 
 /** Fee tiers to scan, most-likely-liquid first. */
 export const FEE_TIERS = [500, 3000, 10000] as const;
@@ -294,8 +294,25 @@ export function buildTradeCalls(args: {
   minAmountOut: bigint;
   /** Unix seconds. v4 only — bounds the Permit2 allowance and the router call. */
   deadline: number;
+  /**
+   * The grant-sealed V4SelfSwap address, when this grant carries one. Present
+   * ⇒ v4 quotes execute through the adapter (two calls, no Permit2, recipient
+   * structural). Absent ⇒ the legacy Permit2 + UniversalRouter path, which
+   * only pre-adapter GRANT_V4 grants can actually reach.
+   */
+  v4Adapter?: `0x${string}`;
 }): SwapCall[] {
   if (args.quote.v4) {
+    if (args.v4Adapter) {
+      return buildV4AdapterSwapCalls({
+        adapter: args.v4Adapter,
+        key: args.quote.v4.key,
+        tokenIn: args.tokenIn,
+        amountIn: args.amountIn,
+        minAmountOut: args.minAmountOut,
+        deadline: args.deadline,
+      });
+    }
     return buildV4SwapCalls({
       key: args.quote.v4.key,
       tokenIn: args.tokenIn,

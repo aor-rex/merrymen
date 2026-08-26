@@ -1492,7 +1492,7 @@ async function main() {
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: grantHasV4(active.grant),
+          v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
         });
         if (!quote) {
           // Say WHY there is no route when the answer is "your key can't take
@@ -1623,6 +1623,11 @@ async function main() {
         // allowance. Building these by hand at the call site is how you approve
         // one router and swap through another.
         const calls = buildTradeCalls({
+          // The grant-sealed adapter, only when its code answered at arm time.
+          // Absent, a v4 quote falls to the legacy Permit2 route — which only a
+          // pre-adapter GRANT_V4 grant can execute, and the quote gate above
+          // only opens v4 when one of the two is true.
+          v4Adapter: active.v4AdapterLive ? (grantV4Adapter(active.grant) ?? undefined) : undefined,
           quote,
           tokenIn: intent.sellToken,
           tokenOut: intent.buyToken,
@@ -1632,7 +1637,13 @@ async function main() {
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
         exec = await executor.execute(calls);
-        const venue = quote.v4 ? "v4" : quote.path ? "v3 via WETH" : "v3 direct";
+        const venue = quote.v4
+          ? active.v4AdapterLive && grantV4Adapter(active.grant)
+            ? "v4 (adapter)"
+            : "v4"
+          : quote.path
+            ? "v3 via WETH"
+            : "v3 direct";
         await addEvent(
           agentId,
           "ok",
@@ -1749,7 +1760,7 @@ async function main() {
               tokenOut: intent.buyToken,
               amountIn: probeIn,
               via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
-              v4: grantHasV4(active.grant),
+              v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
             });
             if (ref) {
               bps = impactBps({
