@@ -225,10 +225,14 @@ export function BandSection() {
         )}
         {(() => {
           const series = (feed?.equity ?? []).map((p) => p.equity_usdg);
-          if (series.length < 2) {
+          if (series.length < 1) {
             return <span className="dim">P&amp;L — no history yet</span>;
           }
-          const delta = series[series.length - 1]! - series[0]!;
+          // Equity MINUS the capital that was put in. This was last-minus-first
+          // over the equity curve, which counts a deposit as a gain and a
+          // withdrawal as a loss — and the curve is windowed, so its "first"
+          // drifted forward over time and the number quietly changed meaning.
+          const delta = series[series.length - 1]! - (feed?.netContributionsUsdg ?? 0);
           return (
             <span style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
               <b className={delta >= 0 ? "up" : "down"} style={{ color: delta >= 0 ? "var(--green)" : "var(--red)" }}>

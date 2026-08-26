@@ -76,6 +76,33 @@ export async function GET() {
         /* table not created yet */
       }
 
+      // Capital the owner put in, less what they took out — P&L is equity minus
+      // this. The chart above is windowed to 500 points; the ARITHMETIC must
+      // never be, which is the other half of the old bug: last-minus-first over
+      // a sliding window has a "first" that drifts forward, so the published
+      // number silently changed meaning once an agent passed 500 snapshots.
+      let contributed = 0;
+      try {
+        const row = db
+          .prepare(
+            `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+               FROM flows WHERE agent_id = ?`,
+          )
+          .get(account) as { net: number } | undefined;
+        contributed = row?.net ?? 0;
+      } catch {
+        /* flows arrives with a worker migration */
+      }
+      let latestEquity: number | null = null;
+      try {
+        const row = db
+          .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 1")
+          .get(account) as { equity_usdg: number } | undefined;
+        latestEquity = row?.equity_usdg ?? null;
+      } catch {
+        /* table not created yet */
+      }
+
       let peak = 0;
       let maxDdBps = 0;
       for (const p of equity) {
@@ -125,8 +152,7 @@ export async function GET() {
         hwm_usdg: row.hwm_usdg as number,
         accrued_fee_usdg: row.accrued_fee_usdg as number,
         equity,
-        pnl_usdg:
-          equity.length >= 2 ? equity[equity.length - 1]!.equity_usdg - equity[0]!.equity_usdg : null,
+        pnl_usdg: latestEquity === null ? null : latestEquity - contributed,
         max_drawdown_bps: maxDdBps,
         trades,
       };

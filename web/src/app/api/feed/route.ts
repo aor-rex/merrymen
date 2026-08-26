@@ -74,6 +74,12 @@ export interface FeedResponse {
   trades: TradeRecord[];
   financials: AgentFinancials | null;
   agent: AgentIdentity | null;
+  /**
+   * Capital the owner put in, less what they took out. Subtract it from equity
+   * to get P&L. Without it the dashboard's headline counts a deposit as a gain,
+   * which is exactly what it did until 2026-08-26.
+   */
+  netContributionsUsdg: number;
 }
 
 /** The configured strategy + basket, straight from settings.json (live). */
@@ -101,6 +107,7 @@ export async function GET() {
       trades: [],
       financials: null,
       agent: { name: "Robin", ...readIdentitySettings() },
+      netContributionsUsdg: 0,
     } satisfies FeedResponse);
   }
 
@@ -114,13 +121,32 @@ export async function GET() {
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
     let name = "Robin";
+    let netContributionsUsdg = 0;
+    // WHOSE numbers these are. Re-granting mints a new smart account and leaves
+    // the old one's rows in the same tables, and every query below used to read
+    // the lot — so two agents' equity curves interleaved and the dashboard's
+    // P&L spanned both. Armed wins, else the newest.
+    let agentId: string | null = null;
+    try {
+      const row = db
+        .prepare(
+          `SELECT smart_account FROM agents ORDER BY (status = 'armed') DESC, created_at DESC LIMIT 1`,
+        )
+        .get() as { smart_account: string } | undefined;
+      agentId = row?.smart_account ?? null;
+    } catch {
+      /* no agents table yet */
+    }
+    // Every query is scoped to that agent. A ledger with no agent row at all
+    // (an un-armed first run) has nothing to report anyway.
+    const scope = agentId ?? "";
     try {
       events = db
         .prepare(
           `SELECT level, message, datetime(created_at, 'unixepoch') AS created_at
-           FROM events ORDER BY created_at DESC, id DESC LIMIT 40`,
+           FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 40`,
         )
-        .all() as unknown as FeedEvent[];
+        .all(scope) as unknown as FeedEvent[];
     } catch {
       /* table not created yet */
     }
@@ -128,10 +154,10 @@ export async function GET() {
       equity = db
         .prepare(
           `SELECT cash_usdg, vault_usdg, equity_usdg, datetime(at, 'unixepoch') AS at
-           FROM (SELECT * FROM equity ORDER BY at DESC, id DESC LIMIT 288)
+           FROM (SELECT * FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 288)
            ORDER BY at ASC, id ASC`,
         )
-        .all() as unknown as EquityPoint[];
+        .all(scope) as unknown as EquityPoint[];
     } catch {
       /* table not created yet */
     }
@@ -140,9 +166,9 @@ export async function GET() {
         .prepare(
           `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale,
                   price_source, value_usdg
-           FROM positions ORDER BY value_usdg DESC`,
+           FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
         )
-        .all() as unknown as PositionRow[];
+        .all(scope) as unknown as PositionRow[];
     } catch {
       // price_source arrives with a worker migration. The dashboard can be
       // running against a database the upgraded worker hasn't opened yet, and
@@ -152,9 +178,9 @@ export async function GET() {
         const legacy = db
           .prepare(
             `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg
-             FROM positions ORDER BY value_usdg DESC`,
+             FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
           )
-          .all() as unknown as Omit<PositionRow, "price_source">[];
+          .all(scope) as unknown as Omit<PositionRow, "price_source">[];
         positions = legacy.map((p) => ({ ...p, price_source: "chainlink" }));
       } catch {
         /* table not created yet */
@@ -166,9 +192,9 @@ export async function GET() {
           `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
                   sim_quote_out, sim_min_out, sim_fee_tier, sim_gas,
                   datetime(created_at, 'unixepoch') AS created_at
-           FROM trades ORDER BY created_at DESC, id DESC LIMIT 30`,
+           FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 30`,
         )
-        .all() as unknown as TradeRecord[];
+        .all(scope) as unknown as TradeRecord[];
     } catch {
       /* table not created yet */
     }
@@ -185,6 +211,17 @@ export async function GET() {
     } catch {
       /* columns not migrated yet */
     }
+    try {
+      const row = db
+        .prepare(
+          `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+             FROM flows WHERE agent_id = ?`,
+        )
+        .get(scope) as { net: number } | undefined;
+      netContributionsUsdg = row?.net ?? 0;
+    } catch {
+      /* flows arrives with a worker migration; zero means "nothing known to have crossed" */
+    }
     return NextResponse.json({
       source: "sqlite",
       events,
@@ -193,6 +230,7 @@ export async function GET() {
       trades,
       financials,
       agent: { name, ...readIdentitySettings() },
+      netContributionsUsdg,
     } satisfies FeedResponse);
   } finally {
     db.close();

@@ -837,11 +837,40 @@ async function status() {
   try {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(DB, { readOnly: true });
-    const t = db.prepare("SELECT COUNT(*) AS n, SUM(status='landed') AS landed FROM trades").get();
-    const eq = db.prepare("SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity ORDER BY at DESC, id DESC LIMIT 1").get();
-    const events = db.prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events ORDER BY created_at DESC, id DESC LIMIT 3").all();
+    // Scope to the signed grant's account. These reads were unfiltered, so
+    // after a re-grant they mixed the old agent's rows in with the new one's.
+    const acct = grant?.smartAccount ?? null;
+    const where = acct ? " WHERE agent_id = ?" : "";
+    const arg = acct ? [acct] : [];
+    const t = db.prepare(`SELECT COUNT(*) AS n, SUM(status='landed') AS landed FROM trades${where}`).get(...arg);
+    const eq = db.prepare(`SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity${where} ORDER BY at DESC, id DESC LIMIT 1`).get(...arg);
+    // `flows` arrives with a worker migration, and this CLI routinely runs
+    // against a ledger the upgraded worker hasn't opened yet. Losing the whole
+    // status readout over a missing table would be a worse bug than the missing
+    // line — the outer catch prints "no ledger yet" and hides everything.
+    let flow = null;
+    try {
+      flow = db
+        .prepare(
+          `SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount_usdg ELSE -amount_usdg END),0) AS net FROM flows${where}`,
+        )
+        .get(...arg);
+    } catch {
+      /* pre-migration ledger */
+    }
+    const events = db.prepare(`SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events${where} ORDER BY created_at DESC, id DESC LIMIT 3`).all(...arg);
     console.log(`  trades: ${t?.landed ?? 0} landed / ${t?.n ?? 0} attempts`);
-    if (eq) console.log(`  equity: ${Number(eq.equity_usdg).toFixed(2)} USDG ${dim(`(${eq.at} UTC)`)}`);
+    if (eq) {
+      console.log(`  equity: ${Number(eq.equity_usdg).toFixed(2)} USDG ${dim(`(${eq.at} UTC)`)}`);
+      // Equity is not performance. Say what was put in so the two are never
+      // read as the same number. Without a flow ledger there is no honest P&L
+      // to state, so say nothing rather than restate equity as profit.
+      if (flow) {
+        const net = Number(flow.net ?? 0);
+        const pnl = Number(eq.equity_usdg) - net;
+        console.log(`  p&l:    ${pnl >= 0 ? "+" : "−"}${Math.abs(pnl).toFixed(2)} USDG ${dim(`(you put in ${net.toFixed(2)})`)}`);
+      }
+    }
     if (events.length) {
       console.log(dim("  recent:"));
       for (const e of events) console.log(`    ${dim(e.at)} [${e.level}] ${e.message.slice(0, 100)}`);
