@@ -97,7 +97,11 @@ export async function GET() {
       smartAccount: plan.smartAccount,
       ownerAddress: plan.ownerAddress,
       gasWei: plan.gasWei.toString(),
-      balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+      balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
+      // Without this the panel prints "This account is empty" when every
+      // balance read FAILED — which is how somebody concludes their money is
+      // gone because an RPC blinked. The CLI already branches on it.
+      unreadable: plan.unreadable,
     });
   } catch (e) {
     return NextResponse.json({ hasStoredKey: true, hasBundler, chainId, error: msg(e) });
@@ -176,6 +180,12 @@ export async function POST(req: Request) {
       explorer: explorerFor(chainId),
       chainId,
       balances: res.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+      // WHAT WAS LEFT BEHIND, and whether anything moved at all. A sweep where
+      // every token refuses to transfer returns txHash: null with the held
+      // balances intact — and without these two fields the panel rendered
+      // "Recovered ✓" for it, with a link to /tx/null. On the escape hatch.
+      skipped: res.skipped,
+      unreadable: res.unreadable,
     });
   } catch (e) {
     return NextResponse.json({ error: msg(e) }, { status: 500 });

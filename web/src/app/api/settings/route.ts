@@ -140,6 +140,10 @@ const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
 const NUM_FIELDS: Record<string, [number, number]> = {
   slippageBps: [1, 5_000],
+  // 0 is a MEANINGFUL low bound here, not a typo: it is the impact guard's
+  // off switch, and the guard's own rejection message tells owners to raise
+  // this setting — which was impossible while it was missing from this list.
+  maxImpactBps: [0, 10_000],
   perfFeeBps: [0, 5_000],
   tickSeconds: [15, 3_600],
   buyPerTickUsdg: [1, 100_000],

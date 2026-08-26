@@ -73,8 +73,32 @@ export const GRANT_TRANSFER = "transfer";
  * landed, whose transfer permission had a free-form recipient. Absent means
  * absent; it does not mean legacy.
  */
-export function grantHasTransfer(grant: Pick<StoredGrant, "grantFeatures"> | null | undefined): boolean {
-  return grant?.grantFeatures?.includes(GRANT_TRANSFER) ?? false;
+/**
+ * When the withdrawal allowlist landed (e950ea5, 2026-08-02) and the wall's
+ * USDG transfer permission became conditional on registering a recipient.
+ *
+ * THE MARKER ALONE IS NOT EVIDENCE, and that is why this constant exists. From
+ * that commit until 2026-08-26 both signers kept writing "transfer" into
+ * grantFeatures while passing no withdrawal addresses — so every grant minted
+ * in that 24-day window carries the marker AND has zero on-chain transfer
+ * permission. With a 14-day default expiry, that window is essentially the
+ * whole population of currently-armed grants, while the genuinely pre-allowlist
+ * ones the marker was meant to protect are mostly expired.
+ *
+ * Reading the marker on its own would leave exactly those grants with a mirror
+ * LOOSER than the chain: the worker offers the transfer, builds the UserOp, and
+ * the account contract refuses it — gas spent to be told no.
+ */
+export const WITHDRAWAL_ALLOWLIST_LANDED_AT = 1_785_630_924;
+
+export function grantHasTransfer(
+  grant: Pick<StoredGrant, "grantFeatures" | "grantedAt"> | null | undefined,
+): boolean {
+  if (!grant?.grantFeatures?.includes(GRANT_TRANSFER)) return false;
+  // Signed before the allowlist existed: the permission really is there, with a
+  // free-form recipient. Tightening these would make the mirror STRICTER than
+  // the chain and break a working wallet.
+  return (grant.grantedAt ?? 0) < WITHDRAWAL_ALLOWLIST_LANDED_AT;
 }
 
 export interface GrantCaps {

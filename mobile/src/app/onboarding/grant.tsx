@@ -173,7 +173,7 @@ export default function Grant() {
 
       <Text style={styles.section}>what it may never do</Text>
       <View style={styles.nevers}>
-        <Never text="Move funds to an address you didn't approve — transfers are capped per call on-chain and need your explicit confirmation." />
+        <Never text="Send your money anywhere. This wall registers no withdrawal address, so it carries no transfer permission at all — the chain refuses every send. Funds come home with your owner key." />
         <Never text="Trade an asset outside the allowed list. Adding one means signing a new wall, which is why it can't widen by itself." />
         <Never text="Outlive its expiry. The key dies on schedule even if every other control fails." />
         <Never text="Touch your recovery phrase. It never leaves this phone — not to us, not to the agent, not over the network." />

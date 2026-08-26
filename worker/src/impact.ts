@@ -137,7 +137,14 @@ export function judgeImpact(args: {
 }): ImpactVerdict {
   const { bps, maxBps, isExit } = args;
   // A cap of 0 or less is how an owner turns the guard off entirely.
-  if (maxBps <= 0) return { ok: true, bps, note: "impact guard disabled" };
+  //
+  // NO NOTE. Callers raise `note` as a warn event, so returning one here put
+  // "impact guard disabled" in the feed on every single swap, forever, for an
+  // owner who had deliberately chosen that setting. A setting working as
+  // configured is not an event; nagging about a decision already made is how a
+  // feed becomes something people stop reading — and this feed is where the
+  // costly-exit warning has to be noticed.
+  if (maxBps <= 0) return { ok: true, bps };
 
   if (bps === null) {
     if (isExit) return { ok: true, bps: null, note: "impact unknown — exits are never blocked on it" };

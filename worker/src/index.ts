@@ -116,6 +116,7 @@ import {
   getAgentEpoch,
   getAgentFinancials,
   hasEpochOneHistory,
+  lastKnownEquityUsdg,
   lastKnownCashUsdg,
   openNextEpoch,
   getOpsToday,
@@ -928,7 +929,14 @@ async function main() {
     // performance figure or an audit export, so the first arm on a ledger that
     // has epoch-1 rows opens epoch 2 and reporting starts clean.
     if ((await getAgentEpoch(agentId)) === 1 && (await hasEpochOneHistory(agentId))) {
-      const opened = await openNextEpoch(agentId);
+      // Carry the capital across with it. Equity is an absolute balance and
+      // flows are epoch-scoped, so without an opening balance the two stop
+      // living in the same frame and the first top-up in the new epoch
+      // republishes the whole bankroll as profit — the exact bug the epoch
+      // boundary exists to end. Read BEFORE the bump, so it is epoch 1's last
+      // observation.
+      const carried = await lastKnownEquityUsdg(agentId);
+      const opened = await openNextEpoch(agentId, carried ?? undefined);
       await addEvent(
         agentId,
         "ok",

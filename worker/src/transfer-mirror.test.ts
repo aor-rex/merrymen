@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { limitsFromGrant } from "./limits";
 import { checkPolicy, type AgentState, type TradeIntent } from "./policy";
-import { buildCallPermissions, CASH, GRANT_TRANSFER, usdgUnits, type StoredGrant } from "../../packages/core/src/index";
+import {
+  buildCallPermissions,
+  CASH,
+  GRANT_TRANSFER,
+  WITHDRAWAL_ALLOWLIST_LANDED_AT,
+  usdgUnits,
+  type StoredGrant,
+} from "../../packages/core/src/index";
 
 /**
  * THE MIRROR MAY NEVER BE LOOSER THAN THE CHAIN.
@@ -22,14 +29,14 @@ import { buildCallPermissions, CASH, GRANT_TRANSFER, usdgUnits, type StoredGrant
  * These tests assert the two halves against each other, not against prose.
  */
 
-const grantWith = (features: string[]): StoredGrant =>
+const grantWith = (features: string[], grantedAt = 1_000_000): StoredGrant =>
   ({
     smartAccount: "0x00000000000000000000000000000000000000a1",
     owner: "0x00000000000000000000000000000000000000b1",
     sessionKeyAddress: "0x00000000000000000000000000000000000000c1",
     serialized: "x",
     caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
-    grantedAt: 1_000_000,
+    grantedAt,
     expiresAt: Math.floor(Date.now() / 1000) + 86_400,
     chainId: 4663,
     grantFeatures: features,
@@ -101,4 +108,32 @@ test("swaps and vault moves are untouched by any of this", () => {
     CALM,
   );
   assert.equal(verdict.ok, true, "parking cash is not a withdrawal");
+});
+
+test("a STALE marker is not a permission — the Aug 2..26 generation is refused too", () => {
+  // THE POPULATION THIS ALMOST MISSED. The withdrawal allowlist landed on
+  // 2026-08-02 and made the wall's transfer permission conditional; both
+  // signers kept writing the "transfer" marker anyway until 2026-08-26. So
+  // every grant minted in that window claims a permission its wall never
+  // emitted — and with a 14-day default expiry, that window is essentially the
+  // entire population of currently-armed grants, while the genuinely
+  // pre-allowlist ones the marker protects are mostly expired.
+  //
+  // Reading the marker alone would leave exactly those grants with a mirror
+  // looser than the chain: the worker offers the transfer, builds the UserOp,
+  // and the account contract refuses it.
+  const stale = grantWith([GRANT_TRANSFER, "tradeable-v2"], WITHDRAWAL_ALLOWLIST_LANDED_AT + 60);
+  const limits = limitsFromGrant(stale);
+  assert.deepEqual(limits.withdrawalAddresses, [], "the claim is not honoured");
+  const verdict = checkPolicy(sendTo("0x00000000000000000000000000000000000000ee"), limits, CALM);
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.rule, "transfer-not-permitted");
+});
+
+test("one second before the allowlist landed, the marker still means what it said", () => {
+  // The boundary itself, so the cutoff cannot drift silently.
+  const genuine = grantWith([GRANT_TRANSFER, "tradeable-v2"], WITHDRAWAL_ALLOWLIST_LANDED_AT - 1);
+  assert.equal(limitsFromGrant(genuine).withdrawalAddresses, undefined, "free-form, as signed");
+  const atCutoff = grantWith([GRANT_TRANSFER, "tradeable-v2"], WITHDRAWAL_ALLOWLIST_LANDED_AT);
+  assert.deepEqual(limitsFromGrant(atCutoff).withdrawalAddresses, [], "at the cutoff the permission is already gone");
 });

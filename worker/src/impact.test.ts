@@ -99,10 +99,16 @@ test("an expensive BUY is refused, with the number in the message", () => {
   assert.match(v.ok === false ? v.detail : "", /3\.00%/);
 });
 
-test("a cap of 0 disables the guard entirely, including for unknowns", () => {
+test("a cap of 0 disables the guard entirely, including for unknowns — and says nothing about it", () => {
   // The owner who wants 'any amount' must have a way to say so.
-  assert.equal(judgeImpact({ bps: 9999, maxBps: 0, isExit: false }).ok, true);
+  const loud = judgeImpact({ bps: 9999, maxBps: 0, isExit: false });
+  assert.equal(loud.ok, true);
   assert.equal(judgeImpact({ bps: null, maxBps: 0, isExit: false }).ok, true);
+  // …and must not be nagged about it. Callers raise `note` as a warn EVENT, so
+  // a note here meant "impact guard disabled" in the feed on every single swap
+  // for someone who had already made that decision. The feed is where the
+  // costly-exit warning has to be noticed; it cannot also be a metronome.
+  assert.equal(loud.ok === true && loud.note, undefined, "a setting working as configured is not an event");
 });
 
 test("the boundary is inclusive — exactly at the cap passes", () => {

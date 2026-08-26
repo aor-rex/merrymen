@@ -927,8 +927,10 @@ export default function GrantPage() {
                     : "the legacy three (QQQ, NVDA, TSLA) only. Renew below to widen it."}
                 </li>
                 <li>
-                  <b>USDG out</b> — none. No withdrawal address is registered, so this key carries no
-                  transfer permission at all; moving money out is the owner key&apos;s job.
+                  <b>USDG out</b> — none. No withdrawal address is registered, so the key you are about
+                  to sign carries no transfer permission at all; moving money out is the owner
+                  key&apos;s job (<code>merrymen recover</code>). Wallets signed before this changed keep
+                  the free-form transfer permission they were signed with.
                 </li>
                 <li>
                   <b>Uniswap v4</b> —{" "}

@@ -24,6 +24,8 @@ interface Ctx {
   smartAccount?: string;
   ownerAddress?: string;
   balances?: Balance[];
+  /** Labels whose balance could not be READ. Never conflate with "not held". */
+  unreadable?: string[];
   error?: string;
 }
 interface PlanRes {
@@ -32,14 +34,21 @@ interface PlanRes {
   explorer: string;
   chainId: number;
   balances: Balance[];
+  /** Labels whose balance could not be READ. Never conflate with "not held". */
+  unreadable?: string[];
   error?: string;
 }
 interface SweepRes {
-  txHash: string;
+  /** NULL when nothing moved. Typed nullable because it IS nullable — as a bare
+   * string, tsc waved through a success block that rendered /tx/null. */
+  txHash: string | null;
   to: string;
   smartAccount: string;
   explorer: string;
   balances: Balance[];
+  /** Held, but refused to transfer. Non-empty means nothing was swept. */
+  skipped?: { symbol: string; reason: string }[];
+  unreadable?: string[];
   error?: string;
 }
 
@@ -106,7 +115,12 @@ export function RecoverPanel() {
   const hasBundler = ctx?.hasBundler ?? false;
   // Do we know what's in the account yet? (stored-key ctx, or a checked paste.)
   const known = !!(plan || (ctx?.hasStoredKey && ctx));
-  const empty = known && balances.length === 0;
+  // "Empty" is a CLAIM, and it may only be made when everything was actually
+  // read. Saying an account is empty because an RPC blinked is how somebody
+  // concludes their money is gone.
+  const unreadable = (ctx?.unreadable ?? plan?.unreadable ?? []) as string[];
+  const empty = known && balances.length === 0 && unreadable.length === 0;
+  const blind = known && balances.length === 0 && unreadable.length > 0;
 
   async function sweep() {
     setError(null);
@@ -157,13 +171,44 @@ export function RecoverPanel() {
         <p className="recover-sub">reading your account…</p>
       ) : result ? (
         <div className="recover-done">
-          <p className="recover-sub">
-            <b>Recovered ✓</b> — {result.balances.map((b) => `${b.amount} ${b.symbol}`).join(", ")} sent to{" "}
-            <span className="mono">{short(result.to)}</span>.
-          </p>
-          <a className="recover-btn" href={`${result.explorer}/tx/${result.txHash}`} target="_blank" rel="noreferrer">
-            view the transaction ↗
-          </a>
+          {result.txHash ? (
+            <>
+              <p className="recover-sub">
+                <b>Recovered ✓</b> — {result.balances.map((b) => `${b.amount} ${b.symbol}`).join(", ")} sent to{" "}
+                <span className="mono">{short(result.to)}</span>.
+              </p>
+              {result.skipped?.length ? (
+                <p className="recover-sub">
+                  Left behind, because they refused to transfer:{" "}
+                  {result.skipped.map((s) => s.symbol).join(", ")}.
+                </p>
+              ) : null}
+              <a className="recover-btn" href={`${result.explorer}/tx/${result.txHash}`} target="_blank" rel="noreferrer">
+                view the transaction ↗
+              </a>
+            </>
+          ) : (
+            /* NOTHING MOVED — and this used to render as "Recovered ✓" with a
+               link to /tx/null, which reads as explorer lag rather than as
+               failure. A false success claim on the escape hatch is the worst
+               place in the product to have one: the owner walks away believing
+               their money is out. */
+            <>
+              <p className="recover-sub">
+                <b>Nothing moved.</b> Every token in this account refused to transfer, so no
+                transaction was sent — your funds are still where they were.
+              </p>
+              {result.skipped?.length ? (
+                <ul className="recover-sub">
+                  {result.skipped.map((s) => (
+                    <li key={s.symbol}>
+                      <span className="mono">{s.symbol}</span> — {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -215,6 +260,14 @@ export function RecoverPanel() {
 
               {empty ? (
                 <p className="recover-sub">This account is empty — nothing to recover.</p>
+              ) : blind ? (
+                /* NOT "empty". Every balance read failed, which is a different
+                   fact — and telling someone their account is empty because an
+                   RPC blinked is how they conclude their money is gone. */
+                <p className="recover-sub">
+                  Nothing found — but {unreadable.join(", ")} could not be read. That is NOT a zero
+                  balance. Check the RPC and try again before concluding anything.
+                </p>
               ) : (
                 <>
                   <div className="recover-holdings mono">

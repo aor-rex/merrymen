@@ -763,7 +763,7 @@ export default function SettingsPage() {
                 <span className="field-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
               </span>
               <span className="field-hint">
-                Lets chat send USDG out (always asks to /confirm; amount capped on-chain by your per-trade cap). Needs a grant created after this feature shipped.
+                Lets chat send USDG out, if your wallet can. Wallets signed today register no withdrawal address, so their wall carries no transfer permission and the send is refused before anything is built — only grants signed before that changed can transfer. Money leaves with your owner key: merrymen recover.
               </span>
             </label>
             <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">

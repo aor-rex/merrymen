@@ -640,7 +640,21 @@ export async function getAgentEpoch(agentId: string): Promise<number> {
 }
 
 /**
- * Does this agent have rows from before the audit work? Used once, at the first
+ * The moment the accounting work landed (ce28516). Rows written before it are
+ * the ones that cannot be audited: no flow records, fills booked from a
+ * slippage floor rather than a receipt, equity rows that can hold a phantom
+ * crater from a failed balance read.
+ *
+ * A TIMESTAMP, not merely "epoch = 1", and that distinction is load-bearing. A
+ * brand-new agent running today's code writes its own perfectly good rows into
+ * epoch 1 on its first run — including its opening-balance flow. Bumping on the
+ * bare presence of epoch-1 rows would orphan that agent's real deposit records
+ * on its very next restart, which is the opposite of what the boundary is for.
+ */
+export const ACCOUNTING_FIXED_AT = 1_787_704_075;
+
+/**
+ * Does this agent have rows from BEFORE the audit work? Used once, at the first
  * arm, to decide whether an epoch boundary is needed. A brand-new agent has
  * nothing to quarantine and stays in epoch 1.
  */
@@ -648,20 +662,52 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
   try {
     const row = getDb()
       .prepare(
-        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1)
-              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1) AS n`,
+        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1 AND created_at < ?)
+              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1 AND at < ?) AS n`,
       )
-      .get(agentId, agentId) as { n: number } | undefined;
+      .get(agentId, ACCOUNTING_FIXED_AT, agentId, ACCOUNTING_FIXED_AT) as { n: number } | undefined;
     return (row?.n ?? 0) > 0;
   } catch {
     return false;
   }
 }
 
-/** Close the current epoch and open the next. Everything before stays, untouched. */
-export async function openNextEpoch(agentId: string): Promise<number> {
+/**
+ * Close the current epoch and open the next.
+ *
+ * CAPITAL MUST CROSS THE BOUNDARY OR P&L LIES. Equity is an absolute balance
+ * reading; flows are epoch-scoped. Bump the epoch without carrying the capital
+ * over and the two terms stop living in the same frame: the new epoch's
+ * contributions start at nothing while equity still holds every dollar
+ * deposited before the boundary. The COUNT(*) guard hides that only while there
+ * are ZERO flows — the first top-up in the new epoch makes contributions equal
+ * to just that top-up, and `equity − contributions` publishes the entire
+ * bankroll as profit. Which is the exact bug this whole epoch mechanism was
+ * built to end.
+ *
+ * So the boundary writes an opening balance: everything present is capital the
+ * owner put in, and the new epoch measures only what happens after it. That is
+ * what "reporting starts clean" has to mean — epoch 1's performance is
+ * unmeasurable, which is precisely why it was quarantined.
+ *
+ * Booked 'inferred' because it is: a balance observed at a boundary, not a
+ * transfer anybody witnessed. The flow ledger has that column so this kind of
+ * row can never be mistaken for a receipt.
+ */
+export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
   const next = (await getAgentEpoch(agentId)) + 1;
   getDb().prepare("UPDATE agents SET epoch = ? WHERE smart_account = ?").run(next, agentId);
+  // AFTER the UPDATE, deliberately: addFlow stamps the row with the agent's
+  // CURRENT epoch, so this lands in the new one. Written the other way round it
+  // would file the opening balance in the epoch being closed and change nothing.
+  if (openingBalanceUsdg !== undefined && openingBalanceUsdg > 0) {
+    await addFlow({
+      agentId,
+      direction: "in",
+      amountUsdg: openingBalanceUsdg,
+      source: "inferred",
+    });
+  }
   return next;
 }
 
@@ -811,6 +857,29 @@ export async function lastKnownCashUsdg(agentId: string): Promise<number | null>
       )
       .get(agentId, epoch) as { cash_usdg: number } | undefined;
     return row ? row.cash_usdg : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The last composed equity reading in the agent's CURRENT epoch, or null.
+ *
+ * Used at an epoch boundary to say how much capital is present, so the opening
+ * balance and the equity reading that follows it live in the same frame. null
+ * means no observation exists — which is not zero, and at a boundary means the
+ * new epoch simply opens with no contributions on record rather than with a
+ * fabricated one.
+ */
+export async function lastKnownEquityUsdg(agentId: string): Promise<number | null> {
+  try {
+    const epoch = epochOf(agentId);
+    const row = getDb()
+      .prepare(
+        "SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+      )
+      .get(agentId, epoch) as { equity_usdg: number } | undefined;
+    return row ? row.equity_usdg : null;
   } catch {
     return null;
   }
