@@ -156,7 +156,10 @@ describe("a deposit is never profit (the fee regression)", () => {
 describe("readPnl reports the agent's own money", () => {
   it("subtracts what was put in, rather than calling it profit", async () => {
     // The real shape of the July ledger: money in, worth 999.48 now.
-    await setAgentStatus(A, "armed"); // the armed agent is the one being reported on
+    // One armed agent at a time — a re-grant retires the last one. `status`
+    // DEFAULTs to 'armed', so B has to be retired explicitly here.
+    await setAgentStatus(A, "armed");
+    await setAgentStatus(B, "expired");
     await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778 });
     // B is funded and marked to a very different number in the same tables.
     await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0 });
@@ -169,5 +172,23 @@ describe("readPnl reports the agent's own money", () => {
     assert.doesNotMatch(out, /change: \$999\.48/);
     assert.doesNotMatch(out, /50,?000/);
     assert.match(out, /you put in \$750\.00/);
+  });
+
+  it("claims NO P&L when nothing is on record about capital", async () => {
+    // A ledger written before flow tracking existed. Net contributions is
+    // UNKNOWN, not zero — and equity minus zero is the bankroll, which is the
+    // exact number this whole change exists to stop reporting. Caught by
+    // running the dashboard against the real July database, where it cheerfully
+    // printed +$999.48 again.
+    const C = "0x000000000000000000000000000000000000000c";
+    await ensureAgent(grant(C));
+    await setAgentStatus(A, "expired");
+    await setAgentStatus(C, "armed");
+    await addEquity(C, { ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0 });
+
+    assert.equal(await getNetContributionsUsdg(C), null);
+    const out = readPnl();
+    assert.match(out, /not measurable/);
+    assert.doesNotMatch(out, /change: \$999\.48/);
   });
 });

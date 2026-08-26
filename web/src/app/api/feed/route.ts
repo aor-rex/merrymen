@@ -78,8 +78,12 @@ export interface FeedResponse {
    * Capital the owner put in, less what they took out. Subtract it from equity
    * to get P&L. Without it the dashboard's headline counts a deposit as a gain,
    * which is exactly what it did until 2026-08-26.
+   *
+   * NULL when nothing is on record, which is NOT zero: a ledger written before
+   * flow tracking knows nothing about what was put in, and equity minus zero is
+   * the bankroll presented as profit. Show no P&L rather than a wrong one.
    */
-  netContributionsUsdg: number;
+  netContributionsUsdg: number | null;
 }
 
 /** The configured strategy + basket, straight from settings.json (live). */
@@ -107,7 +111,7 @@ export async function GET() {
       trades: [],
       financials: null,
       agent: { name: "Robin", ...readIdentitySettings() },
-      netContributionsUsdg: 0,
+      netContributionsUsdg: null,
     } satisfies FeedResponse);
   }
 
@@ -121,7 +125,7 @@ export async function GET() {
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
     let name = "Robin";
-    let netContributionsUsdg = 0;
+    let netContributionsUsdg: number | null = null;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
     // the old one's rows in the same tables, and every query below used to read
     // the lot — so two agents' equity curves interleaved and the dashboard's
@@ -130,7 +134,11 @@ export async function GET() {
     try {
       const row = db
         .prepare(
-          `SELECT smart_account FROM agents ORDER BY (status = 'armed') DESC, created_at DESC LIMIT 1`,
+          // rowid breaks the tie: `status` DEFAULTs to 'armed' so it
+          // discriminates less than it looks, and created_at is whole seconds.
+          // rowid is insertion order — the newest grant wins, deterministically.
+          `SELECT smart_account FROM agents
+            ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
         )
         .get() as { smart_account: string } | undefined;
       agentId = row?.smart_account ?? null;
@@ -214,13 +222,14 @@ export async function GET() {
     try {
       const row = db
         .prepare(
-          `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+          `SELECT COUNT(*) AS n,
+                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
              FROM flows WHERE agent_id = ?`,
         )
-        .get(scope) as { net: number } | undefined;
-      netContributionsUsdg = row?.net ?? 0;
+        .get(scope) as { n: number; net: number } | undefined;
+      netContributionsUsdg = !row || row.n === 0 ? null : row.net;
     } catch {
-      /* flows arrives with a worker migration; zero means "nothing known to have crossed" */
+      /* flows arrives with a worker migration — null, never zero */
     }
     return NextResponse.json({
       source: "sqlite",

@@ -451,15 +451,23 @@ export async function addFlow(flow: FlowRow): Promise<void> {
 /**
  * Capital the owner has put in, less what they have taken out. Subtract it from
  * equity and what remains is the only thing that deserves to be called P&L.
+ *
+ * NULL when nothing is on record — which is NOT the same as zero. A ledger
+ * written before the flows table existed knows nothing about what was put in,
+ * and treating that as "nothing was put in" republishes the original bug:
+ * equity minus zero is the bankroll, presented as profit. Callers must show no
+ * P&L at all rather than a confident wrong one.
  */
-export async function getNetContributionsUsdg(agentId: string): Promise<number> {
+export async function getNetContributionsUsdg(agentId: string): Promise<number | null> {
   const row = getDb()
     .prepare(
-      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
        FROM flows WHERE agent_id = ?`,
     )
-    .get(agentId) as { net: number } | undefined;
-  return row?.net ?? 0;
+    .get(agentId) as { n: number; net: number } | undefined;
+  if (!row || row.n === 0) return null;
+  return row.net;
 }
 
 /** The flow record itself, newest first — for the audit export and /pnl's detail line. */

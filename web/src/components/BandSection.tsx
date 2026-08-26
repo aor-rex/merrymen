@@ -228,11 +228,17 @@ export function BandSection() {
           if (series.length < 1) {
             return <span className="dim">P&amp;L — no history yet</span>;
           }
+          const contributed = feed?.netContributionsUsdg ?? null;
+          if (contributed === null) {
+            // Nothing on record about capital. Equity minus nothing is the
+            // bankroll, and showing that as a gain is the bug this replaces.
+            return <span className="dim" style={{ marginLeft: "auto" }}>P&amp;L — no record of deposits yet</span>;
+          }
           // Equity MINUS the capital that was put in. This was last-minus-first
           // over the equity curve, which counts a deposit as a gain and a
           // withdrawal as a loss — and the curve is windowed, so its "first"
           // drifted forward over time and the number quietly changed meaning.
-          const delta = series[series.length - 1]! - (feed?.netContributionsUsdg ?? 0);
+          const delta = series[series.length - 1]! - contributed;
           return (
             <span style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
               <b className={delta >= 0 ? "up" : "down"} style={{ color: delta >= 0 ? "var(--green)" : "var(--red)" }}>

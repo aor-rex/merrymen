@@ -81,15 +81,19 @@ export async function GET() {
       // never be, which is the other half of the old bug: last-minus-first over
       // a sliding window has a "first" that drifts forward, so the published
       // number silently changed meaning once an agent passed 500 snapshots.
-      let contributed = 0;
+      // NULL, not zero, when nothing is on record: this is a PUBLIC scoreboard,
+      // and "equity minus nothing" published as P&L is the bankroll dressed up
+      // as performance.
+      let contributed: number | null = null;
       try {
         const row = db
           .prepare(
-            `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+            `SELECT COUNT(*) AS n,
+                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
                FROM flows WHERE agent_id = ?`,
           )
-          .get(account) as { net: number } | undefined;
-        contributed = row?.net ?? 0;
+          .get(account) as { n: number; net: number } | undefined;
+        contributed = !row || row.n === 0 ? null : row.net;
       } catch {
         /* flows arrives with a worker migration */
       }
@@ -152,7 +156,7 @@ export async function GET() {
         hwm_usdg: row.hwm_usdg as number,
         accrued_fee_usdg: row.accrued_fee_usdg as number,
         equity,
-        pnl_usdg: latestEquity === null ? null : latestEquity - contributed,
+        pnl_usdg: latestEquity === null || contributed === null ? null : latestEquity - contributed,
         max_drawdown_bps: maxDdBps,
         trades,
       };

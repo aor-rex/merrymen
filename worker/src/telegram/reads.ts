@@ -37,8 +37,13 @@ function currentAgentId(db: DatabaseSync): string | null {
   try {
     const row = db
       .prepare(
+        // rowid breaks the tie deliberately: `status` DEFAULTs to 'armed', so it
+        // discriminates less than it looks, and created_at is whole seconds, so
+        // two agents granted in the same second would otherwise resolve in
+        // whatever order SQLite felt like. rowid is insertion order — the newest
+        // grant wins, every time.
         `SELECT smart_account FROM agents
-          ORDER BY (status = 'armed') DESC, created_at DESC LIMIT 1`,
+          ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
       )
       .get() as { smart_account: string } | undefined;
     if (row?.smart_account) return row.smart_account;
@@ -64,20 +69,24 @@ function currentAgentId(db: DatabaseSync): string | null {
  * "the agent made money" — the two were the same number until 2026-08-26, which
  * is how /pnl came to report a 1,000 USDG deposit as a 1,000 USDG profit.
  */
-function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number {
+function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
   try {
     const sql =
-      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
          FROM flows WHERE agent_id = ?` + (sinceUnix !== undefined ? " AND at >= ?" : "");
     const stmt = db.prepare(sql);
     const row = (
       sinceUnix !== undefined ? stmt.get(agentId, sinceUnix) : stmt.get(agentId)
-    ) as { net: number } | undefined;
-    return row?.net ?? 0;
+    ) as { n: number; net: number } | undefined;
+    // No rows is NOT zero. A ledger written before the flows table existed knows
+    // nothing about what was put in, and calling that zero republishes the very
+    // bug this fixes: equity minus zero is the bankroll, reported as profit.
+    if (!row || row.n === 0) return null;
+    return row.net;
   } catch {
-    // Pre-migration ledger: no flows table. Zero is the honest answer — it just
-    // means nothing is known to have crossed the boundary.
-    return 0;
+    // Pre-migration ledger — no flows table at all.
+    return null;
   }
 }
 
@@ -237,13 +246,18 @@ export function readPnl(): string {
     // after a 1,000 USDG deposit, this line read +999.48.
     const equityNow = eq[eq.length - 1]!.equity_usdg;
     const contributed = netContributions(db, agentId);
-    const delta = equityNow - contributed;
-    const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
-    const lines = [
-      `📈 <b>P&amp;L</b>`,
-      `• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`,
-      `• equity ${usd(equityNow)} · you put in ${usd(contributed)}`,
-    ];
+    const lines = [`📈 <b>P&amp;L</b>`];
+    if (contributed === null) {
+      // Nothing on record about capital, so there is no P&L to state. Saying
+      // "equity minus nothing" would be the original bug with extra steps.
+      lines.push(`• equity: ${usd(equityNow)}`);
+      lines.push(`• change: not measurable — no record of what was put in (ledger predates flow tracking)`);
+    } else {
+      const delta = equityNow - contributed;
+      const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
+      lines.push(`• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`);
+      lines.push(`• equity ${usd(equityNow)} · you put in ${usd(contributed)}`);
+    }
     if (realizedLine) lines.push(realizedLine);
     lines.push(`• fees accrued: $${(fee?.f ?? 0).toFixed(2)}`);
     return lines.join("\n");
@@ -357,18 +371,21 @@ export function readReport(ctx: StatusContext): string {
     // Both windows net out capital that crossed the boundary inside them, so a
     // deposit doesn't read as a day's winnings.
     if (today.length >= 2) {
+      // Today's flows net out of today's move; a same-day deposit is not a win.
       const d =
         today[today.length - 1]!.equity_usdg -
         today[0]!.equity_usdg -
-        netContributions(db, agentId, midnight);
+        (netContributions(db, agentId, midnight) ?? 0);
       const base = today[0]!.equity_usdg;
       const pct = base > 0 ? (d / base) * 100 : 0;
       lines.push(`• today: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     } else {
       lines.push(`• today: not enough ticks yet`);
     }
-    if (all.length >= 1) {
-      const contributed = netContributions(db, agentId);
+    const contributed = netContributions(db, agentId);
+    if (contributed === null) {
+      lines.push(`• all-time: not measurable — no record of what was put in`);
+    } else if (all.length >= 1) {
       const d = all[all.length - 1]!.equity_usdg - contributed;
       const pct = contributed > 0 ? (d / contributed) * 100 : 0;
       lines.push(`• all-time: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
@@ -433,6 +450,9 @@ export function readBrag(ctx: StatusContext): string {
     // the owner, it misleads everyone they show it to — so it nets out capital
     // like every other figure rather than bragging about a deposit.
     const contributed = netContributions(db, agentId);
+    if (contributed === null) {
+      return "🏹 nothing to brag about yet — this ledger has no record of what was put in, so there's no honest number to share.";
+    }
     const delta = last.equity_usdg - contributed;
     const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
     const days = Math.max(1, Math.round((last.at - first.at) / 86400));
