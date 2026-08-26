@@ -219,7 +219,18 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
         );
       }
     }
-    if (inputs.gasWei !== null && inputs.gasWei > 0n && inputs.gasWei < LOW_GAS_WEI) {
+    // ZERO used to be excluded by that `> 0n`, so the one balance at which
+    // every operation is guaranteed to fail was the one balance that produced
+    // no warning at all. It gets its own, blunter message: "low" understates a
+    // condition that is not low but stopped.
+    if (inputs.gasWei === 0n) {
+      await fire(
+        "no-gas",
+        `⛽ the account has <b>no ETH</b> — live trades cannot land at all. The account pays its own gas, ` +
+          `so send a little <b>ETH</b> to it; USDG is capital and cannot pay for anything. ` +
+          `(Paper mode signs nothing, so this only bites once you're live.)`,
+      );
+    } else if (inputs.gasWei !== null && inputs.gasWei > 0n && inputs.gasWei < LOW_GAS_WEI) {
       // Chain- and mode-agnostic on purpose: there's no faucet on mainnet, and in
       // paper mode nothing signs, so gas can't be what's stopping a trade. Also
       // names gas-vs-capital — "top up the account" is what sends people to USDG.

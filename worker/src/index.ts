@@ -437,7 +437,15 @@ async function main() {
   // valued — the total is then a partial sum, and judging a drawdown on it would
   // read the missing asset as a loss and refuse the very sell that clears it.
   let lastEquityKnown = true;
-  let lastGasWei = 0n; // updated each tick; feeds the low-gas Telegram alert
+  // ETH held by the smart account, as of the last tick that could read it.
+  //
+  // NULL means "not read yet", which is different from zero — and the
+  // difference matters, because zero is the one value that makes every
+  // UserOperation fail. The account self-pays gas with no paymaster, so this is
+  // the single condition that stops a trade dead, and until now it was also the
+  // only one nothing checked: the failure arrived as a raw bundler exception,
+  // truncated to 80 characters, in the reject_rule column, retried every tick.
+  let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
   let notifierHandle: ReturnType<typeof startNotifier> | null = null;
 
   // Uniswap TWAPs for tokens with no Chainlink feed. Cached across ticks — the
@@ -1267,6 +1275,37 @@ async function main() {
       return;
     }
 
+    // ── gas pre-flight ───────────────────────────────────────────────────
+    // The account self-pays with no paymaster, so with zero ETH the EntryPoint
+    // prefund check fails during bundler validation and the op never reaches
+    // the chain. That was arriving as a raw bundler exception truncated into
+    // reject_rule and retried every tick — an unreadable message for the one
+    // problem with the simplest cause.
+    //
+    // Only ZERO is refused here, deliberately. A too-clever estimate that
+    // refuses a trade the chain would have accepted is a worse failure than the
+    // one being fixed: it would look identical to the agent being broken. Below
+    // the floor we warn and let the chain decide.
+    if (lastGasWei === 0n) {
+      await addEvent(
+        agentId,
+        "err",
+        `no ETH in the account — every operation fails before it reaches the chain. ` +
+          `Send ETH to ${active.grant.smartAccount} on chain ${active.grant.chainId}; USDG alone cannot pay gas.`,
+      );
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "no-gas",
+      });
+      return;
+    }
+
     // Reserve spend/ops BEFORE the await-heavy execution and roll back on
     // failure. Incrementing only after success opens a TOCTOU window: a chat
     // trade interleaved with a tick could both pass checkPolicy against the
@@ -2015,6 +2054,9 @@ async function main() {
     const snap: Snapshot = {
       cashUsdg: balances.cashUsdg,
       vaultUsdg: balances.vaultUsdg,
+      // The fuel, so a strategy can decline rather than propose an intent the
+      // gas pre-flight will refuse a moment later.
+      ethWei: balances.ethWei,
       holdings,
       prices: market.prices,
       pausedTokens: market.pausedTokens,
@@ -2304,7 +2346,10 @@ async function main() {
           ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)
           : null,
       breakerBps: active ? active.limits.maxDrawdownBps : null,
-      gasWei: lastGasWei > 0n ? lastGasWei : null,
+      // Pass ZERO through. It used to be mapped to null here AND filtered again
+      // in the notifier, so an account with exactly no ETH — the only balance
+      // that guarantees failure — got no alert at all.
+      gasWei: lastGasWei,
     }),
     getChainId: () => active?.grant.chainId ?? null,
   });

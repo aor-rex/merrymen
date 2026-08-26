@@ -23,6 +23,20 @@ export interface Holding {
 export interface Snapshot {
   cashUsdg: bigint;
   vaultUsdg: bigint;
+  /**
+   * Native ETH held by the account, in wei — the fuel, not the capital.
+   *
+   * The account self-pays gas with no paymaster, so at zero every operation
+   * fails before it reaches the chain. The worker refuses such an intent
+   * outright, but a strategy that knows its own gas position can simply not
+   * propose, which is cheaper and quieter than proposing and being refused.
+   *
+   * Absent or NULL means "not read this tick" — different from zero, and a
+   * strategy must not treat the two alike. Optional for the same reason `depth`
+   * is: a backtest or a fixture has no chain to read it from, and a field that
+   * forces every caller to invent a value teaches them to invent zero.
+   */
+  ethWei?: bigint | null;
   /** Current stock holdings by symbol. */
   holdings: Map<string, Holding>;
   /**
