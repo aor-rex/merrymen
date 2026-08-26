@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
+import { gasQualifier } from "../equity";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -78,6 +79,25 @@ function agentEpoch(db: DatabaseSync, agentId: string): number {
     return row?.epoch ?? 1;
   } catch {
     return 1;
+  }
+}
+
+/**
+ * Gas paid in USDG for this epoch, and how many trades' gas could not be
+ * priced. The count is what stops "net of gas" being claimed when it isn't.
+ */
+function gasPaid(db: DatabaseSync, agentId: string, epoch: number): { usdg: number; unpricedTrades: number } {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
+           FROM trades WHERE agent_id = ? AND status = 'landed' AND epoch = ?`,
+      )
+      .get(agentId, epoch) as { usdg: number; unpriced: number | null } | undefined;
+    return { usdg: row?.usdg ?? 0, unpricedTrades: row?.unpriced ?? 0 };
+  } catch {
+    return { usdg: 0, unpricedTrades: 0 }; // pre-migration ledger
   }
 }
 
@@ -273,10 +293,17 @@ export function readPnl(): string {
       lines.push(`• equity: ${usd(equityNow)}`);
       lines.push(`• change: not measurable — no record of what was put in (ledger predates flow tracking)`);
     } else {
-      const delta = equityNow - contributed;
+      const gas = gasPaid(db, agentId, epoch);
+      // NET of gas. Gas leaves in ETH and equity_usdg is cash + vault +
+      // positions, so every figure here used to be gross of a cost that at this
+      // account's trade sizes was most of the total.
+      const delta = equityNow - contributed - gas.usdg;
       const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
       lines.push(`• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`);
       lines.push(`• equity ${usd(equityNow)} · you put in ${usd(contributed)}`);
+      if (gas.usdg > 0 || gas.unpricedTrades > 0) {
+        lines.push(`• ${esc(gasQualifier(gas))}`);
+      }
     }
     if (realizedLine) lines.push(realizedLine);
     lines.push(`• fees accrued: $${(fee?.f ?? 0).toFixed(2)}`);
@@ -297,7 +324,7 @@ export function readPnl(): string {
       }
       if (wei > 0n) {
         const eth = Number(wei) / 1e18;
-        lines.push(`• gas paid: ${eth.toFixed(6)} ETH (not included above — the figures are gross of gas)`);
+        lines.push(`• gas paid: ${eth.toFixed(6)} ETH`);
       }
     } catch {
       /* gas_wei arrives with a worker migration */

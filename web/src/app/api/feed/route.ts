@@ -84,6 +84,13 @@ export interface FeedResponse {
    * the bankroll presented as profit. Show no P&L rather than a wrong one.
    */
   netContributionsUsdg: number | null;
+  /**
+   * Gas paid in USDG, and how many landed trades' gas could NOT be priced.
+   * P&L is equity − contributions − gas; the count is what says whether that is
+   * the full gas cost or only the priceable part.
+   */
+  gasUsdg: number;
+  gasUnpricedTrades: number;
 }
 
 /** The configured strategy + basket, straight from settings.json (live). */
@@ -112,6 +119,8 @@ export async function GET() {
       financials: null,
       agent: { name: "Robin", ...readIdentitySettings() },
       netContributionsUsdg: null,
+      gasUsdg: 0,
+      gasUnpricedTrades: 0,
     } satisfies FeedResponse);
   }
 
@@ -126,6 +135,8 @@ export async function GET() {
     let financials: AgentFinancials | null = null;
     let name = "Robin";
     let netContributionsUsdg: number | null = null;
+    let gasUsdg = 0;
+    let gasUnpricedTrades = 0;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
     // the old one's rows in the same tables, and every query below used to read
     // the lot — so two agents' equity curves interleaved and the dashboard's
@@ -231,6 +242,19 @@ export async function GET() {
     } catch {
       /* flows arrives with a worker migration — null, never zero */
     }
+    try {
+      const row = db
+        .prepare(
+          `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                  SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
+             FROM trades WHERE agent_id = ? AND status = 'landed'`,
+        )
+        .get(scope) as { usdg: number; unpriced: number | null } | undefined;
+      gasUsdg = row?.usdg ?? 0;
+      gasUnpricedTrades = row?.unpriced ?? 0;
+    } catch {
+      /* gas_usdg arrives with a worker migration */
+    }
     return NextResponse.json({
       source: "sqlite",
       events,
@@ -240,6 +264,8 @@ export async function GET() {
       financials,
       agent: { name, ...readIdentitySettings() },
       netContributionsUsdg,
+      gasUsdg,
+      gasUnpricedTrades,
     } satisfies FeedResponse);
   } finally {
     db.close();

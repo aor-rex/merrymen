@@ -238,9 +238,18 @@ export function BandSection() {
           // over the equity curve, which counts a deposit as a gain and a
           // withdrawal as a loss — and the curve is windowed, so its "first"
           // drifted forward over time and the number quietly changed meaning.
-          const delta = series[series.length - 1]! - contributed;
+          // NET of gas. Gas leaves in ETH and equity is cash + vault +
+          // positions, so this figure was gross of a cost that at these trade
+          // sizes is most of the total.
+          const delta = series[series.length - 1]! - contributed - (feed?.gasUsdg ?? 0);
+          const gasNote =
+            (feed?.gasUnpricedTrades ?? 0) > 0
+              ? `net of $${(feed?.gasUsdg ?? 0).toFixed(2)} gas — ${feed!.gasUnpricedTrades} trade(s) had unpriceable gas, so this is not the full cost`
+              : (feed?.gasUsdg ?? 0) > 0
+                ? `net of $${feed!.gasUsdg.toFixed(2)} gas`
+                : undefined;
           return (
-            <span style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }} title={gasNote}>
               <b className={delta >= 0 ? "up" : "down"} style={{ color: delta >= 0 ? "var(--green)" : "var(--red)" }}>
                 {delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(2)}
               </b>

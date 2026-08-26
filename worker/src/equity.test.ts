@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { bookGaps, composeEquityUsdg, drawdownBps, pnlUsdg } from "./equity";
+import { bookGaps, composeEquityUsdg, drawdownBps, gasQualifier, pnlUsdg } from "./equity";
 
 const usdg = (v: number) => BigInt(Math.round(v * 1e6));
 
@@ -61,6 +61,33 @@ describe("pnlUsdg — unknown is not zero", () => {
   it("a withdrawal reduces contributions, so profit survives it", () => {
     // Put in 1000, took out 400, book worth 700 → made 100.
     near(pnlUsdg(700, 600), 100);
+  });
+
+  it("subtracts gas — the cost equity cannot see", () => {
+    // Gas leaves in ETH and equity_usdg is cash + vault + positions, so without
+    // this every figure was gross of gas. At the sizes this thing trades that
+    // is most of the cost, not a rounding detail.
+    near(pnlUsdg(1010, 1000, 3.45), 6.55);
+  });
+
+  it("gas cannot turn an unknown into a number", () => {
+    assert.equal(pnlUsdg(1010, null, 3.45), null);
+  });
+});
+
+describe("gasQualifier — 'net of gas' is a claim", () => {
+  it("says so plainly when every trade's gas was priced", () => {
+    assert.equal(gasQualifier({ usdg: 3.45, unpricedTrades: 0 }), "net of gas");
+  });
+
+  it("does not claim 'net of gas' when some gas could not be priced", () => {
+    const s = gasQualifier({ usdg: 3.45, unpricedTrades: 2 });
+    assert.match(s, /not the full cost/);
+    assert.match(s, /2 trade\(s\)/);
+  });
+
+  it("distinguishes no gas from unpriced gas", () => {
+    assert.equal(gasQualifier({ usdg: 0, unpricedTrades: 0 }), "no gas costs recorded");
   });
 });
 

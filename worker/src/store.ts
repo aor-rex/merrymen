@@ -284,6 +284,10 @@ function getDb(): DatabaseSync {
     // The cash leg of a fill, so an audit can check it against the chain's USDG
     // movement directly rather than reconstructing it from price × quantity.
     "ALTER TABLE trades ADD COLUMN fill_cash_usdg REAL",
+    // Gas priced in USDG at the moment it was burned, so P&L can be reported
+    // NET of it. NULL means the ETH price was refused at the time — unpriced,
+    // which is a different fact from free, and reported as such.
+    "ALTER TABLE trades ADD COLUMN gas_usdg REAL",
   ]) {
     try {
       db.exec(ddl);
@@ -379,6 +383,8 @@ export interface TradeRow {
   basis_source?: "receipt" | "paper" | "quote";
   /** Gas actually paid, wei, as a decimal string. Real cost; not in equity_usdg. */
   gas_wei?: string;
+  /** That gas in USDG at the price when it was burned. NULL = unpriced, NOT free. */
+  gas_usdg?: number;
   /** Measured execution quality: how far the fill landed from the quote, in bps (+ is worse). */
   fill_slippage_bps?: number;
 }
@@ -741,6 +747,33 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
  * ETH entirely, which means realized P&L is GROSS OF GAS; this is the number
  * that says by how much.
  */
+/**
+ * Gas paid, in USDG, and how much of it could not be priced.
+ *
+ * The count is the honest half. "Net of gas" is only true if every trade's gas
+ * was priceable; when some was not, the figure is net of SOME gas, and a
+ * surface that says otherwise is overstating what it knows.
+ */
+export async function getGasPaidUsdg(
+  agentId: string,
+  epoch?: number,
+): Promise<{ usdg: number; unpricedTrades: number }> {
+  try {
+    const where = epoch === undefined ? "" : " AND epoch = ?";
+    const params = epoch === undefined ? [agentId] : [agentId, epoch];
+    const row = getDb()
+      .prepare(
+        `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
+           FROM trades WHERE agent_id = ? AND status = 'landed'${where}`,
+      )
+      .get(...params) as { usdg: number; unpriced: number | null } | undefined;
+    return { usdg: row?.usdg ?? 0, unpricedTrades: row?.unpriced ?? 0 };
+  } catch {
+    return { usdg: 0, unpricedTrades: 0 }; // pre-migration ledger
+  }
+}
+
 export async function getGasPaidWei(agentId: string): Promise<bigint> {
   try {
     const rows = getDb()
@@ -837,8 +870,8 @@ export async function addTrade(row: TradeRow): Promise<void> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -867,6 +900,7 @@ export async function addTrade(row: TradeRow): Promise<void> {
         row.fill_slippage_bps ?? null,
         epoch,
         row.fill_cash_usdg ?? null,
+        row.gas_usdg ?? null,
       );
     };
     if (!moved) {
@@ -890,6 +924,7 @@ export async function addTrade(row: TradeRow): Promise<void> {
         fillPriceUsd: row.fill_price_usd ?? null,
         fillQtyRaw: row.fill_qty_raw ?? null,
         fillSide: row.fill_side ?? null,
+        gasUsdg: row.gas_usdg ?? null,
         gasWei: row.gas_wei ?? null,
         kind: row.kind,
         realizedPnlUsdg: row.realized_pnl_usdg ?? null,

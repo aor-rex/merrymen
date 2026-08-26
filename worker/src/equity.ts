@@ -31,11 +31,16 @@ export interface BookParts {
  * wrote. So the curve everyone reads sat below the figure the fee ratcheted on,
  * permanently, by the quarantined cost.
  *
- * NOTE what is still absent: ETH. Gas is paid from it and it is genuinely part
- * of the account, but there is no ETH/USD feed here, and inventing a rate for
- * this number is not a trade worth making. Gas is recorded per trade in wei
- * instead (trades.gas_wei), and every figure derived from equity is therefore
- * GROSS OF GAS — which the surfaces say out loud.
+ * NOTE what is deliberately absent: ETH. Gas is paid from it, so it is real
+ * money, but folding a volatile asset into equity would feed it to the
+ * high-water mark and the drawdown breaker — an ETH rally would ratchet the HWM
+ * and accrue a performance fee on the gas float, and an hour where the WETH
+ * pool is refused would drop equity by the whole ETH balance and read as a
+ * genuine drawdown.
+ *
+ * So the book is the USDG book, and ETH is fuel: its CONSUMPTION is charged
+ * against P&L at the price on the day it was burned (trades.gas_usdg, priced
+ * from the WETH pool TWAP), rather than its BALANCE being marked. See pnlUsdg.
  */
 export function composeEquityUsdg(parts: BookParts): bigint {
   return parts.cashUsdg + parts.vaultUsdg + parts.positionsUsdg + parts.quarantinedCostUsdg;
@@ -49,9 +54,39 @@ export function composeEquityUsdg(parts: BookParts): bigint {
  * `equity - 0` is the bankroll — reporting that as profit is the original bug.
  * Callers must show nothing rather than something wrong.
  */
-export function pnlUsdg(equityUsdg: number, netContributionsUsdg: number | null): number | null {
+export function pnlUsdg(
+  equityUsdg: number,
+  netContributionsUsdg: number | null,
+  /**
+   * Gas paid, in USDG, priced when it was burned. Subtracted because it is a
+   * real cost of trading that equity cannot see: gas leaves the account in ETH,
+   * and `equity_usdg` is cash + vault + positions. Pass 0 only when you know
+   * the figure is zero — for "not known", see gasPriced below.
+   */
+  gasUsdg = 0,
+): number | null {
   if (netContributionsUsdg === null) return null;
-  return equityUsdg - netContributionsUsdg;
+  return equityUsdg - netContributionsUsdg - gasUsdg;
+}
+
+/** What a P&L figure is net of, so a surface can say so rather than imply it. */
+export interface GasCoverage {
+  /** USDG of gas that could be priced. */
+  usdg: number;
+  /** Landed trades whose gas could NOT be priced — the figure is gross of these. */
+  unpricedTrades: number;
+}
+
+/**
+ * How to describe a P&L figure honestly given what is known about gas.
+ *
+ * "Net of gas" is a claim, and it is only true if every trade's gas was
+ * priceable. When some was not, the figure is net of SOME gas — and saying so
+ * is the difference between a number and a number you can rely on.
+ */
+export function gasQualifier(cov: GasCoverage): string {
+  if (cov.unpricedTrades === 0) return cov.usdg > 0 ? "net of gas" : "no gas costs recorded";
+  return `net of ${cov.usdg.toFixed(2)} USDG gas, but ${cov.unpricedTrades} trade(s) had unpriceable gas — this is not the full cost`;
 }
 
 /**

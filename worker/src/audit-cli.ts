@@ -24,6 +24,7 @@ import {
   type ExportedEntry,
   type FetchedReceipt,
 } from "./audit";
+import { gasQualifier, pnlUsdg } from "./equity";
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -175,10 +176,18 @@ async function doVerify(): Promise<void> {
   const r = reconcile(book);
   console.log("");
   console.log(`  contributed:  ${book.netContributionsUsdg.toFixed(2)} USDG`);
-  console.log(`  realized P&L: ${book.realizedPnlUsdg.toFixed(2)} USDG`);
-  console.log(`  gas paid:     ${(Number(book.gasWei) / 1e18).toFixed(6)} ETH (not included in equity)`);
+  console.log(`  realized P&L: ${book.realizedPnlUsdg.toFixed(2)} USDG (gross of gas)`);
+  console.log(
+    `  gas paid:     ${(Number(book.gasWei) / 1e18).toFixed(6)} ETH = ${book.gasUsdg.toFixed(2)} USDG` +
+      (book.gasUnpricedFills > 0 ? ` (+ ${book.gasUnpricedFills} fill(s) whose gas is UNPRICED)` : ""),
+  );
   if (book.publishedEquityUsdg !== null) {
     console.log(`  equity:       ${book.publishedEquityUsdg.toFixed(2)} USDG (as published)`);
+    const net = pnlUsdg(book.publishedEquityUsdg, book.netContributionsUsdg, book.gasUsdg);
+    console.log(
+      `  P&L net:      ${net?.toFixed(2) ?? "—"} USDG — ` +
+        gasQualifier({ usdg: book.gasUsdg, unpricedTrades: book.gasUnpricedFills }),
+    );
     console.log(`  residual:     ${r.residualUsdg?.toFixed(2) ?? "—"} USDG — unrealized on open positions`);
   }
 

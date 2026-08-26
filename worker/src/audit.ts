@@ -102,8 +102,12 @@ export interface ReconstructedBook {
   netContributionsUsdg: number;
   /** Σ realized P&L booked on closing fills. */
   realizedPnlUsdg: number;
-  /** Σ gas paid, wei. Not in equity — there is no ETH/USD feed. */
+  /** Σ gas paid, wei. Not in equity — gas leaves the account in ETH. */
   gasWei: bigint;
+  /** Σ gas in USDG, priced from the WETH pool TWAP when each trade landed. */
+  gasUsdg: number;
+  /** Landed fills whose gas could not be priced — the figure is gross of these. */
+  gasUnpricedFills: number;
   /** The last published equity figure, for comparison. */
   publishedEquityUsdg: number | null;
   /** Fills and flows that name a transaction — what an RPC check would refetch. */
@@ -125,6 +129,8 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
     netContributionsUsdg: 0,
     realizedPnlUsdg: 0,
     gasWei: 0n,
+    gasUsdg: 0,
+    gasUnpricedFills: 0,
     publishedEquityUsdg: null,
     chainRefs: [],
     unanchored: [],
@@ -161,6 +167,10 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
         } catch {
           /* a malformed figure is a chain finding, not an arithmetic one */
         }
+        // Priced when it was burned. A null here is UNPRICED, not free — and it
+        // is counted, so a "net of gas" claim can be checked rather than taken.
+        if (typeof p.gasUsdg === "number") book.gasUsdg += p.gasUsdg;
+        else if (p.status === "landed") book.gasUnpricedFills += 1;
       }
       if (typeof p.txHash === "string" && p.txHash) {
         book.chainRefs.push({ kind: "fill", txHash: p.txHash, seq: e.seq });
@@ -357,12 +367,17 @@ export function reconcile(book: ReconstructedBook): {
   if (book.publishedEquityUsdg === null) {
     return { residualUsdg: null, note: "no mark recorded — nothing to reconcile against" };
   }
+  // Gas left the account in ETH, so it never touched published equity — it is
+  // not part of what equity has to explain, and subtracting it here would
+  // manufacture a residual that isn't there. It is charged against P&L
+  // separately (see pnlUsdg), which is a different question from this one.
   const explained = book.netContributionsUsdg + book.realizedPnlUsdg;
   const residual = book.publishedEquityUsdg - explained;
   return {
     residualUsdg: residual,
     note:
       "residual = published equity − (contributions + realized). It is the unrealized " +
-      "mark-to-market on open positions, and is expected to be non-zero while any position is open.",
+      "mark-to-market on open positions, and is expected to be non-zero while any position is open. " +
+      "Gas is excluded here because it never entered equity; it is charged against P&L instead.",
   };
 }

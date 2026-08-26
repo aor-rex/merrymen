@@ -30,7 +30,11 @@ export interface ScoreboardAgent {
   hwm_usdg: number;
   accrued_fee_usdg: number;
   equity: ScoreboardEquityPoint[];
+  /** Equity − contributions − gas. Null when contributions are unknown. */
   pnl_usdg: number | null;
+  /** Gas charged against that figure, and fills whose gas could not be priced. */
+  gas_usdg: number;
+  gas_unpriced_trades: number;
   max_drawdown_bps: number;
   trades: { landed: number; rejected: number; reverted: number; volume_usdg: number };
 }
@@ -97,6 +101,25 @@ export async function GET() {
       } catch {
         /* flows arrives with a worker migration */
       }
+      // Gas priced in USDG when it was burned, and how much could not be
+      // priced — the count is what stops "net of gas" being a claim we can't
+      // back on a public page.
+      let gasUsdg = 0;
+      let gasUnpriced = 0;
+      try {
+        const row = db
+          .prepare(
+            `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                    SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
+               FROM trades WHERE agent_id = ? AND status = 'landed'`,
+          )
+          .get(account) as { usdg: number; unpriced: number | null } | undefined;
+        gasUsdg = row?.usdg ?? 0;
+        gasUnpriced = row?.unpriced ?? 0;
+      } catch {
+        /* gas_usdg arrives with a worker migration */
+      }
+
       let latestEquity: number | null = null;
       try {
         const row = db
@@ -156,7 +179,13 @@ export async function GET() {
         hwm_usdg: row.hwm_usdg as number,
         accrued_fee_usdg: row.accrued_fee_usdg as number,
         equity,
-        pnl_usdg: latestEquity === null || contributed === null ? null : latestEquity - contributed,
+        // Net of gas, like every other surface. Gas leaves in ETH and never
+        // touched equity, so without subtracting it a published figure
+        // overstates performance by the whole trading cost.
+        pnl_usdg:
+          latestEquity === null || contributed === null ? null : latestEquity - contributed - gasUsdg,
+        gas_usdg: gasUsdg,
+        gas_unpriced_trades: gasUnpriced,
         max_drawdown_bps: maxDdBps,
         trades,
       };

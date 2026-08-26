@@ -55,6 +55,7 @@ import { bestRoute, buildTradeCalls, minOutWithSlippage } from "./venues/uniswap
 import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst } from "./fills";
 import { bookGaps, composeEquityUsdg } from "./equity";
+import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
@@ -452,6 +453,46 @@ async function main() {
    * with a reason, and stays unpriced. Refusing is the safe outcome — equity and
    * the drawdown breaker read these numbers.
    */
+  /**
+   * The ETH price, for charging gas against the book.
+   *
+   * Same guarded TWAP reader that values feedless holdings — liquidity floor and
+   * divergence band included — so a pool being pushed around cannot make gas
+   * look cheap. Cached for a few minutes: gas is priced per trade, and a fresh
+   * pool read on every fill would add an RPC round trip to the hot path for a
+   * number that moves in cents.
+   *
+   * Returns null on refusal. The caller records the gas as UNPRICED, never as
+   * zero — a zero would quietly improve reported P&L by the whole gas bill.
+   */
+  let ethPriceCache: { price8: bigint; atSec: number } | null = null;
+  const ETH_PRICE_TTL_SEC = 300;
+  async function ethPrice8(): Promise<{ price8: bigint | null; reason?: string }> {
+    const now = Math.floor(Date.now() / 1000);
+    if (ethPriceCache && now - ethPriceCache.atSec < ETH_PRICE_TTL_SEC) {
+      return { price8: ethPriceCache.price8 };
+    }
+    try {
+      const { quotes, refused } = await poolPrices.read({
+        client: mainnetClient(),
+        tokens: [wethPriceToken(CASH.WETH as `0x${string}`)],
+        guard: {
+          minLiquidityUsdg: usdg(cfg.minPoolLiquidityUsdg),
+          maxDivergenceBps: cfg.maxPriceDivergenceBps,
+        },
+        nowSec: now,
+      });
+      const q = quotes.get("WETH");
+      if (q && q.price8 > 0n) {
+        ethPriceCache = { price8: q.price8, atSec: now };
+        return { price8: q.price8 };
+      }
+      return { price8: null, reason: refused[0]?.reason ?? "the WETH/USDG pool did not pass the price guards" };
+    } catch (e) {
+      return { price8: null, reason: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   async function mergePoolPrices(prices: Map<string, PriceQuote>, agentId: string): Promise<void> {
     // Memecoins only, not merely "feedless". A Stock Token whose feed hasn't
     // been published yet (BE today) is still ERC-8056: its value scales with
@@ -1457,6 +1498,18 @@ async function main() {
         }
       }
 
+      // What the gas cost, in the currency the book is kept in. A refusal is
+      // recorded as unpriced rather than as zero — see gas-price.ts.
+      const eth = await ethPrice8();
+      const gasCost = priceGas(exec.gasWei, eth.price8, eth.reason);
+      if (gasCost.usdg === null && exec.gasWei > 0n) {
+        await addEvent(
+          agentId,
+          "warn",
+          `gas for this trade is unpriced (${gasCost.reason}) — P&L will be gross of it until an ETH price is available`,
+        );
+      }
+
       // Only a LANDED swap moves the basis — a revert must never book P&L.
       const booked = liveFill ? bookFill(agentId, "live", liveFill, basisSource) : null;
       await recordTrade({
@@ -1469,6 +1522,10 @@ async function main() {
         tx_hash: txHash,
         user_op_hash: exec.userOpHash,
         gas_wei: exec.gasWei.toString(),
+        // Gas priced at the moment it was burned, not at today's rate: the cost
+        // was incurred then, and re-valuing it later would make a past trade's
+        // P&L drift with the ETH price.
+        ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
         ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
         ...sim,
