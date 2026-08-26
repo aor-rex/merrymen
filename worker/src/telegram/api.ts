@@ -154,13 +154,15 @@ export async function getUpdates(
 /**
  * The commands shown in the Telegram "/" menu. Mirrors /help (reads.ts) as
  * Telegram BotCommand entries: 1-32 lowercase alphanumeric/underscore, no
- * leading slash, plain-text descriptions (no HTML). PC/control and agent
- * entries are still gated at runtime — the menu merely surfaces them.
+ * leading slash, plain-text descriptions (no HTML). This is the FULL menu —
+ * pushed to each allowlisted chat so owners keep discoverability. Strangers
+ * see the trimmed publicBotCommands subset instead.
  */
 export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "help", description: "list every command" },
   { command: "status", description: "what the band is doing now" },
   { command: "positions", description: "current positions and P&L" },
+  { command: "depth", description: "liquidity map for one SYMBOL" },
   { command: "pnl", description: "profit and loss" },
   { command: "trades", description: "recent trades" },
   { command: "report", description: "today's campfire report" },
@@ -211,11 +213,39 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "agent", description: "run a multi-step task on your PC" },
 ];
 
-/** Push the command menu to Telegram. Best-effort — never throws. */
+/**
+ * What an arbitrary stranger sees in the "/" menu. Pure reads + onboarding
+ * signposts only — the remote-control surface (shell/keyboard/power/files,
+ * agent) and the trading controls stay OUT of the public menu so the bot
+ * doesn't advertise what it can do to a computer. Every command is still
+ * gated at runtime; this is about not painting the target, while owners get
+ * the full menu pushed to their own allowlisted chats (service.ts).
+ */
+const PUBLIC_COMMAND_NAMES = new Set([
+  "help",
+  "status",
+  "positions",
+  "depth",
+  "pnl",
+  "trades",
+  "report",
+  "why",
+  "brag",
+  "alerts",
+  "reminders",
+  "soul",
+  "wallet",
+  "link",
+]);
+
+export const publicBotCommands = BOT_COMMANDS.filter((c) => PUBLIC_COMMAND_NAMES.has(c.command));
+
+/** Push the command menu to Telegram. Best-effort — never throws.
+ * scope takes a chat_id for the per-allowlisted-chat full-menu push. */
 export async function setMyCommands(
   opts: TelegramOpts,
   commands?: { command: string; description: string }[],
-  scope?: { type: string },
+  scope?: { type: string; chat_id?: number },
 ): Promise<{ ok: boolean; reason?: string }> {
   const { result, reason } = await call(opts, "setMyCommands", {
     commands: commands ?? BOT_COMMANDS,
