@@ -9,20 +9,17 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
-import { wrapSqlite, type Db } from "./db";
+import { wrapSqlite, makePgDb, type Db } from "./db";
 
 let driver: Db | null = null;
 
-function getDb(): Db {
-  if (driver) return driver;
-  ensureHome();
-  const DB_FILE = homePaths.db();
-  // The schema runs SYNCHRONOUSLY on the raw sqlite connection (sqlite allows it,
-  // and it keeps self-hosted's lazy-on-first-use init exactly as it was). The
-  // store's per-query calls then go through the async driver we wrap it in.
-  const db = new DatabaseSync(DB_FILE);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec(`
+/**
+ * The schema, written once in the sqlite dialect — the single source of truth for
+ * BOTH backends. Self-hosted runs it verbatim on node:sqlite; the hosted Postgres
+ * path runs it through db.ts's translateSchema(). Keeping ONE string, rather than a
+ * hand-maintained parallel Postgres DDL, is what stops the two dialects drifting.
+ */
+const SQLITE_SCHEMA = `
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -238,8 +235,14 @@ function getDb(): Db {
       entry_sec INTEGER NOT NULL DEFAULT (unixepoch()),
       PRIMARY KEY (agent_id, mode, symbol)
     );
-  `);
-  for (const ddl of [
+`;
+
+/**
+ * Additive migrations, applied after the CREATE block on every open. Each is
+ * idempotent: sqlite throws "duplicate column" on re-run and the loop swallows it;
+ * the Postgres translation turns each into ADD COLUMN IF NOT EXISTS.
+ */
+const SQLITE_ALTERS: string[] = [
     "ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0",
     // Persistent high-water mark + running fee total — HWM must survive
     // restarts or the breaker and the fee ledger both forget the peak.
@@ -317,7 +320,19 @@ function getDb(): Db {
     // NET of it. NULL means the ETH price was refused at the time — unpriced,
     // which is a different fact from free, and reported as such.
     "ALTER TABLE trades ADD COLUMN gas_usdg REAL",
-  ]) {
+];
+
+/** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
+ *  Sqlite allows synchronous DDL, which keeps self-hosted's lazy-on-first-use init
+ *  byte-for-byte; only the per-query calls the store makes go through the async
+ *  interface. */
+function initSqlite(): Db {
+  ensureHome();
+  const DB_FILE = homePaths.db();
+  const db = new DatabaseSync(DB_FILE);
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec(SQLITE_SCHEMA);
+  for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
     } catch {
@@ -328,7 +343,37 @@ function getDb(): Db {
   // and a diagnostic line landing in the middle of it corrupts the file. A log
   // is not data.
   console.error(`[store] sqlite at ${DB_FILE}`);
-  driver = wrapSqlite(db);
+  return wrapSqlite(db);
+}
+
+/** Open the shared Postgres ledger (hosted, multi-tenant): connect, then run the
+ *  same schema + migrations through the async driver, which translates each to the
+ *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
+async function initPostgres(url: string): Promise<Db> {
+  const d = await makePgDb(url);
+  await d.exec(SQLITE_SCHEMA);
+  for (const ddl of SQLITE_ALTERS) {
+    try {
+      await d.exec(ddl);
+    } catch {
+      // ADD COLUMN IF NOT EXISTS makes a re-run a no-op; a genuine error still
+      // surfaces on the first real query rather than being masked here.
+    }
+  }
+  console.error("[store] postgres ledger");
+  return d;
+}
+
+function getDb(): Db {
+  if (driver) return driver;
+  if (process.env.DATABASE_URL) {
+    // Postgres init is async (connect + DDL) and cannot run inside this sync
+    // accessor. The hosted worker and web bootstrap both call initStore() first;
+    // failing loudly here beats silently opening a stray local sqlite file on a
+    // machine that was meant to share the network ledger.
+    throw new Error("[store] DATABASE_URL is set — call and await initStore() before the first store use");
+  }
+  driver = initSqlite();
   return driver;
 }
 
@@ -337,9 +382,13 @@ export function resetStoreForTest(): void {
   driver = null;
 }
 
-/** Create the DB + schema eagerly so a broken store fails at startup, not mid-trade. */
-export function initStore(): void {
-  getDb();
+/** Create the DB + schema eagerly so a broken store fails at startup, not mid-trade.
+ *  Async because the Postgres backend connects and runs DDL over the network; the
+ *  self-hosted sqlite path stays synchronous under the await. */
+export async function initStore(): Promise<void> {
+  if (driver) return;
+  const url = process.env.DATABASE_URL;
+  driver = url ? await initPostgres(url) : initSqlite();
 }
 
 export interface TradeRow {

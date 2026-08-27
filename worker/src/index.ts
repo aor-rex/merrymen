@@ -202,7 +202,7 @@ interface ActiveAgent {
 }
 
 async function main() {
-  initStore();
+  await initStore();
   const selftest = process.argv.includes("--selftest");
 
   let active: ActiveAgent | null = null;
