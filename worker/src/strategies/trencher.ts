@@ -162,9 +162,9 @@ export interface TrencherDeps {
   swapRouter: `0x${string}`;
   usdgToken: `0x${string}`;
   /** Candidates the discovery pass surfaced and the tick could price. */
-  candidates: () => readonly Candidate[];
+  candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
   /** What's currently held from previous entries. */
-  open: () => readonly OpenPosition[];
+  open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
   /** Live depth for a held token, when it's still readable. */
   liquidityOf: (token: `0x${string}`) => number | null;
   onNote?: (level: "ok" | "warn", message: string) => void;
@@ -187,7 +187,7 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       if (!snap.sequencerUp) return intents;
 
       // ── exits first, always ────────────────────────────────────────────
-      const openNow = deps.open();
+      const openNow = await deps.open();
       for (const pos of openNow) {
         const held = snap.holdings.get(pos.symbol);
         if (!held || held.rawBalance <= 0n) continue;
@@ -215,7 +215,7 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
 
       // ── entries, only with what's left ─────────────────────────────────
       const heldSymbols = new Set(openNow.map((p) => p.symbol));
-      for (const c of deps.candidates()) {
+      for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
         const size = deps.cfg.perEntryUsdg;

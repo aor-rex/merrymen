@@ -60,8 +60,8 @@ export interface StrategyBuildOpts {
    */
   trench?: {
     usdgToken: `0x${string}`;
-    candidates: () => readonly Candidate[];
-    open: () => readonly OpenPosition[];
+    candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
+    open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
     liquidityOf: (token: `0x${string}`) => number | null;
   };
 }

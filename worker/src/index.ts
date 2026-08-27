@@ -638,11 +638,11 @@ async function main() {
    * Live trenching is reachable, it just costs the owner the same two deliberate
    * steps as any other token. That is the feature, not a limitation.
    */
-  function trenchCandidates(): Candidate[] {
+  async function trenchCandidates(): Promise<Candidate[]> {
     if (!paperActive()) return [];
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
-    for (const c of recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25)) {
+    for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25)) {
       const quote = lastPrices.get(c.symbol);
       out.push({
         symbol: c.symbol,
@@ -667,14 +667,14 @@ async function main() {
    * ledger already tracks exactly what was paid per raw unit and survives
    * partial fills, so a second copy could only ever disagree with it.
    */
-  function trenchOpen(): OpenPosition[] {
+  async function trenchOpen(): Promise<OpenPosition[]> {
     if (!active) return [];
     const mode: BasisMode = paperActive() ? "paper" : "live";
     const out: OpenPosition[] = [];
     for (const t of watchTokens) {
-      const basis = getBasis(active.agentId, mode, t.symbol);
+      const basis = await getBasis(active.agentId, mode, t.symbol);
       if (basis.qtyRaw <= 0n || basis.costUsdg <= 0n) continue;
-      const entry = getTrenchEntry(active.agentId, mode, t.symbol);
+      const entry = await getTrenchEntry(active.agentId, mode, t.symbol);
       if (!entry) continue; // not a trench entry — another strategy's position
       // costUsdg(6dp) / qty(10^dec) → USD per whole token at 8dp.
       const entryPrice8 =
@@ -715,7 +715,7 @@ async function main() {
         minLiquidityUsdg: usdg(cfg.minPoolLiquidityUsdg),
         maxDivergenceBps: cfg.maxPriceDivergenceBps,
       },
-      seen: seenPools(),
+      seen: await seenPools(),
       known: watchTokens,
       sinceMinutes: Math.max(60, cfg.discoveryIntervalMin * 2),
     });
@@ -724,12 +724,12 @@ async function main() {
       // Persist BEFORE announcing. If the notification fails we'd rather stay
       // quiet than repeat ourselves every poll — a feed that duplicates stops
       // being read, and the owner can always look the token up.
-      markPoolSeen(d.token, d.symbol);
+      await markPoolSeen(d.token, d.symbol);
       // Record the NUMBERS too, not just that we saw it. Without them a
       // strategy asking "is this worth entering" would have to re-derive
       // everything, and the figures it re-derived would be from a later moment
       // than the one the owner was told about.
-      recordCandidate({
+      await recordCandidate({
         address: d.token,
         symbol: d.symbol,
         decimals: d.decimals,
@@ -1046,18 +1046,20 @@ async function main() {
    * money" a number: a buy adds cost, a sell books realized P&L against the
    * average and shrinks the basis pro-rata (see basis.ts for the exact identity).
    */
-  function bookFill(
+  async function bookFill(
     agentId: string,
     mode: BasisMode,
     f: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number },
     source: "receipt" | "paper" | "quote",
-  ): Pick<
-    TradeRow,
-    "fill_side" | "fill_qty_raw" | "fill_cash_usdg" | "fill_price_usd" | "realized_pnl_usdg" | "basis_source"
+  ): Promise<
+    Pick<
+      TradeRow,
+      "fill_side" | "fill_qty_raw" | "fill_cash_usdg" | "fill_price_usd" | "realized_pnl_usdg" | "basis_source"
+    >
   > {
-    const prev = getBasis(agentId, mode, f.symbol);
+    const prev = await getBasis(agentId, mode, f.symbol);
     const r = applyFill(prev, { side: f.side, qtyRaw: f.qtyRaw, cashUsdg: f.cashUsdg });
-    setBasis(agentId, mode, f.symbol, r.basis);
+    await setBasis(agentId, mode, f.symbol, r.basis);
 
     // Trench bookkeeping. The baseline is stamped on the FIRST buy only (the
     // insert is ON CONFLICT DO NOTHING), so topping up doesn't quietly reset the
@@ -1066,11 +1068,11 @@ async function main() {
     if (cfg.strategy === "trencher") {
       const tok = watchTokens.find((t) => t.symbol === f.symbol);
       if (f.side === "buy" && tok) {
-        setTrenchEntry(agentId, mode, f.symbol, lastLiquidityUsd.get(tok.address.toLowerCase()) ?? 0);
+        await setTrenchEntry(agentId, mode, f.symbol, lastLiquidityUsd.get(tok.address.toLowerCase()) ?? 0);
       }
       // Flat again: forget the baseline so a later re-entry starts fresh rather
       // than being judged against a position that closed hours ago.
-      if (f.side === "sell" && r.basis.qtyRaw <= 0n) clearTrenchEntry(agentId, mode, f.symbol);
+      if (f.side === "sell" && r.basis.qtyRaw <= 0n) await clearTrenchEntry(agentId, mode, f.symbol);
     }
     if (r.basisUnknown) {
       // Two very different causes, and the old message asserted the wrong one.
@@ -1113,7 +1115,7 @@ async function main() {
    *
    * Returns undefined for non-swaps, so vault moves and transfers are untouched.
    */
-  function scoutContextFor(intent: TradeIntent): ScoutContext | undefined {
+  async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
     if (intent.kind !== "swap" || !active) return undefined;
     const symbol = symbolOfToken(intent.buyToken);
     const buyUnpriceable = lastUnpriceable.has(intent.buyToken.toLowerCase());
@@ -1126,7 +1128,7 @@ async function main() {
       buyUnpriceable,
       existingCostUsdg:
         symbol !== undefined
-          ? getBasis(active.agentId, paperActive() ? "paper" : "live", symbol).costUsdg
+          ? (await getBasis(active.agentId, paperActive() ? "paper" : "live", symbol)).costUsdg
           : 0n,
       quarantinedUsdg: lastQuarantinedUsdg,
     };
@@ -1214,7 +1216,7 @@ async function main() {
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
     };
-    const verdict = checkPolicy(intent, limits, state, scoutContextFor(intent));
+    const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
     const notional =
       intent.kind === "swap" || intent.kind === "equity-order" ? intent.notionalUsdg : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
@@ -1308,7 +1310,7 @@ async function main() {
         // The 'brokerage' BasisMode (and the brokerage cash ledger) arrive with
         // step 5; until then paper equities are basis-tracked, not cash-tracked.
         const booked = placed.fill
-          ? bookFill(
+          ? await bookFill(
               agentId,
               "paper",
               {
@@ -1404,7 +1406,7 @@ async function main() {
         // Book the fill against the running cost basis. Paper fills are EXACT (we
         // know the shares and the cash), so realized P&L here is the real thing.
         const booked = fill.fill
-          ? bookFill(
+          ? await bookFill(
               agentId,
               "paper",
               {
@@ -1425,7 +1427,7 @@ async function main() {
         // it, the basis is flat too — otherwise stale dust would silently become
         // the cost of the NEXT position in that symbol.
         if (fill.fill && !fill.positions.some((p) => p.symbol === fill.fill!.symbol)) {
-          setBasis(agentId, "paper", fill.fill.symbol, { qtyRaw: 0n, costUsdg: 0n });
+          await setBasis(agentId, "paper", fill.fill.symbol, { qtyRaw: 0n, costUsdg: 0n });
         }
         await recordTrade({
           agent_id: agentId,
@@ -1522,7 +1524,7 @@ async function main() {
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
-          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
+          v4Keys: await poolKeysFor(intent.sellToken, intent.buyToken),
         });
         if (!quote) {
           // Say WHY there is no route when the answer is "your key can't take
@@ -1794,7 +1796,7 @@ async function main() {
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
-          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
+          v4Keys: await poolKeysFor(intent.sellToken, intent.buyToken),
             });
             if (ref) {
               bps = impactBps({
@@ -1930,7 +1932,7 @@ async function main() {
       }
 
       // Only a LANDED swap moves the basis — a revert must never book P&L.
-      const booked = liveFill ? bookFill(agentId, "live", liveFill, basisSource) : null;
+      const booked = liveFill ? await bookFill(agentId, "live", liveFill, basisSource) : null;
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -2195,9 +2197,14 @@ async function main() {
     // the part of the book it can actually protect. What it cannot do is notice
     // a quarantined token going to zero — which is why the scout BUDGET, not the
     // breaker, is the risk control for this money.
+    // Pre-fetch the basis cost for the quarantined set so quarantineOf keeps its
+    // synchronous cost lookup (the ledger read is async now).
+    const qMode: BasisMode = paper ? "paper" : "live";
+    const qCost = new Map<string, bigint>();
+    for (const s of unpricedByDesign) qCost.set(s, (await getBasis(agentId, qMode, s)).costUsdg);
     const quarantine = quarantineOf(
       unpricedByDesign,
-      (symbol) => getBasis(agentId, paper ? "paper" : "live", symbol).costUsdg,
+      (symbol) => qCost.get(symbol) ?? 0n,
       (symbol) => poolRefusals.get(symbol),
     );
     // The book is only genuinely UNKNOWN when a quarantined holding has no
@@ -2258,11 +2265,11 @@ async function main() {
       // still owned — closing its basis here would discard the cost of a real
       // position and later report its whole sale proceeds as profit.
       const heldNow = new Set([...positions.map((p) => p.symbol), ...unpricedByDesign, ...missingPrice]);
-      for (const symbol of basisSymbols(agentId, "live")) {
+      for (const symbol of await basisSymbols(agentId, "live")) {
         if (heldNow.has(symbol)) continue;
-        const stranded = getBasis(agentId, "live", symbol);
+        const stranded = await getBasis(agentId, "live", symbol);
         if (stranded.qtyRaw <= 0n) continue;
-        setBasis(agentId, "live", symbol, { qtyRaw: 0n, costUsdg: 0n });
+        await setBasis(agentId, "live", symbol, { qtyRaw: 0n, costUsdg: 0n });
         console.log(`[basis] ${symbol} no longer held on-chain — closing stranded basis (${fmt(stranded.costUsdg)} USDG cost)`);
         await addEvent(agentId, "warn", `closed leftover ${symbol} cost basis (${fmt(stranded.costUsdg)} USDG) — position is flat on-chain`);
       }

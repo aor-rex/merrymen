@@ -141,31 +141,31 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * from disk — before this, every restart silently wiped the thread and the
    * merryman greeted a mid-conversation owner like a stranger.
    */
-  const historyFor = (chatId: number): { role: "user" | "assistant"; content: string }[] => {
+  const historyFor = async (chatId: number): Promise<{ role: "user" | "assistant"; content: string }[]> => {
     let h = history.get(chatId);
     if (!h) {
-      h = recentChatTurns(chatId, HISTORY_TURNS * 2).map((t) => ({ role: t.role, content: t.content }));
+      h = (await recentChatTurns(chatId, HISTORY_TURNS * 2)).map((t) => ({ role: t.role, content: t.content }));
       history.set(chatId, h);
       // Restore the last turn's recalled ids too, so a pronoun sent right after
       // a restart still lands on whatever the merryman was just talking about.
-      const lastWithIds = [...recentChatTurns(chatId, 4)].reverse().find((t) => t.memoryIds?.length);
+      const lastWithIds = [...(await recentChatTurns(chatId, 4))].reverse().find((t) => t.memoryIds?.length);
       if (lastWithIds?.memoryIds?.length) stickyIds.set(chatId, new Set(lastWithIds.memoryIds));
     }
     return h;
   };
 
-  const pushHistory = (
+  const pushHistory = async (
     chatId: number,
     role: "user" | "assistant",
     content: string,
     memoryIds?: string[],
-  ): void => {
+  ): Promise<void> => {
     const trimmed = content.slice(0, 600);
-    const h = historyFor(chatId);
+    const h = await historyFor(chatId);
     h.push({ role, content: trimmed });
     while (h.length > HISTORY_TURNS * 2) h.shift();
     history.set(chatId, h);
-    appendChatTurn(chatId, { role, content: trimmed, memoryIds }); // write-through
+    await appendChatTurn(chatId, { role, content: trimmed, memoryIds }); // write-through
   };
 
   const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
@@ -446,7 +446,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // knew about you") untrue.
       forgetOwner: () => {
         forgetOwner();
-        clearChatTurns(msg.chatId);
+        void clearChatTurns(msg.chatId); // fire-and-forget; the in-memory wipe below is immediate
         history.delete(msg.chatId);
         stickyIds.delete(msg.chatId);
       },
@@ -553,7 +553,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: historyFor(msg.chatId) };
+        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
@@ -571,7 +571,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           const recalled = recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
           // Read BEFORE this turn is written, so it's the gap since they last
           // spoke rather than zero.
-          const gap = describeGap(lastChatTurnAt(msg.chatId), now());
+          const gap = describeGap(await lastChatTurnAt(msg.chatId), now());
           const chatCtx = {
             state: [
               `SOUL:\n${identity}`,
@@ -582,7 +582,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
             ]
               .filter(Boolean)
               .join("\n"),
-            history: historyFor(msg.chatId),
+            history: await historyFor(msg.chatId),
           };
           const fluent = await narrateChat(msg.text, chatCtx, llm);
           if (fluent) cmd = { kind: "chat", reply: fluent };
@@ -595,7 +595,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
-      pushHistory(msg.chatId, "user", msg.text);
+      await pushHistory(msg.chatId, "user", msg.text);
     }
 
     // Sender-level authz for state-changing commands. In a GROUP the chatId is a
@@ -621,7 +621,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // Natural-language multi-step task → the agent loop (same gates as /agent).
     if (cmd.kind === "agent") {
-      pushHistory(msg.chatId, "assistant", "starting an agent task");
+      await pushHistory(msg.chatId, "assistant", "starting an agent task");
       await startAgent(cmd.task);
       return;
     }
@@ -635,7 +635,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
-    if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
+    if (!slash) await pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
     await sendMessage({ token }, msg.chatId, reply);
   };
 

@@ -9,14 +9,18 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
+import { wrapSqlite, type Db } from "./db";
 
-let db: DatabaseSync | null = null;
+let driver: Db | null = null;
 
-function getDb(): DatabaseSync {
-  if (db) return db;
+function getDb(): Db {
+  if (driver) return driver;
   ensureHome();
   const DB_FILE = homePaths.db();
-  db = new DatabaseSync(DB_FILE);
+  // The schema runs SYNCHRONOUSLY on the raw sqlite connection (sqlite allows it,
+  // and it keeps self-hosted's lazy-on-first-use init exactly as it was). The
+  // store's per-query calls then go through the async driver we wrap it in.
+  const db = new DatabaseSync(DB_FILE);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(`
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
@@ -324,7 +328,13 @@ function getDb(): DatabaseSync {
   // and a diagnostic line landing in the middle of it corrupts the file. A log
   // is not data.
   console.error(`[store] sqlite at ${DB_FILE}`);
-  return db;
+  driver = wrapSqlite(db);
+  return driver;
+}
+
+/** Test seam: drop the cached driver so a test can point MERRYMEN_HOME elsewhere. */
+export function resetStoreForTest(): void {
+  driver = null;
 }
 
 /** Create the DB + schema eagerly so a broken store fails at startup, not mid-trade. */
@@ -438,7 +448,7 @@ export function newDecisionId(): string {
 
 export async function addDecision(row: DecisionRow): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare(
         `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -463,7 +473,7 @@ export async function addDecision(row: DecisionRow): Promise<void> {
 }
 
 export async function ensureAgent(grant: StoredGrant): Promise<string> {
-  getDb()
+  await getDb()
     .prepare(
       `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -486,7 +496,7 @@ export async function ensureAgent(grant: StoredGrant): Promise<string> {
 export async function getAgentFinancials(
   agentId: string,
 ): Promise<{ hwmUsdg: number; accruedFeeUsdg: number }> {
-  const row = getDb()
+  const row = await getDb()
     .prepare("SELECT hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?")
     .get(agentId) as { hwm_usdg: number; accrued_fee_usdg: number } | undefined;
   return { hwmUsdg: row?.hwm_usdg ?? 0, accruedFeeUsdg: row?.accrued_fee_usdg ?? 0 };
@@ -495,7 +505,7 @@ export async function getAgentFinancials(
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
 export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
-    getDb()
+    await getDb()
       .prepare("UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?) WHERE smart_account = ?")
       .run(hwmUsdg, agentId);
     return true;
@@ -522,7 +532,7 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boo
  */
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare("UPDATE agents SET hwm_usdg = MAX(0, hwm_usdg + ?) WHERE smart_account = ?")
       .run(deltaUsdg, agentId);
   } catch (e) {
@@ -587,17 +597,18 @@ export interface JournalEntry {
  * `journaled()` so the mirror and the row it mirrors commit together. A journal
  * that can be half-written is not evidence of anything.
  */
-function appendJournalRow(agentId: string, epoch: number, kind: JournalKind, payload: unknown): void {
-  const db = getDb();
-  const prev = db
+async function appendJournalRow(db: Db, agentId: string, epoch: number, kind: JournalKind, payload: unknown): Promise<void> {
+  const prev = (await db
     .prepare("SELECT hash FROM journal WHERE agent_id = ? AND epoch = ? ORDER BY seq DESC LIMIT 1")
-    .get(agentId, epoch) as { hash: string } | undefined;
+    .get(agentId, epoch)) as { hash: string } | undefined;
   const prevHash = prev?.hash ?? JOURNAL_GENESIS;
   const payloadJson = canonicalJson(payload);
-  db.prepare(
-    `INSERT INTO journal (agent_id, epoch, kind, payload_json, prev_hash, hash)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(agentId, epoch, kind, payloadJson, prevHash, journalHash(prevHash, payloadJson));
+  await db
+    .prepare(
+      `INSERT INTO journal (agent_id, epoch, kind, payload_json, prev_hash, hash)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(agentId, epoch, kind, payloadJson, prevHash, journalHash(prevHash, payloadJson));
 }
 
 /**
@@ -608,33 +619,26 @@ function appendJournalRow(agentId: string, epoch: number, kind: JournalKind, pay
  * not a ledger whose chain has a hole in it or a journal claiming a trade the
  * trades table never got.
  */
-export function journaled(
+export async function journaled(
   agentId: string,
   epoch: number,
   kind: JournalKind,
   payload: unknown,
-  write: () => void,
-): void {
-  const db = getDb();
-  db.exec("BEGIN");
-  try {
-    write();
-    appendJournalRow(agentId, epoch, kind, payload);
-    db.exec("COMMIT");
-  } catch (e) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      /* the transaction may already be gone */
-    }
-    throw e;
-  }
+  write: (db: Db) => Promise<void>,
+): Promise<void> {
+  // One transaction, pinned to one connection (tx()), so the domain write and
+  // its journal entry commit together or not at all — the Postgres backend needs
+  // the single-connection guarantee that sqlite got for free.
+  await getDb().tx(async (tx) => {
+    await write(tx);
+    await appendJournalRow(tx, agentId, epoch, kind, payload);
+  });
 }
 
 /** Every entry for one epoch, oldest first — what `merrymen export` emits. */
 export async function readJournal(agentId: string, epoch: number): Promise<JournalEntry[]> {
   try {
-    return getDb()
+    return await getDb()
       .prepare(
         `SELECT seq, agent_id, epoch, kind, payload_json, prev_hash, hash, at
            FROM journal WHERE agent_id = ? AND epoch = ? ORDER BY seq ASC`,
@@ -645,10 +649,10 @@ export async function readJournal(agentId: string, epoch: number): Promise<Journ
   }
 }
 
-/** Synchronous epoch lookup — the write paths below are sync and can't await. */
-function epochOf(agentId: string): number {
+/** The epoch this agent writes into now — 1 if it has none yet. */
+async function epochOf(agentId: string): Promise<number> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
       .get(agentId) as { epoch: number } | undefined;
     return row?.epoch ?? 1;
@@ -660,7 +664,7 @@ function epochOf(agentId: string): number {
 /** The epoch this agent writes into now. */
 export async function getAgentEpoch(agentId: string): Promise<number> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
       .get(agentId) as { epoch: number } | undefined;
     return row?.epoch ?? 1;
@@ -690,7 +694,7 @@ export const ACCOUNTING_FIXED_AT = 1_787_704_075;
  */
 export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare(
         `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1 AND created_at < ?)
               + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1 AND at < ?) AS n`,
@@ -726,7 +730,7 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
  */
 export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
   const next = (await getAgentEpoch(agentId)) + 1;
-  getDb().prepare("UPDATE agents SET epoch = ? WHERE smart_account = ?").run(next, agentId);
+  await getDb().prepare("UPDATE agents SET epoch = ? WHERE smart_account = ?").run(next, agentId);
   // AFTER the UPDATE, deliberately: addFlow stamps the row with the agent's
   // CURRENT epoch, so this lands in the new one. Written the other way round it
   // would file the opening balance in the epoch being closed and change nothing.
@@ -756,9 +760,9 @@ export interface FlowRow {
 /** Record money crossing the account boundary, and mirror it into the journal. */
 export async function addFlow(flow: FlowRow): Promise<void> {
   try {
-    const epoch = epochOf(flow.agentId);
+    const epoch = await epochOf(flow.agentId);
     const amount = Math.abs(flow.amountUsdg);
-    journaled(
+    await journaled(
       flow.agentId,
       epoch,
       "flow",
@@ -769,8 +773,8 @@ export async function addFlow(flow: FlowRow): Promise<void> {
         source: flow.source,
         txHash: flow.txHash ?? null,
       },
-      () => {
-        getDb()
+      async (db: Db) => {
+        await db
           .prepare(
             `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -802,7 +806,7 @@ export async function addFlow(flow: FlowRow): Promise<void> {
  * P&L at all rather than a confident wrong one.
  */
 export async function getNetContributionsUsdg(agentId: string): Promise<number | null> {
-  const row = getDb()
+  const row = await getDb()
     .prepare(
       `SELECT COUNT(*) AS n,
               COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
@@ -837,7 +841,7 @@ export async function getGasPaidUsdg(
   try {
     const where = epoch === undefined ? "" : " AND epoch = ?";
     const params = epoch === undefined ? [agentId] : [agentId, epoch];
-    const row = getDb()
+    const row = await getDb()
       .prepare(
         `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                 SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
@@ -852,7 +856,7 @@ export async function getGasPaidUsdg(
 
 export async function getGasPaidWei(agentId: string): Promise<bigint> {
   try {
-    const rows = getDb()
+    const rows = await getDb()
       .prepare("SELECT gas_wei FROM trades WHERE agent_id = ? AND gas_wei IS NOT NULL")
       .all(agentId) as { gas_wei: string }[];
     return rows.reduce((sum, r) => {
@@ -880,8 +884,8 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
  */
 export async function lastKnownCashUsdg(agentId: string): Promise<number | null> {
   try {
-    const epoch = epochOf(agentId);
-    const row = getDb()
+    const epoch = await epochOf(agentId);
+    const row = await getDb()
       .prepare(
         "SELECT cash_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
       )
@@ -903,8 +907,8 @@ export async function lastKnownCashUsdg(agentId: string): Promise<number | null>
  */
 export async function lastKnownEquityUsdg(agentId: string): Promise<number | null> {
   try {
-    const epoch = epochOf(agentId);
-    const row = getDb()
+    const epoch = await epochOf(agentId);
+    const row = await getDb()
       .prepare(
         "SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
       )
@@ -919,7 +923,7 @@ export async function lastKnownEquityUsdg(agentId: string): Promise<number | nul
 export async function listFlows(agentId: string, limit = 200): Promise<
   { direction: string; amount_usdg: number; source: string; tx_hash: string | null; at: number }[]
 > {
-  return getDb()
+  return await getDb()
     .prepare(
       `SELECT direction, amount_usdg, source, tx_hash, at FROM flows
        WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT ?`,
@@ -939,16 +943,17 @@ export async function addFeeAccrual(
   a: { profitUsdg: number; feeUsdg: number; hwmBeforeUsdg: number; hwmAfterUsdg: number },
 ): Promise<boolean> {
   try {
-    const epoch = epochOf(agentId);
-    journaled(agentId, epoch, "fee", { ...a, epoch }, () => {
-      const db = getDb();
-      db.prepare(
-        `INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg, epoch)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(agentId, a.profitUsdg, a.feeUsdg, a.hwmBeforeUsdg, a.hwmAfterUsdg, epoch);
-      db.prepare(
-        "UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?",
-      ).run(a.feeUsdg, agentId);
+    const epoch = await epochOf(agentId);
+    await journaled(agentId, epoch, "fee", { ...a, epoch }, async (db: Db) => {
+      await db
+        .prepare(
+          `INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg, epoch)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(agentId, a.profitUsdg, a.feeUsdg, a.hwmBeforeUsdg, a.hwmAfterUsdg, epoch);
+      await db
+        .prepare("UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?")
+        .run(a.feeUsdg, agentId);
     });
     return true;
   } catch (e) {
@@ -962,7 +967,7 @@ export async function setAgentStatus(
   status: "armed" | "active" | "killed" | "expired",
 ): Promise<void> {
   try {
-    getDb().prepare("UPDATE agents SET status = ? WHERE smart_account = ?").run(status, agentId);
+    await getDb().prepare("UPDATE agents SET status = ? WHERE smart_account = ?").run(status, agentId);
   } catch (e) {
     console.error("[store] status update failed:", e);
   }
@@ -974,7 +979,7 @@ export async function addEvent(
   message: string,
 ): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
       .run(agentId, level, message);
   } catch (e) {
@@ -994,14 +999,14 @@ export async function addEvent(
  */
 export async function addTrade(row: TradeRow): Promise<boolean> {
   try {
-    const epoch = epochOf(row.agent_id);
+    const epoch = await epochOf(row.agent_id);
     // Only money-moving rows enter the hash chain. A rejection changes no
     // balance, so its absence cannot distort a performance claim — and there
     // are thousands of them. They stay in `trades` (and in the export, as
     // context) without being part of the tamper-evident record.
     const moved = row.status === "landed" || row.status === "paper";
-    const writeRow = () => {
-      getDb()
+    const writeRow = async (db: Db) => {
+      await db
       .prepare(
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
@@ -1040,10 +1045,10 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
       );
     };
     if (!moved) {
-      writeRow();
+      await writeRow(getDb());
       return true;
     }
-    journaled(
+    await journaled(
       row.agent_id,
       epoch,
       "fill",
@@ -1111,8 +1116,8 @@ export async function addEquity(
   },
 ): Promise<void> {
   try {
-    const epoch = epochOf(agentId);
-    journaled(
+    const epoch = await epochOf(agentId);
+    await journaled(
       agentId,
       epoch,
       "mark",
@@ -1130,8 +1135,8 @@ export async function addEquity(
         positionsUsdg: b.positionsUsdg,
         vaultUsdg: b.vaultUsdg,
       },
-      () => {
-        getDb()
+      async (db: Db) => {
+        await db
           .prepare(
             "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch) VALUES (?, ?, ?, ?, ?, ?, ?)",
           )
@@ -1170,7 +1175,7 @@ export async function setPositions(
          value_usdg = excluded.value_usdg, updated_at = excluded.updated_at`,
     );
     for (const p of positions) {
-      upsert.run(
+      await upsert.run(
         agentId,
         p.symbol,
         p.token,
@@ -1184,11 +1189,13 @@ export async function setPositions(
     }
     const held = positions.map((p) => p.symbol);
     const placeholders = held.map(() => "?").join(",");
-    db.prepare(
-      held.length
-        ? `DELETE FROM positions WHERE agent_id = ? AND symbol NOT IN (${placeholders})`
-        : "DELETE FROM positions WHERE agent_id = ?",
-    ).run(agentId, ...held);
+    await db
+      .prepare(
+        held.length
+          ? `DELETE FROM positions WHERE agent_id = ? AND symbol NOT IN (${placeholders})`
+          : "DELETE FROM positions WHERE agent_id = ?",
+      )
+      .run(agentId, ...held);
   } catch (e) {
     console.error("[store] positions update failed:", e);
   }
@@ -1237,7 +1244,7 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
  */
 export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
-  const row = getDb()
+  const row = await getDb()
     .prepare(
       `SELECT COUNT(*) AS n FROM trades
        WHERE agent_id = ? AND status IN (${sql}) AND created_at > unixepoch() - 86400`,
@@ -1249,7 +1256,7 @@ export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): P
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
 export async function setAgentName(agentId: string, name: string): Promise<void> {
   try {
-    getDb().prepare(`UPDATE agents SET name = ? WHERE smart_account = ?`).run(name, agentId);
+    await getDb().prepare(`UPDATE agents SET name = ? WHERE smart_account = ?`).run(name, agentId);
   } catch (e) {
     console.error("[store] agent rename failed:", e);
   }
@@ -1257,7 +1264,7 @@ export async function setAgentName(agentId: string, name: string): Promise<void>
 
 /** Sum of landed chat transfers in the trailing 24h — the transfer sub-budget. */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
-  const row = getDb()
+  const row = await getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
        WHERE agent_id = ? AND status = 'landed' AND kind = 'transfer'
@@ -1274,7 +1281,7 @@ export async function getTransferredTodayUsdg(agentId: string): Promise<number> 
  */
 export async function getSpentTodayUsdg(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
-  const row = getDb()
+  const row = await getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
        WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'
@@ -1298,28 +1305,32 @@ export interface ChatTurn {
 }
 
 /** Append one turn and prune the chat back to its retention window. */
-export function appendChatTurn(chatId: number, turn: ChatTurn): void {
+export async function appendChatTurn(chatId: number, turn: ChatTurn): Promise<void> {
   try {
     const db = getDb();
-    db.prepare("INSERT INTO chat_turns (chat_id, role, content, memory_ids) VALUES (?, ?, ?, ?)").run(
-      chatId,
-      turn.role,
-      turn.content,
-      turn.memoryIds && turn.memoryIds.length ? JSON.stringify(turn.memoryIds) : null,
-    );
-    db.prepare(
-      `DELETE FROM chat_turns WHERE chat_id = ? AND id NOT IN (
+    await db
+      .prepare("INSERT INTO chat_turns (chat_id, role, content, memory_ids) VALUES (?, ?, ?, ?)")
+      .run(
+        chatId,
+        turn.role,
+        turn.content,
+        turn.memoryIds && turn.memoryIds.length ? JSON.stringify(turn.memoryIds) : null,
+      );
+    await db
+      .prepare(
+        `DELETE FROM chat_turns WHERE chat_id = ? AND id NOT IN (
          SELECT id FROM chat_turns WHERE chat_id = ? ORDER BY id DESC LIMIT ?)`,
-    ).run(chatId, chatId, CHAT_TURNS_KEPT);
+      )
+      .run(chatId, chatId, CHAT_TURNS_KEPT);
   } catch (e) {
     console.error("[store] chat turn insert failed:", e);
   }
 }
 
 /** The most recent turns for a chat, oldest-first (prompt order). */
-export function recentChatTurns(chatId: number, limit = CHAT_TURNS_KEPT): ChatTurn[] {
+export async function recentChatTurns(chatId: number, limit = CHAT_TURNS_KEPT): Promise<ChatTurn[]> {
   try {
-    const rows = getDb()
+    const rows = await getDb()
       .prepare("SELECT role, content, memory_ids FROM chat_turns WHERE chat_id = ? ORDER BY id DESC LIMIT ?")
       .all(chatId, limit) as { role: string; content: string; memory_ids: string | null }[];
     return rows
@@ -1340,9 +1351,9 @@ export function recentChatTurns(chatId: number, limit = CHAT_TURNS_KEPT): ChatTu
 
 /** Unix seconds of the last turn in a chat, or null if there is none. Lets the
  * merryman know it's been three days rather than opening cold every time. */
-export function lastChatTurnAt(chatId: number): number | null {
+export async function lastChatTurnAt(chatId: number): Promise<number | null> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare("SELECT at FROM chat_turns WHERE chat_id = ? ORDER BY id DESC LIMIT 1")
       .get(chatId) as { at: number } | undefined;
     return row?.at ?? null;
@@ -1353,9 +1364,9 @@ export function lastChatTurnAt(chatId: number): number | null {
 
 /** Forget one chat's conversation — what /forget must actually do now that
  * turns persist to disk rather than dying with the process. */
-export function clearChatTurns(chatId: number): void {
+export async function clearChatTurns(chatId: number): Promise<void> {
   try {
-    getDb().prepare("DELETE FROM chat_turns WHERE chat_id = ?").run(chatId);
+    await getDb().prepare("DELETE FROM chat_turns WHERE chat_id = ?").run(chatId);
   } catch (e) {
     console.error("[store] chat turn clear failed:", e);
   }
@@ -1371,9 +1382,9 @@ export function clearChatTurns(chatId: number): void {
 export type BasisMode = "paper" | "live" | "brokerage";
 
 /** Load a symbol's basis for one mode. Missing row = a flat position, not an error. */
-export function getBasis(agentId: string, mode: BasisMode, symbol: string): { qtyRaw: bigint; costUsdg: bigint } {
+export async function getBasis(agentId: string, mode: BasisMode, symbol: string): Promise<{ qtyRaw: bigint; costUsdg: bigint }> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?")
       .get(agentId, mode, symbol) as { qty_raw: string; cost_usdg: string } | undefined;
     if (!row) return { qtyRaw: 0n, costUsdg: 0n };
@@ -1384,33 +1395,37 @@ export function getBasis(agentId: string, mode: BasisMode, symbol: string): { qt
 }
 
 /** Persist a symbol's basis; a fully-closed position drops the row entirely. */
-export function setBasis(
+export async function setBasis(
   agentId: string,
   mode: BasisMode,
   symbol: string,
   b: { qtyRaw: bigint; costUsdg: bigint },
-): void {
+): Promise<void> {
   try {
     const db = getDb();
     if (b.qtyRaw <= 0n) {
-      db.prepare("DELETE FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?").run(agentId, mode, symbol);
+      await db
+        .prepare("DELETE FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?")
+        .run(agentId, mode, symbol);
       return;
     }
-    db.prepare(
-      `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+    await db
+      .prepare(
+        `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
        VALUES (?, ?, ?, ?, ?, unixepoch())
        ON CONFLICT(agent_id, mode, symbol) DO UPDATE SET
          qty_raw = excluded.qty_raw, cost_usdg = excluded.cost_usdg, updated_at = excluded.updated_at`,
-    ).run(agentId, mode, symbol, b.qtyRaw.toString(), b.costUsdg.toString());
+      )
+      .run(agentId, mode, symbol, b.qtyRaw.toString(), b.costUsdg.toString());
   } catch (e) {
     console.error("[store] basis update failed:", e);
   }
 }
 
 /** Every symbol carrying basis in one mode — used to reconcile against reality. */
-export function basisSymbols(agentId: string, mode: BasisMode): string[] {
+export async function basisSymbols(agentId: string, mode: BasisMode): Promise<string[]> {
   try {
-    const rows = getDb()
+    const rows = await getDb()
       .prepare("SELECT symbol FROM cost_basis WHERE agent_id = ? AND mode = ?")
       .all(agentId, mode) as { symbol: string }[];
     return rows.map((r) => r.symbol);
@@ -1424,7 +1439,7 @@ export function basisSymbols(agentId: string, mode: BasisMode): string[] {
  * live money must never be summed together, and rows whose basis was unknown
  * carry NULL so they're excluded rather than counted as cost-free profit.
  */
-export function getRealizedPnlUsdg(agentId: string, mode: BasisMode, sinceUnix?: number): number {
+export async function getRealizedPnlUsdg(agentId: string, mode: BasisMode, sinceUnix?: number): Promise<number> {
   // Exhaustive on purpose: a mode with no status mapping would read ZERO P&L
   // everywhere, silently — the exact failure the design doc calls out.
   // 'brokerage' maps to 'landed' like 'live': a settled broker fill is as real
@@ -1437,12 +1452,12 @@ export function getRealizedPnlUsdg(agentId: string, mode: BasisMode, sinceUnix?:
   try {
     const row = (
       sinceUnix
-        ? getDb()
+        ? await getDb()
             .prepare(
               "SELECT COALESCE(SUM(realized_pnl_usdg), 0) AS pnl FROM trades WHERE agent_id = ? AND status = ? AND realized_pnl_usdg IS NOT NULL AND created_at > ?",
             )
             .get(agentId, status, sinceUnix)
-        : getDb()
+        : await getDb()
             .prepare(
               "SELECT COALESCE(SUM(realized_pnl_usdg), 0) AS pnl FROM trades WHERE agent_id = ? AND status = ? AND realized_pnl_usdg IS NOT NULL",
             )
@@ -1466,10 +1481,10 @@ export interface PaperBookRow {
 
 /** Load the paper book, seeding it with the starting cash on first touch. */
 export async function getPaperBook(agentId: string, startUsdg: number): Promise<PaperBookRow> {
-  getDb()
+  await getDb()
     .prepare("INSERT OR IGNORE INTO paper_book (agent_id, cash_usdg) VALUES (?, ?)")
     .run(agentId, startUsdg);
-  const row = getDb()
+  const row = await getDb()
     .prepare("SELECT cash_usdg, vault_usdg, hwm_usdg, shares FROM paper_book WHERE agent_id = ?")
     .get(agentId) as { cash_usdg: number; vault_usdg: number; hwm_usdg: number; shares: string };
   let shares: PaperBookRow["shares"] = {};
@@ -1482,7 +1497,7 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
 }
 
 export async function setPaperBook(agentId: string, book: PaperBookRow): Promise<void> {
-  getDb()
+  await getDb()
     .prepare(
       `UPDATE paper_book SET cash_usdg = ?, vault_usdg = ?, hwm_usdg = ?, shares = ?, updated_at = unixepoch()
        WHERE agent_id = ?`,
@@ -1491,9 +1506,9 @@ export async function setPaperBook(agentId: string, book: PaperBookRow): Promise
 }
 
 /** Addresses discovery has already reported. Bounded — old rows are pruned. */
-export function seenPools(): Set<string> {
+export async function seenPools(): Promise<Set<string>> {
   try {
-    const rows = getDb().prepare("SELECT address FROM discovered_pools").all() as { address: string }[];
+    const rows = await getDb().prepare("SELECT address FROM discovered_pools").all() as { address: string }[];
     return new Set(rows.map((r) => r.address.toLowerCase()));
   } catch {
     return new Set();
@@ -1501,14 +1516,14 @@ export function seenPools(): Set<string> {
 }
 
 /** Record a reported pair so it is never announced twice. */
-export function markPoolSeen(address: string, symbol: string): void {
+export async function markPoolSeen(address: string, symbol: string): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare("INSERT OR IGNORE INTO discovered_pools (address, symbol) VALUES (?, ?)")
       .run(address.toLowerCase(), symbol.slice(0, 16));
     // A launchy chain could otherwise grow this forever. 5k rows is far more
     // than dedupe needs and keeps the table trivial to scan.
-    getDb().exec(
+    await getDb().exec(
       "DELETE FROM discovered_pools WHERE address NOT IN (SELECT address FROM discovered_pools ORDER BY first_seen DESC LIMIT 5000)",
     );
   } catch (e) {
@@ -1544,9 +1559,9 @@ export interface PoolCandidate {
  * `first_seen` doubles as the age baseline: the pool's own creation time isn't
  * always available, and the moment we first saw it is at least a fact.
  */
-export function recordCandidate(c: PoolCandidate): void {
+export async function recordCandidate(c: PoolCandidate): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare(
         // The pool-key columns use COALESCE(excluded.x, x) so a KEYLESS
         // re-sighting of the same token — the gateway path, an older worker, a
@@ -1590,10 +1605,10 @@ export function recordCandidate(c: PoolCandidate): void {
  * different pool, not a vaguer one. Returns plain structural objects so the
  * venues layer never has to import the store's row shapes.
  */
-export function poolKeysFor(
+export async function poolKeysFor(
   a: string,
   b: string,
-): { currency0: `0x${string}`; currency1: `0x${string}`; fee: number; tickSpacing: number; hooks: `0x${string}` }[] {
+): Promise<{ currency0: `0x${string}`; currency1: `0x${string}`; fee: number; tickSpacing: number; hooks: `0x${string}` }[]> {
   try {
     // v4 sorts currency0 < currency1 numerically; for equal-length lowercase
     // hex strings that is the same order as a string comparison.
@@ -1601,7 +1616,7 @@ export function poolKeysFor(
     const bl = b.toLowerCase();
     const lo = al < bl ? al : bl;
     const hi = al < bl ? bl : al;
-    const rows = getDb()
+    const rows = await getDb()
       .prepare(
         `SELECT pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks
          FROM discovered_pools
@@ -1628,9 +1643,9 @@ export function poolKeysFor(
 }
 
 /** Candidates seen within `maxAgeSec`, freshest first. */
-export function recentCandidates(maxAgeSec: number, limit = 25): PoolCandidate[] {
+export async function recentCandidates(maxAgeSec: number, limit = 25): Promise<PoolCandidate[]> {
   try {
-    const rows = getDb()
+    const rows = await getDb()
       .prepare(
         `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen
          FROM discovered_pools WHERE first_seen > unixepoch() - ?
@@ -1660,9 +1675,9 @@ export function recentCandidates(maxAgeSec: number, limit = 25): PoolCandidate[]
  * instead — that ledger already tracks exactly what was paid per raw unit, and
  * a second copy could disagree with it after a partial fill.
  */
-export function setTrenchEntry(agentId: string, mode: BasisMode, symbol: string, liquidityUsd: number): void {
+export async function setTrenchEntry(agentId: string, mode: BasisMode, symbol: string, liquidityUsd: number): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare(
         `INSERT INTO trench_positions (agent_id, mode, symbol, entry_liquidity_usd)
          VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
@@ -1673,13 +1688,13 @@ export function setTrenchEntry(agentId: string, mode: BasisMode, symbol: string,
   }
 }
 
-export function getTrenchEntry(
+export async function getTrenchEntry(
   agentId: string,
   mode: BasisMode,
   symbol: string,
-): { liquidityUsd: number; entrySec: number } | null {
+): Promise<{ liquidityUsd: number; entrySec: number } | null> {
   try {
-    const row = getDb()
+    const row = await getDb()
       .prepare("SELECT entry_liquidity_usd, entry_sec FROM trench_positions WHERE agent_id = ? AND mode = ? AND symbol = ?")
       .get(agentId, mode, symbol) as { entry_liquidity_usd: number; entry_sec: number } | undefined;
     return row ? { liquidityUsd: Number(row.entry_liquidity_usd), entrySec: Number(row.entry_sec) } : null;
@@ -1689,9 +1704,9 @@ export function getTrenchEntry(
 }
 
 /** Forget a closed position, so re-entering later starts a fresh baseline. */
-export function clearTrenchEntry(agentId: string, mode: BasisMode, symbol: string): void {
+export async function clearTrenchEntry(agentId: string, mode: BasisMode, symbol: string): Promise<void> {
   try {
-    getDb()
+    await getDb()
       .prepare("DELETE FROM trench_positions WHERE agent_id = ? AND mode = ? AND symbol = ?")
       .run(agentId, mode, symbol);
   } catch {

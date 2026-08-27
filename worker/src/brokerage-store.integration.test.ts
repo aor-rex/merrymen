@@ -99,15 +99,15 @@ describe("the 'brokerage' basis book", () => {
       settlement_status: "queued",
       realized_pnl_usdg: 999, // must NOT be summed
     });
-    assert.equal(getRealizedPnlUsdg(AGENT, "brokerage"), 7.5);
+    assert.equal(await getRealizedPnlUsdg(AGENT, "brokerage"), 7.5);
   });
 
-  it("the three basis books never bleed into each other", () => {
-    setBasis(AGENT, "brokerage", "AAPL", { qtyRaw: 5n * 10n ** 17n, costUsdg: 100_000_000n });
+  it("the three basis books never bleed into each other", async () => {
+    await setBasis(AGENT, "brokerage", "AAPL", { qtyRaw: 5n * 10n ** 17n, costUsdg: 100_000_000n });
     // The same agent+symbol in the other modes stays flat: a custodial fill can
     // never price an on-chain (or simulated) position's sell.
-    assert.deepEqual(getBasis(AGENT, "live", "AAPL"), { qtyRaw: 0n, costUsdg: 0n });
-    assert.deepEqual(getBasis(AGENT, "paper", "AAPL"), { qtyRaw: 0n, costUsdg: 0n });
-    assert.deepEqual(getBasis(AGENT, "brokerage", "AAPL"), { qtyRaw: 500_000_000_000_000_000n, costUsdg: 100_000_000n });
+    assert.deepEqual(await getBasis(AGENT, "live", "AAPL"), { qtyRaw: 0n, costUsdg: 0n });
+    assert.deepEqual(await getBasis(AGENT, "paper", "AAPL"), { qtyRaw: 0n, costUsdg: 0n });
+    assert.deepEqual(await getBasis(AGENT, "brokerage", "AAPL"), { qtyRaw: 500_000_000_000_000_000n, costUsdg: 100_000_000n });
   });
 });
