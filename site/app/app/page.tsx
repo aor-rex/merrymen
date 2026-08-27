@@ -179,9 +179,9 @@ export default function AppPage() {
             because blocking the exit is never a safety feature.
           </p>
           <p className="app-honest-sub">
-            The real-data build connects to your own self-hosted worker. Your numbers never transit
-            anyone else&apos;s server — which is also why there&apos;s no &quot;cloud&quot; version to
-            download.
+            The real-data build connects to a merrymen worker — your own self-hosted one, or the
+            hosted service. Your owner key never leaves the phone either way; the most a server ever
+            holds is a capped, revocable session key.
           </p>
         </div>
       </div>

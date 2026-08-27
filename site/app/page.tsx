@@ -120,10 +120,10 @@ export default function Home() {
             Trading agents you never have to trust.
           </h1>
           <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
-            merrymen is a trading bot you run yourself. It works the market for you on Robinhood Chain —
-            but your keys stay on your machine, and the size of every trade, how often it may trade,
-            how long its key lives and where value can land are enforced by the blockchain itself, not
-            by the bot behaving. Name it, chat with it, and steer it from Telegram.
+            merrymen is a trading bot you own — self-host it or run it hosted. It works the market for
+            you on Robinhood Chain, but your owner key never leaves you, and the size of every trade,
+            how often it may trade, how long its key lives and where value can land are enforced by the
+            blockchain itself, not by the bot behaving. Name it, chat with it, and steer it from Telegram.
           </p>
           <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
             <span className="mag" data-magnetic>
@@ -150,7 +150,7 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-meta" data-reveal="up" style={{ ["--d" as string]: "240ms" }}>
-            MIT-licensed · runs on your machine · no account, no cloud
+            MIT-licensed · self-host it or run it hosted · your owner key never leaves you
             <br />
             <span style={{ opacity: 0.75 }}>
               Windows {DESKTOP_VERSION} · {DESKTOP_SIZE} · macOS and Linux via{" "}
@@ -208,9 +208,9 @@ export default function Home() {
             <h2 data-reveal="mask">The wall is the product.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               Anyone can ship a trading agent. The hard thing — the thing merrymen is — is an agent
-              you don&apos;t have to trust: it runs on your machine, holds keys that never leave it,
-              and trades inside caps the chain itself enforces. Everything else on this page is
-              built on top of that wall.
+              you don&apos;t have to trust: your owner key never leaves you, and it trades inside caps
+              the chain itself enforces — a leaked session key is value-churn, never theft. Everything
+              else on this page is built on top of that wall.
             </p>
           </div>
 
@@ -246,9 +246,10 @@ export default function Home() {
             <div className="cell" data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               <h4>merrymen inverts it</h4>
               <p>
-                The agent lives on your machine and holds a session key whose limits — how much per
-                trade, how often, how long it lives, and <em>where value may land</em> — are
-                enforced by your account contract on-chain, verifiable in the explorer. A
+                The agent holds only a session key whose limits — how much per trade, how often, how
+                long it lives, and <em>where value may land</em> — are enforced by your account
+                contract on-chain, verifiable in the explorer. The owner key that could lift those
+                limits never leaves you. A
                 compromised agent can trade inside that wall. It cannot send your funds to an
                 address you never registered, and it cannot sign anything. You verify; it trades.
               </p>
@@ -272,12 +273,13 @@ export default function Home() {
 
           <div className="feature-row">
             <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">Self-hosted</div>
-              <h3>Runs on your machine. Full stop.</h3>
+              <div className="feature-kicker">Your machine, or ours</div>
+              <h3>Self-host it, or run it hosted.</h3>
               <p>
-                One <code className="inline">npm install</code>, a local dashboard, and a worker that
-                trades on a schedule. No servers, no sign-up — your data and your keys live in
-                <code className="inline">~/.merrymen</code> and never leave it.
+                One <code className="inline">npm install</code> for a local dashboard and a worker on
+                your own machine — or run it hosted from a URL, no install. Either way your{" "}
+                <strong>owner key</strong> is generated on your device and never leaves it; a hosted
+                server only ever holds a capped, revocable session key the chain keeps on a leash.
               </p>
               <ul className="feature-list">
                 {["Create a wallet in-browser — nothing to connect", "Caps enforced by the account contract on every op", "Testnet sandbox or real mainnet, you choose", "Kill switch destroys the grant, halts the band"].map((t) => (
@@ -502,7 +504,7 @@ npm install -g merrymen && merrymen start`}
             <span>MIT open source — read every line</span>
             <span>200+ tests on the policy wall &amp; pipeline</span>
             <span>caps enforced by the account contract, verifiable in the explorer</span>
-            <span>zero servers — it runs on your machine</span>
+            <span>your owner key never leaves your device — self-hosted or hosted</span>
           </div>
 
           <p className="words-invite" data-reveal="up" style={{ ["--d" as string]: "140ms" }}>
