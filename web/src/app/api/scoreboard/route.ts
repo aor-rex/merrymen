@@ -9,6 +9,8 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
+import { isHostedMode } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -49,12 +51,27 @@ export interface ScoreboardResponse {
   agents: ScoreboardAgent[];
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  // Self-hosted, this board is a transparency product: EVERY agent, publicly.
+  // Hosted, that same query is a customer-list dump — every tenant's smart
+  // account, caps, equity curve, P&L and fees. So hosted scopes to the caller's
+  // OWN agents (owner_address = the SIWE tenant); no session → nothing.
+  let tenant: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
+  }
+
   if (!existsSync(DB_FILE)) {
     return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
   }
 
-  const db = new DatabaseSync(DB_FILE, { readOnly: true });
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(DB_FILE, { readOnly: true });
+  } catch {
+    return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
+  }
   try {
     let rows: Record<string, unknown>[] = [];
     try {
@@ -62,9 +79,9 @@ export async function GET() {
         .prepare(
           `SELECT smart_account, name, status, chain_id, caps, granted_at, expires_at,
                   COALESCE(hwm_usdg, 0) AS hwm_usdg, COALESCE(accrued_fee_usdg, 0) AS accrued_fee_usdg
-           FROM agents ORDER BY created_at DESC`,
+           FROM agents ${tenant ? "WHERE LOWER(owner_address) = ?" : ""} ORDER BY created_at DESC`,
         )
-        .all() as Record<string, unknown>[];
+        .all(...(tenant ? [tenant] : [])) as Record<string, unknown>[];
     } catch {
       return NextResponse.json({ source: "sqlite", agents: [] } satisfies ScoreboardResponse);
     }

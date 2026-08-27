@@ -8,7 +8,8 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
-import { TRADEABLE_SYMBOLS, type MerrymenSettings } from "@merrymen/core";
+import { TRADEABLE_SYMBOLS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];
 
@@ -107,26 +108,48 @@ function readIdentitySettings(): { strategy: string; basket: string[] } {
   }
 }
 
-export async function GET() {
+/** The empty feed — no ledger, no session, or an unreadable db. Never a leak. */
+function emptyFeed(): FeedResponse {
+  return {
+    source: "none",
+    events: [],
+    equity: [],
+    positions: [],
+    trades: [],
+    financials: null,
+    // Identity still resolves live from settings + default name.
+    agent: { name: "Robin", ...readIdentitySettings() },
+    netContributionsUsdg: null,
+    gasUsdg: 0,
+    gasUnpricedTrades: 0,
+  };
+}
+
+export async function GET(req: Request) {
+  // HOSTED: the tenant is the SIWE-authenticated wallet, resolved up front. No
+  // session → nothing to show. The feed must scope to THIS tenant's agent, never
+  // the global "armed or newest" heuristic below (which on a shared ledger is
+  // whichever tenant is armed across the whole fleet).
+  let tenant: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json(emptyFeed());
+  }
+
   if (!existsSync(DB_FILE)) {
-    // No ledger yet — identity still resolves live from settings + default name.
-    return NextResponse.json({
-      source: "none",
-      events: [],
-      equity: [],
-      positions: [],
-      trades: [],
-      financials: null,
-      agent: { name: "Robin", ...readIdentitySettings() },
-      netContributionsUsdg: null,
-      gasUsdg: 0,
-      gasUnpricedTrades: 0,
-    } satisfies FeedResponse);
+    return NextResponse.json(emptyFeed());
   }
 
   // Read-only open so the worker stays the single writer. Tolerate a DB the
-  // worker hasn't fully initialized yet — missing tables read as empty.
-  const db = new DatabaseSync(DB_FILE, { readOnly: true });
+  // worker hasn't fully initialized yet — missing tables read as empty. A
+  // corrupt or locked file degrades to an empty feed rather than a 500 (the
+  // open used to sit outside the try).
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(DB_FILE, { readOnly: true });
+  } catch {
+    return NextResponse.json(emptyFeed());
+  }
   try {
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
@@ -141,20 +164,39 @@ export async function GET() {
     // the old one's rows in the same tables, and every query below used to read
     // the lot — so two agents' equity curves interleaved and the dashboard's
     // P&L spanned both. Armed wins, else the newest.
+    //
+    // HOSTED scopes by the authenticated tenant (owner_address), NOT the global
+    // heuristic: on a shared ledger "armed or newest across the fleet" is some
+    // other customer's book. The owner_address comparison is case-folded because
+    // the SIWE tenant is lowercased and the stored address may not be.
     let agentId: string | null = null;
-    try {
-      const row = db
-        .prepare(
-          // rowid breaks the tie: `status` DEFAULTs to 'armed' so it
-          // discriminates less than it looks, and created_at is whole seconds.
-          // rowid is insertion order — the newest grant wins, deterministically.
-          `SELECT smart_account FROM agents
-            ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
-        )
-        .get() as { smart_account: string } | undefined;
-      agentId = row?.smart_account ?? null;
-    } catch {
-      /* no agents table yet */
+    if (tenant) {
+      try {
+        const row = db
+          .prepare(
+            `SELECT smart_account FROM agents WHERE LOWER(owner_address) = ?
+              ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
+          )
+          .get(tenant) as { smart_account: string } | undefined;
+        agentId = row?.smart_account ?? null;
+      } catch {
+        /* no agents table yet */
+      }
+    } else {
+      try {
+        const row = db
+          .prepare(
+            // rowid breaks the tie: `status` DEFAULTs to 'armed' so it
+            // discriminates less than it looks, and created_at is whole seconds.
+            // rowid is insertion order — the newest grant wins, deterministically.
+            `SELECT smart_account FROM agents
+              ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
+          )
+          .get() as { smart_account: string } | undefined;
+        agentId = row?.smart_account ?? null;
+      } catch {
+        /* no agents table yet */
+      }
     }
     // Every query is scoped to that agent. A ledger with no agent row at all
     // (an un-armed first run) has nothing to report anyway.
