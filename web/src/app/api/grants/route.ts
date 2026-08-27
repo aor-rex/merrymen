@@ -13,6 +13,7 @@ import { homePaths, merrymenHome } from "@/lib/home";
 import { createPublicClient, http, parseAbi } from "viem";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { getGrantStore } from "@merrymen/grant-store";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -96,15 +97,15 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
-    // The per-tenant store (Postgres) lands in the next commit. Until then a
-    // hosted deploy is not live — this route enforces the CUSTODY invariant now
-    // so that when the store arrives it is only ever storing session-key-only,
-    // tenant-bound grants. Writing the single file here would collide across
-    // tenants, so hosted mode refuses rather than pretend.
-    return NextResponse.json(
-      { error: "hosted grant store not yet enabled — see docs/hosted-platform-plan.md commit 3" },
-      { status: 503 },
-    );
+    // Persist to the per-tenant store, keyed on the authenticated tenant. The
+    // store seals the session key at rest and refuses (again, defence in depth)
+    // any grant carrying an owner key or whose owner isn't this tenant.
+    try {
+      await getGrantStore().put(tenant, grant);
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true });
   }
 
   await mkdir(DATA_DIR, { recursive: true });
@@ -116,7 +117,17 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true });
 }
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  if (isHostedMode()) {
+    // The kill switch is per-tenant and authenticated. It forgets the server's
+    // session key; the wallet and its funds stay reachable via the owner key
+    // the browser still holds (client-side recovery). Nothing to archive here
+    // — the server never held the owner key to begin with.
+    const tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+    await getGrantStore().remove(tenant);
+    return NextResponse.json({ ok: true });
+  }
   // The kill switch destroys the session key, NOT the wallet — archive it so the
   // owner key survives and the funds stay reachable.
   await archiveCurrentGrant();
@@ -124,12 +135,20 @@ export async function DELETE() {
   return NextResponse.json({ ok: true });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   let grant: StoredGrant;
-  try {
-    grant = JSON.parse(await readFile(GRANT_FILE, "utf8")) as StoredGrant;
-  } catch {
-    return NextResponse.json({ exists: false } satisfies AgentStatus);
+  if (isHostedMode()) {
+    const tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ exists: false } satisfies AgentStatus);
+    const g = await getGrantStore().get(tenant);
+    if (!g) return NextResponse.json({ exists: false } satisfies AgentStatus);
+    grant = g;
+  } else {
+    try {
+      grant = JSON.parse(await readFile(GRANT_FILE, "utf8")) as StoredGrant;
+    } catch {
+      return NextResponse.json({ exists: false } satisfies AgentStatus);
+    }
   }
 
   const chain = chainForId(grant.chainId);
