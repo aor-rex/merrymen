@@ -47,11 +47,7 @@ theft. The bones are right; the single-tenant *wrapper* is the whole job.
   signer omits the owner key, `/api/grants` rejects owner-key payloads + auth +
   owner===tenant, `/api/recover` refuses the server sweep, boot assertion.
   Verified over real HTTP.
-- [ ] **3. Per-tenant state store (Postgres).** Port the file/SQLite state
-  (grant + archive, settings, ledger, heartbeat, paused) to Postgres over
-  `DATABASE_URL`; schema is already `agent_id`-keyed. Web routes derive
-  home/filter per-request from the authenticated tenant instead of a
-  module-load constant. Session keys encrypted at rest.
+- [x] **3. Per-tenant grant store** (`94cd881`) — AES-256-GCM encryption at rest, file + Postgres backends behind one interface (pg runtime-only, gated), tenant-scoped grants route (POST/GET/DELETE). Verified over HTTP. **3b (deferred):** the ledger port (worker/src/store.ts, 30 SQLite tables) — per-tenant SQLite works in process-per-tenant; Postgres port follows.
 - [ ] **4. House keys + rate limits.** Groq + Pimlico as server secrets, injected
   where the code already builds them (`pimlicoBundlerUrl`, `resolveLlm`); hosted
   settings strip/ignore tenant-supplied bundler/llm/rpc fields (invert
