@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { buildStrategy, type StrategyBuildOpts } from "./strategies/registry";
 import { mergeSettings } from "./settings";
-import { UNISWAP } from "../../packages/core/src/index";
+import { UNISWAP, type MerrymenSettings } from "../../packages/core/src/index";
 
 afterEach(() => {
   delete process.env.MERRYMEN_HOSTED;
@@ -51,7 +51,7 @@ describe("hosted strategy loader fails closed", () => {
 });
 
 describe("hosted forces the remote-execution flags off", () => {
-  const rceFile = {
+  const rceFile: MerrymenSettings = {
     telegramPcControlEnabled: true,
     telegramAgentEnabled: true,
     telegramAgentAutoShell: true,
@@ -59,7 +59,7 @@ describe("hosted forces the remote-execution flags off", () => {
     telegramAppAllowlist: ["cmd.exe"],
     telegramFilesRoot: "C:/",
     telegramCapabilities: ["shell", "keyboard"],
-  } as const;
+  };
   const rceEnv = {
     MERRYMEN_TELEGRAM_PC_CONTROL: "true",
     MERRYMEN_TELEGRAM_AGENT: "true",
