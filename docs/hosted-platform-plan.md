@@ -93,7 +93,11 @@ per-tenant encrypted grant store (`94cd881`).
 - [ ] **B2. Ledger → Postgres** behind `getDb()`; async-ify the 15 sync exports;
   retention + per-tenant quota.
 - [ ] **B3. Gas DRY state + per-tenant bundler accounting.**
-- [ ] **B4. Railway config + multi-replica nonce store (KV).**
+- [~] **B4. Railway config** — Dockerfile (one image, two start commands),
+  `railway.json`, `.dockerignore`, `start:web`/`start:orchestrator` scripts, and
+  `docs/hosted-deploy.md` (the full env contract + 2-service + Postgres setup).
+  Build verified (`npm run build` green). **Still open:** the multi-replica
+  nonce store (KV) — web stays single-replica until then.
 - [ ] **B5. Hosted-mode copy** — "owner key never leaves; server holds a capped
   session key"; kill UI says "stopped & deleted, expires on <date>".
 
