@@ -19,7 +19,7 @@ process.env.MERRYMEN_STORE_DEK = "SECRET-dek-never-to-a-child";
 process.env.MERRYMEN_SESSION_SECRET = "SECRET-session-never-to-a-child";
 process.env.DATABASE_URL = "postgres://SECRET-never-to-a-child";
 
-const { childHome, childEnv, fleetHaltFile } = await import("./orchestrator");
+const { childHome, childEnv, fleetHaltFile, dedupeBotToken } = await import("./orchestrator");
 
 const T = "0xABCDef0000000000000000000000000000000001" as const;
 
@@ -44,5 +44,30 @@ describe("orchestrator env curation", () => {
 
   it("fleetHaltFile sits under the orchestrator home", () => {
     assert.equal(fleetHaltFile(), path.join(process.env.MERRYMEN_HOME!, "FLEET_HALT"));
+  });
+});
+
+describe("telegram bot-token collision guard", () => {
+  it("the first tenant keeps a token; a second tenant sharing it is stripped", () => {
+    const seen = new Set<string>();
+    const a: any = { telegramBotToken: "111:AAA", strategy: "trencher" };
+    const b: any = { telegramBotToken: "111:AAA", strategy: "even-keel" };
+    assert.equal(dedupeBotToken(a, seen), false, "first claim keeps it");
+    assert.equal(a.telegramBotToken, "111:AAA");
+    assert.equal(dedupeBotToken(b, seen), true, "the duplicate is stripped");
+    assert.equal(b.telegramBotToken, undefined, "…so this child won't poll the same bot");
+    assert.equal(b.strategy, "even-keel", "the rest of its config is untouched");
+  });
+
+  it("distinct tokens both survive; no token is a no-op", () => {
+    const seen = new Set<string>();
+    const a: any = { telegramBotToken: "111:AAA" };
+    const b: any = { telegramBotToken: "222:BBB" };
+    const c: any = { strategy: "steady-basket" };
+    assert.equal(dedupeBotToken(a, seen), false);
+    assert.equal(dedupeBotToken(b, seen), false);
+    assert.equal(dedupeBotToken(c, seen), false);
+    assert.equal(a.telegramBotToken, "111:AAA");
+    assert.equal(b.telegramBotToken, "222:BBB");
   });
 });

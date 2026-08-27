@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
 import { getSettingsStore } from "./settings-store";
-import { isHostedMode } from "../../packages/core/src/index";
+import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -72,6 +72,26 @@ export function childHome(tenant: string): string {
 /** The fleet-halt marker: present = stop every child and spawn none. Operator-only. */
 export function fleetHaltFile(): string {
   return path.join(merrymenHome(), "FLEET_HALT");
+}
+
+/**
+ * TELEGRAM BOT COLLISION GUARD. A Telegram bot accepts exactly ONE long-poll
+ * getUpdates loop per token — two children polling the same token would steal
+ * each other's updates, and one tenant's bot could surface another's replies.
+ * Each hosted tenant brings their OWN bot; if two ever share a token, only the
+ * first (by the caller's iteration order) keeps it and the rest get Telegram
+ * stripped rather than clobbering. Mutates `settings` and returns true when it
+ * stripped a duplicate.
+ */
+export function dedupeBotToken(settings: MerrymenSettings, seen: Set<string>): boolean {
+  const token = settings.telegramBotToken;
+  if (!token) return false;
+  if (seen.has(token)) {
+    delete settings.telegramBotToken;
+    return true;
+  }
+  seen.add(token);
+  return false;
 }
 
 /**
@@ -132,10 +152,13 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
  * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
  * the tenant stored can only ever be their own legitimate configuration.
  */
-async function writeSettingsForChild(tenant: `0x${string}`): Promise<void> {
+async function writeSettingsForChild(tenant: `0x${string}`, seenBotTokens?: Set<string>): Promise<void> {
   try {
     const settings = await getSettingsStore().get(tenant);
     if (!settings) return;
+    if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
+      log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
+    }
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -226,9 +249,12 @@ export async function reconcile(): Promise<void> {
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
-  // file per tenant, and unchanged content is a harmless rewrite.
+  // file per tenant, and unchanged content is a harmless rewrite. The shared
+  // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
+  // in writeSettingsForChild).
+  const seenBotTokens = new Set<string>();
   for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`);
+    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {

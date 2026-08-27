@@ -79,8 +79,13 @@ per-tenant encrypted grant store (`94cd881`).
   FLEET_HALT. Live-verified: spawns a child with its own home + session-only
   grant, custody boundary holds through the fork. **Deferred to B:** the Postgres
   advisory lease + in-flight reconciliation (single-replica/testnet until then).
-- [ ] **A6. Telegram multi-tenant.** One bot, one cursor, route by from-id;
-  per-tenant notifier state.
+- [x] **A6. Per-tenant settings + Telegram** — the settings store (`0f10d45`):
+  each child runs the tenant's OWN strategy/basket/tokens (sealed at rest, the
+  orchestrator delivers settings.json). Telegram is then per-tenant by
+  construction: each tenant brings their own bot (RCE already forced off by A4,
+  notifier scoped by A2a), with an orchestrator collision guard so two tenants
+  can't clobber each other's bot. *(Chose per-tenant bots over one house bot +
+  from-id routing — simpler under process-per-tenant.)*
 
 ### Phase B — hardening + durability before real funds
 - [ ] **B1. First-arm identity proof** (recover from `enableSignature` /
