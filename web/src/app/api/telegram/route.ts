@@ -12,7 +12,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { merrymenHome } from "@/lib/home";
+import { merrymenHome } from "@merrymen/home";
 import type { MerrymenSettings } from "@merrymen/core";
 
 export const dynamic = "force-dynamic";

@@ -9,7 +9,7 @@
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { homePaths, merrymenHome } from "@/lib/home";
+import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient, http, parseAbi } from "viem";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";

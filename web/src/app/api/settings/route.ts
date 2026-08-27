@@ -10,7 +10,7 @@
 
 import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths, merrymenHome } from "@/lib/home";
+import { homePaths, merrymenHome } from "@merrymen/home";
 import {
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,

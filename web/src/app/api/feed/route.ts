@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { homePaths } from "@merrymen/home";
 import { TRADEABLE_SYMBOLS, type MerrymenSettings } from "@merrymen/core";
 
 const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];

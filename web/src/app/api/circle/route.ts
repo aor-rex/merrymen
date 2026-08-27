@@ -9,7 +9,7 @@
 
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { homePaths } from "@merrymen/home";
 import {
   CIRCLE_TIERS,
   MERRYMEN_TOKEN,

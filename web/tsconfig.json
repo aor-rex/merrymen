@@ -20,6 +20,7 @@
       "@merrymen/policy": ["../worker/src/policy.ts"],
       "@merrymen/recover": ["../worker/src/recover.ts"],
       "@merrymen/grant-store": ["../worker/src/grant-store.ts"],
+      "@merrymen/home": ["../worker/src/home.ts"],
       "@merrymen/backtest": ["../worker/src/backtest.ts"],
       "@merrymen/backtest-scenario": ["../worker/src/backtest-scenario.ts"],
       "@merrymen/limits": ["../worker/src/limits.ts"],

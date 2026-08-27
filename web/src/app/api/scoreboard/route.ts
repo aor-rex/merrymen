@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { homePaths } from "@merrymen/home";
 
 export const dynamic = "force-dynamic";
 
