@@ -24,6 +24,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { getSettingsStore } from "@merrymen/settings-store";
 
 export const dynamic = "force-dynamic";
 
@@ -74,7 +75,10 @@ async function listCustomStrategies(): Promise<string[]> {
   }
 }
 
-async function readStored(): Promise<MerrymenSettings> {
+async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettings> {
+  // Hosted: a tenant's settings live in the per-tenant store, not the global
+  // settings.json (which the child workers each have their own copy of).
+  if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
     return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
@@ -108,8 +112,11 @@ function redactUrl(u: unknown): string | undefined {
   }
 }
 
-export async function GET() {
-  const stored = await readStored();
+export async function GET(req: Request) {
+  // Hosted: show the signed-in tenant's own settings (a signed-out caller sees
+  // defaults — nothing personal, no secrets). Self-hosted: the single file.
+  const tenant = isHostedMode() ? tenantOf(req) : null;
+  const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
   const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
@@ -198,6 +205,7 @@ export async function PUT(req: Request) {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
 
+  let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
     // ── hosted settings lockdown ─────────────────────────────────────────
     // This route has no auth self-hosted (the localhost middleware is the
@@ -205,7 +213,7 @@ export async function PUT(req: Request) {
     // tenant may not own. Without the auth check, anyone could repoint the
     // bundler or flip on PC-control; without the field strip, an authenticated
     // tenant still could.
-    const tenant = tenantOf(req);
+    tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
     // Drop every house-key + remote-execution field before the handler sees it.
     // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
@@ -215,7 +223,7 @@ export async function PUT(req: Request) {
   }
 
   const errors: string[] = [];
-  const stored = await readStored();
+  const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
 
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
@@ -480,10 +488,17 @@ export async function PUT(req: Request) {
 
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
-  await mkdir(DATA_DIR, { recursive: true });
-  // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-  // owner-only perms (0600), not the default world-readable 0644.
-  await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  if (tenant) {
+    // Hosted: the tenant's own settings go to the per-tenant store (sealed at
+    // rest), and the orchestrator hands the child worker a settings.json from it
+    // within a reconcile tick.
+    await getSettingsStore().put(tenant, next);
+  } else {
+    await mkdir(DATA_DIR, { recursive: true });
+    // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
+    // owner-only perms (0600), not the default world-readable 0644.
+    await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+    await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  }
   return NextResponse.json({ ok: true, appliesWithin: "one worker tick" });
 }

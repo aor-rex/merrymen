@@ -34,6 +34,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
+import { getSettingsStore } from "./settings-store";
 import { isHostedMode } from "../../packages/core/src/index";
 
 /** How often to re-read the store for tenants added or killed. */
@@ -123,6 +124,26 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
   return true;
 }
 
+/**
+ * Hand the child the tenant's OWN settings.json from the store — their strategy,
+ * basket, custom tokens, sizing, their Telegram bot. No-op if the tenant has
+ * saved nothing yet (the child then runs the safe defaults). Refreshed every
+ * reconcile so a config change propagates: the worker re-reads settings.json each
+ * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
+ * the tenant stored can only ever be their own legitimate configuration.
+ */
+async function writeSettingsForChild(tenant: `0x${string}`): Promise<void> {
+  try {
+    const settings = await getSettingsStore().get(tenant);
+    if (!settings) return;
+    const home = childHome(tenant);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+  } catch {
+    /* best-effort — the child falls back to defaults */
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   // PHASE B: take a per-tenant Postgres advisory lease here, BEFORE arming, so a
@@ -133,6 +154,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no grant in the store — not spawning`);
     return;
   }
+  await writeSettingsForChild(tenant);
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
@@ -201,6 +223,12 @@ export async function reconcile(): Promise<void> {
   // Spawn any tenant with a grant that isn't running.
   for (const tenant of tenants) {
     if (!children.has(tenant.toLowerCase())) await spawnChild(tenant.toLowerCase() as `0x${string}`);
+  }
+  // Refresh every running child's settings.json so a tenant's config change
+  // reaches it (the worker re-reads settings.json each tick). Cheap: one small
+  // file per tenant, and unchanged content is a harmless rewrite.
+  for (const tenant of children.keys()) {
+    await writeSettingsForChild(tenant as `0x${string}`);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {
