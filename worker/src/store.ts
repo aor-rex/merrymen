@@ -478,13 +478,18 @@ export async function getAgentFinancials(
 }
 
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
-export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<void> {
+export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
     getDb()
       .prepare("UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?) WHERE smart_account = ?")
       .run(hwmUsdg, agentId);
+    return true;
   } catch (e) {
+    // A swallowed HWM update lets the persisted peak lag the true one, so the
+    // drawdown breaker measures against a low mark and under-reports the drop —
+    // the unsafe direction. Return false so the caller can surface it.
     console.error("[store] hwm update failed:", e);
+    return false;
   }
 }
 
@@ -917,7 +922,7 @@ export async function listFlows(agentId: string, limit = 200): Promise<
 export async function addFeeAccrual(
   agentId: string,
   a: { profitUsdg: number; feeUsdg: number; hwmBeforeUsdg: number; hwmAfterUsdg: number },
-): Promise<void> {
+): Promise<boolean> {
   try {
     const epoch = epochOf(agentId);
     journaled(agentId, epoch, "fee", { ...a, epoch }, () => {
@@ -930,8 +935,10 @@ export async function addFeeAccrual(
         "UPDATE agents SET accrued_fee_usdg = accrued_fee_usdg + ? WHERE smart_account = ?",
       ).run(a.feeUsdg, agentId);
     });
+    return true;
   } catch (e) {
     console.error("[store] fee accrual failed:", e);
+    return false;
   }
 }
 
@@ -960,7 +967,17 @@ export async function addEvent(
   }
 }
 
-export async function addTrade(row: TradeRow): Promise<void> {
+/**
+ * Write a trade row. Returns TRUE if it was persisted, FALSE if the write was
+ * caught and swallowed — the caller must not mistake a swallowed failure for a
+ * recorded fill. On a network-backed ledger a write can fail routinely, and a
+ * dropped money-moving row silently UNDER-counts getSpentTodayUsdg on the next
+ * budget refresh, loosening the daily cap (the unsafe direction). The caller
+ * (processIntent.recordTrade) fails CLOSED on a false: it books the spend into
+ * the settled counters directly and raises a durable alarm instead of letting
+ * the reservation release drop it.
+ */
+export async function addTrade(row: TradeRow): Promise<boolean> {
   try {
     const epoch = epochOf(row.agent_id);
     // Only money-moving rows enter the hash chain. A rejection changes no
@@ -1009,7 +1026,7 @@ export async function addTrade(row: TradeRow): Promise<void> {
     };
     if (!moved) {
       writeRow();
-      return;
+      return true;
     }
     journaled(
       row.agent_id,
@@ -1041,8 +1058,10 @@ export async function addTrade(row: TradeRow): Promise<void> {
       },
       writeRow,
     );
+    return true;
   } catch (e) {
     console.error("[store] trade insert failed:", e);
+    return false;
   }
 }
 

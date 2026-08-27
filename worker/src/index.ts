@@ -1173,16 +1173,38 @@ async function main() {
       // inside another closure, and with only nested assignments TypeScript
       // keeps the initializer's narrowing and resolves the reads to `never`.
       lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
-      const written = await addTrade({ ...row, decision_id });
+      const wrote = await addTrade({ ...row, decision_id });
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
-      if (row.status === "landed" || row.status === "paper" || row.status === "submitted") {
-        ledgerWrites += 1;
+      const moneyMoving = row.status === "landed" || row.status === "paper" || row.status === "submitted";
+      if (moneyMoving) ledgerWrites += 1;
+      if (!wrote && moneyMoving) {
+        // FAIL-CLOSED. The fill happened (on-chain, or a simulated paper fill)
+        // but its ledger row did NOT land — a network-backed write can fail
+        // routinely. If we refreshed the budget now it would re-read the ledger
+        // WITHOUT this row and under-count the day's spend, and releasing the
+        // reservation would drop it for good — both loosen the cap, the unsafe
+        // direction. So book the spend straight into the settled counters (the
+        // reservation's own figures), SKIP the ledger re-read, and release the
+        // now-double-counted reservation. The spend stays counted for the rest of
+        // this arm; A5's chain reconciliation writes the missing row on the next
+        // arm. A durable err event, not a swallowed console.error.
+        if (reserved) {
+          settledSpentUsdg += reserved.spendUsdg;
+          settledOps += reserved.ops;
+        }
+        releaseBudget();
+        void addEvent(
+          agentId,
+          "err",
+          `ledger write failed for a ${row.status} ${row.kind} — spend kept counted in-session, row needs reconciliation`,
+        );
+        return wrote;
       }
       await refreshBudget(agentId);
       releaseBudget();
-      return written;
+      return wrote;
     };
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
@@ -2293,13 +2315,23 @@ async function main() {
       // actually accrue less — the perk is in the ledger, not just the marketing.
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);
       if (accrual.profitUsdg > 0n) {
-        await addFeeAccrual(agentId, {
+        const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),
           hwmBeforeUsdg: usdgNum(highWaterMarkUsdg),
           hwmAfterUsdg: usdgNum(accrual.newHwmUsdg),
         });
-        await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
+        const hwmOk = await setAgentHwm(agentId, usdgNum(accrual.newHwmUsdg));
+        // Fail-closed surfacing: a swallowed fee or HWM write lets the persisted
+        // peak lag the true one, so a restart reseeds a low mark and the breaker
+        // under-measures drawdown. Loud + durable rather than a console.error.
+        if (!feeOk || !hwmOk) {
+          void addEvent(
+            agentId,
+            "err",
+            `fee/HWM persist failed (fee=${feeOk} hwm=${hwmOk}) — drawdown/fee accounting may lag until it succeeds`,
+          );
+        }
         if (accrual.feeUsdg > 0n) {
           const circle =
             holderTier.feeDiscountBps > 0
