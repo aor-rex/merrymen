@@ -8,13 +8,26 @@
 
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  HOUSE_KEY_FIELDS,
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
+  isHostedMode,
   isValidCustomToken,
   type CustomToken,
   type MerrymenSettings,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
+
+/**
+ * A tenant settings file with every house-key field removed (hosted mode). The
+ * field list is HOUSE_KEY_FIELDS in core, shared with the settings API so the
+ * worker's "strip before merge" and the API's "refuse to write" can't drift.
+ */
+export function stripHouseKeys(file: MerrymenSettings): MerrymenSettings {
+  const copy = { ...file } as Record<string, unknown>;
+  for (const k of HOUSE_KEY_FIELDS) delete copy[k];
+  return copy as MerrymenSettings;
+}
 
 export interface ResolvedConfig {
   bundlerApiKey: string | undefined;
@@ -171,6 +184,11 @@ export function mergeSettings(
   env: Record<string, string | undefined>,
 ): ResolvedConfig {
   const d = SETTINGS_DEFAULTS;
+
+  // HOSTED: the house owns the connection/credential/endpoint fields. Drop them
+  // from the tenant file so every `str(file.X, env.X)` below falls through to the
+  // server env. Self-hosted (the default) is untouched — the file still wins.
+  if (isHostedMode()) file = stripHouseKeys(file);
 
   const rawBreaker = str(file.breakerAddress, env.MERRYMEN_BREAKER_ADDRESS);
   const breakerAddress =

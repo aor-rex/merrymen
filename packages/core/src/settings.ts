@@ -268,6 +268,60 @@ export const SECRET_SETTING_KEYS = [
 ] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
 
+/**
+ * Connection / credential / endpoint fields the HOSTED server owns — "house
+ * keys". A tenant must never set them: `bundler*` spends our bundler budget or
+ * points us at their key; `rpc*` / `llmBaseUrl` are SSRF from our egress; the
+ * LLM keys are ours to pay for. Self-hosted, these are the owner's own and the
+ * settings file wins as always. Shared by the worker (strips them from the
+ * tenant file before merge, so env wins) and the settings API (refuses to write
+ * them hosted).
+ */
+export const HOUSE_KEY_FIELDS = [
+  "bundlerApiKey",
+  "bundlerUrl",
+  "rpcMainnet",
+  "rpcTestnet",
+  "groqApiKey",
+  "groqModel",
+  "anthropicApiKey",
+  "llmProvider",
+  "llmApiKey",
+  "llmBaseUrl",
+  "llmProviderModel",
+  "llmModel",
+  "rialtoApiKey",
+  "rialtoApiKeyHeader",
+  "bitqueryApiKey",
+  "merrymenToken",
+  "virtualsApiKey",
+  "telegramTranscribeKey",
+  "telegramTranscribeBase",
+] as const;
+
+/**
+ * The remote-execution settings — turning these on means "run a shell / drive a
+ * PC". Self-hosted that is the owner's own machine; hosted it would be a shell on
+ * OUR server with an allowlist the attacker chose, so a tenant must never set
+ * them. The worker also refuses to act on them hosted (defence in depth), but a
+ * value the tenant cannot even write is one fewer thing to get wrong.
+ */
+export const RCE_SETTING_FIELDS = [
+  "telegramPcControlEnabled",
+  "telegramAgentEnabled",
+  "telegramAgentAutoShell",
+  "telegramShellAllowlist",
+  "telegramAppAllowlist",
+  "telegramFilesRoot",
+  "telegramCapabilities",
+] as const;
+
+/** Every settings field a HOSTED tenant is forbidden from writing. */
+export const HOSTED_FORBIDDEN_SETTING_FIELDS = [
+  ...HOUSE_KEY_FIELDS,
+  ...RCE_SETTING_FIELDS,
+] as const;
+
 /** The PC-control capability groups a user can enable, in dashboard order. */
 export const PC_CAPABILITIES = [
   "screen",

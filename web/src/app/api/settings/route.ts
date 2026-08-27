@@ -12,15 +12,18 @@ import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import {
+  HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
   STOCK_TOKENS,
+  isHostedMode,
   isValidCustomToken,
   type LlmProviderInfo,
   type MerrymenSettings,
 } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -193,6 +196,22 @@ export async function PUT(req: Request) {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
+  }
+
+  if (isHostedMode()) {
+    // ── hosted settings lockdown ─────────────────────────────────────────
+    // This route has no auth self-hosted (the localhost middleware is the
+    // perimeter), so on a public URL it must gain one AND refuse the fields a
+    // tenant may not own. Without the auth check, anyone could repoint the
+    // bundler or flip on PC-control; without the field strip, an authenticated
+    // tenant still could.
+    const tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    // Drop every house-key + remote-execution field before the handler sees it.
+    // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
+    // fields, and rejecting the whole payload for their mere presence would break
+    // saving strategy/basket. The forbidden fields simply do not take effect.
+    for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete (body as Record<string, unknown>)[k];
   }
 
   const errors: string[] = [];
