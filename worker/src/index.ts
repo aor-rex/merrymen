@@ -2631,6 +2631,10 @@ async function main() {
   }
 
   const buildStatusContext = () => ({
+    // The process's OWN agent — under process-per-tenant this IS the tenant, and
+    // it is what scopes every ledger read to this book alone once the ledger is
+    // shared. Null when idle; the reads then refuse rather than guess.
+    agentId: active?.agentId ?? null,
     name: getName(),
     strategy: strategy.name,
     venue: cfg.swapVenue,
@@ -2742,6 +2746,11 @@ async function main() {
       gasWei: lastGasWei,
     }),
     getChainId: () => active?.grant.chainId ?? null,
+    // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an
+    // unscoped `id > cursor` would fire this tenant's notifications on another
+    // tenant's fills. Null → the cursor matches nothing (agent_id = NULL), which
+    // fails safe rather than leaking.
+    getAgentId: () => active?.agentId ?? null,
   });
 
   // Stream the band's activity to its Virtuals Terminal page — landed/paper
@@ -2752,6 +2761,9 @@ async function main() {
     note: strategyNote,
     buildStatusContext,
     getChainId: () => active?.grant.chainId ?? null,
+    // Same tenant-scoping as the notifier: the public stream must only ever
+    // carry this tenant's own fills.
+    getAgentId: () => active?.agentId ?? null,
     getAgentName: () => getName(),
   });
 

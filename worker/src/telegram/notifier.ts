@@ -48,6 +48,8 @@ export interface NotifierDeps {
   getAlertInputs: () => AlertInputs;
   /** The armed grant's chain id → block-explorer proof links. Null when unarmed. */
   getChainId: () => number | null;
+  /** This tenant's own agent id — scopes the trade cursor. Null when unarmed. */
+  getAgentId: () => string | null;
   now?: () => number;
 }
 
@@ -148,6 +150,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // ── trade pings ─────────────────────────────────────────────────────────
     const chainId = deps.getChainId();
     const explorer = chainId != null ? explorerFor(chainId) : null;
+    // This tenant's own agent. A null id binds as SQL NULL below, and `agent_id
+    // = NULL` matches nothing — so an unarmed notifier reports nobody's trades
+    // rather than, on a shared ledger, some other tenant's.
+    const agentId = deps.getAgentId();
     const periodMin = cfg.telegramNotifyEveryMin;
     const db = openRO();
     if (db) {
@@ -160,9 +166,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           // Immediate: one message per trade row.
           const rows = db
             .prepare(
-              "SELECT id, kind, amount_usdg, status, reject_rule, tx_hash FROM trades WHERE id > ? ORDER BY id ASC LIMIT 10",
+              "SELECT id, kind, amount_usdg, status, reject_rule, tx_hash FROM trades WHERE id > ? AND agent_id = ? ORDER BY id ASC LIMIT 10",
             )
-            .all(state.lastNotifiedTradeId) as unknown as TradeRowLite[];
+            .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
           for (const t of rows) {
             await sendMessage({ token }, chatId, tradeLine(t, explorer));
             deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
@@ -172,8 +178,8 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           const st = deps.stateRef.get();
           if (now() - st.lastTradeDigestAt >= periodMin * 60) {
             const agg = db
-              .prepare("SELECT status, COUNT(*) AS c, COALESCE(SUM(amount_usdg), 0) AS s FROM trades WHERE id > ? GROUP BY status")
-              .all(st.lastNotifiedTradeId) as unknown as TradeAgg[];
+              .prepare("SELECT status, COUNT(*) AS c, COALESCE(SUM(amount_usdg), 0) AS s FROM trades WHERE id > ? AND agent_id = ? GROUP BY status")
+              .all(st.lastNotifiedTradeId, agentId) as unknown as TradeAgg[];
             const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
             const total = agg.reduce((n, r) => n + r.c, 0);
             if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));

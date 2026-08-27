@@ -94,6 +94,8 @@ export interface VirtualsStreamerDeps {
   note: (level: "ok" | "warn", message: string) => void;
   buildStatusContext: () => StatusContext;
   getChainId: () => number | null;
+  /** This tenant's own agent id — scopes the trade cursor. Null when unarmed. */
+  getAgentId: () => string | null;
   getAgentName: () => string;
   now?: () => number;
   fetchFn?: FetchLike;
@@ -124,9 +126,12 @@ export function startVirtualsStreamer(deps: VirtualsStreamerDeps): { stop(): voi
           const max = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
           newTradeCursor = max?.m ?? 0;
         } else {
+          // Scoped to this tenant's own fills — the stream is public, so an
+          // unscoped cursor on a shared ledger would broadcast a neighbour's
+          // trades under this agent's name. Null id → agent_id = NULL → no rows.
           const rows = db
-            .prepare("SELECT id, kind, amount_usdg, status, tx_hash FROM trades WHERE id > ? ORDER BY id ASC LIMIT 20")
-            .all(cursor.lastTradeId) as unknown as TradeRowLite[];
+            .prepare("SELECT id, kind, amount_usdg, status, tx_hash FROM trades WHERE id > ? AND agent_id = ? ORDER BY id ASC LIMIT 20")
+            .all(cursor.lastTradeId, deps.getAgentId()) as unknown as TradeRowLite[];
           for (const t of rows) {
             const log = fillLog(t, name, explorer);
             if (log) logs.push(log);

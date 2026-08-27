@@ -10,6 +10,10 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+// RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
+// the note in service.ts). isHostedMode decides whether a missing agent id may
+// fall back to the single-tenant guess, or must refuse.
+import { isHostedMode } from "../../../packages/core/src/index";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -62,6 +66,23 @@ function currentAgentId(db: DatabaseSync): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The agent whose numbers these are. The caller passes the process's OWN agent
+ * (active.agentId — under process-per-tenant that IS this tenant), and once the
+ * ledger is shared across tenants that passed id is the ONLY correct answer.
+ *
+ * currentAgentId is a SELF-HOSTED fallback for the idle case — no armed grant,
+ * reporting on the last agent in a single-tenant DB. It must NEVER run hosted:
+ * "the newest agent in the table" there is some other tenant, so a null id on a
+ * shared ledger returns null (→ a "no agent" answer) rather than leaking a
+ * neighbour's book.
+ */
+function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
+  if (passed) return passed;
+  if (isHostedMode()) return null;
+  return currentAgentId(db);
 }
 
 /**
@@ -130,6 +151,13 @@ function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number)
 }
 
 export interface StatusContext {
+  /**
+   * The process's own agent (active.agentId), or null when idle. Optional so the
+   * self-hosted callers and the tests that predate multi-tenancy still typecheck;
+   * when present it scopes every figure to this tenant, which is what keeps one
+   * tenant's book off another's screen once the ledger is shared.
+   */
+  agentId?: string | null;
   /** The merryman's user-given name (soul IDENTITY.md). */
   name: string;
   strategy: string;
@@ -183,9 +211,17 @@ export function readStatus(ctx: StatusContext): string {
   const db = openRO();
   if (db) {
     try {
-      const eq = db
-        .prepare("SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity ORDER BY at DESC, id DESC LIMIT 1")
-        .get() as { equity_usdg: number; at: string } | undefined;
+      const agentId = resolveAgent(db, ctx.agentId);
+      // Scoped to this tenant's latest equity row — an unfiltered ORDER BY at
+      // DESC would surface whichever tenant last wrote an equity row on a shared
+      // ledger. No agent resolved → no equity line, never a neighbour's number.
+      const eq = agentId
+        ? (db
+            .prepare(
+              "SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 1",
+            )
+            .get(agentId) as { equity_usdg: number } | undefined)
+        : undefined;
       if (eq) lines.push(`• equity: ${eq.equity_usdg.toFixed(2)} USDG`);
     } catch {
       /* table not ready */
@@ -195,15 +231,17 @@ export function readStatus(ctx: StatusContext): string {
   return lines.join("\n");
 }
 
-export function readPositions(): string {
+export function readPositions(agentId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet — the band hasn't ridden.";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "📖 no open positions — all in cash/vault.";
     const rows = db
       .prepare(
-        "SELECT symbol, value_usdg, price_usd, price_stale, price_source FROM positions ORDER BY value_usdg DESC",
+        "SELECT symbol, value_usdg, price_usd, price_stale, price_source FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC",
       )
-      .all() as {
+      .all(who) as {
       symbol: string;
       value_usdg: number;
       price_usd: number;
@@ -234,11 +272,11 @@ export function readPositions(): string {
   }
 }
 
-export function readPnl(): string {
+export function readPnl(passedId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
-    const agentId = currentAgentId(db);
+    const agentId = resolveAgent(db, passedId);
     if (!agentId) return "📈 no agent yet — grant one at localhost:3100/grant.";
     const epoch = agentEpoch(db, agentId);
     const eq = db
@@ -337,15 +375,17 @@ export function readPnl(): string {
   }
 }
 
-export function readTrades(): string {
+export function readTrades(agentId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "🧾 no trades yet.";
     const rows = db
       .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades ORDER BY created_at DESC, id DESC LIMIT 8",
+        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 8",
       )
-      .all() as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
+      .all(who) as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
     if (!rows.length) return "🧾 no trades yet.";
     const icon = (s: string) => (s === "landed" ? "✅" : s === "rejected" ? "🚫" : "⚠️");
     const body = rows
@@ -429,7 +469,7 @@ export function readReport(ctx: StatusContext): string {
   const lines: string[] = ["🔥 <b>campfire report</b>"];
   if (!db) return "🔥 no ledger yet — the band hasn't ridden. Nothing to report.";
   try {
-    const agentId = currentAgentId(db);
+    const agentId = resolveAgent(db, ctx.agentId);
     if (!agentId) return "🔥 no agent yet — grant one at localhost:3100/grant.";
     const midnight = localMidnightUnix();
     const all = equitySeries(db, agentId);
@@ -510,7 +550,7 @@ export function readBrag(ctx: StatusContext): string {
   const db = openRO();
   if (!db) return "🏹 no ledger yet — nothing to brag about (yet).";
   try {
-    const agentId = currentAgentId(db);
+    const agentId = resolveAgent(db, ctx.agentId);
     if (!agentId) return "🏹 no agent yet — grant one at localhost:3100/grant.";
     const all = equitySeries(db, agentId);
     if (all.length < 2) return "🏹 the band just saddled up — give it a few ticks, then we'll brag.";
@@ -530,8 +570,8 @@ export function readBrag(ctx: StatusContext): string {
     let best = "";
     try {
       const b = db
-        .prepare("SELECT kind, amount_usdg FROM trades WHERE status='landed' ORDER BY amount_usdg DESC LIMIT 1")
-        .get() as { kind: string; amount_usdg: number } | undefined;
+        .prepare("SELECT kind, amount_usdg FROM trades WHERE agent_id = ? AND status='landed' ORDER BY amount_usdg DESC LIMIT 1")
+        .get(agentId) as { kind: string; amount_usdg: number } | undefined;
       if (b) best = `\n• best shot: ${esc(b.kind)} ${b.amount_usdg.toFixed(2)} USDG`;
     } catch {
       /* no trades */
@@ -554,15 +594,17 @@ export function readBrag(ctx: StatusContext): string {
  * events recorded around it. Works with no LLM; the service may hand this to
  * Claude for an in-character retelling.
  */
-export function readWhyEvidence(): { text: string; hasTrade: boolean } {
+export function readWhyEvidence(agentId?: string | null): { text: string; hasTrade: boolean } {
   const db = openRO();
   if (!db) return { text: "no ledger yet — I haven't made a trade to explain.", hasTrade: false };
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
     const t = db
       .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades ORDER BY id DESC LIMIT 1",
+        "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
       )
-      .get() as
+      .get(who) as
       | { kind: string; amount_usdg: number; status: string; reject_rule: string | null; tx_hash: string | null; created_at: string | number; decision_id: string | null }
       | undefined;
     if (!t) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
@@ -575,8 +617,12 @@ export function readWhyEvidence(): { text: string; hasTrade: boolean } {
     // This is exact — no more guessing with a time window.
     const d = t.decision_id
       ? (db
-          .prepare("SELECT source, action, symbol, size_usdg, reason, dropped_rule FROM decisions WHERE id = ?")
-          .get(t.decision_id) as
+          // AND agent_id: decisions.id is a global autoincrement, so an unscoped
+          // WHERE id = ? could surface another tenant's decision row (their
+          // strategy's reasoning) if a decision_id ever collided across the
+          // shared ledger. Pinning the tenant makes that structurally impossible.
+          .prepare("SELECT source, action, symbol, size_usdg, reason, dropped_rule FROM decisions WHERE id = ? AND agent_id = ?")
+          .get(t.decision_id, who) as
           | { source: string; action: string | null; symbol: string | null; size_usdg: number | null; reason: string | null; dropped_rule: string | null }
           | undefined)
       : undefined;
@@ -593,9 +639,9 @@ export function readWhyEvidence(): { text: string; hasTrade: boolean } {
           typeof t.created_at === "number" ? t.created_at : Math.floor(new Date(t.created_at).getTime() / 1000);
         const evs = db
           .prepare(
-            "SELECT message FROM events WHERE created_at BETWEEN ? AND ? ORDER BY created_at DESC, id DESC LIMIT 4",
+            "SELECT message FROM events WHERE agent_id = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC, id DESC LIMIT 4",
           )
-          .all(tradeUnix - 900, tradeUnix + 900) as { message: string }[];
+          .all(who, tradeUnix - 900, tradeUnix + 900) as { message: string }[];
         if (evs.length) {
           lines.push(`• what was on my mind (approx):`);
           for (const e of evs) lines.push(`  · ${esc(e.message.slice(0, 140))}`);
@@ -611,13 +657,15 @@ export function readWhyEvidence(): { text: string; hasTrade: boolean } {
 }
 
 /** Recent event-feed lines (for the LLM's context). */
-export function readRecentEvents(limit = 5): string {
+export function readRecentEvents(agentId?: string | null, limit = 5): string {
   const db = openRO();
   if (!db) return "(no events)";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "(no events)";
     const rows = db
-      .prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events ORDER BY created_at DESC, id DESC LIMIT ?")
-      .all(limit) as { level: string; message: string; at: string }[];
+      .prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(who, limit) as { level: string; message: string; at: string }[];
     if (!rows.length) return "(no events)";
     return rows.map((r) => `[${r.at}] ${r.level}: ${r.message}`).join("\n");
   } catch {
@@ -636,14 +684,14 @@ export function readLlmState(ctx: StatusContext): string {
   return [
     strip(readStatus(ctx)),
     "",
-    strip(readPositions()),
+    strip(readPositions(ctx.agentId)),
     "",
-    strip(readPnl()),
+    strip(readPnl(ctx.agentId)),
     "",
-    strip(readTrades()),
+    strip(readTrades(ctx.agentId)),
     "",
     "RECENT EVENTS:",
-    readRecentEvents(5),
+    readRecentEvents(ctx.agentId, 5),
   ].join("\n");
 }
 

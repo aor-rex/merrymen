@@ -354,14 +354,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       grantHasTransfer: deps.grantHasTransfer(),
       reads: {
         status: () => readStatus(statusCtx()),
-        positions: () => readPositions(),
+        positions: () => readPositions(statusCtx().agentId),
         depth: (symbol: string) => deps.readDepth(symbol),
-        pnl: () => readPnl(),
-        trades: () => readTrades(),
+        pnl: () => readPnl(statusCtx().agentId),
+        trades: () => readTrades(statusCtx().agentId),
         report: () => readReport(statusCtx()),
         brag: () => readBrag(statusCtx()),
         why: async () => {
-          const ev = readWhyEvidence();
+          const ev = readWhyEvidence(statusCtx().agentId);
           const llm = resolveLlm(cfg);
           if (!ev.hasTrade || !llm) return ev.text;
           return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
