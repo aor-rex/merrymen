@@ -85,7 +85,7 @@ export interface CommandDeps {
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
-  kill(): { ok: boolean; reason?: string };
+  kill(): { ok: boolean; reason?: string; archived?: string | null };
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
@@ -220,7 +220,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         return "🔒 transfers from chat are off. Turn on “allow transfers” for Telegram in the dashboard first.";
       }
       if (!deps.grantHasTransfer) {
-        return "🧱 your permission wall predates transfers — discard the grant and re-create your wallet at /grant to add the (capped) transfer permission.";
+        return "🔒 this wall carries no transfer permission — no withdrawal address was registered when it was signed, so the chain would refuse the send. Move funds with your owner key: `merrymen recover`.";
       }
       let usdg = cmd.usdg;
       let note = "";
@@ -253,6 +253,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "kill") {
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — the grant is untouched.";
+        }
       } else {
         const refusal = pcRefusal({ kind: p.kind } as Command, deps);
         if (refusal) {
@@ -274,6 +279,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.hotkey(p.combo);
         case "power":
           return await deps.pc.power(p.action);
+        case "kill": {
+          const r = deps.kill();
+          if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
+          const arch = r.archived ? ` Your owner key is archived to ${r.archived}.` : "";
+          return `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.${arch} Re-grant in the dashboard to ride again.`;
+        }
       }
     }
     case "cancel": {
