@@ -219,6 +219,21 @@ function getDb(): DatabaseSync {
       symbol TEXT NOT NULL,
       first_seen INTEGER NOT NULL DEFAULT (unixepoch())
     );
+    -- The liquidity a trench position was ENTERED at, per (agent, mode, symbol),
+    -- so a trench exit can compare against its own baseline. Read at
+    -- worker/src/index.ts and written by setTrenchEntry — but this CREATE was
+    -- missing entirely, so getTrenchEntry always hit "no such table", returned
+    -- null through its catch, and setTrenchEntry console-errored on every fill:
+    -- the trench strategy had no entry baseline at all. entry_sec is DEFAULTed
+    -- because the INSERT only supplies the liquidity.
+    CREATE TABLE IF NOT EXISTS trench_positions (
+      agent_id TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      entry_liquidity_usd REAL NOT NULL,
+      entry_sec INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (agent_id, mode, symbol)
+    );
   `);
   for (const ddl of [
     "ALTER TABLE equity ADD COLUMN positions_usdg REAL NOT NULL DEFAULT 0",
