@@ -33,7 +33,8 @@ export type PendingAction =
   | { kind: "getfile"; path: string; expiresAt: number; nonce: string }
   | { kind: "type"; text: string; expiresAt: number; nonce: string }
   | { kind: "hotkey"; combo: string; expiresAt: number; nonce: string }
-  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number; nonce: string };
+  | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number; nonce: string }
+  | { kind: "kill"; expiresAt: number; nonce: string };
 
 /** What KIND of parked action is waiting — fed to the LLM only so it can
  * steer the owner to the buttons. Must NOT include payload (text, address,
@@ -52,6 +53,12 @@ export function describePending(p: PendingAction): string {
       return "a keyboard action is waiting for confirmation";
     case "power":
       return "a power action is waiting for confirmation";
+    case "kill":
+      return "a kill is waiting for confirmation";
+    default: {
+      const _exhaustive: never = p;
+      return _exhaustive;
+    }
   }
 }
 
@@ -68,6 +75,7 @@ export interface CommandDeps {
   reads: {
     status(): string;
     positions(): string;
+    depth(symbol: string): string | Promise<string>;
     pnl(): string;
     trades(): string;
     report(): string | Promise<string>;
@@ -163,6 +171,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.reads.status();
     case "positions":
       return deps.reads.positions();
+    case "depth":
+      return deps.reads.depth(cmd.symbol);
     case "pnl":
       return deps.reads.pnl();
     case "trades":
@@ -367,10 +377,15 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "unwatch":
       return deps.removeWatcher(cmd.id);
     case "kill": {
-      const r = deps.kill();
-      return r.ok
-        ? "🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick. Re-grant in the dashboard to ride again."
-        : `nothing to kill: ${r.reason ?? "no grant"}`;
+      const bKill = blocked();
+      if (bKill) return bKill;
+      deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
+      return (
+        `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
+        `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +
+        `<code>merrymen recover</code> can still sweep the funds.\n\n` +
+        `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
+      );
     }
     case "chat":
       return cmd.reply;
