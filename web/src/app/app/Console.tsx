@@ -325,6 +325,7 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             <div className="col">
               <Chat
                 agentName={agentName}
+                strategy={strategy}
                 ledger={{ eqNow, todayDelta, allTime, positions: feed?.positions ?? [], refusedToday, events: feed?.events ?? [], daysLeft }}
               />
             </div>
@@ -441,19 +442,43 @@ type Ledger = {
   daysLeft: number | null;
 };
 
-function Chat({ agentName, ledger }: { agentName: string; ledger: Ledger }) {
+function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: string; ledger: Ledger }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([
     {
       role: "them",
-      html: `I'm ${escapeHtml(agentName)}. Ask me for your <span class="mono">/status</span>, <span class="mono">/positions</span>, or <span class="mono">/pnl</span> — I read them straight off the ledger. Full reasoning + orders are landing next.`,
+      html: `I'm ${escapeHtml(agentName)}. Ask me anything about your book — or for a quick <span class="mono">/status</span>, <span class="mono">/positions</span>, <span class="mono">/pnl</span>. Orders still go through the wall on the Wallet screen.`,
     },
   ]);
   const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
+
+  // The tenant's own ledger, as a compact context the model narrates from. Built
+  // client-side (the console has the feed) and sent to /api/chat, which supplies
+  // only the LLM — so it works in hosted mode where the server can't read the
+  // ledger. The model can never act on this; it returns text only.
+  const buildState = () => {
+    const posLine = ledger.positions.length
+      ? ledger.positions
+          .slice(0, 8)
+          .map((p) => `${p.symbol} ${usd(p.value_usdg)} USDG @ $${usd(p.price_usd)}${p.price_source === "pool" ? " (pool px)" : ""}`)
+          .join("; ")
+      : "all in cash and the vault";
+    const last = ledger.events.find((e) => e.level === "ok")?.message || ledger.events[0]?.message || "";
+    return [
+      `YOU ARE: ${agentName}, a merryman running the ${strategy} strategy on Robinhood Chain.`,
+      `EQUITY: ${usd(ledger.eqNow)} USDG${ledger.todayDelta !== null ? `, ${ledger.todayDelta >= 0 ? "+" : ""}${usd(ledger.todayDelta)} today` : ""}${ledger.allTime !== null ? `, ${ledger.allTime >= 0 ? "+" : ""}${ledger.allTime.toFixed(1)}% all-time net of gas` : ""}.`,
+      `POSITIONS: ${posLine}.`,
+      `TODAY: ${ledger.refusedToday} trade(s) refused by the wall.${ledger.daysLeft !== null ? ` Session key expires in ${ledger.daysLeft} days.` : ""}`,
+      last ? `RECENT FROM CAMP: ${last.slice(0, 240)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  };
 
   const answer = (raw: string): string => {
     const q = raw.trim().toLowerCase();
@@ -492,12 +517,32 @@ function Chat({ agentName, ledger }: { agentName: string; ledger: Ledger }) {
     return `Heard you. Right now I answer <span class="mono">/status</span>, <span class="mono">/positions</span> and <span class="mono">/pnl</span> from your live ledger — free-form reasoning and wall-checked orders are the next thing I learn.`;
   };
 
-  const submit = () => {
-    const v = val.trim();
-    if (!v) return;
+  const submit = async (text?: string) => {
+    const v = (text ?? val).trim();
+    if (!v || busy) return;
     setVal("");
-    setMsgs((m) => [...m, { role: "me", html: escapeHtml(v) }]);
-    setTimeout(() => setMsgs((m) => [...m, { role: "them", html: answer(v) }]), 260);
+    setBusy(true);
+    const history = msgs.map((m) => ({ role: m.role === "me" ? "user" : "assistant", content: stripTags(m.html) }));
+    setMsgs((m) => [
+      ...m,
+      { role: "me", html: escapeHtml(v) },
+      { role: "them", html: '<span style="color:var(--faint);font-family:var(--mono)">…</span>' },
+    ]);
+    let replyHtml: string | null = null;
+    try {
+      const r = (await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: v, state: buildState(), history }),
+      }).then((res) => res.json())) as { reply?: string | null };
+      if (r && typeof r.reply === "string" && r.reply.trim()) replyHtml = escapeHtml(r.reply.trim());
+    } catch {
+      /* fall through to the deterministic answer */
+    }
+    const finalHtml = replyHtml ?? answer(v);
+    // Replace the "…" placeholder with the real reply.
+    setMsgs((m) => [...m.slice(0, -1), { role: "them", html: finalHtml }]);
+    setBusy(false);
   };
 
   return (
@@ -518,7 +563,7 @@ function Chat({ agentName, ledger }: { agentName: string; ledger: Ledger }) {
       </div>
       <div className="chips">
         {["/status", "/positions", "/pnl", "why?"].map((c) => (
-          <span className="chip" key={c} onClick={() => { setVal(c); setTimeout(submit, 0); }}>
+          <span className="chip" key={c} onClick={() => submit(c)}>
             {c}
           </span>
         ))}
@@ -528,10 +573,10 @@ function Chat({ agentName, ledger }: { agentName: string; ledger: Ledger }) {
           value={val}
           onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder={`Ask ${agentName.split(" ")[0]} anything…`}
+          placeholder={busy ? "Will is thinking…" : `Ask ${agentName.split(" ")[0]} anything…`}
           autoComplete="off"
         />
-        <button className="send" onClick={submit} aria-label="Send" disabled={!val.trim()}>
+        <button className="send" onClick={() => submit()} aria-label="Send" disabled={!val.trim() || busy}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
             <path d="M22 2L11 13" />
             <path d="M22 2l-7 20-4-9-9-4z" />
@@ -544,6 +589,17 @@ function Chat({ agentName, ledger }: { agentName: string; ledger: Ledger }) {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] || c);
+}
+
+/** Plain text of a rendered bubble, for sending prior turns back as chat history. */
+function stripTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .trim();
 }
 
 // ── decorative canvas ──
