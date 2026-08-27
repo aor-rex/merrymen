@@ -19,6 +19,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
+# The Postgres driver — a HOSTED-ONLY runtime dependency. Both the shared ledger
+# (worker/src/db.ts) and the grant store (worker/src/grant-store.ts) reach it by
+# dynamic import, and only when DATABASE_URL is set; a self-hosted install never
+# sets it and never loads pg, which is why pg is deliberately NOT in package.json.
+# --no-save keeps it out of the manifest/lock; it just has to exist in the image's
+# node_modules so `require('pg')` resolves at runtime. Without this the first
+# Postgres access on Railway throws "Cannot find module 'pg'" at boot.
+RUN npm install --no-save --ignore-scripts pg@8
+
 # Full source. .dockerignore keeps node_modules / .next / local state out.
 COPY . .
 
