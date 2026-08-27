@@ -80,7 +80,9 @@ export async function resolveCallback(cb: TgCallback, ctx: ResolveCallbackCtx): 
 
   // Parse `confirm:<nonce>` / `cancel:<nonce>` from the closed set. Anything
   // else is an unknown/foreign button: toast, never edit.
-  const [verb, nonce] = cb.data.split(":", 2);
+  const sep = cb.data.indexOf(":");
+  const verb = sep === -1 ? cb.data : cb.data.slice(0, sep);
+  const nonce = sep === -1 ? "" : cb.data.slice(sep + 1);
   if ((verb !== "confirm" && verb !== "cancel") || !nonce) {
     await ctx.answer(cb.queryId, { text: "unknown button." });
     return;

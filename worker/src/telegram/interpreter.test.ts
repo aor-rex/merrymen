@@ -461,7 +461,7 @@ describe("executeCommand — transfer confirm flow", () => {
     const d = deps(); // caps on, shell allowlist has "git status"
     await executeCommand({ kind: "transfer", to: ADDR, usdg: 20 }, d);
     const r = await executeCommand({ kind: "shell", cmd: "git status" }, d);
-    assert.match(r, /already waiting/i);
+    assert.match(r, /waiting for confirmation/i);
     assert.deepEqual(d.calls, [`pend:${ADDR}:20`]); // slot NOT overwritten
     // The original ask is still exactly what /confirm executes.
     assert.match(await executeCommand({ kind: "confirm" }, d), /submitted transfer/);
@@ -636,17 +636,23 @@ describe("PC control — gating, confirm-park, and injection safety", () => {
   });
 });
 
-describe("describePending — the one-liner fed to the LLM so it can name a parked action", () => {
+describe("describePending — kind-only, no payload (payload never leaves the machine)", () => {
   const at = 1000;
-  it("names each of the six kinds", () => {
+  it("names each of the six kinds without payload", () => {
     assert.equal(
       describePending({ kind: "transfer", to: "0x1234567890abcdef1234567890abcdef12345678", usdg: 20, expiresAt: at, nonce: "n1" }),
-      "transfer 20 USDG → 0x1234567890abcdef1234567890abcdef12345678",
+      "a transfer is waiting for confirmation",
     );
-    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at, nonce: "n2" }), 'run shell command "ls -la"');
-    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at, nonce: "n3" }), "send file notes.txt");
-    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at, nonce: "n4" }), 'type "hello"');
-    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at, nonce: "n5" }), "press ctrl+s");
-    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at, nonce: "n6" }), "power shutdown");
+    assert.equal(describePending({ kind: "shell", cmd: "ls -la", expiresAt: at, nonce: "n2" }), "a shell command is waiting for confirmation");
+    assert.equal(describePending({ kind: "getfile", path: "notes.txt", expiresAt: at, nonce: "n3" }), "a file send is waiting for confirmation");
+    assert.equal(describePending({ kind: "type", text: "hello", expiresAt: at, nonce: "n4" }), "a keyboard action is waiting for confirmation");
+    assert.equal(describePending({ kind: "hotkey", combo: "ctrl+s", expiresAt: at, nonce: "n5" }), "a keyboard action is waiting for confirmation");
+    assert.equal(describePending({ kind: "power", action: "shutdown", expiresAt: at, nonce: "n6" }), "a power action is waiting for confirmation");
+  });
+  it("never leaks the payload", () => {
+    const t = describePending({ kind: "type", text: "s3cr3t", expiresAt: at, nonce: "n" });
+    assert.ok(!t.includes("s3cr3t"));
+    const tr = describePending({ kind: "transfer", to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", usdg: 5, expiresAt: at, nonce: "n" });
+    assert.ok(!tr.includes("0xaaaa"));
   });
 });

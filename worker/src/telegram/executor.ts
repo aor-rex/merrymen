@@ -35,23 +35,23 @@ export type PendingAction =
   | { kind: "hotkey"; combo: string; expiresAt: number; nonce: string }
   | { kind: "power"; action: "sleep" | "shutdown"; expiresAt: number; nonce: string };
 
-/** One short phrase naming what a parked action WOULD do — fed to the LLM so it
- * can tell the owner exactly what's waiting to be confirmed ("press ctrl+s",
- * "transfer 20 USDG → 0x…", …). */
+/** What KIND of parked action is waiting — fed to the LLM only so it can
+ * steer the owner to the buttons. Must NOT include payload (text, address,
+ * cmd, path) — that would send a pasted password or address to the LLM
+ * provider. The human-facing card already shows the verbatim payload. */
 export function describePending(p: PendingAction): string {
   switch (p.kind) {
     case "transfer":
-      return `transfer ${p.usdg} USDG → ${p.to}`;
+      return "a transfer is waiting for confirmation";
     case "shell":
-      return `run shell command "${p.cmd}"`;
+      return "a shell command is waiting for confirmation";
     case "getfile":
-      return `send file ${p.path}`;
+      return "a file send is waiting for confirmation";
     case "type":
-      return `type "${p.text}"`;
     case "hotkey":
-      return `press ${p.combo}`;
+      return "a keyboard action is waiting for confirmation";
     case "power":
-      return `power ${p.action}`;
+      return "a power action is waiting for confirmation";
   }
 }
 
@@ -140,6 +140,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
   const refusal = pcRefusal(cmd, deps);
   if (refusal) return refusal;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const blocked = (): string | null => {
+    const live = deps.getPending();
+    if (live && now() <= live.expiresAt) return `⏳ ${describePending(live)} — /confirm it or /cancel first.`;
+    return null;
+  };
 
   switch (cmd.kind) {
     case "link": {
@@ -213,10 +218,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         usdg = deps.maxActionUsdg;
         note = ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)`;
       }
-      const live = deps.getPending();
-      if (live && now() <= live.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b0 = blocked();
+      if (b0) return b0;
       deps.setPending({ kind: "transfer", to: cmd.to, usdg, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return [
         `⚠️ <b>confirm transfer</b>${note}`,
@@ -319,44 +322,34 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       if (!shellAllowed(cmd.cmd, deps.shellAllowlist)) {
         return `🔒 “${esc(cmd.cmd)}” isn't in your shell allowlist (or it chains/redirects). Add exact commands in the dashboard.`;
       }
-      const liveShell = deps.getPending();
-      if (liveShell && now() <= liveShell.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b1 = blocked();
+      if (b1) return b1;
       deps.setPending({ kind: "shell", cmd: cmd.cmd, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm run</b>\n<code>${esc(cmd.cmd)}</code>\n\n/confirm to run (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "getfile": {
       const res = resolveInRoot(deps.filesRoot, cmd.path);
       if (!res.ok) return `🔒 ${esc(res.reason)}`;
-      const liveFile = deps.getPending();
-      if (liveFile && now() <= liveFile.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b2 = blocked();
+      if (b2) return b2;
       deps.setPending({ kind: "getfile", path: cmd.path, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm send file</b>\n<code>${esc(cmd.path)}</code> will be sent to this chat.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "type": {
-      const liveType = deps.getPending();
-      if (liveType && now() <= liveType.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b3 = blocked();
+      if (b3) return b3;
       deps.setPending({ kind: "type", text: cmd.text, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm type</b> into your active window:\n<code>${esc(cmd.text)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "hotkey": {
-      const liveKey = deps.getPending();
-      if (liveKey && now() <= liveKey.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b4 = blocked();
+      if (b4) return b4;
       deps.setPending({ kind: "hotkey", combo: cmd.combo, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm hotkey</b> <code>${esc(cmd.combo)}</code>\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
     case "power": {
-      const livePower = deps.getPending();
-      if (livePower && now() <= livePower.expiresAt) {
-        return "⏳ an action is already waiting — /confirm it or /cancel first.";
-      }
+      const b5 = blocked();
+      if (b5) return b5;
       deps.setPending({ kind: "power", action: cmd.action, expiresAt: now() + CONFIRM_TTL_SEC, nonce: nonce() });
       return `⚠️ <b>confirm ${cmd.action}</b> — this will ${cmd.action} your machine.\n\n/confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
     }
