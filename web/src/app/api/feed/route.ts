@@ -3,19 +3,16 @@
  * shared SQLite file the worker writes (.data/merrymen.db).
  */
 
-import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
 import { TRADEABLE_SYMBOLS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { withReadDb, fmtEpoch } from "@/lib/ledger";
 
 const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];
 
 export const dynamic = "force-dynamic";
-
-const DB_FILE = homePaths.db();
 
 export interface FeedEvent {
   level: "ok" | "warn" | "err";
@@ -136,21 +133,13 @@ export async function GET(req: Request) {
     if (!tenant) return NextResponse.json(emptyFeed());
   }
 
-  if (!existsSync(DB_FILE)) {
-    return NextResponse.json(emptyFeed());
-  }
-
-  // Read-only open so the worker stays the single writer. Tolerate a DB the
-  // worker hasn't fully initialized yet — missing tables read as empty. A
-  // corrupt or locked file degrades to an empty feed rather than a 500 (the
-  // open used to sit outside the try).
-  let db: DatabaseSync;
-  try {
-    db = new DatabaseSync(DB_FILE, { readOnly: true });
-  } catch {
-    return NextResponse.json(emptyFeed());
-  }
-  try {
+  // Reads go through the ledger driver: read-only sqlite (self-hosted) or the
+  // shared Postgres a worker child wrote (hosted). A missing/locked db → null →
+  // an empty feed, never a 500. The SQL below is dialect-neutral: no
+  // datetime('unixepoch') (timestamps are raw epoch, formatted by fmtEpoch) and
+  // no rowid (the tie-break is smart_account, which both backends have).
+  return withReadDb(async (db) => {
+    if (!db) return NextResponse.json(emptyFeed());
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
     let positions: PositionRow[] = [];
@@ -172,27 +161,27 @@ export async function GET(req: Request) {
     let agentId: string | null = null;
     if (tenant) {
       try {
-        const row = db
+        const row = (await db
           .prepare(
             `SELECT smart_account FROM agents WHERE LOWER(owner_address) = ?
-              ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
+              ORDER BY (status = 'armed') DESC, created_at DESC, smart_account DESC LIMIT 1`,
           )
-          .get(tenant) as { smart_account: string } | undefined;
+          .get(tenant)) as { smart_account: string } | undefined;
         agentId = row?.smart_account ?? null;
       } catch {
         /* no agents table yet */
       }
     } else {
       try {
-        const row = db
+        const row = (await db
           .prepare(
-            // rowid breaks the tie: `status` DEFAULTs to 'armed' so it
-            // discriminates less than it looks, and created_at is whole seconds.
-            // rowid is insertion order — the newest grant wins, deterministically.
+            // The tie-break: `status` DEFAULTs to 'armed' so it discriminates
+            // less than it looks, and created_at is whole seconds. smart_account
+            // is the final deterministic key (there is no cross-dialect rowid).
             `SELECT smart_account FROM agents
-              ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
+              ORDER BY (status = 'armed') DESC, created_at DESC, smart_account DESC LIMIT 1`,
           )
-          .get() as { smart_account: string } | undefined;
+          .get()) as { smart_account: string } | undefined;
         agentId = row?.smart_account ?? null;
       } catch {
         /* no agents table yet */
@@ -212,15 +201,15 @@ export async function GET(req: Request) {
     //
     // A CLAUSE, not a constant: this app can be running against a database an
     // older worker wrote, where `epoch` does not exist. Referencing a missing
-    // column throws at prepare(), and the surrounding catch would blank the
+    // column throws at query time, and the surrounding catch would blank the
     // whole panel — strictly worse than showing a pre-epoch ledger unfiltered,
     // since every row in one is epoch 1 by definition.
     let epochWhere = "";
     let epochArg: number[] = [];
     try {
-      const erow = db
+      const erow = (await db
         .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
-        .get(scope) as { epoch: number } | undefined;
+        .get(scope)) as { epoch: number } | undefined;
       epochWhere = " AND epoch = ?";
       epochArg = [erow?.epoch ?? 1];
     } catch {
@@ -229,65 +218,72 @@ export async function GET(req: Request) {
     // `events` and `positions` are deliberately NOT epoch-filtered below:
     // neither table has the column, so agent scoping is all they support.
     try {
-      events = db
+      const rows = (await db
         .prepare(
-          `SELECT level, message, datetime(created_at, 'unixepoch') AS created_at
+          `SELECT level, message, created_at
            FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 40`,
         )
-        .all(scope) as unknown as FeedEvent[];
+        .all(scope)) as { level: FeedEvent["level"]; message: string; created_at: number }[];
+      events = rows.map((r) => ({ level: r.level, message: r.message, created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
     }
     try {
-      equity = db
+      const rows = (await db
         .prepare(
-          `SELECT cash_usdg, vault_usdg, equity_usdg, datetime(at, 'unixepoch') AS at
+          `SELECT cash_usdg, vault_usdg, equity_usdg, at
            FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 288)
            ORDER BY at ASC, id ASC`,
         )
-        .all(scope, ...epochArg) as unknown as EquityPoint[];
+        .all(scope, ...epochArg)) as { cash_usdg: number; vault_usdg: number; equity_usdg: number; at: number }[];
+      equity = rows.map((r) => ({
+        cash_usdg: r.cash_usdg,
+        vault_usdg: r.vault_usdg,
+        equity_usdg: r.equity_usdg,
+        at: fmtEpoch(r.at),
+      }));
     } catch {
       /* table not created yet */
     }
     try {
-      positions = db
+      positions = (await db
         .prepare(
           `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale,
                   price_source, value_usdg
            FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
         )
-        .all(scope) as unknown as PositionRow[];
+        .all(scope)) as unknown as PositionRow[];
     } catch {
       // price_source arrives with a worker migration. The dashboard can be
       // running against a database the upgraded worker hasn't opened yet, and
       // losing the whole positions panel over a label would be a worse bug than
       // the missing label — so fall back to the shape that always existed.
       try {
-        const legacy = db
+        const legacy = (await db
           .prepare(
             `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg
              FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
           )
-          .all(scope) as unknown as Omit<PositionRow, "price_source">[];
+          .all(scope)) as unknown as Omit<PositionRow, "price_source">[];
         positions = legacy.map((p) => ({ ...p, price_source: "chainlink" }));
       } catch {
         /* table not created yet */
       }
     }
     try {
-      trades = db
+      const rows = (await db
         .prepare(
           `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
-                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas,
-                  datetime(created_at, 'unixepoch') AS created_at
+                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
            FROM trades WHERE agent_id = ?${epochWhere} ORDER BY created_at DESC, id DESC LIMIT 30`,
         )
-        .all(scope, ...epochArg) as unknown as TradeRecord[];
+        .all(scope, ...epochArg)) as (Omit<TradeRecord, "created_at"> & { created_at: number })[];
+      trades = rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           // SCOPED, and with the SAME tie-break the agent resolution above
           // uses. This read was neither: it took the newest row by created_at
@@ -297,7 +293,7 @@ export async function GET(req: Request) {
           // measured against.
           `SELECT name, hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?`,
         )
-        .get(scope) as ({ name: string } & AgentFinancials) | undefined;
+        .get(scope)) as ({ name: string } & AgentFinancials) | undefined;
       if (row) {
         financials = { hwm_usdg: row.hwm_usdg, accrued_fee_usdg: row.accrued_fee_usdg };
         if (typeof row.name === "string" && row.name) name = row.name;
@@ -306,25 +302,25 @@ export async function GET(req: Request) {
       /* columns not migrated yet */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           `SELECT COUNT(*) AS n,
                   COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
              FROM flows WHERE agent_id = ?${epochWhere}`,
         )
-        .get(scope, ...epochArg) as { n: number; net: number } | undefined;
+        .get(scope, ...epochArg)) as { n: number; net: number } | undefined;
       netContributionsUsdg = !row || row.n === 0 ? null : row.net;
     } catch {
       /* flows arrives with a worker migration — null, never zero */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                   SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
              FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
         )
-        .get(scope, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
+        .get(scope, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
       gasUsdg = row?.usdg ?? 0;
       gasUnpricedTrades = row?.unpriced ?? 0;
     } catch {
@@ -342,7 +338,5 @@ export async function GET(req: Request) {
       gasUsdg,
       gasUnpricedTrades,
     } satisfies FeedResponse);
-  } finally {
-    db.close();
-  }
+  });
 }

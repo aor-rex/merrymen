@@ -5,16 +5,12 @@
  * with the same weight as landed ones.
  */
 
-import { existsSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
-import { homePaths } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { withReadDb, fmtEpoch } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
-
-const DB_FILE = homePaths.db();
 
 export interface ScoreboardEquityPoint {
   equity_usdg: number;
@@ -62,31 +58,25 @@ export async function GET(req: Request) {
     if (!tenant) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
   }
 
-  if (!existsSync(DB_FILE)) {
-    return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
-  }
-
-  let db: DatabaseSync;
-  try {
-    db = new DatabaseSync(DB_FILE, { readOnly: true });
-  } catch {
-    return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
-  }
-  try {
+  // Reads go through the ledger driver (read-only sqlite self-hosted, shared
+  // Postgres hosted). A missing/locked db → null → an empty board, never a 500.
+  // The SQL is dialect-neutral: timestamps are raw epoch formatted by fmtEpoch.
+  return withReadDb(async (db) => {
+    if (!db) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
     let rows: Record<string, unknown>[] = [];
     try {
-      rows = db
+      rows = (await db
         .prepare(
           `SELECT smart_account, name, status, chain_id, caps, granted_at, expires_at,
                   COALESCE(hwm_usdg, 0) AS hwm_usdg, COALESCE(accrued_fee_usdg, 0) AS accrued_fee_usdg
            FROM agents ${tenant ? "WHERE LOWER(owner_address) = ?" : ""} ORDER BY created_at DESC`,
         )
-        .all(...(tenant ? [tenant] : [])) as Record<string, unknown>[];
+        .all(...(tenant ? [tenant] : []))) as Record<string, unknown>[];
     } catch {
       return NextResponse.json({ source: "sqlite", agents: [] } satisfies ScoreboardResponse);
     }
 
-    const agents: ScoreboardAgent[] = rows.map((row) => {
+    const agents: ScoreboardAgent[] = await Promise.all(rows.map(async (row) => {
       const account = row.smart_account as string;
 
       // WHICH RUN. Everything before the accounting fix stays epoch 1 — no flow
@@ -102,9 +92,9 @@ export async function GET(req: Request) {
       let epochWhere = "";
       let epochArg: number[] = [];
       try {
-        const e = db
+        const e = (await db
           .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
-          .get(account) as { epoch: number } | undefined;
+          .get(account)) as { epoch: number } | undefined;
         epochWhere = " AND epoch = ?";
         epochArg = [e?.epoch ?? 1];
       } catch {
@@ -113,13 +103,14 @@ export async function GET(req: Request) {
 
       let equity: ScoreboardEquityPoint[] = [];
       try {
-        equity = db
+        const erows = (await db
           .prepare(
-            `SELECT equity_usdg, datetime(at, 'unixepoch') AS at
+            `SELECT equity_usdg, at
              FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 500)
              ORDER BY at ASC, id ASC`,
           )
-          .all(account, ...epochArg) as unknown as ScoreboardEquityPoint[];
+          .all(account, ...epochArg)) as { equity_usdg: number; at: number }[];
+        equity = erows.map((r) => ({ equity_usdg: r.equity_usdg, at: fmtEpoch(r.at) }));
       } catch {
         /* table not created yet */
       }
@@ -134,13 +125,13 @@ export async function GET(req: Request) {
       // as performance.
       let contributed: number | null = null;
       try {
-        const row = db
+        const row = (await db
           .prepare(
             `SELECT COUNT(*) AS n,
                     COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
                FROM flows WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account, ...epochArg) as { n: number; net: number } | undefined;
+          .get(account, ...epochArg)) as { n: number; net: number } | undefined;
         contributed = !row || row.n === 0 ? null : row.net;
       } catch {
         /* flows arrives with a worker migration */
@@ -151,13 +142,13 @@ export async function GET(req: Request) {
       let gasUsdg = 0;
       let gasUnpriced = 0;
       try {
-        const row = db
+        const row = (await db
           .prepare(
             `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                     SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
                FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
           )
-          .get(account, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
+          .get(account, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
         gasUsdg = row?.usdg ?? 0;
         gasUnpriced = row?.unpriced ?? 0;
       } catch {
@@ -166,9 +157,9 @@ export async function GET(req: Request) {
 
       let latestEquity: number | null = null;
       try {
-        const row = db
+        const row = (await db
           .prepare(`SELECT equity_usdg FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1`)
-          .get(account, ...epochArg) as { equity_usdg: number } | undefined;
+          .get(account, ...epochArg)) as { equity_usdg: number } | undefined;
         latestEquity = row?.equity_usdg ?? null;
       } catch {
         /* table not created yet */
@@ -188,7 +179,7 @@ export async function GET(req: Request) {
       // "flawless" rather than "nothing happened yet".
       let maxDdBps: number | null = null;
       try {
-        const dd = db
+        const dd = (await db
           .prepare(
             `SELECT MAX(CASE WHEN peak > 0 AND equity_usdg < peak
                              THEN CAST(((peak - equity_usdg) / peak) * 10000 AS INTEGER)
@@ -200,7 +191,7 @@ export async function GET(req: Request) {
                             ) AS peak
                        FROM equity WHERE agent_id = ?${epochWhere})`,
           )
-          .get(account, ...epochArg) as { bps: number | null } | undefined;
+          .get(account, ...epochArg)) as { bps: number | null } | undefined;
         maxDdBps = dd?.bps ?? null;
       } catch {
         /* pre-migration ledger, or a SQLite without window functions */
@@ -208,7 +199,7 @@ export async function GET(req: Request) {
 
       let trades = { landed: 0, rejected: 0, reverted: 0, volume_usdg: 0 };
       try {
-        const t = db
+        const t = (await db
           .prepare(
             `SELECT
                SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
@@ -217,7 +208,7 @@ export async function GET(req: Request) {
                COALESCE(SUM(CASE WHEN status = 'landed' AND kind != 'vault-withdraw' THEN amount_usdg ELSE 0 END), 0) AS volume
              FROM trades WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account, ...epochArg) as { landed: number; rejected: number; reverted: number; volume: number };
+          .get(account, ...epochArg)) as { landed: number; rejected: number; reverted: number; volume: number };
         trades = {
           landed: t.landed ?? 0,
           rejected: t.rejected ?? 0,
@@ -256,10 +247,8 @@ export async function GET(req: Request) {
         max_drawdown_bps: maxDdBps,
         trades,
       };
-    });
+    }));
 
     return NextResponse.json({ source: "sqlite", agents } satisfies ScoreboardResponse);
-  } finally {
-    db.close();
-  }
+  });
 }
