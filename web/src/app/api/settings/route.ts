@@ -307,6 +307,13 @@ export async function PUT(req: Request) {
       setOrClear("breakerAddress", v.trim());
     else errors.push("breakerAddress: must be a 0x… address");
   }
+  if ("v4AdapterAddress" in body) {
+    const v = body.v4AdapterAddress;
+    if (v === "" || v === null || v === undefined) setOrClear("v4AdapterAddress", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("v4AdapterAddress", v.trim());
+    else errors.push("v4AdapterAddress: must be a 0x… address");
+  }
   // $MERRYMEN holder wallet — a read-only address for the Merry Circle fee tier.
   if ("holderAddress" in body) {
     const v = body.holderAddress;

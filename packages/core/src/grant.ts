@@ -55,6 +55,39 @@ export function grantHasMultihop(grant: Pick<StoredGrant, "grantFeatures"> | nul
   return grant?.grantFeatures?.includes(GRANT_MULTIHOP) ?? false;
 }
 
+/**
+ * grantFeatures marker meaning "this signature can call the V4SelfSwap
+ * adapter" — the contract that makes Uniswap v4 constrainable by the wall.
+ *
+ * DISTINCT FROM GRANT_V4, deliberately. GRANT_V4 means the OLD route: Permit2
+ * plus the UniversalRouter, whose `execute(bytes, bytes[])` hides the swap
+ * recipient in opaque bytes the policy cannot constrain — which is why neither
+ * signer has ever minted it. This marker means the adapter route: one declared
+ * selector whose recipient is `msg.sender` in bytecode. The two permission
+ * sets are disjoint, so conflating the markers would tell the worker a route
+ * exists that the signature does not carry.
+ */
+export const GRANT_V4_ADAPTER = "v4-adapter";
+
+/**
+ * The adapter address this signature can actually call, or null.
+ *
+ * BOTH the marker and a valid address are required — the GRANT_TRANSFER
+ * lesson, applied before the wound this time: a marker alone is a claim, not
+ * evidence, and a claim the wall does not back means the worker builds a
+ * UserOp the account contract refuses. The address is per-deploy (testnet and
+ * mainnet adapters differ), sealed into the signature at signing time; the
+ * worker must call THIS address, never whatever settings says at tick time.
+ */
+export function grantV4Adapter(
+  grant: Pick<StoredGrant, "grantFeatures" | "v4AdapterAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_V4_ADAPTER)) return null;
+  const a = grant.v4AdapterAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
 export const GRANT_TRANSFER = "transfer";
 
 /**
@@ -136,6 +169,13 @@ export interface StoredGrant {
    * thought they'd enabled it.
    */
   grantTokens?: string[];
+  /**
+   * The V4SelfSwap adapter this signature's `swapExactIn` permission was
+   * sealed against, lowercased. Per-deploy and per-chain, so it lives on the
+   * grant rather than in a registry constant — see grantV4Adapter, which is
+   * the only reader and requires the GRANT_V4_ADAPTER marker alongside it.
+   */
+  v4AdapterAddress?: string;
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
   /**

@@ -35,7 +35,7 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { UNISWAP } from "../../../packages/core/src/index";
+import { UNISWAP, V4SELFSWAP_ABI } from "../../../packages/core/src/index";
 
 /** UniversalRouter command byte for "run these v4 actions". */
 export const CMD_V4_SWAP = 0x10;
@@ -371,5 +371,72 @@ export function buildV4SwapCalls(args: {
     { to: args.tokenIn, value: 0n, data: erc20Approve },
     { to: permit2, value: 0n, data: permit2Approve },
     { to: router, value: 0n, data: execute },
+  ];
+}
+
+/**
+ * The ADAPTER route — the calls for a v4 swap through V4SelfSwap, which is the
+ * route whose recipient the wall can actually vouch for.
+ *
+ * TWO calls where the UniversalRouter path needs three, and no Permit2
+ * anywhere: the adapter pulls tokenIn with a plain transferFrom, so a plain
+ * ERC-20 approve is the whole authorization — capped at exactly this trade's
+ * amountIn, consumed by the pull, nothing standing.
+ *
+ * tokenOut is DERIVED from the key rather than taken as an argument, and a
+ * tokenIn that is not one of the key's currencies throws: the quote and the
+ * call must describe one route, and an argument pair that disagrees with the
+ * key would encode a swap nobody priced.
+ */
+export function buildV4AdapterSwapCalls(args: {
+  /** The grant-sealed V4SelfSwap address — from grantV4Adapter, never settings. */
+  adapter: `0x${string}`;
+  key: PoolKey;
+  tokenIn: `0x${string}`;
+  amountIn: bigint;
+  minAmountOut: bigint;
+  /** Unix seconds; the adapter reverts Expired() past it. */
+  deadline: number;
+}): Call[] {
+  const inLc = args.tokenIn.toLowerCase();
+  const c0 = args.key.currency0.toLowerCase();
+  const c1 = args.key.currency1.toLowerCase();
+  if (inLc !== c0 && inLc !== c1) {
+    throw new Error(`tokenIn ${args.tokenIn} is not a currency of the pool key (${args.key.currency0}/${args.key.currency1})`);
+  }
+  const tokenOut = (inLc === c0 ? args.key.currency1 : args.key.currency0) as `0x${string}`;
+
+  // swapExactIn takes uint128 amounts. Anything wider would be silently
+  // truncated by the ABI encoder into a number nobody quoted — the same
+  // hazard the Permit2 path documents for its uint160/uint48. No real trade
+  // is within 10^20 of this bound; hitting it means something upstream broke.
+  const LIMIT = 1n << 128n;
+  if (args.amountIn >= LIMIT) throw new Error(`amountIn ${args.amountIn} overflows uint128`);
+  if (args.minAmountOut >= LIMIT) throw new Error(`minAmountOut ${args.minAmountOut} overflows uint128`);
+
+  const approve = encodeFunctionData({
+    abi: parseAbi(["function approve(address spender, uint256 amount) returns (bool)"]),
+    functionName: "approve",
+    args: [args.adapter, args.amountIn],
+  });
+
+  const swap = encodeFunctionData({
+    abi: V4SELFSWAP_ABI,
+    functionName: "swapExactIn",
+    args: [
+      args.tokenIn,
+      tokenOut,
+      args.key.fee,
+      args.key.tickSpacing,
+      args.key.hooks,
+      args.amountIn,
+      args.minAmountOut,
+      BigInt(args.deadline),
+    ],
+  });
+
+  return [
+    { to: args.tokenIn, value: 0n, data: approve },
+    { to: args.adapter, value: 0n, data: swap },
   ];
 }

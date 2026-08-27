@@ -73,6 +73,20 @@ describe("mergeSettings — file > env > default", () => {
     assert.equal(c.breakerAddress, "0x" + "ab".repeat(20));
   });
 
+  it("the v4 adapter address follows the same discipline: file over env, junk becomes undefined", () => {
+    // Same stakes as the breaker: this string becomes a CALL TARGET. A junk
+    // value must vanish rather than reach a wall or a warning path, and the
+    // file must beat the environment so what the owner sees in /settings is
+    // what the worker actually resolved.
+    const file = mergeSettings({ v4AdapterAddress: "0x" + "cd".repeat(20) }, { MERRYMEN_V4_ADAPTER_ADDRESS: "0x" + "ef".repeat(20) });
+    assert.equal(file.v4AdapterAddress, "0x" + "cd".repeat(20), "file wins over env");
+    const env = mergeSettings({}, { MERRYMEN_V4_ADAPTER_ADDRESS: "0x" + "ef".repeat(20) });
+    assert.equal(env.v4AdapterAddress, "0x" + "ef".repeat(20), "env fills in when the file is silent");
+    const junk = mergeSettings({ v4AdapterAddress: "not-an-address" }, {});
+    assert.equal(junk.v4AdapterAddress, undefined, "junk is UNDEFINED, never a call target");
+    assert.equal(mergeSettings({}, {}).v4AdapterAddress, undefined, "absent by default");
+  });
+
   it("all unknown basket symbols fall back to the default basket", () => {
     const c = mergeSettings({ basketSymbols: ["DOGE", "SHIB"] }, {});
     assert.deepEqual(c.basketSymbols, ["QQQ", "NVDA", "TSLA"]);

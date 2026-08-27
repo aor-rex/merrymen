@@ -11,6 +11,7 @@ import {
   TRADEABLE_SYMBOLS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
+  V4SELFSWAP_ABI,
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
@@ -393,4 +394,117 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
     pad(SELF, { size: 32 }).toLowerCase(),
     "offset 3*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
   );
+});
+
+test("the V4 ADAPTER opt-in: one permission, both legs pinned to the owner's asset list, at proven offsets", () => {
+  const ADAPTER = "0x00000000000000000000000000000000000000d4" as const;
+  const CUSTOM = { symbol: "WIF", address: "0x00000000000000000000000000000000000000e7", decimals: 9 } as const;
+
+  // Absent by default — the closed position, like every opt-in here.
+  assert.equal(find(ADAPTER).length, 0, "no adapter permission without the opt-in");
+
+  const withAdapter = buildCallPermissions(CAPS, SELF, {
+    v4AdapterAddress: ADAPTER,
+    extraTokens: [CUSTOM],
+  }) as unknown as Perm[];
+  const mine = withAdapter.filter((p) => p.target.toLowerCase() === ADAPTER);
+  assert.equal(mine.length, 1, "exactly one call permission on the adapter");
+  const [swap] = mine;
+  assert.equal(swap!.functionName, "swapExactIn");
+  assert.equal(swap!.valueLimit, 0n);
+
+  // The adapter joined the SPENDER set, so the existing approves can name it —
+  // zero new approve entries. Check the USDG approve's ONE_OF actually grew.
+  const usdgApprove = withAdapter.find(
+    (p) => p.target.toLowerCase() === CASH.USDG.toLowerCase() && p.functionName === "approve",
+  )!;
+  const spenderCond = (usdgApprove.args as { value: string[] }[])[0]!;
+  assert.ok(
+    spenderCond.value.map((a) => a.toLowerCase()).includes(ADAPTER),
+    "the adapter must be an allowed spender, or it can never pull tokenIn",
+  );
+
+  // BOTH LEGS PINNED — the strictness v3 never had. tokenIn and tokenOut are
+  // ONE_OF over USDG + tradeable stocks + the owner's extras, derived in the
+  // same call as the approve targets so the two sets cannot drift. This is
+  // what turns "a stolen key swaps the bankroll into a token it minted for
+  // gas" into "both legs must be assets the OWNER named".
+  const args = swap!.args as (null | { condition: number; value: string | string[] })[];
+  assert.equal(args.length, 8, "eight declared args, eight policy slots — all static, no pointer words");
+  for (const i of [0, 1] as const) {
+    const cond = args[i] as { condition: number; value: string[] };
+    assert.equal(cond.condition, ParamCondition.ONE_OF, `arg ${i} must be pinned`);
+    const set = cond.value.map((a) => a.toLowerCase());
+    assert.ok(set.includes(CASH.USDG.toLowerCase()), "cash is an asset");
+    assert.ok(set.includes(CUSTOM.address.toLowerCase()), "the owner's own token is an asset");
+    assert.ok(!set.includes("0x00000000000000000000000000000000000000ff"), "an unnamed token is not");
+  }
+  for (const i of [2, 3, 4, 5, 6, 7]) assert.equal(args[i], null, `arg ${i} stays unconstrained — see wall.ts for why each`);
+
+  // AND PROVE THE OFFSETS against viem's encoder, not against the reasoning.
+  // All eight params are static, so this is the one signature where the flat
+  // args[i] -> word i mapping is EXACT — but that is precisely the claim that
+  // must fail loudly if the contract's signature ever changes shape.
+  const calldata = encodeFunctionData({
+    abi: V4SELFSWAP_ABI,
+    functionName: "swapExactIn",
+    args: [
+      CASH.USDG as `0x${string}`,
+      CUSTOM.address as `0x${string}`,
+      3000,
+      60,
+      "0x00000000000000000000000000000000000000aa",
+      1_000_000n,
+      999n,
+      1_800_000_000n,
+    ],
+  });
+  const body = calldata.slice(10);
+  const word = (i: number) => `0x${body.slice(i * 64, (i + 1) * 64)}`;
+  assert.equal(word(0).toLowerCase(), pad(CASH.USDG as `0x${string}`, { size: 32 }).toLowerCase(), "word 0 = tokenIn");
+  assert.equal(word(1).toLowerCase(), pad(CUSTOM.address as `0x${string}`, { size: 32 }).toLowerCase(), "word 1 = tokenOut");
+  assert.equal(
+    word(4).toLowerCase(),
+    pad("0x00000000000000000000000000000000000000aa", { size: 32 }).toLowerCase(),
+    "word 4 = hooks",
+  );
+  assert.equal(BigInt(word(5)), 1_000_000n, "word 5 = amountIn");
+  assert.equal(BigInt(word(6)), 999n, "word 6 = minAmountOut");
+  assert.equal(BigInt(word(7)), 1_800_000_000n, "word 7 = deadline");
+});
+
+test("the adapter opt-in is INDEPENDENT of the legacy v4 route, and a junk address throws", () => {
+  const ADAPTER = "0x00000000000000000000000000000000000000d4" as const;
+  const base = perms().length;
+
+  // Adapter alone: +1 permission (its call), no Permit2, no UniversalRouter.
+  const adapterOnly = buildCallPermissions(CAPS, SELF, { v4AdapterAddress: ADAPTER }) as unknown as Perm[];
+  assert.equal(adapterOnly.length, base + 1);
+  assert.equal(
+    adapterOnly.filter((p) => p.target.toLowerCase() === UNISWAP.universalRouter.toLowerCase()).length,
+    0,
+    "the adapter route does not smuggle the UniversalRouter back in",
+  );
+
+  // Legacy flag alone: unchanged from before the adapter existed (+3).
+  const legacy = buildCallPermissions(CAPS, SELF, { allowUniswapV4: true }) as unknown as Perm[];
+  assert.equal(legacy.length, base + 2, "the legacy Permit2+UniversalRouter set is untouched");
+
+  // Both: strictly additive, no interference.
+  const both = buildCallPermissions(CAPS, SELF, {
+    v4AdapterAddress: ADAPTER,
+    allowUniswapV4: true,
+  }) as unknown as Perm[];
+  assert.equal(both.length, base + 3);
+
+  // A malformed address must throw at build time — a permission whose target
+  // is garbage is a route that looks granted and can never match, sealed into
+  // a signature nobody can amend.
+  for (const bad of ["0x1234", "not-an-address", ""]) {
+    assert.throws(
+      () => buildCallPermissions(CAPS, SELF, { v4AdapterAddress: bad as never }),
+      /not an address/,
+      `"${bad}" must be refused before it becomes policy`,
+    );
+  }
 });

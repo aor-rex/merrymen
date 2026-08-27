@@ -92,3 +92,68 @@ describe("parsePoolEvent — third-party JSON reaching a trading agent", () => {
     assert.equal(p?.token, ok.Arguments[0]!.Value.address);
   });
 });
+
+describe("parsePoolEvent — the v4 PoolKey, all five fields or none", () => {
+  const A = "0x00000000000000000000000000000000000000a1";
+  const B = "0x00000000000000000000000000000000000000b2";
+  const HOOK = "0x00000000000000000000000000000000000000f1";
+  const namedEvent = (args: { Name: string; Value: Record<string, unknown> }[]) => ({
+    Block: { Time: "2026-08-26T12:00:00Z" },
+    Transaction: { Hash: "0xabc" },
+    Arguments: args,
+  });
+  const FULL = [
+    { Name: "currency0", Value: { address: A } },
+    { Name: "currency1", Value: { address: B } },
+    { Name: "fee", Value: { integer: 8388608 } },
+    { Name: "tickSpacing", Value: { integer: 200 } },
+    { Name: "hooks", Value: { address: HOOK } },
+  ];
+
+  it("a complete Initialize event yields the whole key — hooks included", () => {
+    // This is the ONLY way a hooked pool ever becomes routable: the hook
+    // address cannot be guessed by tier-scanning, only read from this event.
+    const p = parsePoolEvent(namedEvent(FULL))!;
+    assert.ok(p, "the pair parses");
+    assert.deepEqual(p.key, { currency0: A, currency1: B, fee: 8388608, tickSpacing: 200, hooks: HOOK });
+  });
+
+  it("a MISSING field means NO key, never a defaulted one", () => {
+    // A partial key is not a vaguer version of the same pool — it is a
+    // DIFFERENT pool. Defaulting fee to 0 would fabricate an identity, which
+    // is the unknown-as-zero bug wearing a pool costume.
+    for (const drop of ["currency0", "fee", "tickSpacing", "hooks"]) {
+      const p = parsePoolEvent(namedEvent(FULL.filter((a) => a.Name !== drop)));
+      // currency0 dropped may kill the whole pair (fewer than 2 addresses is
+      // fine too) — the invariant is only that no PARTIAL key ever appears.
+      assert.equal(p?.key, undefined, `dropping ${drop} must not yield a key`);
+    }
+  });
+
+  it("out-of-range values mean no key: fee ≥ 2^24, |tickSpacing| ≥ 2^23, identical currencies", () => {
+    const bad = (name: string, Value: Record<string, unknown>) =>
+      namedEvent(FULL.map((a) => (a.Name === name ? { Name: name, Value } : a)));
+    assert.equal(parsePoolEvent(bad("fee", { integer: 2 ** 24 }))?.key, undefined);
+    assert.equal(parsePoolEvent(bad("tickSpacing", { integer: 2 ** 23 }))?.key, undefined);
+    assert.equal(parsePoolEvent(bad("currency1", { address: A }))?.key, undefined, "a pool of itself is not a pool");
+  });
+
+  it("bigInteger strings are accepted where integer is absent — Bitquery types by width", () => {
+    const p = parsePoolEvent(
+      namedEvent(FULL.map((a) => (a.Name === "fee" ? { Name: "fee", Value: { bigInteger: "3000" } } : a))),
+    )!;
+    assert.equal(p.key?.fee, 3000);
+  });
+
+  it("the OLD event shape — addresses only, no names — still parses, keyless", () => {
+    // The gateway path and pre-key sightings produce exactly this. Discovery
+    // must keep working for them, just without a routable key.
+    const p = parsePoolEvent({
+      Block: { Time: "2026-08-26T12:00:00Z" },
+      Transaction: { Hash: "0xabc" },
+      Arguments: [{ Value: { address: A } }, { Value: { address: B } }],
+    })!;
+    assert.ok(p);
+    assert.equal(p.key, undefined);
+  });
+});

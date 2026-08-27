@@ -183,6 +183,20 @@ export interface NewPair {
   /** Unix seconds the pool was initialized. */
   createdAt: number;
   txHash: string;
+  /**
+   * The full v4 PoolKey, when every one of its five fields parsed. ABSENT
+   * otherwise — a partial key is not a vaguer version of the same pool, it is
+   * a different pool, so nothing here is ever defaulted. This is what makes a
+   * HOOKED pool routable at all: the hook address cannot be guessed, only
+   * learned from the Initialize event.
+   */
+  key?: {
+    currency0: `0x${string}`;
+    currency1: `0x${string}`;
+    fee: number;
+    tickSpacing: number;
+    hooks: `0x${string}`;
+  };
 }
 
 /**
@@ -222,7 +236,14 @@ export async function recentPools(
         Block { Time }
         Transaction { Hash }
         Log { Signature { Name } }
-        Arguments { Name Value { ... on EVM_ABI_Address_Value_Arg { address } } }
+        Arguments {
+          Name
+          Value {
+            ... on EVM_ABI_Address_Value_Arg { address }
+            ... on EVM_ABI_Integer_Value_Arg { integer }
+            ... on EVM_ABI_BigInt_Value_Arg { bigInteger }
+          }
+        }
       }
     }
   }`;
@@ -245,17 +266,65 @@ export function parsePoolEvent(ev: unknown): NewPair | null {
   const e = ev as {
     Block?: { Time?: string };
     Transaction?: { Hash?: string };
-    Arguments?: { Name?: string; Value?: { address?: string } }[];
+    Arguments?: { Name?: string; Value?: { address?: string; integer?: number | string; bigInteger?: string } }[];
   };
   const addrs: string[] = [];
+  // BY NAME where the names exist. The v4 Initialize event's arguments are
+  // named (currency0, currency1, fee, tickSpacing, hooks, …), and names are
+  // what survive an argument being reordered or a fragment being added. The
+  // positional addrs[] walk stays as the fallback the gateway path and older
+  // shapes still need.
+  const byName = new Map<string, { address?: string; integer?: number | string; bigInteger?: string }>();
   for (const a of e.Arguments ?? []) {
     const v = a?.Value?.address;
     if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v)) addrs.push(v.toLowerCase());
+    if (typeof a?.Name === "string" && a.Value && typeof a.Value === "object") byName.set(a.Name, a.Value);
   }
   if (addrs.length < 2) return null;
   const time = e.Block?.Time ? Math.floor(new Date(e.Block.Time).getTime() / 1000) : 0;
   if (!Number.isFinite(time) || time <= 0) return null;
   const hash = typeof e.Transaction?.Hash === "string" ? e.Transaction.Hash : "";
+
+  // THE POOL KEY, all five fields or none. A v4 pool's identity is the whole
+  // tuple — currency pair, fee, tickSpacing, hooks — and a partial key is not
+  // a vaguer version of the same fact, it is a DIFFERENT pool. Defaulting a
+  // missing fee to anything would fabricate an identity, which is the
+  // unknown-as-zero bug wearing a pool costume. So: parse each field
+  // defensively, and only when every one is present and in range does the
+  // pair carry a key. Absent creds, absent fragments, a gateway that has not
+  // caught up — all of those degrade to key-less pairs, exactly the shape
+  // discovery produced before keys existed.
+  const addr = (name: string): `0x${string}` | null => {
+    const v = byName.get(name)?.address;
+    return typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v) ? (v.toLowerCase() as `0x${string}`) : null;
+  };
+  const int = (name: string): number | null => {
+    const v = byName.get(name);
+    const raw = v?.integer ?? v?.bigInteger;
+    if (raw === undefined || raw === null) return null;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+  };
+  let key: NewPair["key"];
+  const currency0 = addr("currency0");
+  const currency1 = addr("currency1");
+  const fee = int("fee");
+  const tickSpacing = int("tickSpacing");
+  const hooks = addr("hooks");
+  if (
+    currency0 !== null &&
+    currency1 !== null &&
+    fee !== null &&
+    tickSpacing !== null &&
+    hooks !== null &&
+    fee >= 0 &&
+    fee < 2 ** 24 &&
+    Math.abs(tickSpacing) < 2 ** 23 &&
+    currency0 !== currency1
+  ) {
+    key = { currency0, currency1, fee, tickSpacing, hooks };
+  }
+
   return {
     token: addrs[0] as `0x${string}`,
     symbol: "",
@@ -264,5 +333,6 @@ export function parsePoolEvent(ev: unknown): NewPair | null {
     protocol: "uniswap",
     createdAt: time,
     txHash: hash,
+    ...(key ? { key } : {}),
   };
 }

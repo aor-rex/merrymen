@@ -35,6 +35,7 @@ export interface ResolvedConfig {
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
+  v4AdapterAddress: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
@@ -175,6 +176,10 @@ export function mergeSettings(
   const breakerAddress =
     rawBreaker && /^0x[0-9a-fA-F]{40}$/.test(rawBreaker) ? (rawBreaker as `0x${string}`) : undefined;
 
+  const rawAdapter = str(file.v4AdapterAddress, env.MERRYMEN_V4_ADAPTER_ADDRESS);
+  const v4AdapterAddress =
+    rawAdapter && /^0x[0-9a-fA-F]{40}$/.test(rawAdapter) ? (rawAdapter as `0x${string}`) : undefined;
+
   const rawHolder = str(file.holderAddress, env.MERRYMEN_HOLDER_ADDRESS);
   const holderAddress =
     rawHolder && /^0x[0-9a-fA-F]{40}$/.test(rawHolder) ? (rawHolder as `0x${string}`) : undefined;
@@ -222,6 +227,7 @@ export function mergeSettings(
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
+    v4AdapterAddress,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,

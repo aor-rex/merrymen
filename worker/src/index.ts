@@ -47,6 +47,7 @@ import {
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
   // to the Telegram executor, and the two must not shadow each other.
   grantHasTransfer as grantCarriesTransfer,
+  grantV4Adapter,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -119,6 +120,7 @@ import {
   lastKnownEquityUsdg,
   lastKnownCashUsdg,
   openNextEpoch,
+  poolKeysFor,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
@@ -195,6 +197,8 @@ interface ActiveAgent {
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
+  /** The grant-sealed V4SelfSwap has CODE on this chain — see the arm check. */
+  v4AdapterLive: boolean;
 }
 
 async function main() {
@@ -732,6 +736,9 @@ async function main() {
         liquidityUsd: d.liquidityUsdg === null ? 0 : Number(d.liquidityUsdg) / 1e6,
         fdvUsd: d.fdvUsd ?? 0,
         firstSeen: 0, // the store stamps this itself
+        // The PoolKey rides along when the Initialize event carried one — this
+        // is the moment a hooked pool becomes routable, and the only one.
+        ...(d.key ? { key: d.key } : {}),
       });
       const line = describeDiscovery(d);
       console.log(`[discovery] ${line}`);
@@ -904,6 +911,36 @@ async function main() {
       }
     }
 
+    // The v4 adapter is trusted only when the GRANT-SEALED address has code on
+    // this chain — same discipline as the breaker above, same reason: a call
+    // to a codeless address would fail in ways that read as "no route" rather
+    // than "you deployed to the other chain". The grant is the authority on
+    // WHICH address (the permission was sealed against it); settings only gets
+    // a say here as a mismatch warning, because an owner who just redeployed
+    // and updated settings has not re-signed yet, and should be told so.
+    let v4AdapterLive = false;
+    const sealedAdapter = grantV4Adapter(grant);
+    if (sealedAdapter) {
+      const code = await client.getCode({ address: sealedAdapter }).catch(() => undefined);
+      v4AdapterLive = code !== undefined && code !== "0x";
+      if (!v4AdapterLive) {
+        console.log(`[worker] v4 adapter ${sealedAdapter} has no code on chain ${chain.id} — v4 routing disabled`);
+        await addEvent(
+          agentId,
+          "warn",
+          `v4 adapter has no code on chain ${chain.id} — v4 routing is OFF for this grant. ` +
+            `Deploy the adapter on this chain (or fix v4AdapterAddress) and re-sign.`,
+        );
+      } else if (cfg.v4AdapterAddress && cfg.v4AdapterAddress.toLowerCase() !== sealedAdapter) {
+        await addEvent(
+          agentId,
+          "warn",
+          `settings name a different v4 adapter (${cfg.v4AdapterAddress}) than this grant was sealed against ` +
+            `(${sealedAdapter}). The worker uses the SEALED one — re-sign at /grant to switch.`,
+        );
+      }
+    }
+
     active = {
       grant,
       agentId,
@@ -915,6 +952,7 @@ async function main() {
       orderExecutor: null,
       limits: limitsFromGrant(grant, watchTokens),
       breakerLive,
+      v4AdapterLive,
     };
     // Nothing is in flight at arm time, so clear any stale reservation with it.
     inFlightSpentUsdg = 0n;
@@ -1458,7 +1496,11 @@ async function main() {
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: grantHasV4(active.grant),
+          v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          // Discovered pool keys make HOOKED pools routable — new launches
+          // live behind hooks findV4Pool cannot guess. Empty for undiscovered
+          // pairs, and inert when the v4 gate above is closed.
+          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
         });
         if (!quote) {
           // Say WHY there is no route when the answer is "your key can't take
@@ -1589,6 +1631,11 @@ async function main() {
         // allowance. Building these by hand at the call site is how you approve
         // one router and swap through another.
         const calls = buildTradeCalls({
+          // The grant-sealed adapter, only when its code answered at arm time.
+          // Absent, a v4 quote falls to the legacy Permit2 route — which only a
+          // pre-adapter GRANT_V4 grant can execute, and the quote gate above
+          // only opens v4 when one of the two is true.
+          v4Adapter: active.v4AdapterLive ? (grantV4Adapter(active.grant) ?? undefined) : undefined,
           quote,
           tokenIn: intent.sellToken,
           tokenOut: intent.buyToken,
@@ -1598,7 +1645,13 @@ async function main() {
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
         exec = await executor.execute(calls);
-        const venue = quote.v4 ? "v4" : quote.path ? "v3 via WETH" : "v3 direct";
+        const venue = quote.v4
+          ? active.v4AdapterLive && grantV4Adapter(active.grant)
+            ? "v4 (adapter)"
+            : "v4"
+          : quote.path
+            ? "v3 via WETH"
+            : "v3 direct";
         await addEvent(
           agentId,
           "ok",
@@ -1715,7 +1768,11 @@ async function main() {
               tokenOut: intent.buyToken,
               amountIn: probeIn,
               via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
-              v4: grantHasV4(active.grant),
+              v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          // Discovered pool keys make HOOKED pools routable — new launches
+          // live behind hooks findV4Pool cannot guess. Empty for undiscovered
+          // pairs, and inert when the v4 gate above is closed.
+          v4Keys: poolKeysFor(intent.sellToken, intent.buyToken),
             });
             if (ref) {
               bps = impactBps({

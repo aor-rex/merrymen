@@ -14,13 +14,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { decodeAbiParameters, decodeFunctionData, parseAbi } from "viem";
-import { UNISWAP } from "../../../packages/core/src/index";
+import { UNISWAP, V4SELFSWAP_ABI } from "../../../packages/core/src/index";
 import {
   ACTION_SETTLE_ALL,
   ACTION_SWAP_EXACT_IN_SINGLE,
   ACTION_TAKE_ALL,
   CMD_V4_SWAP,
   UNIVERSAL_ROUTER_ABI,
+  NO_HOOKS,
+  buildV4AdapterSwapCalls,
   buildV4SwapCalls,
   encodeV4SwapInput,
   isZeroForOne,
@@ -213,5 +215,104 @@ describe("buildV4SwapCalls — approve Permit2, Permit2 grants the router, execu
       inputs[0],
       encodeV4SwapInput({ key, zeroForOne: false, amountIn: 1000n, minAmountOut: 990n }),
     );
+  });
+});
+
+describe("buildV4AdapterSwapCalls — approve the adapter, call swapExactIn, nothing else", () => {
+  // The route whose recipient the wall can vouch for: no Permit2, no
+  // UniversalRouter, one plain approve consumed by the adapter's pull.
+  const ADAPTER = "0x00000000000000000000000000000000000000d4" as const;
+  const key = makePoolKey(LOW, HIGH, 3000, 60);
+  const DEADLINE = 1_800_000_000;
+  const calls = buildV4AdapterSwapCalls({
+    adapter: ADAPTER,
+    key,
+    tokenIn: LOW,
+    amountIn: 1000n,
+    minAmountOut: 990n,
+    deadline: DEADLINE,
+  });
+
+  it("is exactly two calls: the token approves the adapter, the adapter swaps", () => {
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.to, LOW);
+    assert.equal(calls[1]!.to, ADAPTER);
+    for (const c of calls) assert.equal(c.value, 0n);
+  });
+
+  it("approves the ADAPTER for exactly the trade size — consumed by the pull, nothing standing", () => {
+    const d = decodeFunctionData({
+      abi: parseAbi(["function approve(address spender, uint256 amount) returns (bool)"]),
+      data: calls[0]!.data,
+    });
+    assert.equal((d.args[0] as string).toLowerCase(), ADAPTER);
+    assert.equal(d.args[1], 1000n);
+  });
+
+  it("every swapExactIn argument is the one that was quoted", () => {
+    const d = decodeFunctionData({ abi: V4SELFSWAP_ABI, data: calls[1]!.data });
+    assert.equal(d.functionName, "swapExactIn");
+    const [tokenIn, tokenOut, fee, tickSpacing, hooks, amountIn, minOut, deadline] = d.args as readonly [
+      string, string, number, number, string, bigint, bigint, bigint,
+    ];
+    assert.equal(tokenIn.toLowerCase(), LOW);
+    assert.equal(tokenOut.toLowerCase(), HIGH, "tokenOut is DERIVED from the key — the other currency");
+    assert.equal(fee, 3000);
+    assert.equal(tickSpacing, 60);
+    assert.equal(hooks.toLowerCase(), NO_HOOKS);
+    assert.equal(amountIn, 1000n);
+    assert.equal(minOut, 990n);
+    assert.equal(deadline, BigInt(DEADLINE));
+  });
+
+  it("derives tokenOut correctly in the OTHER direction too", () => {
+    const rev = buildV4AdapterSwapCalls({
+      adapter: ADAPTER, key, tokenIn: HIGH, amountIn: 5n, minAmountOut: 1n, deadline: DEADLINE,
+    });
+    const d = decodeFunctionData({ abi: V4SELFSWAP_ABI, data: rev[1]!.data });
+    assert.equal((d.args![0] as string).toLowerCase(), HIGH);
+    assert.equal((d.args![1] as string).toLowerCase(), LOW);
+  });
+
+  it("a hooked key travels intact — hooks are the point, not an error", () => {
+    const HOOK = "0x00000000000000000000000000000000000000f1" as const;
+    const hooked = makePoolKey(LOW, HIGH, 8388608, 200, HOOK);
+    const c = buildV4AdapterSwapCalls({
+      adapter: ADAPTER, key: hooked, tokenIn: LOW, amountIn: 7n, minAmountOut: 1n, deadline: DEADLINE,
+    });
+    const d = decodeFunctionData({ abi: V4SELFSWAP_ABI, data: c[1]!.data });
+    assert.equal((d.args![4] as string).toLowerCase(), HOOK);
+  });
+
+  it("a tokenIn outside the key throws — the quote and the call must describe ONE route", () => {
+    assert.throws(
+      () =>
+        buildV4AdapterSwapCalls({
+          adapter: ADAPTER, key, tokenIn: "0x00000000000000000000000000000000000000ee",
+          amountIn: 1n, minAmountOut: 1n, deadline: DEADLINE,
+        }),
+      /not a currency of the pool key/,
+    );
+  });
+
+  it("uint128 overflow throws rather than truncating into a number nobody quoted", () => {
+    const TOO_BIG = 1n << 128n;
+    assert.throws(
+      () => buildV4AdapterSwapCalls({ adapter: ADAPTER, key, tokenIn: LOW, amountIn: TOO_BIG, minAmountOut: 1n, deadline: DEADLINE }),
+      /overflows uint128/,
+    );
+    assert.throws(
+      () => buildV4AdapterSwapCalls({ adapter: ADAPTER, key, tokenIn: LOW, amountIn: 1n, minAmountOut: TOO_BIG, deadline: DEADLINE }),
+      /overflows uint128/,
+    );
+  });
+
+  it("neither Permit2 nor the UniversalRouter appears anywhere in the calls", () => {
+    // The entire reason this route exists. If either address shows up, the
+    // adapter path has regressed into the one it replaced.
+    for (const c of calls) {
+      assert.notEqual(c.to.toLowerCase(), (UNISWAP.permit2 as string).toLowerCase());
+      assert.notEqual(c.to.toLowerCase(), (UNISWAP.universalRouter as string).toLowerCase());
+    }
   });
 });

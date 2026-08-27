@@ -1055,6 +1055,12 @@ export default function SettingsPage() {
               <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
             </Field>
             <Field
+              label="v4 adapter contract"
+              hint="Deployed V4SelfSwap address for THIS chain — it opens Uniswap v4 (where new pairs launch). Does nothing until you re-sign the grant: the address is sealed into the signature."
+            >
+              <input type="text" placeholder="0x…" value={v("v4AdapterAddress")} onChange={set("v4AdapterAddress")} />
+            </Field>
+            <Field
               label="Rialto integrator key"
               hint="From Rialto's wallet-signed onboarding (docs.rialto.xyz). Enables real stock-token routing through their propAMMs."
             >

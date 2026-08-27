@@ -252,6 +252,16 @@ function getDb(): DatabaseSync {
     "ALTER TABLE discovered_pools ADD COLUMN decimals INTEGER NOT NULL DEFAULT 18",
     "ALTER TABLE discovered_pools ADD COLUMN liquidity_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE discovered_pools ADD COLUMN fdv_usd REAL NOT NULL DEFAULT 0",
+    // The v4 PoolKey, captured from the Initialize event when discovery could
+    // read it. NULLABLE WITH NO DEFAULTS, deliberately: a pool's identity is
+    // the whole five-tuple, and a DEFAULT 0 fee would fabricate a pool that
+    // does not exist — the unknown-as-zero bug wearing a schema. All five are
+    // set together or not at all (recordCandidate enforces it).
+    "ALTER TABLE discovered_pools ADD COLUMN pool_currency0 TEXT",
+    "ALTER TABLE discovered_pools ADD COLUMN pool_currency1 TEXT",
+    "ALTER TABLE discovered_pools ADD COLUMN pool_fee INTEGER",
+    "ALTER TABLE discovered_pools ADD COLUMN pool_tick_spacing INTEGER",
+    "ALTER TABLE discovered_pools ADD COLUMN pool_hooks TEXT",
     // Brokerage orders. A broker fill has an order id and no tx hash, and it
     // fills asynchronously — 'status' stays our coarse verdict enum, while
     // settlement_status carries the BROKER'S OWN state word verbatim
@@ -1481,6 +1491,14 @@ export interface PoolCandidate {
   liquidityUsd: number;
   fdvUsd: number;
   firstSeen: number;
+  /** The v4 PoolKey when discovery captured one — all five fields or absent. */
+  key?: {
+    currency0: string;
+    currency1: string;
+    fee: number;
+    tickSpacing: number;
+    hooks: string;
+  };
 }
 
 /**
@@ -1496,15 +1514,82 @@ export function recordCandidate(c: PoolCandidate): void {
   try {
     getDb()
       .prepare(
-        `INSERT INTO discovered_pools (address, symbol, decimals, liquidity_usd, fdv_usd)
-         VALUES (?, ?, ?, ?, ?)
+        // The pool-key columns use COALESCE(excluded.x, x) so a KEYLESS
+        // re-sighting of the same token — the gateway path, an older worker, a
+        // Bitquery hiccup — can never blank a key that was already captured.
+        // Keys are learned once from the Initialize event and then only ever
+        // replaced by another full key.
+        `INSERT INTO discovered_pools (address, symbol, decimals, liquidity_usd, fdv_usd,
+                                       pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(address) DO UPDATE SET
            symbol = excluded.symbol, decimals = excluded.decimals,
-           liquidity_usd = excluded.liquidity_usd, fdv_usd = excluded.fdv_usd`,
+           liquidity_usd = excluded.liquidity_usd, fdv_usd = excluded.fdv_usd,
+           pool_currency0 = COALESCE(excluded.pool_currency0, pool_currency0),
+           pool_currency1 = COALESCE(excluded.pool_currency1, pool_currency1),
+           pool_fee = COALESCE(excluded.pool_fee, pool_fee),
+           pool_tick_spacing = COALESCE(excluded.pool_tick_spacing, pool_tick_spacing),
+           pool_hooks = COALESCE(excluded.pool_hooks, pool_hooks)`,
       )
-      .run(c.address.toLowerCase(), c.symbol.slice(0, 16), c.decimals, c.liquidityUsd, c.fdvUsd);
+      .run(
+        c.address.toLowerCase(),
+        c.symbol.slice(0, 16),
+        c.decimals,
+        c.liquidityUsd,
+        c.fdvUsd,
+        c.key ? c.key.currency0.toLowerCase() : null,
+        c.key ? c.key.currency1.toLowerCase() : null,
+        c.key ? c.key.fee : null,
+        c.key ? c.key.tickSpacing : null,
+        c.key ? c.key.hooks.toLowerCase() : null,
+      );
   } catch (e) {
     console.error("[store] candidate upsert failed:", e);
+  }
+}
+
+/**
+ * Discovered v4 PoolKeys for a currency pair — the only way a HOOKED pool can
+ * ever be routed, since a hook address cannot be guessed by tier-scanning.
+ *
+ * Rows qualify only when ALL FIVE key columns are non-NULL: a partial key is a
+ * different pool, not a vaguer one. Returns plain structural objects so the
+ * venues layer never has to import the store's row shapes.
+ */
+export function poolKeysFor(
+  a: string,
+  b: string,
+): { currency0: `0x${string}`; currency1: `0x${string}`; fee: number; tickSpacing: number; hooks: `0x${string}` }[] {
+  try {
+    // v4 sorts currency0 < currency1 numerically; for equal-length lowercase
+    // hex strings that is the same order as a string comparison.
+    const al = a.toLowerCase();
+    const bl = b.toLowerCase();
+    const lo = al < bl ? al : bl;
+    const hi = al < bl ? bl : al;
+    const rows = getDb()
+      .prepare(
+        `SELECT pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks
+         FROM discovered_pools
+         WHERE pool_currency0 = ? AND pool_currency1 = ?
+           AND pool_fee IS NOT NULL AND pool_tick_spacing IS NOT NULL AND pool_hooks IS NOT NULL`,
+      )
+      .all(lo, hi) as {
+      pool_currency0: string;
+      pool_currency1: string;
+      pool_fee: number;
+      pool_tick_spacing: number;
+      pool_hooks: string;
+    }[];
+    return rows.map((r) => ({
+      currency0: r.pool_currency0 as `0x${string}`,
+      currency1: r.pool_currency1 as `0x${string}`,
+      fee: Number(r.pool_fee),
+      tickSpacing: Number(r.pool_tick_spacing),
+      hooks: r.pool_hooks as `0x${string}`,
+    }));
+  } catch {
+    return [];
   }
 }
 

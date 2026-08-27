@@ -57,6 +57,13 @@ export interface Discovery {
    * when the number is about to gate spending.
    */
   fdvUsd: number | null;
+  /**
+   * The v4 PoolKey the Initialize event carried, when all five fields parsed.
+   * The only way a HOOKED pool ever becomes routable — hook addresses cannot
+   * be guessed, only learned here. Absent for keyless sightings; the store
+   * keeps a captured key even when later sightings are keyless.
+   */
+  key?: NewPair["key"];
 }
 
 /**
@@ -104,7 +111,7 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
   if (!res.ok || !res.data) return [];
 
   const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
-  const candidates: `0x${string}`[] = [];
+  const candidates: { token: `0x${string}`; poolKey?: NewPair["key"] }[] = [];
   const seenThisPass = new Set<string>();
   for (const pair of res.data) {
     const token = newTokenOf(pair);
@@ -112,12 +119,12 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
     const key = token.toLowerCase();
     if (deps.seen.has(key) || knownAddrs.has(key) || seenThisPass.has(key)) continue;
     seenThisPass.add(key);
-    candidates.push(token);
+    candidates.push({ token, poolKey: pair.key });
   }
   if (!candidates.length) return [];
 
   const out: Discovery[] = [];
-  for (const token of candidates) {
+  for (const { token, poolKey } of candidates) {
     // Read identity from the CONTRACT, never from the indexer. A symbol is
     // attacker-chosen text that will be shown to a human and could be picked to
     // impersonate a real ticker; taking it from the chain at least means it's
@@ -170,7 +177,7 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
       reason = "couldn't read its pool";
     }
 
-    out.push({ token, symbol, decimals, createdAt: 0, liquidityUsdg, priceable, reason, price8, fdvUsd });
+    out.push({ token, symbol, decimals, createdAt: 0, liquidityUsdg, priceable, reason, price8, fdvUsd, ...(poolKey ? { key: poolKey } : {}) });
   }
   return out;
 }

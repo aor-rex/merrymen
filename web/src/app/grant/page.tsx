@@ -125,12 +125,27 @@ export default function GrantPage() {
   // listed — the tradable set lives inside the signed session key, so listing a
   // token only takes effect when a grant covering it is signed here.
   const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
+  // The deployed V4SelfSwap for this install, read from /settings. Sealed into
+  // the wall at signing — which is why it is read here and not at trade time.
+  const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
 
   useEffect(() => {
-    setGrant(loadGrant());
+    const stored = loadGrant();
+    setGrant(stored);
+    // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
+    // SELECTED chain (so the page cannot lie), which makes this sync load-
+    // bearing: without it the selector defaults to testnet, and a mainnet
+    // owner clicking "renew (free)" would silently re-sign their real-money
+    // wallet onto the sandbox — the same silent-chain bug, mirrored. The caps
+    // follow for the same reason: the form should open showing what the
+    // current key actually carries.
+    if (stored) {
+      setChainId(stored.chainId);
+      setCaps(stored.caps);
+    }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
       .then((r) => (r.ok ? r.json() : { exists: false }))
@@ -138,10 +153,12 @@ export default function GrantPage() {
       .catch(() => setServerArmed(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[] }; defaults?: { basketSymbols?: string[] } } | null) => {
+      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
         setCustomTokens(list as CustomToken[]);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
+        const a = v?.values?.v4AdapterAddress;
+        setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
       })
       .catch(() => {
         setCustomTokens([]);
@@ -206,7 +223,7 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await createAgentWallet(caps, setStatus, chainId, customTokens);
+      const g = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter);
       setGrant(g);
       setStatus(null);
     } catch (e) {
@@ -247,6 +264,7 @@ export default function GrantPage() {
         setStatus,
         chainId,
         customTokens,
+        v4Adapter,
       );
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
@@ -280,12 +298,40 @@ export default function GrantPage() {
     setError(null);
     setRenewing(true);
     try {
+      // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
+      // button an owner presses right after saving a new token or the adapter
+      // address in /settings — and the mount-time fetch predates that save, so
+      // re-signing from stale state silently sealed a wall WITHOUT the thing
+      // they just added, with nothing failing until the first no-exit reject.
+      let freshTokens = customTokens;
+      let freshAdapter = v4Adapter;
+      try {
+        const r = await fetch("/api/settings");
+        if (r.ok) {
+          const v = (await r.json()) as {
+            values?: { customTokens?: unknown[]; v4AdapterAddress?: string };
+          };
+          freshTokens = (v?.values?.customTokens ?? []).filter(isValidCustomToken) as CustomToken[];
+          const a = v?.values?.v4AdapterAddress;
+          freshAdapter = typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined;
+          setCustomTokens(freshTokens);
+          setV4Adapter(freshAdapter);
+        }
+      } catch {
+        /* unreachable settings: sign with what the page already had, as before */
+      }
+      // The SELECTED chain and the CURRENT caps — not the old grant's. The old
+      // behaviour reused grant.chainId and grant.caps, so renewing while the
+      // selector showed mainnet silently re-signed on testnet, and any cap the
+      // owner had just edited in the form was ignored. What the page shows is
+      // what gets signed, or the page is lying.
       const g = await restoreAgentWallet(
         grant.demoOwnerPrivateKey,
-        grant.caps,
-        () => {},
-        grant.chainId,
-        customTokens,
+        caps,
+        setStatus,
+        chainId,
+        freshTokens,
+        freshAdapter,
       );
       setGrant(g);
       setServerArmed(true);
