@@ -304,8 +304,13 @@ export async function PUT(req: Request) {
       setOrClear("strategy", undefined);
     } else if (typeof v === "string" && BUILTIN_STRATEGIES.includes(v)) {
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
-    } else if (typeof v === "string" && (await listCustomStrategies()).includes(v)) {
+    } else if (!isHostedMode() && typeof v === "string" && (await listCustomStrategies()).includes(v)) {
+      // Custom strategy files are self-hosted ONLY. Hosted, the loader refuses to
+      // execute them (registry.ts fail-closed); rejecting the name here too means
+      // the control plane never even stores it — the write-time half of the gate.
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
+    } else if (isHostedMode()) {
+      errors.push("strategy: only built-in strategies are available on hosted merrymen");
     } else {
       errors.push(`strategy: not a builtin and no strategies/${String(v)}.ts file exists`);
     }

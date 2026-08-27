@@ -184,11 +184,14 @@ export function mergeSettings(
   env: Record<string, string | undefined>,
 ): ResolvedConfig {
   const d = SETTINGS_DEFAULTS;
+  const hosted = isHostedMode();
 
   // HOSTED: the house owns the connection/credential/endpoint fields. Drop them
   // from the tenant file so every `str(file.X, env.X)` below falls through to the
   // server env. Self-hosted (the default) is untouched — the file still wins.
-  if (isHostedMode()) file = stripHouseKeys(file);
+  // The remote-execution flags are forced off further down (they are not house
+  // keys, but a shell on our server is never a tenant's to enable).
+  if (hosted) file = stripHouseKeys(file);
 
   const rawBreaker = str(file.breakerAddress, env.MERRYMEN_BREAKER_ADDRESS);
   const breakerAddress =
@@ -292,15 +295,21 @@ export function mergeSettings(
     telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
     telegramNotifyEveryMin: num(file.telegramNotifyEveryMin, env.MERRYMEN_TELEGRAM_NOTIFY_EVERY_MIN, d.telegramNotifyEveryMin, 0, 1440),
     telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
-    telegramPcControlEnabled: bool(file.telegramPcControlEnabled, env.MERRYMEN_TELEGRAM_PC_CONTROL, d.telegramPcControlEnabled),
-    telegramCapabilities: strArray(file.telegramCapabilities, env.MERRYMEN_TELEGRAM_CAPABILITIES, d.telegramCapabilities),
-    telegramFilesRoot: str(file.telegramFilesRoot, env.MERRYMEN_TELEGRAM_FILES_ROOT),
-    telegramShellAllowlist: strArray(file.telegramShellAllowlist, env.MERRYMEN_TELEGRAM_SHELL_ALLOWLIST, d.telegramShellAllowlist),
-    telegramAppAllowlist: strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
+    // Remote-execution surface — FORCED OFF hosted, regardless of file or env.
+    // Self-hosted these mean "a shell / PC control on the owner's own machine";
+    // hosted they would mean "a shell on OUR server", with an allowlist the
+    // attacker picked. The settings route also refuses to write them, and the
+    // agent gate refuses to run them — this is the config-resolution boundary of
+    // the same defence, the one that wins even for a value already on disk.
+    telegramPcControlEnabled: hosted ? false : bool(file.telegramPcControlEnabled, env.MERRYMEN_TELEGRAM_PC_CONTROL, d.telegramPcControlEnabled),
+    telegramCapabilities: hosted ? [] : strArray(file.telegramCapabilities, env.MERRYMEN_TELEGRAM_CAPABILITIES, d.telegramCapabilities),
+    telegramFilesRoot: hosted ? undefined : str(file.telegramFilesRoot, env.MERRYMEN_TELEGRAM_FILES_ROOT),
+    telegramShellAllowlist: hosted ? [] : strArray(file.telegramShellAllowlist, env.MERRYMEN_TELEGRAM_SHELL_ALLOWLIST, d.telegramShellAllowlist),
+    telegramAppAllowlist: hosted ? [] : strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
     telegramTranscribeKey: str(file.telegramTranscribeKey, env.MERRYMEN_TELEGRAM_TRANSCRIBE_KEY),
     telegramTranscribeBase: str(file.telegramTranscribeBase, env.MERRYMEN_TELEGRAM_TRANSCRIBE_BASE, d.telegramTranscribeBase)!,
-    telegramAgentEnabled: bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
-    telegramAgentAutoShell: bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
+    telegramAgentEnabled: hosted ? false : bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
+    telegramAgentAutoShell: hosted ? false : bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
     telegramAgentMaxSteps: num(file.telegramAgentMaxSteps, env.MERRYMEN_TELEGRAM_AGENT_MAX_STEPS, d.telegramAgentMaxSteps, 1, 60),
   };
 }

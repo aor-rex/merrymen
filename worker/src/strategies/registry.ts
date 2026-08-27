@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "../../../packages/core/src/index";
+import { CASH, MORPHO, STOCK_TOKENS, isHostedMode, type StockToken } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist, type StrategistDecision } from "../strategist/strategy";
@@ -141,7 +141,20 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
   // hot-reloading, crash-isolated; every intent is shape-validated and then
   // policy-checked like any other).
   if (!(BUILTIN_STRATEGIES as readonly string[]).includes(name)) {
-    return makeCustomStrategy(name, { onNote: opts.onNote });
+    if (isHostedMode()) {
+      // FAIL CLOSED on hosted. A non-builtin name makes makeCustomStrategy
+      // dynamic-import() and EXECUTE a file from the tenant's home, in the
+      // process that holds every tenant's session key — arbitrary code
+      // execution. The intent validator constrains the return VALUE, never the
+      // module body, which runs at import. So we refuse to load it and fall
+      // through to the safe builtin (steady-basket) below rather than run tenant
+      // code — never throw, which would crash the child at boot. The settings
+      // route rejects the name at write time too; this is the loader half of the
+      // gate, the boundary that actually executes.
+      opts.onNote?.("warn", `custom strategy "${name}" is disabled on hosted merrymen — running steady-basket instead`);
+    } else {
+      return makeCustomStrategy(name, { onNote: opts.onNote });
+    }
   }
   if (name === "llm-strategist") {
     // LLM proposes; deterministic code disposes. Without a key, the null
