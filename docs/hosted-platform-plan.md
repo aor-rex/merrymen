@@ -65,14 +65,20 @@ per-tenant encrypted grant store (`94cd881`).
   guess; web (`13e4898`): feed + scoreboard resolve the agent from the SIWE
   tenant, DatabaseSync degrades instead of 500; writes (`7edc5e4`): addTrade/
   setAgentHwm/addFeeAccrual report failure so a dropped fill keeps spend counted.
-- [ ] **A3. House keys server-only + settings route locked down.** Invert house-
-  key precedence (env wins) hosted; gate `PUT /api/settings` (auth + strip house-
-  key & RCE fields); per-tenant token buckets + THROTTLED.
-- [ ] **A4. RCE hard-off hosted.** Strategy loader fail-closed; PC/agent/auto-
-  shell forced off — both boundaries.
-- [ ] **A5. Orchestrator (single tenant on testnet).** Advisory lease + in-flight
-  reconciliation as one step; scrubbed env + injected house keys; bundler-derived
-  watchdog + SIGKILL; second heartbeat beat; fix `trench_positions` CREATE TABLE.
+- [x] **A3. House keys server-only + settings route locked down** (`ec59d03`) —
+  house-key precedence inverted (env wins hosted); `PUT /api/settings` gated
+  (401 + strips house-key & RCE fields). Verified over HTTP. *(Per-tenant token
+  buckets + THROTTLED moved to B3, where the keys are actually shared.)*
+- [x] **A4. RCE hard-off hosted** (`082d917`) — strategy loader fails closed to
+  steady-basket; PC/agent/auto-shell forced off in config + rejected at the
+  route. Verified over HTTP (non-builtin strategy 400, RCE fields stripped).
+- [x] **A5. Orchestrator (single tenant on testnet)** — `trench_positions`
+  CREATE TABLE, a today-bug (`1a0190c`); the supervisor (`95f6d7b`): reconcile
+  spawns/stands-down one worker child per tenant, curated env (house keys in,
+  DEK/secret/db-url stripped), heartbeat watchdog + SIGKILL, crash backoff,
+  FLEET_HALT. Live-verified: spawns a child with its own home + session-only
+  grant, custody boundary holds through the fork. **Deferred to B:** the Postgres
+  advisory lease + in-flight reconciliation (single-replica/testnet until then).
 - [ ] **A6. Telegram multi-tenant.** One bot, one cursor, route by from-id;
   per-tenant notifier state.
 
