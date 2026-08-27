@@ -43,12 +43,10 @@ theft. The bones are right; the single-tenant *wrapper* is the whole job.
 - [x] **1. Wallet-native auth** (`218535a`) — SIWE challenge/verify, HMAC
   sessions, `MERRYMEN_HOSTED` flag, middleware. The boundary everything
   authorizes against.
-- [ ] **2. The custody boundary.** In hosted mode the web signer stops writing
-  `demoOwnerPrivateKey` and POSTs the session-key-only shape (the mobile
-  `signGrant.ts` template). `/api/grants` rejects any owner-key/mnemonic payload
-  and asserts `grant.owner === tenant`. Move recovery client-side; delete the
-  server sweep. Boot assertion: hosted mode refuses to start if any grant record
-  holds an owner key.
+- [x] **2. The custody boundary** (`2b8285c`) — `carriesOwnerKey` guard, hosted
+  signer omits the owner key, `/api/grants` rejects owner-key payloads + auth +
+  owner===tenant, `/api/recover` refuses the server sweep, boot assertion.
+  Verified over real HTTP.
 - [ ] **3. Per-tenant state store (Postgres).** Port the file/SQLite state
   (grant + archive, settings, ledger, heartbeat, paused) to Postgres over
   `DATABASE_URL`; schema is already `agent_id`-keyed. Web routes derive
