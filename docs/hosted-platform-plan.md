@@ -38,31 +38,56 @@ theft. The bones are right; the single-tenant *wrapper* is the whole job.
 10. **Telegram agent-mode/auto-shell OFF** on hosted infra; single getUpdates
     cursor routing by from-id → tenant; notifier targets the tenant's own chat.
 
+## Reconciled with the wall-narrowing audit (2026-08-27)
+
+An earlier design pass (`docs/hosted-worker-design.md`, pre-P2) called wall
+narrowing "step zero". That is now **done** and verified in `wall.ts`:
+`NOT_FOR_VALIDATE_SIG` (off-chain signing), swap/vault recipients pinned to
+`self`, USDG transfer absent by default, Permit2 opt-in + the recipient-in-
+bytecode V4 adapter. So "a leaked session key is value-churn, never theft" is
+accurate. But that audit surfaced fund-safety work BEYOND the original 8-commit
+list — tenant-scoped reads, RCE gates on the strategy loader, first-arm identity
+proof, in-flight reconciliation — now folded in below. Owner decisions:
+ledger → full Postgres port; sequencing → **testnet vertical slice first**. The
+full ordered plan lives in the plan file; this is the tracking checklist.
+
 ## Commit order (dependency-sorted)
 
-- [x] **1. Wallet-native auth** (`218535a`) — SIWE challenge/verify, HMAC
-  sessions, `MERRYMEN_HOSTED` flag, middleware. The boundary everything
-  authorizes against.
-- [x] **2. The custody boundary** (`2b8285c`) — `carriesOwnerKey` guard, hosted
-  signer omits the owner key, `/api/grants` rejects owner-key payloads + auth +
-  owner===tenant, `/api/recover` refuses the server sweep, boot assertion.
-  Verified over real HTTP.
-- [x] **3. Per-tenant grant store** (`94cd881`) — AES-256-GCM encryption at rest, file + Postgres backends behind one interface (pg runtime-only, gated), tenant-scoped grants route (POST/GET/DELETE). Verified over HTTP. **3b (deferred):** the ledger port (worker/src/store.ts, 30 SQLite tables) — per-tenant SQLite works in process-per-tenant; Postgres port follows.
-- [ ] **4. House keys + rate limits.** Groq + Pimlico as server secrets, injected
-  where the code already builds them (`pimlicoBundlerUrl`, `resolveLlm`); hosted
-  settings strip/ignore tenant-supplied bundler/llm/rpc fields (invert
-  precedence). Per-tenant token buckets with a surfaced THROTTLED state.
-- [ ] **5. Process-per-tenant orchestrator.** A supervisor that leases tenants
-  via `pg_try_advisory_lock` and runs one worker child per active grant with its
-  own `MERRYMEN_HOME` + injected house keys. Idempotent restart from Postgres.
-- [ ] **6. Telegram multi-tenant.** One bot, one cursor, route by from-id;
-  agent-mode off by default on hosted infra.
-- [ ] **7. Railway config.** Services (web, orchestrator), Postgres, env groups,
-  build. `MERRYMEN_PUBLIC_ORIGIN`, `MERRYMEN_SESSION_SECRET`, house keys as
-  sealed secrets.
-- [ ] **8. Hosted-mode copy.** The front page's "keys never leave your machine"
-  becomes true-but-scoped: the OWNER key never leaves; the server holds a
-  capped, revocable session key — say exactly that.
+Foundation (done): SIWE auth (`218535a`), custody boundary (`2b8285c`),
+per-tenant encrypted grant store (`94cd881`).
+
+### Phase A — testnet vertical slice
+- [x] **A1. One home map** (`537d734`) — web + worker share one `homePaths` via
+  `@merrymen/home`; the drifted `web/src/lib/home.ts` is deleted.
+- [x] **A2. Tenant-scope reads + fail-close spend writes** (the one-way door) —
+  worker reads (`8bef933`): every telegram read + notifier/streamer cursor
+  scoped to the process's own agent, hosted never falls back to the global
+  guess; web (`13e4898`): feed + scoreboard resolve the agent from the SIWE
+  tenant, DatabaseSync degrades instead of 500; writes (`7edc5e4`): addTrade/
+  setAgentHwm/addFeeAccrual report failure so a dropped fill keeps spend counted.
+- [ ] **A3. House keys server-only + settings route locked down.** Invert house-
+  key precedence (env wins) hosted; gate `PUT /api/settings` (auth + strip house-
+  key & RCE fields); per-tenant token buckets + THROTTLED.
+- [ ] **A4. RCE hard-off hosted.** Strategy loader fail-closed; PC/agent/auto-
+  shell forced off — both boundaries.
+- [ ] **A5. Orchestrator (single tenant on testnet).** Advisory lease + in-flight
+  reconciliation as one step; scrubbed env + injected house keys; bundler-derived
+  watchdog + SIGKILL; second heartbeat beat; fix `trench_positions` CREATE TABLE.
+- [ ] **A6. Telegram multi-tenant.** One bot, one cursor, route by from-id;
+  per-tenant notifier state.
+
+### Phase B — hardening + durability before real funds
+- [ ] **B1. First-arm identity proof** (recover from `enableSignature` /
+  recompute counterfactual) — closes agent-id squatting.
+- [ ] **B2. Ledger → Postgres** behind `getDb()`; async-ify the 15 sync exports;
+  retention + per-tenant quota.
+- [ ] **B3. Gas DRY state + per-tenant bundler accounting.**
+- [ ] **B4. Railway config + multi-replica nonce store (KV).**
+- [ ] **B5. Hosted-mode copy** — "owner key never leaves; server holds a capped
+  session key"; kill UI says "stopped & deleted, expires on <date>".
+
+### Phase C — mainnet
+- [ ] Re-audit + two-funded-tenant testnet run, then flip to 4663.
 
 ## Verification gates
 
