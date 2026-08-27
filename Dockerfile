@@ -1,11 +1,15 @@
 # Hosted merrymen — ONE image, TWO services.
 #
 # The same image runs either the Next.js dashboard (the web service) or the
-# process-per-tenant supervisor (the orchestrator service); Railway picks which
-# by overriding the start command per service (see docs/hosted-deploy.md). Both
-# need the whole monorepo present: the web build resolves packages/core + worker
-# from source via tsconfig paths (next.config externalDir), and the orchestrator
-# runs worker/src directly with tsx at runtime.
+# process-per-tenant supervisor (the orchestrator service); the role is picked by
+# the MERRYMEN_START env var per service (see the CMD at the bottom + docs/
+# hosted-deploy.md). railway.json deliberately sets NO startCommand and NO
+# healthcheck, so this one image + a single per-service variable is the only
+# difference between the two — and the orchestrator, which serves no HTTP, is
+# never failed by a path healthcheck it can't answer. Both need the whole monorepo
+# present: the web build resolves packages/core + worker from source via tsconfig
+# paths (next.config externalDir), and the orchestrator runs worker/src directly
+# with tsx at runtime.
 #
 # node:22 (not alpine) for glibc + a node new enough for the built-in node:sqlite
 # the worker uses (>= 22.12).
@@ -36,8 +40,11 @@ RUN npm run build
 
 ENV NODE_ENV=production
 
-# Default to the web service. The orchestrator service overrides this with
-# `npm run start:orchestrator` in its Railway service settings. Every secret
-# (MERRYMEN_SESSION_SECRET, MERRYMEN_STORE_DEK, DATABASE_URL, the house keys) is
-# injected at RUNTIME by Railway, never baked into the image.
-CMD ["npm", "run", "start:web"]
+# ONE image, TWO roles, selected by MERRYMEN_START (a Railway per-service var):
+#   web service          → MERRYMEN_START unset → `npm run start:web` (the Next dashboard)
+#   orchestrator service → MERRYMEN_START=start:orchestrator (the per-tenant supervisor)
+# Kept as an npm script name (not a full command) so the surface for a mis-set
+# value is just "unknown npm script", never an arbitrary shell command. Every
+# secret (MERRYMEN_SESSION_SECRET, MERRYMEN_STORE_DEK, DATABASE_URL, the house
+# keys) is injected at RUNTIME by Railway, never baked into the image.
+CMD ["sh", "-c", "npm run ${MERRYMEN_START:-start:web}"]

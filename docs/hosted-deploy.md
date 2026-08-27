@@ -52,15 +52,21 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 **orchestrator only** (the house keys from step 3):
 | Var | Value |
 |---|---|
+| `MERRYMEN_START` | `start:orchestrator` — selects the supervisor role of the shared image (web leaves this unset) |
 | `MERRYMEN_BUNDLER_API_KEY` *(or `MERRYMEN_BUNDLER_URL`)* | Pimlico key / full bundler URL |
-| `MERRYMEN_RPC_TESTNET` | testnet 46630 RPC |
+| `MERRYMEN_RPC_TESTNET` | `https://rpc.testnet.chain.robinhood.com` (or a private endpoint) |
 | `GROQ_API_KEY` *(optional)* | strategist brain |
 
 > The orchestrator must NOT get `MERRYMEN_SESSION_SECRET`, and the web service does not need the house keys. The DEK is the one secret both hold. Children get the house keys but never the DEK / session secret / `DATABASE_URL` (the supervisor strips them at fork).
 
 ## 5. Create the two services
-1. **web** — new service from this repo. It uses `railway.json` as-is (Dockerfile build, `start:web`, healthcheck `/api/version`). Set the web env above.
-2. **orchestrator** — a second service from the same repo. Override the **start command** to `npm run start:orchestrator` and disable its healthcheck (it serves no HTTP). Set the orchestrator env above. It needs **no public domain**.
+Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
+`CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no
+startCommand and no healthcheck — so the only difference between the services is
+the `MERRYMEN_START` variable, and the HTTP-less orchestrator is never failed by a
+healthcheck it can't answer.
+1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
+2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
 
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
