@@ -16,6 +16,7 @@ import { useEffect, useRef, useState, type ReactElement } from "react";
 import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
+import { getInjectedProvider, requestAccount } from "@/lib/wallet";
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -23,22 +24,27 @@ const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—");
 
 type ChatMsg = { role: "me" | "them"; html: string };
 
+type Session = { hosted: boolean; address: string | null };
+
 export default function Console() {
   const [feed, setFeed] = useState<FeedResponse | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let alive = true;
     const pull = async () => {
       try {
-        const [f, s] = await Promise.all([
+        const [f, s, se] = await Promise.all([
           fetch("/api/feed", { cache: "no-store" }).then((r) => r.json() as Promise<FeedResponse>),
           fetch("/api/grants", { cache: "no-store" }).then((r) => r.json() as Promise<AgentStatus>),
+          fetch("/api/auth/session", { cache: "no-store" }).then((r) => r.json() as Promise<Session>),
         ]);
         if (!alive) return;
         setFeed(f);
         setStatus(s);
+        setSession(se);
       } catch {
         /* transient — keep the last good numbers */
       } finally {
@@ -61,31 +67,104 @@ export default function Console() {
     );
   }
 
-  // No armed agent (not signed in, or never granted) → the gate.
+  // Hosted + not signed in → the wallet gate. Self-hosted skips this entirely
+  // (the localhost guard is its perimeter; session.hosted is false there).
+  if (session?.hosted && !session.address) {
+    return <ConnectGate />;
+  }
+
+  // Signed in (or self-hosted) but no armed agent → create one.
   if (!status?.exists) {
-    return (
-      <div className="sc-root">
-        <Embers />
-        <div className="gate">
-          <div className="gate-card">
-            <div className="gate-mark">🏹</div>
-            <h1>Muster your band.</h1>
-            <p>
-              Create an agent wallet, set the caps the chain will enforce, and fund it. Your owner
-              key is generated in this browser and never leaves it — the server only ever holds a
-              capped, revocable session key.
-            </p>
-            <Link className="btn lime" href="/grant">
-              Create your agent →
-            </Link>
-            <span className="fine">non-custodial · caps enforced on-chain</span>
-          </div>
-        </div>
-      </div>
-    );
+    return <CreateGate signedIn={!!session?.address} />;
   }
 
   return <Loaded feed={feed} status={status} />;
+}
+
+function CreateGate({ signedIn }: { signedIn: boolean }) {
+  return (
+    <div className="sc-root">
+      <Embers />
+      <div className="gate">
+        <div className="gate-card">
+          <div className="gate-mark">🏹</div>
+          <h1>Muster your band.</h1>
+          <p>
+            {signedIn ? "Signed in. Now " : ""}
+            Create an agent wallet, set the caps the chain will enforce, and fund it. Your owner key
+            is generated in this browser and never leaves it — the server only ever holds a capped,
+            revocable session key.
+          </p>
+          <Link className="btn lime" href="/grant">
+            Create your agent →
+          </Link>
+          <span className="fine">non-custodial · caps enforced on-chain</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnectGate() {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const connect = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const provider = getInjectedProvider();
+      const account = await requestAccount(provider);
+      const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
+        if (!r.ok) throw new Error("sign-in is unavailable right now");
+        return r.json();
+      })) as { nonce: string; message: string };
+      // EIP-191 personal_sign of the human-readable challenge. The server
+      // recovers the address from THIS — the wallet is the identity.
+      const signature = (await provider.request({
+        method: "personal_sign",
+        params: [ch.message, account],
+      })) as string;
+      const v = await fetch("/api/auth/verify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nonce: ch.nonce, signature }),
+      });
+      if (!v.ok) {
+        const e = (await v.json().catch(() => ({}))) as { error?: string };
+        throw new Error(e.error || "sign-in failed");
+      }
+      // Session cookie is set — reload to pick up the tenant's grant + feed.
+      window.location.reload();
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "sign-in failed";
+      // A user rejecting the signature isn't an error worth shouting about.
+      setErr(/reject|denied|4001/i.test(m) ? "Sign-in cancelled." : m);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sc-root">
+      <Embers />
+      <div className="gate">
+        <div className="gate-card">
+          <div className="gate-mark">🏹</div>
+          <h1>Sign in with your wallet.</h1>
+          <p>
+            No password, no email. Your wallet signs a one-time challenge — it moves no funds and
+            grants no permissions, it just proves the account is yours. The signature is your whole
+            login.
+          </p>
+          <button className="btn lime" onClick={connect} disabled={busy}>
+            {busy ? "Check your wallet…" : "Connect wallet →"}
+          </button>
+          {err && <span className="fine" style={{ color: "var(--rose)" }}>{err}</span>}
+          <span className="fine">your owner key never leaves this device</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStatus }) {
