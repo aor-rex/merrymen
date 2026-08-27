@@ -56,8 +56,20 @@ function hostAllowed(hostHeader: string | null): boolean {
   return false; // a public domain or public IPv4 → blocked (this is the DNS-rebind kill)
 }
 
+/**
+ * Hosted mode has a PUBLIC domain by definition, so the localhost host-allowlist
+ * above would reject every request. In hosted mode the perimeter moves from
+ * "only loopback can reach the API" to "only an authenticated tenant can mutate
+ * anything" — enforced by tenantOf()/requireTenant in each route handler, which
+ * run in the node runtime with the signing secret. Middleware keeps the one
+ * defence that still applies on a public origin: the cross-site block, which no
+ * attacker page can forge past. Read `MERRYMEN_HOSTED` directly (edge runtime
+ * can't import node modules) rather than through isHostedMode().
+ */
+const HOSTED = ["1", "true", "yes"].includes((process.env.MERRYMEN_HOSTED ?? "").trim().toLowerCase());
+
 export function middleware(req: NextRequest) {
-  if (!hostAllowed(req.headers.get("host"))) {
+  if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
     return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
   }
   const site = req.headers.get("sec-fetch-site");
