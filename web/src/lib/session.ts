@@ -61,6 +61,7 @@ import {
   GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
+  isHostedMode,
   TRADEABLE_V2,
   USDG_DECIMALS,
   type CustomToken,
@@ -260,16 +261,32 @@ async function mintGrant(
     // against the owner's configured tokens and warns when they've drifted.
     grantTokens: usableExtraTokens(extraTokens).map((t) => t.address.toLowerCase()),
     demoSessionPrivateKey: sessionPrivateKey,
-    demoOwnerPrivateKey: ownerPrivateKey,
+    // THE CUSTODY LINE. Self-hosted keeps the owner key on the grant object: it
+    // is a localhost round-trip to a 0600 file on the user's own machine, which
+    // is not a leak, and it is what the local `merrymen recover` reads. HOSTED
+    // omits it entirely — the grant that goes to the server is session-key-only
+    // (the shape the mobile signer has always used), so the server is never
+    // custodian of a single owner key. The owner key still lives in this
+    // browser's localStorage below, which is what makes client-side recovery
+    // work with no server involvement.
+    ...(isHostedMode() ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(grant));
+  // localStorage ALWAYS gets the full grant WITH the owner key — hosted or not.
+  // This is the browser's own copy, the root of client-side recovery, and it
+  // never crosses the network. Losing it is the same as losing the key, which
+  // is why the UI forces a backup before funding.
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...grant, demoOwnerPrivateKey: ownerPrivateKey }));
 
-  // Hand the grant to the worker (dev-mode file handoff; Supabase later).
+  // Hand the grant to the worker. Self-hosted: a localhost file handoff.
+  // Hosted: an authenticated POST of the session-key-only grant to the tenant's
+  // own store. In hosted mode the browser sends its session cookie so the
+  // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
   try {
     await fetch("/api/grants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify(grant),
     });
   } catch {

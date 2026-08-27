@@ -11,7 +11,8 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@/lib/home";
 import { createPublicClient, http, parseAbi } from "viem";
-import { CASH, MORPHO, chainForId, type StoredGrant } from "@merrymen/core";
+import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -66,6 +67,46 @@ export async function POST(req: Request) {
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
+
+  if (isHostedMode()) {
+    // ── the hosted custody boundary ──────────────────────────────────────
+    // On a public URL the server must NEVER become custodian of an owner key,
+    // and must never let one tenant install a grant under another's account.
+    const tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+
+    // REJECT any owner-key material — the named field, a raw 32-byte key, or a
+    // mnemonic hiding anywhere in the payload. This is the single most important
+    // check in the whole hosted migration: pass it and one DB dump drains
+    // everyone. carriesOwnerKey is the shared definition (packages/core).
+    if (carriesOwnerKey(grant)) {
+      return NextResponse.json(
+        { error: "this grant carries an owner key — hosted grants must be session-key-only" },
+        { status: 422 },
+      );
+    }
+
+    // AUTHORIZE ON THE SESSION ADDRESS, never on the self-declared grant.owner.
+    // A tenant that could claim someone else's owner address would hijack their
+    // agent id and ledger partition (the DB keys every table on smart_account,
+    // and the account derives from the owner).
+    if (typeof grant.owner !== "string" || grant.owner.toLowerCase() !== tenant) {
+      return NextResponse.json(
+        { error: "grant owner does not match the signed-in wallet" },
+        { status: 403 },
+      );
+    }
+    // The per-tenant store (Postgres) lands in the next commit. Until then a
+    // hosted deploy is not live — this route enforces the CUSTODY invariant now
+    // so that when the store arrives it is only ever storing session-key-only,
+    // tenant-bound grants. Writing the single file here would collide across
+    // tenants, so hosted mode refuses rather than pretend.
+    return NextResponse.json(
+      { error: "hosted grant store not yet enabled — see docs/hosted-platform-plan.md commit 3" },
+      { status: 503 },
+    );
+  }
+
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   await archiveCurrentGrant();
