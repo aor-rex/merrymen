@@ -663,3 +663,149 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   .dash-big { font-size: 32px; }
   .dash-form .btn { width: 100%; justify-content: center; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   /app — the mobile app's page. COMPOSED AT 390px FIRST; the desktop
+   layout is the adaptation. Art is generated (public/app/*.webp) and
+   always sits under a veil so the site's text contrast never depends
+   on what a diffusion model happened to paint.
+   ════════════════════════════════════════════════════════════════════ */
+
+.apppage { overflow-x: clip; }
+
+/* ── hero ── */
+.app-hero { position: relative; min-height: 92svh; display: flex; align-items: flex-end; isolation: isolate; }
+.app-hero-art {
+  position: absolute; inset: 0; z-index: -2;
+  background-image: url("/app/hero.webp");
+  background-size: cover; background-position: 50% 28%;
+}
+.app-hero-veil {
+  position: absolute; inset: 0; z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(7,10,8,0.55) 0%, rgba(7,10,8,0.15) 34%, rgba(7,10,8,0.62) 68%, var(--bg) 96%),
+    radial-gradient(120% 60% at 50% 100%, rgba(7,10,8,0.55), transparent 60%);
+}
+.app-hero-inner { padding-top: 20svh; padding-bottom: 3rem; }
+.app-hero h1 { font-size: clamp(2.6rem, 11vw, 4.6rem); line-height: 1.02; margin: 0.55rem 0 0.9rem; text-shadow: 0 2px 24px rgba(0,0,0,0.55); }
+.app-lede { max-width: 34rem; color: var(--text-2); font-size: 1.06rem; text-shadow: 0 1px 12px rgba(0,0,0,0.6); }
+.app-hero-cta { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-top: 1.4rem; }
+.app-hero-fine { color: var(--text-dim); font-size: 0.84rem; margin-top: 1rem; max-width: 34rem; }
+.app-hero-fine em { color: var(--text-2); font-style: normal; }
+
+/* ── phone mock section ── */
+.app-phone-section { display: flex; flex-direction: column; gap: 2.2rem; padding-top: 4.5rem; padding-bottom: 4.5rem; }
+.app-phone-copy h2 { font-size: clamp(1.9rem, 7vw, 2.8rem); margin: 0.5rem 0 0.8rem; }
+.app-phone-copy p { color: var(--text-2); max-width: 36rem; }
+.app-phone-stage { display: flex; justify-content: center; }
+.app-phone {
+  width: min(320px, 82vw);
+  border-radius: 42px;
+  padding: 12px;
+  background: linear-gradient(160deg, #262e26, #10160f 60%);
+  border: 1px solid var(--line);
+  box-shadow:
+    0 40px 80px -30px rgba(0,0,0,0.8),
+    0 0 0 1px rgba(182,226,38,0.06),
+    0 0 90px -30px rgba(182,226,38,0.22);
+  position: relative;
+}
+.app-phone-notch {
+  position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  width: 88px; height: 22px; border-radius: 12px; background: #060806; z-index: 2;
+}
+.app-screen {
+  border-radius: 32px; background: #0a0e0a; border: 1px solid #141a14;
+  padding: 3.2rem 1.1rem 1.4rem; min-height: 560px;
+  display: flex; flex-direction: column; gap: 0.55rem;
+  font-size: 0.86rem;
+}
+.scr-row { display: flex; justify-content: space-between; align-items: center; }
+.scr-name { font-weight: 600; }
+.scr-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+.scr-equity { display: flex; align-items: baseline; gap: 0.4rem; margin-top: 0.4rem; }
+.scr-big { font-family: var(--font-mono); font-size: 2rem; font-weight: 600; letter-spacing: -0.02em; }
+.scr-unit { color: var(--text-dim); font-size: 0.8rem; }
+.scr-delta { color: var(--green); font-family: var(--font-mono); font-size: 0.78rem; }
+.scr-spark { width: 100%; height: 58px; margin: 0.35rem 0; }
+.scr-split { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; padding: 0.6rem 0; border-top: 1px solid #141a14; border-bottom: 1px solid #141a14; }
+.scr-split > div { display: flex; flex-direction: column; gap: 0.1rem; }
+.scr-label { color: var(--text-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.scr-val { font-family: var(--font-mono); font-size: 0.86rem; }
+.scr-list { display: flex; flex-direction: column; }
+.scr-li { display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid #10150f; font-family: var(--font-mono); font-size: 0.76rem; }
+.scr-ok { color: var(--text-2); }
+.scr-no { color: var(--red); }
+.scr-fade { opacity: 0.55; }
+
+/* ── truths ── */
+.app-truths { padding-bottom: 4.5rem; }
+.app-truths h2 { font-size: clamp(1.9rem, 7vw, 2.8rem); margin: 0.5rem 0 1.4rem; }
+.app-truth-grid { display: grid; gap: 1rem; }
+.app-truth {
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1.35rem 1.4rem;
+}
+.app-truth h3 { margin: 0 0 0.5rem; font-size: 1.08rem; color: var(--lime-2); }
+.app-truth p { margin: 0; color: var(--text-2); font-size: 0.95rem; }
+.mono-chip {
+  font-family: var(--font-mono); font-size: 0.82em; color: var(--lime);
+  background: color-mix(in srgb, var(--lime) 10%, transparent);
+  padding: 0.08em 0.4em; border-radius: 6px; white-space: nowrap;
+}
+
+/* ── campfire band ── */
+.app-camp { position: relative; isolation: isolate; padding: 5.5rem 0; }
+.app-camp-art {
+  position: absolute; inset: 0; z-index: -2;
+  background-image: url("/app/camp.webp");
+  background-size: cover; background-position: 50% 55%;
+}
+.app-camp-veil {
+  position: absolute; inset: 0; z-index: -1;
+  background: linear-gradient(180deg, var(--bg) 0%, rgba(7,10,8,0.42) 26%, rgba(7,10,8,0.5) 72%, var(--bg) 100%);
+}
+.app-camp-inner h2 { font-size: clamp(1.9rem, 7vw, 2.8rem); margin: 0.5rem 0 0.8rem; text-shadow: 0 2px 18px rgba(0,0,0,0.65); }
+.app-camp-inner p { max-width: 36rem; color: var(--text-2); text-shadow: 0 1px 12px rgba(0,0,0,0.7); }
+
+/* ── honesty card ── */
+.app-honest { padding: 4.5rem 0 0; }
+.app-honest-card {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 1.5rem 1.5rem;
+  background:
+    linear-gradient(180deg, rgba(7,10,8,0.88), rgba(7,10,8,0.94)),
+    url("/app/canopy.webp") center / cover;
+}
+.app-honest-card h3 { margin: 0 0 0.6rem; color: var(--lime-2); font-size: 1.12rem; }
+.app-honest-card p { color: var(--text-2); margin: 0 0 0.7rem; max-width: 40rem; }
+.app-honest-sub { color: var(--text-dim); font-size: 0.9rem; }
+
+/* ── get it ── */
+.app-get { padding: 4.5rem 0 5.5rem; }
+.app-get h2 { font-size: clamp(1.9rem, 7vw, 2.8rem); margin: 0.5rem 0 1.4rem; }
+.app-get-grid { display: grid; gap: 1rem; }
+.app-get-card {
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1.4rem 1.4rem 1.5rem;
+  display: flex; flex-direction: column; gap: 0.7rem; align-items: flex-start;
+}
+.app-get-card h3 { margin: 0; font-size: 1.1rem; }
+.app-get-card p { margin: 0; color: var(--text-2); font-size: 0.95rem; }
+.app-get-foot { color: var(--text-dim); font-size: 0.9rem; margin-top: 1.4rem; }
+
+/* ── desktop adaptation ── */
+@media (min-width: 860px) {
+  .app-hero { min-height: 88vh; }
+  .app-hero-inner { padding-bottom: 4.5rem; }
+  .app-phone-section { flex-direction: row; align-items: center; gap: 4rem; }
+  .app-phone-copy { flex: 1; }
+  .app-phone-stage { flex: 0 0 360px; }
+  .app-truth-grid { grid-template-columns: repeat(3, 1fr); }
+  .app-get-grid { grid-template-columns: 1fr 1fr; }
+  .app-camp { padding: 8rem 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .apppage * { transition: none !important; animation: none !important; }
+}
