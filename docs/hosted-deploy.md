@@ -28,9 +28,10 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 ## 3. House keys (testnet)
 The orchestrator injects these into each child; a tenant never sets them (they are stripped server-side). For the testnet slice:
-- **Bundler** — `MERRYMEN_BUNDLER_API_KEY` (a Pimlico key; the URL is built per chain) **or** `MERRYMEN_BUNDLER_URL` (a full 4337 RPC).
-- **RPC** — `MERRYMEN_RPC_TESTNET` for Robinhood testnet **46630** (and `MERRYMEN_RPC_MAINNET` for 4663 later).
+- **Bundler** — `MERRYMEN_BUNDLER_API_KEY` (a **Pimlico** key). The worker builds the URL per chain as `https://api.pimlico.io/v2/<chainId>/rpc?apikey=…`; Pimlico supports Robinhood testnet **46630** (listed as `robinhood-testnet`). Get a key at <https://dashboard.pimlico.io> (free tier is fine for the slice). Alternatively set `MERRYMEN_BUNDLER_URL` to a full 4337 RPC from any bundler that supports 46630.
+- **RPC** — `MERRYMEN_RPC_TESTNET`. The public endpoint is **`https://rpc.testnet.chain.robinhood.com`** (already the chain's built-in default in `packages/core/src/chain.ts`; set it explicitly, or point at a private endpoint for reliability). `MERRYMEN_RPC_MAINNET` = `https://rpc.mainnet.chain.robinhood.com` for 4663 later.
 - **LLM** (optional, for the strategist) — `GROQ_API_KEY` (free tier) or `ANTHROPIC_API_KEY`.
+- **Gas** — the smart account self-pays (no paymaster in the wall by default), so each armed tenant's smart account needs testnet ETH on 46630 from the Robinhood Chain faucet (see <https://docs.robinhood.com/chain/>).
 
 ## 4. Environment, per service
 
