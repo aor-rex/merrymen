@@ -1340,6 +1340,27 @@ export async function getSpentTodayUsdg(agentId: string, rail: BudgetRail = "liv
   return row?.spent ?? 0;
 }
 
+/**
+ * Every UserOperation hash this agent has ANY row for — landed, reverted, or
+ * submitted. The in-flight reconciler (inflight-reconcile.ts) uses it to tell an
+ * op the chain executed but the ledger never recorded (a process death between
+ * submit and the ledger write) from one that is already accounted for. All
+ * statuses, not just the spending ones: a hash recorded as reverted must not be
+ * re-reconciled as landed. Hashes are lowercased so the set compares cleanly
+ * against the chain's (which returns them lowercased).
+ */
+export async function listOpHashes(agentId: string): Promise<Set<string>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT DISTINCT user_op_hash FROM trades
+       WHERE agent_id = ? AND user_op_hash IS NOT NULL`,
+    )
+    .all(agentId)) as { user_op_hash: string | null }[];
+  const set = new Set<string>();
+  for (const r of rows) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  return set;
+}
+
 // ── chat turns — the conversation survives a restart ──────────────────────
 
 /** Kept per chat on disk. Only the newest few reach a prompt (see service.ts);

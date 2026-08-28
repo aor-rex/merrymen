@@ -59,7 +59,8 @@ import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
-import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst } from "./fills";
+import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
+import { findOrphanOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -125,6 +126,7 @@ import {
   getPaperBook,
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
+  listOpHashes,
   initStore,
   setPaperBook,
   setAgentName,
@@ -347,6 +349,128 @@ async function main() {
     const rail = budgetRail();
     settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
     settledOps = await getOpsToday(agentId, rail);
+  };
+
+  /**
+   * In-flight reconciliation, run once at arm BEFORE the budget is seeded.
+   *
+   * If the process died between an op landing on-chain and its ledger row being
+   * written (a redeploy, an OOM, the watchdog), the seed below would re-read the
+   * ledger without that op and UNDER-count the day's spend — the daily cap would
+   * then be looser by exactly that op's notional. This asks the chain what the
+   * account actually executed and writes any 'landed' row the ledger is missing,
+   * so the seed that follows counts it. Best-effort by design: reconciliation is
+   * a safety net, and a chain read that fails must NEVER block arming — the
+   * in-session fail-closed path (recordTrade) still protects the running process.
+   *
+   * Live-only (a real executor); paper never touches the chain. The chain read
+   * itself is gated on an end-to-end run before any funded deploy — the decoding
+   * is unit-proven in inflight-reconcile.test.ts.
+   */
+  const reconcileInFlightAtArm = async (
+    agentId: string,
+    client: ReturnType<typeof createPublicClient>,
+    smartAccount: `0x${string}`,
+  ): Promise<void> => {
+    try {
+      // Convert the 24h cap window to a block span without hardcoding a block
+      // time we don't know: sample a recent span and divide. A generous margin
+      // over 24h, clamped so a mis-estimate can't trigger an enormous scan.
+      const head = await client.getBlockNumber();
+      const SAMPLE = 2_000n;
+      const lo = head > SAMPLE ? head - SAMPLE : 0n;
+      let secPerBlock = 2; // fallback if the sample is degenerate
+      if (head > lo) {
+        const [bHead, bLo] = await Promise.all([
+          client.getBlock({ blockNumber: head }),
+          client.getBlock({ blockNumber: lo }),
+        ]);
+        const dt = Number(bHead.timestamp - bLo.timestamp);
+        if (dt > 0) secPerBlock = dt / Number(head - lo);
+      }
+      const WINDOW_SEC = 26 * 3600; // the 24h cap window + 2h of margin
+      const MAX_LOOKBACK = 200_000n;
+      let lookbackBlocks = BigInt(Math.ceil(WINDOW_SEC / secPerBlock));
+      if (lookbackBlocks > MAX_LOOKBACK) {
+        console.log(
+          `[reconcile] estimated ${secPerBlock.toFixed(2)}s/block would scan ` +
+            `${lookbackBlocks} blocks for 26h — clamping to ${MAX_LOOKBACK}; ` +
+            `an op older than that won't be reconciled (it's outside today's cap anyway)`,
+        );
+        lookbackBlocks = MAX_LOOKBACK;
+      }
+
+      // Narrow adapter over the live client — raw eth_getLogs (topics-based) and
+      // the receipt logs. Kept here, at the impure edge; the core stays testable.
+      const chain: ReconcileChain = {
+        getBlockNumber: () => client.getBlockNumber(),
+        async getLogs(a) {
+          const logs = (await client.request({
+            method: "eth_getLogs",
+            params: [
+              {
+                address: a.address,
+                fromBlock: `0x${a.fromBlock.toString(16)}`,
+                toBlock: `0x${a.toBlock.toString(16)}`,
+                topics: a.topics,
+              },
+            ],
+          } as never)) as RawLog[];
+          return logs;
+        },
+        async getReceiptLogs(txHash) {
+          try {
+            const r = await client.getTransactionReceipt({ hash: txHash });
+            return r.logs as unknown as ReceiptLog[];
+          } catch {
+            return null;
+          }
+        },
+      };
+
+      const known = await listOpHashes(agentId);
+      const orphans = await findOrphanOps({
+        chain,
+        smartAccount,
+        usdgToken: CASH.USDG,
+        knownOpHashes: known,
+        lookbackBlocks,
+        log: (m) => console.log(`[reconcile] ${m}`),
+      });
+      if (orphans.length === 0) return;
+
+      for (const o of orphans) {
+        // 'swap' is the dominant and the SAFE default kind: it counts toward the
+        // cap (unlike 'vault-withdraw', the only exempted kind), so a reconciled
+        // op can only ever over-count spend, never under-count — the safe
+        // direction. Basis is deliberately not booked from a reconstructed
+        // receipt; P&L for this fill isn't attributable, only its spend is.
+        const wrote = await addTrade({
+          agent_id: agentId,
+          kind: "swap",
+          target: smartAccount,
+          amount_usdg: usdgNum(o.notionalUsdg6),
+          user_op_hash: o.userOpHash,
+          tx_hash: o.txHash,
+          status: "landed",
+          basis_source: "receipt",
+        });
+        await addEvent(
+          agentId,
+          wrote ? "warn" : "err",
+          wrote
+            ? `reconciled a landed op the ledger had no row for (${o.userOpHash.slice(0, 10)}…, ` +
+                `${o.attributed ? `${fmt(o.notionalUsdg6)} USDG` : "notional unattributable"}) — ` +
+                `counted toward today's cap so a mid-op restart can't loosen it`
+            : `found an unrecorded landed op (${o.userOpHash.slice(0, 10)}…) but could not write its ` +
+                `reconciliation row — spend for it stays uncounted; will retry next arm`,
+        );
+      }
+    } catch (e) {
+      // Never block arming on a reconciliation failure — the running process is
+      // still protected by recordTrade's in-session fail-closed path.
+      console.log(`[reconcile] skipped (${e instanceof Error ? e.message : String(e)})`);
+    }
   };
 
   /**
@@ -957,6 +1081,10 @@ async function main() {
     // Nothing is in flight at arm time, so clear any stale reservation with it.
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
+    // Recover any op that landed on-chain last run but never reached the ledger,
+    // BEFORE seeding — else the seed under-counts the day's spend and loosens the
+    // cap. Live only (paper never touches the chain); best-effort (guarded).
+    if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
     await refreshBudget(agentId);
 
     // ── epoch boundary ───────────────────────────────────────────────────
