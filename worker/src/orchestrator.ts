@@ -22,11 +22,19 @@
  *    the OS can;
  *  - crash backoff, and a fleet-halt file that stands the whole band down.
  *
- * NOT YET (Phase B, before real funds): the per-tenant Postgres advisory lease
- * (so two orchestrator replicas never both trade a tenant) and in-flight-UserOp
- * reconciliation on restart (so a SIGKILL between submit and ledger-write doesn't
- * under-count spend). Both are noted at their call sites. This supervisor is
- * single-replica + testnet until they land.
+ * MULTI-REPLICA SAFETY. Before arming a tenant this takes a per-tenant Postgres
+ * advisory lease (tenant-lease.ts) and holds it for the child's whole life, so a
+ * second orchestrator replica can never also arm the same tenant and double its
+ * daily spend. Without a shared database the lease is a no-op hold (one process
+ * by construction). A lease that goes unhealthy — its connection dropped, so
+ * Postgres released the lock — stands the child down rather than let it trade
+ * unprotected.
+ *
+ * NOT YET (Phase B, before real funds): in-flight-UserOp reconciliation on
+ * restart, so a SIGKILL between submit and ledger-write doesn't under-count
+ * spend. That lives in the WORKER's arm path (it needs the chain client and the
+ * ledger, which the child already has), and runs before the child seeds its
+ * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
 import { getSettingsStore } from "./settings-store";
+import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 
 /** How often to re-read the store for tenants added or killed. */
@@ -115,10 +124,30 @@ interface Child {
 }
 
 const children = new Map<string, Child>();
+/**
+ * The advisory lease held for each tenant we are running, keyed by lowercased
+ * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
+ * restarts (never re-acquired per process — a restart must not open a window for
+ * another replica). Released only when the tenant is no longer wanted (kill
+ * switch), when its lease goes unhealthy, or on shutdown.
+ */
+const leases = new Map<string, TenantLease>();
 let stopping = false;
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
+}
+
+/** Release and forget a tenant's lease. Best-effort; safe if none is held. */
+async function releaseLease(tenant: string): Promise<void> {
+  const lease = leases.get(tenant);
+  if (!lease) return;
+  leases.delete(tenant);
+  try {
+    await lease.release();
+  } catch {
+    /* best-effort — a dropped connection has already released the lock */
+  }
 }
 
 /** Read a child's heartbeat `at` (unix seconds), or null if it hasn't beaten yet. */
@@ -169,10 +198,16 @@ async function writeSettingsForChild(tenant: `0x${string}`, seenBotTokens?: Set<
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
-  // PHASE B: take a per-tenant Postgres advisory lease here, BEFORE arming, so a
-  // second orchestrator replica can never also run this tenant — and reconcile
-  // any in-flight UserOp from the last run in the same step, so a restart doesn't
-  // under-count spend. Single-replica + testnet until then.
+  // The advisory lease is a precondition, taken by reconcile() before the FIRST
+  // spawn and held across restarts — so this path (including the crash-restart
+  // that re-enters here) never re-acquires it, which would open a window for
+  // another replica. Refuse to arm without a healthy lease: a restart that finds
+  // the lease gone must not trade unprotected.
+  const lease = leases.get(tenant);
+  if (!lease || !lease.healthy()) {
+    log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
+    return;
+  }
   if (!(await writeGrantForChild(tenant))) {
     log(`${tenant}: no grant in the store — not spawning`);
     return;
@@ -243,9 +278,42 @@ export async function reconcile(): Promise<void> {
     return;
   }
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
-  // Spawn any tenant with a grant that isn't running.
+
+  // A lease whose connection dropped no longer protects its tenant — Postgres
+  // has released the lock and another replica may hold it. Stand the child down
+  // and drop the lease; the acquire below will try to re-take it (or find the
+  // other replica now owns it). This is what makes the lock a live guarantee and
+  // not just a start-time check.
+  for (const [tenant, lease] of [...leases]) {
+    if (!lease.healthy()) {
+      log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
+      if (children.has(tenant)) killChild(tenant);
+      await releaseLease(tenant);
+    }
+  }
+
+  // Spawn any wanted tenant that isn't running — but only behind a lease. Acquire
+  // one first (unless we already hold it from a previous reconcile / across a
+  // crash restart); if another replica holds it, skip this tenant and try again
+  // next reconcile.
   for (const tenant of tenants) {
-    if (!children.has(tenant.toLowerCase())) await spawnChild(tenant.toLowerCase() as `0x${string}`);
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    if (children.has(lc)) continue;
+    if (!leases.has(lc)) {
+      let lease: TenantLease | null;
+      try {
+        lease = await acquireTenantLease(lc);
+      } catch (e) {
+        log(`${lc}: lease attempt failed, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      if (!lease) {
+        log(`${lc}: leased by another replica — not arming here`);
+        continue;
+      }
+      leases.set(lc, lease);
+    }
+    await spawnChild(lc);
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
@@ -267,6 +335,13 @@ export async function reconcile(): Promise<void> {
         /* best-effort cleanup */
       }
     }
+  }
+  // Release any lease we still hold for a tenant that is no longer wanted — both
+  // the kill-switch case above and a lease left over from a child that has since
+  // exited. Holding a lease for a tenant we won't arm would block another replica
+  // (or a later re-arm) for no reason.
+  for (const tenant of [...leases.keys()]) {
+    if (!wanted.has(tenant)) await releaseLease(tenant);
   }
 }
 
@@ -312,6 +387,10 @@ export async function runOrchestrator(): Promise<void> {
     stopping = true;
     log("stopping — calling the whole fleet home");
     for (const child of children.values()) child.proc.kill("SIGTERM");
+    // Release every advisory lease so a restarting replica can take over at once
+    // rather than waiting for our dropped connections to time out server-side.
+    // Best-effort and unawaited — we exit in a second regardless.
+    for (const tenant of [...leases.keys()]) void releaseLease(tenant);
     setTimeout(() => process.exit(0), 1_000);
   };
   process.on("SIGINT", stop);
@@ -321,9 +400,12 @@ export async function runOrchestrator(): Promise<void> {
   for (;;) {
     if (stopping) return;
     if (haltRequested()) {
-      if (children.size > 0) {
-        log("FLEET_HALT present — standing every child down");
+      if (children.size > 0 || leases.size > 0) {
+        log("FLEET_HALT present — standing every child down and releasing leases");
         for (const t of [...children.keys()]) killChild(t);
+        // Release leases too: if only THIS replica is halted, another may take
+        // the tenants over; if the whole fleet is halted, releasing is harmless.
+        for (const t of [...leases.keys()]) await releaseLease(t);
       }
     } else {
       await reconcile();
