@@ -1014,6 +1014,21 @@ async function main() {
           ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
           : "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
       );
+      // SAY IT WHERE THE OWNER WILL LOOK, not only on a console nobody is
+      // tailing. Without a bundler NOTHING can ever be signed, so every intent
+      // from here is a simulation — and the tape does not show that. It shows
+      // "paper" fills and, once the day's ops allowance is spent on them,
+      // page after page of cap rejections, which point at the cap instead of
+      // the missing key. An audit of 1,311 intents and zero fills read as a
+      // broken execution path; the truth was that execution had never been
+      // configured. One durable line at arm time is the difference.
+      await addEvent(
+        agentId,
+        "warn",
+        `no bundler key — this agent CANNOT trade live, and nothing it does will reach the chain. ` +
+          `${cfg.paperTradingEnabled ? "Fills below are simulated at live prices." : "Policy and simulation still run."} ` +
+          `Add a Pimlico key in /settings to trade for real.`,
+      );
     }
 
     const client = createPublicClient({ chain, transport: http(rpc) });

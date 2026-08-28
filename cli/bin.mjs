@@ -696,7 +696,11 @@ async function doctor() {
   hasSigner
     ? ok("bundler key configured — can sign live trades")
     : paperOn
-      ? ok("no bundler key — running in 📜 paper mode (simulated fills at live prices)")
+      ? // NOT an ok(). Paper mode works, but "this agent can never trade live" is
+        // not a healthy state to report in green — that reassurance is how an
+        // install sat simulating for weeks while its ledger filled with cap
+        // rejections and nobody thought to look for a missing key.
+        warn("no bundler key — 📜 paper mode only, nothing reaches the chain (get a key: dashboard.pimlico.io)")
       : warn("no bundler key and paper trading off — the agent won't trade (get a key: dashboard.pimlico.io)");
   // The four things that silently mute the bot / idle the brain:
   const hasLlm = !!(
