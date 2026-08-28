@@ -140,6 +140,10 @@ function hasGas(wei?: string): boolean {
 }
 
 function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStatus }) {
+  // One focus at a time. The rail used to be dead links over a wall of panels;
+  // now it switches the main view — Home (the overview), Chat, or Positions — so
+  // the console is calm and scannable instead of everything at once.
+  const [view, setView] = useState<"home" | "chat" | "positions">("home");
   const grant = status.grant;
   const caps = grant?.caps;
   const chainId = grant?.chainId ?? null;
@@ -192,15 +196,15 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             </span>
           </div>
           <nav className="nav">
-            <a className="navlink on">
+            <button type="button" className={`navlink ${view === "home" ? "on" : ""}`} onClick={() => setView("home")}>
               <Ic d="home" /> Home
-            </a>
-            <a className="navlink">
+            </button>
+            <button type="button" className={`navlink ${view === "chat" ? "on" : ""}`} onClick={() => setView("chat")}>
               <Ic d="chat" /> Chat
-            </a>
-            <a className="navlink">
+            </button>
+            <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
               <Ic d="chart" /> Positions <span className="tally">{feed?.positions?.length ?? 0}</span>
-            </a>
+            </button>
             <Link className="navlink" href="/grant">
               <Ic d="wallet" /> Wallet
             </Link>
@@ -248,153 +252,166 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             </span>
           </div>
 
-          {/* hero */}
-          <section className="hero">
-            <div className="equity">
-              <div className="kick">Total equity</div>
-              <div className="big">
-                <span className="num">{usd(eqNow)}</span>
-                <span className="unit">USDG</span>
-              </div>
-              <div className="row2">
-                {todayDelta !== null ? (
-                  <span className={`delta ${todayDelta >= 0 ? "up" : "down"}`}>
-                    {todayDelta >= 0 ? "▲ +" : "▼ "}
-                    {usd(Math.abs(todayDelta))} today
-                  </span>
-                ) : (
-                  <span className="delta up" style={{ color: "var(--faint)" }}>
-                    — building today
-                  </span>
-                )}
-                <span className="sep">·</span>
-                <span className="putin">
-                  {contributed !== null ? (
-                    <>
-                      you put in <b>{usd(contributed)}</b>
-                      {allTime !== null && (
-                        <>
-                          {" · "}
-                          <span className={`g ${allTime < 0 ? "down" : ""}`}>
-                            {allTime >= 0 ? "+" : ""}
-                            {allTime.toFixed(1)}%
-                          </span>{" "}
-                          all-time, net of gas
-                        </>
-                      )}
-                    </>
-                  ) : (
-                    "no deposit on record yet"
-                  )}
-                </span>
-              </div>
-            </div>
-            <div className="spark">
-              <Spark points={equityPts.map((p) => p.equity_usdg)} />
-            </div>
-          </section>
-
-          {/* split */}
-          <section className="split">
-            <Tile label="Cash" v={split.cash} pct={(split.cash / total) * 100} color="var(--mint)" />
-            <Tile label="Vault" v={split.vault} pct={(split.vault / total) * 100} color="var(--gold)" />
-            <Tile label="Positions" v={split.positions} pct={(split.positions / total) * 100} color="var(--lime)" />
-          </section>
-
-          {/* the wall */}
-          <section className="wall">
-            <div className="wall-head">
-              <span className="kick">The wall</span>
-              <span className="by">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />
-                </svg>
-                enforced by the chain, not by us
-              </span>
-            </div>
-            <div className="caps">
-              <Cap l="Per trade" v={caps ? `${usd(caps.perTradeUsdg)}` : "—"} u="USDG" />
-              <Cap l="Per day" v={caps ? `${usd(caps.dailyUsdg)}` : "—"} u="USDG" />
-              <Cap l="Key dies in" v={daysLeft !== null ? `${daysLeft}` : "—"} u="days" />
-              <Cap l="Breaker" v={caps ? `${caps.maxDrawdownPct}%` : "—"} u="drawdown" />
-              <Cap l="Move out" v="blocked" u="· no-transfer" />
-            </div>
-          </section>
-
-          {/* floor */}
-          <section className="floor">
-            <div className="col">
-              <div className="panel">
-                <div className="panel-h">
-                  <h3>The decision tape</h3>
-                  <span className="kick">refused shown too</span>
-                </div>
-                <div className="tape">
-                  {(feed?.trades ?? []).length === 0 ? (
-                    <div className="empty-note">No trades yet — the band hasn&apos;t ridden.</div>
-                  ) : (
-                    (feed?.trades ?? []).slice(0, 6).map((t, i) => <TradeRow key={i} t={t} />)
-                  )}
-                </div>
-                {refusedToday > 0 && (
-                  <div className="tape-foot">
-                    A trade the wall turns back is part of the record — <b>{refusedToday} refused today</b>, not hidden.
+          {/* ── HOME: the overview — equity, the split, the wall, recent tape ── */}
+          {view === "home" && (
+            <>
+              <section className="hero">
+                <div className="equity">
+                  <div className="kick">Total equity</div>
+                  <div className="big">
+                    <span className="num">{usd(eqNow)}</span>
+                    <span className="unit">USDG</span>
                   </div>
-                )}
-              </div>
-
-              <div className="panel">
-                <div className="panel-h">
-                  <h3>Positions</h3>
-                  <span className="kick">{feed?.positions?.length ?? 0} open</span>
+                  <div className="row2">
+                    {todayDelta !== null ? (
+                      <span className={`delta ${todayDelta >= 0 ? "up" : "down"}`}>
+                        {todayDelta >= 0 ? "▲ +" : "▼ "}
+                        {usd(Math.abs(todayDelta))} today
+                      </span>
+                    ) : (
+                      <span className="delta up" style={{ color: "var(--faint)" }}>
+                        — building today
+                      </span>
+                    )}
+                    <span className="sep">·</span>
+                    <span className="putin">
+                      {contributed !== null ? (
+                        <>
+                          you put in <b>{usd(contributed)}</b>
+                          {allTime !== null && (
+                            <>
+                              {" · "}
+                              <span className={`g ${allTime < 0 ? "down" : ""}`}>
+                                {allTime >= 0 ? "+" : ""}
+                                {allTime.toFixed(1)}%
+                              </span>{" "}
+                              all-time, net of gas
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        "no deposit on record yet"
+                      )}
+                    </span>
+                  </div>
                 </div>
-                <div className="pos">
-                  {(feed?.positions ?? []).length === 0 ? (
-                    <div className="empty-note">All in cash and the vault.</div>
-                  ) : (
-                    (feed?.positions ?? []).map((p, i) => (
-                      <div className="prow" key={i}>
-                        <span className="s">
-                          <span
-                            className="tk"
-                            style={{ background: p.price_source === "pool" ? "var(--lime)" : "var(--mint)" }}
-                          />{" "}
-                          {p.symbol}
-                        </span>
-                        <span className="px">
-                          ${usd(p.price_usd)}
-                          {p.price_source === "pool" && <span className="tagpx">pool px</span>}
-                        </span>
-                        <span className="val">{usd(p.value_usdg)}</span>
+                <div className="spark">
+                  <Spark points={equityPts.map((p) => p.equity_usdg)} />
+                </div>
+              </section>
+
+              <section className="split">
+                <Tile label="Cash" v={split.cash} pct={(split.cash / total) * 100} color="var(--mint)" />
+                <Tile label="Vault" v={split.vault} pct={(split.vault / total) * 100} color="var(--gold)" />
+                <Tile label="Positions" v={split.positions} pct={(split.positions / total) * 100} color="var(--lime)" />
+              </section>
+
+              <section className="wall">
+                <div className="wall-head">
+                  <span className="kick">The wall</span>
+                  <span className="by">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />
+                    </svg>
+                    enforced by the chain, not by us
+                  </span>
+                </div>
+                <div className="caps">
+                  <Cap l="Per trade" v={caps ? `${usd(caps.perTradeUsdg)}` : "—"} u="USDG" />
+                  <Cap l="Per day" v={caps ? `${usd(caps.dailyUsdg)}` : "—"} u="USDG" />
+                  <Cap l="Key dies in" v={daysLeft !== null ? `${daysLeft}` : "—"} u="days" />
+                  <Cap l="Breaker" v={caps ? `${caps.maxDrawdownPct}%` : "—"} u="drawdown" />
+                  <Cap l="Move out" v="blocked" u="· no-transfer" />
+                </div>
+              </section>
+
+              <section className="floor one">
+                <div className="col">
+                  <div className="panel">
+                    <div className="panel-h">
+                      <h3>The decision tape</h3>
+                      <span className="kick">refused shown too</span>
+                    </div>
+                    <div className="tape">
+                      {(feed?.trades ?? []).length === 0 ? (
+                        <div className="empty-note">No trades yet — the band hasn&apos;t ridden.</div>
+                      ) : (
+                        (feed?.trades ?? []).slice(0, 6).map((t, i) => <TradeRow key={i} t={t} />)
+                      )}
+                    </div>
+                    {refusedToday > 0 && (
+                      <div className="tape-foot">
+                        A trade the wall turns back is part of the record — <b>{refusedToday} refused today</b>, not hidden.
                       </div>
-                    ))
-                  )}
+                    )}
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
+
+          {/* ── POSITIONS: just the book ── */}
+          {view === "positions" && (
+            <section className="floor one">
+              <div className="col">
+                <div className="panel">
+                  <div className="panel-h">
+                    <h3>Positions</h3>
+                    <span className="kick">{feed?.positions?.length ?? 0} open</span>
+                  </div>
+                  <div className="pos">
+                    {(feed?.positions ?? []).length === 0 ? (
+                      <div className="empty-note">All in cash and the vault.</div>
+                    ) : (
+                      (feed?.positions ?? []).map((p, i) => (
+                        <div className="prow" key={i}>
+                          <span className="s">
+                            <span
+                              className="tk"
+                              style={{ background: p.price_source === "pool" ? "var(--lime)" : "var(--mint)" }}
+                            />{" "}
+                            {p.symbol}
+                          </span>
+                          <span className="px">
+                            ${usd(p.price_usd)}
+                            {p.price_source === "pool" && <span className="tagpx">pool px</span>}
+                          </span>
+                          <span className="val">{usd(p.value_usdg)}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            </section>
+          )}
 
-            <div className="col">
-              <Chat
-                agentName={agentName}
-                strategy={strategy}
-                ledger={{ eqNow, todayDelta, allTime, positions: feed?.positions ?? [], refusedToday, events: feed?.events ?? [], daysLeft }}
-              />
-            </div>
-          </section>
+          {/* ── CHAT: the agent, full width ── */}
+          {view === "chat" && (
+            <section className="floor one chatview">
+              <div className="col">
+                <Chat
+                  agentName={agentName}
+                  strategy={strategy}
+                  ledger={{ eqNow, todayDelta, allTime, positions: feed?.positions ?? [], refusedToday, events: feed?.events ?? [], daysLeft }}
+                />
+              </div>
+            </section>
+          )}
         </main>
       </div>
 
       {/* mobile tabs */}
       <nav className="tabbar">
-        <a className="navlink on">
+        <button type="button" className={`navlink ${view === "home" ? "on" : ""}`} onClick={() => setView("home")}>
           <Ic d="home" /> Home
-        </a>
-        <a className="navlink">
+        </button>
+        <button type="button" className={`navlink ${view === "chat" ? "on" : ""}`} onClick={() => setView("chat")}>
           <Ic d="chat" /> Chat
-        </a>
-        <a className="navlink">
+        </button>
+        <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
           <Ic d="chart" /> Positions
-        </a>
+        </button>
         <Link className="navlink" href="/settings">
           <Ic d="gear" /> Settings
         </Link>

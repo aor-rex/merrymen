@@ -46,6 +46,11 @@
 .sc-root .kick { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); }
 
 .sc-root #sc-embers { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.5; }
+/* Sherwood, at the edge of sight — a Higgsfield night-forest, grounded at the
+   bottom and faded out before it ever reaches the text. Texture, not a picture. */
+.sc-root::before { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; background: url("/atmos/sherwood-night.webp") center 30% / cover no-repeat; opacity: 0.16; -webkit-mask-image: radial-gradient(130% 105% at 50% 100%, #000 18%, transparent 82%); mask-image: radial-gradient(130% 105% at 50% 100%, #000 18%, transparent 82%); }
+@media (prefers-reduced-motion: no-preference) { .sc-root::before { animation: sc-drift 60s ease-in-out infinite alternate; } }
+@keyframes sc-drift { from { transform: scale(1.02) translateY(0); } to { transform: scale(1.08) translateY(-1.4%); } }
 .sc-root .app { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 100vh; position: relative; z-index: 1; }
 
 /* rail */
@@ -55,7 +60,7 @@
 .sc-root .brand b { font-weight: 800; letter-spacing: -0.03em; font-size: 17px; }
 .sc-root .brand .dev { color: var(--faint); font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
 .sc-root .nav { display: flex; flex-direction: column; gap: 2px; }
-.sc-root .navlink { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: var(--r-sm); color: var(--dim); font-weight: 500; font-size: 14px; cursor: pointer; border: 1px solid transparent; transition: background .16s, color .16s, border-color .16s; }
+.sc-root .navlink { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: var(--r-sm); color: var(--dim); font-weight: 500; font-size: 14px; cursor: pointer; border: 1px solid transparent; background: transparent; font-family: inherit; text-align: left; transition: background .16s, color .16s, border-color .16s; }
 .sc-root .navlink svg { width: 17px; height: 17px; stroke-width: 1.7; flex: none; }
 .sc-root .navlink:hover { color: var(--tx-2); background: var(--raised); }
 .sc-root .navlink.on { color: var(--tx); background: color-mix(in srgb, var(--lime) 9%, var(--panel)); border-color: color-mix(in srgb, var(--lime) 22%, var(--line)); }
@@ -130,6 +135,10 @@
 
 /* floor */
 .sc-root .floor { display: grid; grid-template-columns: 1.12fr 1fr; gap: clamp(16px, 2vw, 26px); padding-top: 24px; }
+/* single-focus views (Home tape / Positions / Chat) — one calm column */
+.sc-root .floor.one { grid-template-columns: 1fr; }
+.sc-root .floor.chatview .col { max-width: 820px; }
+.sc-root .floor.chatview .chat { min-height: min(72vh, 660px); }
 .sc-root .col { min-width: 0; display: flex; flex-direction: column; gap: 24px; }
 .sc-root .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
 .sc-root .panel-h { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }

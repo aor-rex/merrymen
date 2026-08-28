@@ -55,6 +55,13 @@ const isImmutableAsset = (url) => {
   // only matters while developing, which is exactly when a pinned stale chunk is
   // most confusing.
   if (url.pathname.startsWith("/_next/static/webpack/")) return false;
+  // On localhost (dev), EVERY /_next/static chunk is rewritten in place on edit
+  // and is not truly content-hashed — cache-first pins a whole stale build (which
+  // silently served an old /app through a dozen rebuilds once). Fetch chunks from
+  // the network in dev; production keeps cache-first, since its chunks are
+  // immutable by hash. API caching is untouched either way.
+  const dev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
+  if (dev && url.pathname.startsWith("/_next/static/")) return false;
   return url.pathname.startsWith("/_next/static/") || /\.(?:woff2?|png|svg|ico)$/.test(url.pathname);
 };
 
