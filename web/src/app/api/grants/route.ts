@@ -14,6 +14,7 @@ import { createPublicClient, http, parseAbi } from "viem";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { getGrantStore } from "@merrymen/grant-store";
+import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -97,6 +98,34 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
+
+    // FIRST-ARM IDENTITY PROOF. owner == tenant above only proves the CLAIMED
+    // owner is this wallet — it says nothing about smartAccount, which the client
+    // supplied as free JSON. A tenant could keep grant.owner == their own wallet
+    // yet point grant.smartAccount at SOMEONE ELSE'S account and squat its ledger
+    // partition (every table keys on smart_account). So recompute the
+    // counterfactual Kernel address from the owner and require it to match the
+    // claimed account. deserializePermissionAccount elsewhere reads accountAddress
+    // straight from the grant; THIS is the check that makes that address earned.
+    // Fail CLOSED: if derivation can't be verified (bad chain id, RPC hiccup),
+    // refuse rather than trust the client — a rejected honest grant is retried, a
+    // trusted dishonest one is not undoable.
+    let derived: `0x${string}`;
+    try {
+      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
+    } catch {
+      return NextResponse.json(
+        { error: "couldn't verify the account derivation — please try again" },
+        { status: 503 },
+      );
+    }
+    if (derived.toLowerCase() !== grant.smartAccount.toLowerCase()) {
+      return NextResponse.json(
+        { error: "this smart account does not derive from the signed-in wallet" },
+        { status: 403 },
+      );
+    }
+
     // Persist to the per-tenant store, keyed on the authenticated tenant. The
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
