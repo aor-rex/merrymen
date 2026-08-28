@@ -11,6 +11,8 @@ import { isMock } from "@/net/api";
 import { TRADEABLE_SYMBOLS, type GrantCaps } from "@merrymen/core";
 import { accountFromMnemonic } from "@/crypto/mnemonic";
 import { readOwner } from "@/crypto/keystore";
+import { fundWithPhantom } from "@/net/wallets";
+import { handoffMessage } from "@/net/handoffMessage";
 import { useBottomPad, useTopPad } from "@/ui/insets";
 import { C } from "@/ui/tokens";
 
@@ -57,6 +59,10 @@ export default function Grant() {
   const [step, setStep] = useState("signing…");
   const [signed, setSigned] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What the wallet handoff actually did. Held as a message rather than a
+  // boolean because the copy and the app-open fail independently, and telling
+  // someone "copied" when it wasn't sends them to paste an empty clipboard.
+  const [handoff, setHandoff] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -98,6 +104,19 @@ export default function Grant() {
       setBusy(false);
     }
   }, [caps]);
+
+  /**
+   * Copy the account and open Phantom, in that order and in one tap.
+   *
+   * Phantom publishes no deeplink that prefills a send (see net/wallets.ts), so
+   * "one tap, then paste" is the most automatic this can honestly be — and every
+   * outcome below is reported truthfully rather than assumed, because the copy
+   * and the launch fail for different reasons.
+   */
+  const fundNow = useCallback(async () => {
+    if (!signed) return;
+    setHandoff(handoffMessage(await fundWithPhantom(signed)));
+  }, [signed]);
 
   // Say it before the walkthrough, not as a thrown error at the end of it.
   // signGrant refuses too — that is the real enforcement, and this is the part
@@ -189,11 +208,30 @@ export default function Grant() {
       {signed ? (
         <View style={styles.done}>
           <Text style={styles.doneTitle}>Wall signed</Text>
-          <Text style={styles.doneLabel}>smart account</Text>
-          <Text style={styles.doneAddr}>{signed}</Text>
+          <Text style={styles.doneLabel}>smart account · Robinhood Chain</Text>
+          {/* Selectable: this screen asks the reader to move money to this
+              address, so being able to select it by hand is the floor. The
+              button below is the fast path, not the only one. */}
+          <Text style={styles.doneAddr} selectable>
+            {signed}
+          </Text>
           <Text style={styles.doneText}>
-            Fund this address with USDG and ETH for gas, and your agent can start inside the limits above. Your
+            Send USDG and a little ETH for gas here, and your agent can start inside the limits above. Your
             recovery phrase never left this phone.
+          </Text>
+
+          <Pressable style={styles.fundBtn} onPress={fundNow}>
+            <Text style={styles.fundBtnText}>Copy address & open Phantom</Text>
+          </Pressable>
+          {handoff && <Text style={styles.handoff}>{handoff}</Text>}
+          {/* Phantom carries Robinhood Chain on the same EVM address it already
+              uses for Ethereum, but the network ships switched off, and a send
+              screen with no Robinhood Chain in the list is exactly where someone
+              gets stuck. Say where the toggle is, once. */}
+          <Text style={styles.fundNote}>
+            No Robinhood Chain in Phantom&apos;s network list? Turn it on under Settings → Active Networks. Any
+            wallet or exchange that supports Robinhood Chain works too — the address above is the same either
+            way.
           </Text>
         </View>
       ) : (
@@ -333,6 +371,22 @@ const styles = StyleSheet.create({
   doneLabel: { color: C.faint, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginTop: 4 },
   doneAddr: { color: C.text, fontSize: 12 },
   doneText: { color: C.dim, fontSize: 13, lineHeight: 19, marginTop: 4 },
+  fundBtn: {
+    backgroundColor: C.green,
+    borderRadius: 10,
+    // 48 not 52: this sits inside the done card rather than being the screen's
+    // own primary action, and matching the page button would compete with it.
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // The label is long enough to wrap flush against both borders at iOS
+    // Larger Text without this — the same fix settings.tsx's action carries.
+    paddingHorizontal: 14,
+    marginTop: 10,
+  },
+  fundBtnText: { color: '#08120e', fontSize: 15, fontWeight: '700', textAlign: 'center' },
+  handoff: { color: C.green, fontSize: 12.5, lineHeight: 18, marginTop: 8 },
+  fundNote: { color: C.faint, fontSize: 12, lineHeight: 18, marginTop: 8 },
   secondary: {
     backgroundColor: C.bg2,
     borderRadius: 12,
