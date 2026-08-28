@@ -6,6 +6,7 @@ import { LogoMark } from "@/components/Logo";
 import { MERRYMEN_GATEWAY_ORIGIN, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import SetupChecklist from "./SetupChecklist";
 
 type Draft = Record<string, string>;
 
@@ -347,6 +348,10 @@ export default function SettingsPage() {
             by the worker within one tick — no restarts. Keys never leave your machine; leave a key
             blank to keep what&apos;s saved.
           </p>
+
+          {/* Setup steps live here after the /app muster is done — a quiet, honest
+              status strip read from real state, and a fast way back to fund or re-key. */}
+          <SetupChecklist />
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="settings-section mono">essentials</div>

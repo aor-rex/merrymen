@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, type ReactElement } from "react";
 import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
-import { getInjectedProvider, requestAccount } from "@/lib/wallet";
+import Onboarding, { type OnboardStep } from "./Onboarding";
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -31,6 +31,18 @@ export default function Console() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // Sticky "the fund step is done" — set when the account first shows gas, or
+  // when the owner explicitly skips it. Keeps the soft step from re-nagging on a
+  // momentary balance blip. The hard steps (connect, create) never read this.
+  const [onboarded, setOnboarded] = useState(false);
+
+  useEffect(() => {
+    try {
+      setOnboarded(localStorage.getItem("mm_onboarded") === "1");
+    } catch {
+      /* private mode — the real-state gating still works without the flag */
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -59,6 +71,21 @@ export default function Console() {
     };
   }, []);
 
+  const markOnboarded = () => {
+    try {
+      localStorage.setItem("mm_onboarded", "1");
+    } catch {
+      /* best effort */
+    }
+    setOnboarded(true);
+  };
+
+  // Once the account actually holds gas, remember it — so reaching camp is
+  // one-way and a later read blip can't drag them back to the fund step.
+  useEffect(() => {
+    if (loaded && !onboarded && hasGas(status?.balances?.ethWei)) markOnboarded();
+  }, [loaded, onboarded, status]);
+
   if (!loaded) {
     return (
       <div className="sc-root">
@@ -67,104 +94,49 @@ export default function Console() {
     );
   }
 
-  // Hosted + not signed in → the wallet gate. Self-hosted skips this entirely
-  // (the localhost guard is its perimeter; session.hosted is false there).
-  if (session?.hosted && !session.address) {
-    return <ConnectGate />;
+  const hosted = !!session?.hosted;
+  const address = session?.address ?? null;
+  const connected = !hosted || !!address; // self-hosted's perimeter is localhost
+  const exists = !!status?.exists;
+  const funded = hasGas(status?.balances?.ethWei);
+  const chainId = status?.grant?.chainId ?? 46630;
+
+  // The guided first run — ONE step on screen, derived from real state. Connect
+  // and create are hard gates; fund is soft (skippable and remembered). When
+  // there's no incomplete step, the console loads.
+  const step: OnboardStep | null = !connected
+    ? "connect"
+    : !exists
+      ? "create"
+      : !funded && !onboarded
+        ? "fund"
+        : null;
+
+  if (step) {
+    return (
+      <Onboarding
+        hosted={hosted}
+        address={address}
+        step={step}
+        smartAccount={status?.grant?.smartAccount ?? null}
+        testnet={chainId === 46630}
+        onSkipFund={markOnboarded}
+      />
+    );
   }
 
-  // Signed in (or self-hosted) but no armed agent → create one.
-  if (!status?.exists) {
-    return <CreateGate signedIn={!!session?.address} />;
+  return <Loaded feed={feed} status={status!} />;
+}
+
+/** True when the agent's smart account holds any gas — the thing that actually
+ *  gates trading. ethWei is a wei string; unreadable or zero reads as unfunded. */
+function hasGas(wei?: string): boolean {
+  if (!wei) return false;
+  try {
+    return BigInt(wei) > 0n;
+  } catch {
+    return Number(wei) > 0;
   }
-
-  return <Loaded feed={feed} status={status} />;
-}
-
-function CreateGate({ signedIn }: { signedIn: boolean }) {
-  return (
-    <div className="sc-root">
-      <Embers />
-      <div className="gate">
-        <div className="gate-card">
-          <div className="gate-mark">🏹</div>
-          <h1>Muster your band.</h1>
-          <p>
-            {signedIn ? "Signed in. Now " : ""}
-            Create an agent wallet, set the caps the chain will enforce, and fund it. Your owner key
-            is generated in this browser and never leaves it — the server only ever holds a capped,
-            revocable session key.
-          </p>
-          <Link className="btn lime" href="/grant">
-            Create your agent →
-          </Link>
-          <span className="fine">non-custodial · caps enforced on-chain</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConnectGate() {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const connect = async () => {
-    setErr(null);
-    setBusy(true);
-    try {
-      const provider = getInjectedProvider();
-      const account = await requestAccount(provider);
-      const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
-        if (!r.ok) throw new Error("sign-in is unavailable right now");
-        return r.json();
-      })) as { nonce: string; message: string };
-      // EIP-191 personal_sign of the human-readable challenge. The server
-      // recovers the address from THIS — the wallet is the identity.
-      const signature = (await provider.request({
-        method: "personal_sign",
-        params: [ch.message, account],
-      })) as string;
-      const v = await fetch("/api/auth/verify", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ nonce: ch.nonce, signature }),
-      });
-      if (!v.ok) {
-        const e = (await v.json().catch(() => ({}))) as { error?: string };
-        throw new Error(e.error || "sign-in failed");
-      }
-      // Session cookie is set — reload to pick up the tenant's grant + feed.
-      window.location.reload();
-    } catch (e) {
-      const m = e instanceof Error ? e.message : "sign-in failed";
-      // A user rejecting the signature isn't an error worth shouting about.
-      setErr(/reject|denied|4001/i.test(m) ? "Sign-in cancelled." : m);
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="sc-root">
-      <Embers />
-      <div className="gate">
-        <div className="gate-card">
-          <div className="gate-mark">🏹</div>
-          <h1>Sign in with your wallet.</h1>
-          <p>
-            No password, no email. Your wallet signs a one-time challenge — it moves no funds and
-            grants no permissions, it just proves the account is yours. The signature is your whole
-            login.
-          </p>
-          <button className="btn lime" onClick={connect} disabled={busy}>
-            {busy ? "Check your wallet…" : "Connect wallet →"}
-          </button>
-          {err && <span className="fine" style={{ color: "var(--rose)" }}>{err}</span>}
-          <span className="fine">your owner key never leaves this device</span>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStatus }) {
