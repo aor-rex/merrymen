@@ -120,6 +120,10 @@ async function main() {
       say("  left behind (they refused to transfer):");
       for (const sk of res.skipped) say(`    • ${sk.symbol}: ${sk.reason}`);
     }
+    if (res.nativeSweptWei > 0n) {
+      say(`  ✓ also swept ${(Number(res.nativeSweptWei) / 1e18).toFixed(6)} ETH ` +
+          `(${(Number(res.nativeReservedWei) / 1e18).toFixed(6)} left to pay for this op)`);
+    }
     say(`  ✓ swept — tx ${res.txHash}`);
     emit({
       ok: true,
@@ -127,6 +131,8 @@ async function main() {
       to: res.to,
       smartAccount: res.smartAccount,
       balances: res.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+      nativeSweptWei: res.nativeSweptWei.toString(),
+      nativeReservedWei: res.nativeReservedWei.toString(),
     });
     process.exit(0);
   } catch (e) {

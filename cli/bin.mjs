@@ -1219,19 +1219,26 @@ async function recover() {
     return;
   }
   const balances = plan.result.balances ?? [];
-  if (balances.length === 0) {
+  // Native ETH counts as something to recover. It did not used to: an account
+  // funded with ETH and no tokens — exactly what the fund instructions ask for —
+  // was told it held nothing while its whole balance sat there.
+  const heldWei = BigInt(plan.result.gasWei ?? "0");
+  const heldEth = Number(heldWei) / 1e18;
+  if (balances.length === 0 && heldWei === 0n) {
     p.close();
-    warn(`nothing to recover — ${plan.result.smartAccount} holds no USDG or tokens.`);
+    warn(`nothing to recover — ${plan.result.smartAccount} holds no ETH, USDG or tokens.`);
     console.log(dim("  If you expected funds here, check you're using the right owner key and chain."));
     return;
   }
 
-  const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ");
+  const parts = balances.map((b) => `${b.amount} ${b.symbol}`);
+  if (heldWei > 0n) parts.push(`${heldEth.toFixed(6)} ETH ${dim("(minus gas)")}`);
+  const list = parts.join(", ");
   console.log();
   warn(`about to sweep ${bold(list)}`);
   console.log(`  from ${dim(plan.result.smartAccount)}`);
   console.log(`  to   ${bold(to)}`);
-  console.log(dim("  real and irreversible. the account keeps its dust ETH — it pays this op's gas.\n"));
+  console.log(dim("  real and irreversible. a little ETH stays behind to pay for this operation.\n"));
   const confirm = (await p.ask(`  type ${bold("sweep")} to confirm: `)).trim().toLowerCase();
   p.close();
   if (confirm !== "sweep") {

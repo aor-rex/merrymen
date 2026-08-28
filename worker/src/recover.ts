@@ -80,6 +80,15 @@ export interface RecoverResult extends RecoverPlan {
   to: Address;
   /** Held, but left behind — with the reason. Never silent. */
   skipped: { symbol: string; reason: string }[];
+  /**
+   * Native ETH actually swept, in wei. Reported separately from `balances`
+   * because it is not a token transfer and cannot be swept in full — the
+   * account pays this very operation's gas out of the same balance, so a
+   * reserve stays behind on purpose.
+   */
+  nativeSweptWei: bigint;
+  /** What was deliberately left to cover gas, in wei. */
+  nativeReservedWei: bigint;
 }
 
 /**
@@ -326,11 +335,45 @@ export async function planRecovery(opts: {
 }
 
 /**
- * Sweep every non-zero token balance to `to` in a single owner-signed UserOp
- * (the account deploys itself on this same op if it never traded). Requires a
- * bundler — a counterfactual smart account cannot move funds any other way.
- * ETH is left behind: it pays for this op's gas, and the remainder is dust.
+ * Sweep every non-zero token balance AND the account's native ETH to `to` in a
+ * single owner-signed UserOp (the account deploys itself on this same op if it
+ * never traded). Requires a bundler — a counterfactual smart account cannot
+ * move funds any other way.
+ *
+ * ETH USED TO BE ABANDONED HERE, on the reasoning that it only pays for this
+ * op's gas and the remainder is dust. That holds on testnet and is wrong the
+ * moment anyone funds a real account: gas money on mainnet is money, and an
+ * account funded with ETH and no tokens hit the empty-balances branch below and
+ * was told "nothing to recover" while its whole balance sat there. Someone
+ * following the fund instructions — which ask for ETH for gas — could be told
+ * their funded account was empty.
+ *
+ * So the ETH goes too, minus a reserve for this operation's own gas. The reserve
+ * is deliberately generous: reserving too much leaves a little behind, while
+ * reserving too little makes the op unaffordable and moves NOTHING, tokens
+ * included. One of those is a rounding error and the other strands the sweep,
+ * so the bias is not a close call.
  */
+/**
+ * How much native ETH can leave, and how much must stay to pay for the move.
+ *
+ * Pure, because this is the arithmetic that decides whether the sweep happens at
+ * all. Reserve too little and the operation cannot be paid for, so NOTHING
+ * moves — the tokens included — and the account is left exactly as stuck as
+ * before. Reserve too much and a few cents stay behind. Those are not
+ * comparable failures, so the buffer is deliberately fat: a gas limit well above
+ * what a handful of transfers costs, doubled.
+ *
+ * Returns a zero sweep when the balance does not clear the reserve, which is the
+ * ordinary case for an account holding only gas money.
+ */
+export function nativeSweep(heldWei: bigint, gasPriceWei: bigint): { sweep: bigint; reserve: bigint } {
+  const GAS_LIMIT_GUESS = 900_000n;
+  const reserve = gasPriceWei * GAS_LIMIT_GUESS * 2n;
+  if (heldWei <= reserve) return { sweep: 0n, reserve: heldWei };
+  return { sweep: heldWei - reserve, reserve };
+}
+
 export async function recoverFunds(opts: {
   chain: Chain;
   ownerPrivateKey: `0x${string}`;
@@ -348,11 +391,29 @@ export async function recoverFunds(opts: {
     extraTokens: opts.extraTokens,
   });
 
-  if (plan.balances.length === 0) {
-    return { ...plan, txHash: null, to: opts.to, skipped: [] };
+  const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
+
+  // ── how much native ETH can leave ────────────────────────────────────────
+  // The account pays for this operation out of the same balance it is sending,
+  // so a reserve has to stay. Size it from the live gas price against a gas
+  // limit comfortably above what a handful of transfers costs, then double it.
+  // If the estimate is short the op simply cannot be paid for and NOTHING
+  // moves — tokens included — so the buffer is protecting the whole sweep, not
+  // just the ETH leg.
+  let { sweep: nativeSweptWei, reserve: nativeReservedWei } = { sweep: 0n, reserve: plan.gasWei };
+  try {
+    ({ sweep: nativeSweptWei, reserve: nativeReservedWei } = nativeSweep(
+      plan.gasWei,
+      await publicClient.getGasPrice(),
+    ));
+  } catch {
+    // Couldn't price gas — take nothing rather than risk making the op
+    // unaffordable. The tokens still move, which is the larger sum.
   }
 
-  const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
+  if (plan.balances.length === 0 && nativeSweptWei === 0n) {
+    return { ...plan, txHash: null, to: opts.to, skipped: [], nativeSweptWei: 0n, nativeReservedWei };
+  }
   const entryPoint = getEntryPoint("0.7");
   const ownerAccount = privateKeyToAccount(opts.ownerPrivateKey);
   const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
@@ -415,11 +476,11 @@ export async function recoverFunds(opts: {
     }
   }
 
-  if (movable.length === 0) {
+  if (movable.length === 0 && nativeSweptWei === 0n) {
     // NOT "the account is empty". Everything here is held; none of it would
     // move. Callers must be able to tell those apart — `skipped` is non-empty
     // and says why for each one.
-    return { ...plan, txHash: null, to: opts.to, skipped };
+    return { ...plan, txHash: null, to: opts.to, skipped, nativeSweptWei: 0n, nativeReservedWei };
   }
 
   const calls = movable.map((b) => ({
@@ -428,10 +489,26 @@ export async function recoverFunds(opts: {
     data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [opts.to, b.raw] }),
   }));
 
+  // The ETH leg goes LAST: a plain value transfer with no calldata. Ordering it
+  // after the token moves means a token that reverts unexpectedly takes the ETH
+  // down with it rather than the reverse — the account keeps its gas money and
+  // the sweep can simply be retried.
+  if (nativeSweptWei > 0n) {
+    calls.push({ to: opts.to, value: nativeSweptWei, data: "0x" as `0x${string}` });
+  }
+
   const userOpHash = await client.sendUserOperation({ callData: await account.encodeCalls(calls) });
   const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
   if (!receipt.success) {
     throw new Error(`recovery UserOp reverted on-chain: ${userOpHash}`);
   }
-  return { ...plan, balances: movable, txHash: receipt.receipt.transactionHash, to: opts.to, skipped };
+  return {
+    ...plan,
+    balances: movable,
+    txHash: receipt.receipt.transactionHash,
+    to: opts.to,
+    skipped,
+    nativeSweptWei,
+    nativeReservedWei,
+  };
 }
