@@ -32,8 +32,15 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
+  /* Layers top→bottom: the existing green glow, a bg-coloured veil that keeps the
+     Sherwood night-forest to a whisper (thicker up top, thinner at the floor so it
+     grounds the page), the forest itself, then the solid base. Same atmosphere the
+     console carries, now under every globals.css page — settings, scoreboard, the
+     dashboard — so the whole product reads as one place. */
   background:
     radial-gradient(120% 80% at 50% -10%, color-mix(in srgb, var(--green) 6%, transparent), transparent 60%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg) 94%, transparent), color-mix(in srgb, var(--bg) 80%, transparent)),
+    url("/atmos/sherwood-night.webp") center 28% / cover no-repeat,
     var(--bg);
   background-attachment: fixed;
   color: var(--text);
