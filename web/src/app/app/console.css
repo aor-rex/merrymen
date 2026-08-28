@@ -251,6 +251,14 @@
 .sc-root .ob-err { display: block; color: var(--rose); font-family: var(--mono); font-size: 12px; margin-top: 12px; }
 .sc-root .ob-note { color: var(--dim); font-size: 14px; }
 
+/* The mobile wallet handoff: shown in place of Connect when this browser has no
+   injected provider, so a phone gets a way in instead of an error. Anchors, not
+   buttons — see the note at the call site. */
+.sc-root .ob-wallets { display: flex; flex-direction: column; gap: 10px; align-items: stretch; width: 100%; max-width: 340px; }
+.sc-root .ob-wallets-say { font-size: 14px; color: var(--dim); line-height: 1.5; }
+.sc-root .ob-wallets .ob-btn { justify-content: center; text-decoration: none; }
+.sc-root .ob-wallets-fine { font-family: var(--mono); font-size: 11px; color: var(--faint); line-height: 1.5; }
+
 .sc-root .ob-btn { font-family: var(--sans); font-weight: 700; font-size: 15px; padding: 13px 22px; border-radius: 10px; background: var(--lime); color: #14210a; border: 1px solid var(--lime); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: transform .12s, background .16s, border-color .16s; }
 .sc-root .ob-btn:hover { transform: translateY(-1px); background: var(--lime-dim); }
 .sc-root .ob-btn:disabled { opacity: .55; cursor: default; transform: none; }

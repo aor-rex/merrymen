@@ -15,9 +15,15 @@
  * hand-drawn wireframe per step, lime used only as the mark — the Sherwood
  * console's world, slowed down to one thing at a time.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { getInjectedProvider, requestAccount } from "@/lib/wallet";
+import {
+  findInjectedProvider,
+  getInjectedProvider,
+  requestAccount,
+  walletBrowserLinks,
+  type WalletBrowserLink,
+} from "@/lib/wallet";
 import { LogoMark } from "@/components/Logo";
 
 export type OnboardStep = "connect" | "create" | "fund";
@@ -225,10 +231,46 @@ const ARTCAP: Record<OnboardStep, string> = { connect: "fig. 1 — the signature
 function ConnectStep() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  /**
+   * Wallet-app links, shown only once we KNOW this browser injects no provider.
+   *
+   * Starts null so the first paint matches the server's (no flash of a handoff
+   * that a desktop extension user never needed), and because a provider can be
+   * injected a tick after load — deciding during render would race it.
+   */
+  const [handoff, setHandoff] = useState<WalletBrowserLink[] | null>(null);
+
+  const offerHandoff = useCallback(() => {
+    setHandoff(walletBrowserLinks(window.location.href, window.location.origin));
+  }, []);
+
+  useEffect(() => {
+    if (findInjectedProvider()) return;
+    // Nothing injected yet. Wallets may announce late, so give the page a beat
+    // before concluding there is none rather than flashing the handoff at a
+    // desktop user whose extension is still waking up.
+    const settle = setTimeout(() => {
+      if (!findInjectedProvider()) offerHandoff();
+    }, 600);
+    const onInit = () => clearTimeout(settle);
+    window.addEventListener("ethereum#initialized", onInit, { once: true });
+    return () => {
+      clearTimeout(settle);
+      window.removeEventListener("ethereum#initialized", onInit);
+    };
+  }, [offerHandoff]);
+
   const connect = async () => {
     setErr(null);
     setBusy(true);
     try {
+      // Re-check here too: this is the moment everything has settled, and a
+      // phone that reached this button still has no wallet to talk to.
+      if (!findInjectedProvider()) {
+        offerHandoff();
+        setBusy(false);
+        return;
+      }
       const provider = getInjectedProvider();
       const account = await requestAccount(provider);
       const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
@@ -258,9 +300,29 @@ function ConnectStep() {
       fine="your owner key never leaves this device"
       err={err}
     >
-      <button className="ob-btn" onClick={connect} disabled={busy}>
-        {busy ? "Check your wallet…" : "Connect wallet →"}
-      </button>
+      {handoff ? (
+        <div className="ob-wallets">
+          <span className="ob-wallets-say">
+            This browser has no wallet to sign with. Open merrymen in your wallet&apos;s browser:
+          </span>
+          {/* Real anchors, deliberately. Phantom's docs are explicit that a
+              browse link "must either be handled by an app or clicked on by an
+              end user" — a scripted window.location assignment is neither, and
+              is also what mobile popup blockers stop. */}
+          {handoff.map((w) => (
+            <a key={w.id} className="ob-btn" href={w.href} rel="noreferrer">
+              Open in {w.name} →
+            </a>
+          ))}
+          <span className="ob-wallets-fine">
+            You&apos;ll land back on this page inside the wallet, where signing in works.
+          </span>
+        </div>
+      ) : (
+        <button className="ob-btn" onClick={connect} disabled={busy}>
+          {busy ? "Check your wallet…" : "Connect wallet →"}
+        </button>
+      )}
     </StepBody>
   );
 }
