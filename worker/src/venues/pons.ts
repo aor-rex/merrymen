@@ -3,28 +3,29 @@
  *
  * WHY THIS EXISTS. Discovery finds tokens by watching Uniswap Initialize
  * events (via Bitquery, the only source that decodes hooked v4 pools). That
- * finds nothing here: a Pons V2 token launches onto its OWN bonding-curve
- * contract and has no pool at all until it graduates. So the launchpad where
- * essentially every new token on this chain appears was, to merrymen,
+ * finds nothing here: a Pons token launches onto its OWN bonding-curve contract
+ * and has no pool at all until it graduates at 4.2 ETH raised. So the launchpad
+ * where essentially every new token on this chain appears was, to merrymen,
  * completely invisible — not "hard to price", not "filtered out", simply never
  * seen. This reads the launchpad directly instead.
  *
- * WHAT IS VERIFIED, AND HOW. Everything below was confirmed against mainnet
- * 4663 rather than taken from documentation, because Pons publishes none:
+ * WHAT IS VERIFIED, AND HOW. Pons publishes no ABI, so every constant here was
+ * established against mainnet 4663 rather than read from documentation:
  *   - the factory has 24,177 bytes of code at the address below;
- *   - it emits this topic0 for launches — 4 in a 3,000-block sample;
- *   - the three indexed addresses are (token, creator, curve), established by
- *     probing each: the first answers symbol()/name() as an ERC-20 ("JASON",
- *     "if only you knew"), the third answers token() pointing back at the
- *     first, and the middle answers neither.
+ *   - it emits this topic0 on launch — ~50 per 3,000 blocks, and 523 distinct
+ *     tokens over 40,000 blocks, so the launchpad is genuinely busy;
+ *   - the field order was fixed by probing a real launch (PIZZA): topic1
+ *     answers symbol() as an ERC-20, topic2 answers token() pointing back at
+ *     topic1 AND getReserves() — so it is the curve — and topic3 answers
+ *     neither, so it is the creator.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO. It does not price a curve token, and it
- * cannot yet: the curve is a beacon proxy whose implementation exposes 62
- * selectors and none of the buy/sell/reserve names one would guess — the
- * interface is genuinely undocumented and needs resolving before a price, let
- * alone a trade, can be honest. So this REPORTS, exactly as discovery.ts does,
- * and nothing here is on the dispose side. Seeing a launch is not deciding to
- * hold it.
+ * A CORRECTION WORTH KEEPING. This module first shipped watching topic0
+ * 0x308c390e…, which looked right because its three indexed addresses probed as
+ * (token, creator, curve). It is a DIFFERENT, secondary event: it fires ~12x
+ * less often and about 205 blocks (~20s) AFTER the launch. Watching it silently
+ * under-reported the launchpad by an order of magnitude. Two events on one
+ * contract can both look like "the launch" when probed in isolation; the thing
+ * that separated them was comparing when each fired for the same token.
  */
 import type { PublicClient } from "viem";
 
@@ -32,13 +33,14 @@ import type { PublicClient } from "viem";
 export const PONS_V2_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e" as const;
 
 /**
- * topic0 of the V2 launch event, taken from the chain rather than a signature
- * guess — Pons publishes no ABI, so the hash IS the specification here.
- * Shape: (address indexed token, address indexed creator, address indexed curve),
- * no data words.
+ * topic0 of the launch event, taken from the chain rather than a signature
+ * guess — with no published ABI the hash IS the specification.
+ *
+ * Shape, established by probing: (token indexed, curve indexed, creator
+ * indexed) with the quote token in the first data word.
  */
-export const PONS_V2_LAUNCH_TOPIC =
-  "0x308c390ed1ab5873392818e036cabdf408bc8ad042fbaead3108954ff75ba980" as const;
+export const PONS_LAUNCH_TOPIC =
+  "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607" as const;
 
 /** A token that launched on a Pons bonding curve. */
 export interface PonsLaunch {
@@ -46,8 +48,18 @@ export interface PonsLaunch {
   token: `0x${string}`;
   /** Its bonding curve — where it trades until graduation. Lowercased. */
   curve: `0x${string}`;
-  /** Whoever launched it, lowercased. Not a trust signal; recorded, not trusted. */
+  /** Whoever launched it, lowercased. Recorded, never treated as a trust signal. */
   creator: `0x${string}`;
+  /**
+   * What the curve is priced in, lowercased. `0x0` means NATIVE ETH.
+   *
+   * Load-bearing rather than trivia: quote assets vary per launch — native ETH,
+   * USDG and cbBTC have all been observed — and the quote asset decides both how
+   * the token is priced and whether the agent can reach it at all. A curve
+   * quoted in something the wall does not cover is not tradeable, however good
+   * the token looks.
+   */
+  quoteToken: `0x${string}`;
   blockNumber: bigint;
   txHash: `0x${string}`;
 }
@@ -61,22 +73,33 @@ function addressFromTopic(topic: string): `0x${string}` {
  * Launches in a block range, oldest first.
  *
  * Malformed logs are SKIPPED rather than defaulted. A launch missing one of its
- * three addresses is not a vaguer version of the same launch — it is something
- * this code does not understand, and inventing a zero address for it would put
- * a token nobody launched in front of the owner.
+ * addresses is not a vaguer version of the same launch — it is something this
+ * code does not understand, and inventing a zero address for it would put a
+ * token nobody launched, on a curve nobody can trade, in front of the owner.
+ * Note that a zero QUOTE token is the one legitimate zero here (native ETH), so
+ * that field is read from data rather than being subject to the same check.
  */
 export function parseLaunchLogs(
-  logs: readonly { topics: readonly string[]; blockNumber: bigint | null; transactionHash: string | null }[],
+  logs: readonly {
+    topics: readonly string[];
+    data: string;
+    blockNumber: bigint | null;
+    transactionHash: string | null;
+  }[],
 ): PonsLaunch[] {
   const out: PonsLaunch[] = [];
   for (const log of logs) {
     if (log.topics.length < 4) continue;
-    if (log.topics[0]?.toLowerCase() !== PONS_V2_LAUNCH_TOPIC) continue;
+    if (log.topics[0]?.toLowerCase() !== PONS_LAUNCH_TOPIC) continue;
     if (log.blockNumber === null || log.transactionHash === null) continue;
+    // The quote token is the first data word. Absent data is a shape this code
+    // does not recognise, not "quoted in ETH" — do not guess it.
+    if (typeof log.data !== "string" || log.data.length < 2 + 64) continue;
     out.push({
       token: addressFromTopic(log.topics[1]!),
-      creator: addressFromTopic(log.topics[2]!),
-      curve: addressFromTopic(log.topics[3]!),
+      curve: addressFromTopic(log.topics[2]!),
+      creator: addressFromTopic(log.topics[3]!),
+      quoteToken: `0x${log.data.slice(2 + 24, 2 + 64)}`.toLowerCase() as `0x${string}`,
       blockNumber: log.blockNumber,
       txHash: log.transactionHash as `0x${string}`,
     });
@@ -101,11 +124,9 @@ export async function recentPonsLaunches(
     const head = await client.getBlockNumber();
     const from = head > lookbackBlocks ? head - lookbackBlocks : 0n;
     // Raw eth_getLogs rather than viem's typed getLogs: that one wants an ABI
-    // event to filter by, and Pons publishes no ABI — the topic hash IS the
-    // specification here. Same approach as inflight-reconcile.ts.
-    // Topic-filtered at the node: the factory also emits a much busier trade
-    // event (60 to every 4 launches in the sample), and pulling those back just
-    // to discard them would be the bulk of the response.
+    // event to filter by, and Pons publishes no ABI — the topic hash is the
+    // only specification that exists. Same approach as inflight-reconcile.ts.
+    // Topic-filtered at the node so the factory's other events never travel.
     const raw = (await client.request({
       method: "eth_getLogs",
       params: [
@@ -113,13 +134,14 @@ export async function recentPonsLaunches(
           address: PONS_V2_FACTORY,
           fromBlock: `0x${from.toString(16)}`,
           toBlock: `0x${head.toString(16)}`,
-          topics: [PONS_V2_LAUNCH_TOPIC],
+          topics: [PONS_LAUNCH_TOPIC],
         },
       ],
-    } as never)) as { topics: string[]; blockNumber: string; transactionHash: string }[];
+    } as never)) as { topics: string[]; data: string; blockNumber: string; transactionHash: string }[];
     return parseLaunchLogs(
       raw.map((l) => ({
         topics: l.topics,
+        data: l.data,
         blockNumber: BigInt(l.blockNumber),
         transactionHash: l.transactionHash,
       })),
