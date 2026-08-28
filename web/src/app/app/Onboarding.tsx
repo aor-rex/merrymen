@@ -302,8 +302,14 @@ function ConnectStep() {
     >
       {handoff ? (
         <div className="ob-wallets">
+          {/* Covers both readers, because the trigger is "no injected provider",
+              not "is a phone" — a desktop visitor with no extension lands here
+              too, and telling them to open a wallet's browser is nonsense. Each
+              clause names the situation before the instruction, so nobody has to
+              read the half that isn't theirs. */}
           <span className="ob-wallets-say">
-            This browser has no wallet to sign with. Open merrymen in your wallet&apos;s browser:
+            No wallet detected in this browser. On a phone, open merrymen inside your wallet app — on a
+            computer, install its extension and reload this page.
           </span>
           {/* Real anchors, deliberately. Phantom's docs are explicit that a
               browse link "must either be handled by an app or clicked on by an
@@ -314,9 +320,7 @@ function ConnectStep() {
               Open in {w.name} →
             </a>
           ))}
-          <span className="ob-wallets-fine">
-            You&apos;ll land back on this page inside the wallet, where signing in works.
-          </span>
+          <span className="ob-wallets-fine">Either way, you come back to this page to sign in.</span>
         </div>
       ) : (
         <button className="ob-btn" onClick={connect} disabled={busy}>

@@ -251,9 +251,9 @@
 .sc-root .ob-err { display: block; color: var(--rose); font-family: var(--mono); font-size: 12px; margin-top: 12px; }
 .sc-root .ob-note { color: var(--dim); font-size: 14px; }
 
-/* The mobile wallet handoff: shown in place of Connect when this browser has no
-   injected provider, so a phone gets a way in instead of an error. Anchors, not
-   buttons — see the note at the call site. */
+/* The wallet handoff: shown in place of Connect whenever this browser injects no
+   provider — a phone (which never does) or a desktop with no extension — so both
+   get a way in instead of an error. Anchors, not buttons: see the call site. */
 .sc-root .ob-wallets { display: flex; flex-direction: column; gap: 10px; align-items: stretch; width: 100%; max-width: 340px; }
 .sc-root .ob-wallets-say { font-size: 14px; color: var(--dim); line-height: 1.5; }
 .sc-root .ob-wallets .ob-btn { justify-content: center; text-decoration: none; }
