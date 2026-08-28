@@ -28,6 +28,8 @@ import {
   type GrantCaps,
   type OwnerPreview,
 } from "@/lib/session";
+import "../app/console.css";
+import "./grant.css";
 
 const DEFAULTS: GrantCaps = {
   perTradeUsdg: 50,
@@ -384,18 +386,42 @@ export default function GrantPage() {
   // its grant — the wallet is inert until re-armed (or should be discarded).
   const desynced = grant !== null && serverArmed === false;
 
+  // Which step the wizard is on, derived from the SAME state that gates the
+  // phases below — presentation only, no logic changed. -1 = the desync recovery
+  // panel (its own screen, off the numbered track).
+  const wizStep = desynced ? -1 : !grant || switching ? 0 : !backedUp ? 1 : 2;
+  const RAIL = ["Choose", "Back up", "Fund", "Ride"] as const;
+  const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
+
   return (
-    <>
-      <header className="topbar">
-        <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
-          <span className="arrow"><LogoMark size={20} /></span>
-          <span>merrymen</span>
+    <div className="sc-root gw">
+      <div className="gw-grid" aria-hidden="true" />
+      <div className="gw-top">
+        <Link href="/" className="gw-brand">
+          <span className="m"><LogoMark size={15} /></span> merrymen
         </Link>
-        <span className={`chain-pill ${activeChainId === MAINNET ? "mainnet" : ""}`}>
+        <span className={`gw-chain ${activeChainId === MAINNET ? "mainnet" : ""}`}>
           <span className="dot" />
           {chainLabel(activeChainId)}
         </span>
-      </header>
+      </div>
+
+      {wizStep >= 0 && (
+        <>
+          <nav className="gw-rail" aria-label="Setup progress">
+            {RAIL.map((label, i) => {
+              const s = i < wizStep ? "done" : i === wizStep ? "on" : "todo";
+              return (
+                <span key={label} className={`gw-node ${s}`}>
+                  <span className="gw-dot">{i < wizStep ? "✓" : i === RAIL.length - 1 ? "→" : String(i + 1).padStart(2, "0")}</span>
+                  <span className="gw-label">{label}</span>
+                </span>
+              );
+            })}
+          </nav>
+          {wizStep <= 2 && <span className="gw-kick">{KICKS[wizStep]}</span>}
+        </>
+      )}
 
       <main className="grant-shell">
         {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
@@ -1017,6 +1043,6 @@ export default function GrantPage() {
           </div>
         )}
       </main>
-    </>
+    </div>
   );
 }

@@ -1,0 +1,150 @@
+/* ── The grant wizard — the create/back-up/fund flow, brought onto the console's
+   world (near-black, lime as the mark, mono, blueprint) and presented one step at
+   a time. Scoped under .gw so it overrides the dense-terminal globals.css grant-*
+   styles WITHOUT touching /settings, which shares some of those class names.
+   Every rule here is presentation only — the page's signing/funding logic is
+   untouched. The .sc-root the page also carries brings the tokens + the Sherwood
+   atmosphere for free. ── */
+
+.gw { position: relative; z-index: 1; max-width: 680px; margin: 0 auto; padding: clamp(20px, 3.5vw, 48px) clamp(18px, 5vw, 36px) 72px; }
+.gw .grant-shell { max-width: none; margin: 0; padding: 0; }
+.gw .gw-grid { position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 46px 46px; -webkit-mask-image: radial-gradient(130% 90% at 50% 20%, #000 22%, transparent 78%); mask-image: radial-gradient(130% 90% at 50% 20%, #000 22%, transparent 78%); opacity: 0.5; }
+
+/* top bar */
+.gw .gw-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: clamp(18px, 3vh, 34px); }
+.gw .gw-brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -0.03em; font-size: 16px; color: var(--tx); }
+.gw .gw-brand .m { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 15px; background: radial-gradient(120% 120% at 30% 20%, color-mix(in srgb, var(--lime) 22%, transparent), transparent 70%), var(--panel-2); border: 1px solid var(--line-2); }
+.gw .gw-chain { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--gold); padding: 7px 12px; border-radius: 999px; background: color-mix(in srgb, var(--gold) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--gold) 26%, var(--line)); }
+.gw .gw-chain.mainnet { color: var(--rose); background: color-mix(in srgb, var(--rose) 8%, var(--panel)); border-color: color-mix(in srgb, var(--rose) 26%, var(--line)); }
+.gw .gw-chain .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* progress rail */
+.gw .gw-rail { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; margin-bottom: clamp(18px, 3vh, 30px); }
+.gw .gw-node { display: inline-flex; align-items: center; gap: 9px; }
+.gw .gw-node:not(:last-child)::after { content: ""; display: inline-block; width: clamp(14px, 3.4vw, 54px); height: 1px; background: var(--line-2); margin: 0 6px 0 14px; }
+.gw .gw-node.done:not(:last-child)::after { background: color-mix(in srgb, var(--lime) 45%, var(--line-2)); }
+.gw .gw-dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; border: 1px solid var(--line-2); color: var(--faint); flex: none; }
+.gw .gw-node.on .gw-dot { border-color: var(--lime); color: var(--lime); box-shadow: 0 0 0 4px color-mix(in srgb, var(--lime) 12%, transparent); }
+.gw .gw-node.done .gw-dot { background: color-mix(in srgb, var(--lime) 18%, transparent); border-color: color-mix(in srgb, var(--lime) 55%, var(--line-2)); color: var(--lime); }
+.gw .gw-node .gw-label { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.gw .gw-node.on .gw-label { color: var(--tx); }
+.gw .gw-node.done .gw-label { color: var(--tx-2); }
+
+/* step header */
+.gw .gw-kick { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--lime-dim); margin-bottom: 12px; }
+.gw .gw-title { font-family: var(--mono); font-size: clamp(28px, 4.6vw, 52px); line-height: 1.0; letter-spacing: -0.035em; font-weight: 600; color: var(--tx); margin: 0 0 8px; }
+
+/* the panel — a calm dark card, not the old bordered slab */
+.gw .grant-panel { background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--line); border-radius: 16px; padding: clamp(20px, 2.6vw, 32px); margin: 0 0 20px; backdrop-filter: blur(3px); animation: sc-rise .5s cubic-bezier(.2,.7,.3,1) both; }
+.gw .grant-title { font-size: clamp(20px, 2.4vw, 27px); font-weight: 700; letter-spacing: -0.02em; color: var(--tx); margin: 0 0 10px; }
+.gw .grant-sub { color: var(--tx-2); font-size: 14.5px; line-height: 1.6; margin: 0 0 18px; }
+.gw .grant-sub b { color: var(--tx); font-weight: 600; }
+.gw .field-lead { color: var(--dim); font-size: 13px; margin: 20px 0 10px; }
+
+/* mode tabs (new wallet / restore) */
+.gw .mode-tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--ground-2); border: 1px solid var(--line); border-radius: 11px; margin-bottom: 20px; }
+.gw .mode-tab { font-family: var(--mono); font-size: 12.5px; color: var(--dim); padding: 8px 14px; border-radius: 8px; border: none; background: none; cursor: pointer; transition: background .15s, color .15s; }
+.gw .mode-tab.on { background: color-mix(in srgb, var(--lime) 12%, var(--panel)); color: var(--tx); }
+
+/* chain choice */
+.gw .chain-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.gw .chain-card { text-align: left; display: flex; flex-direction: column; gap: 7px; padding: 15px 16px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s; }
+.gw .chain-card:hover { border-color: color-mix(in srgb, var(--lime) 35%, var(--line-2)); }
+.gw .chain-card.selected { border-color: var(--lime); background: color-mix(in srgb, var(--lime) 8%, var(--panel)); }
+.gw .chain-card.danger.selected { border-color: var(--rose); background: color-mix(in srgb, var(--rose) 9%, var(--panel)); }
+.gw .chain-card-title { font-weight: 700; font-size: 14.5px; color: var(--tx); }
+.gw .chain-card-body { font-size: 12.5px; color: var(--dim); line-height: 1.5; }
+
+.gw .mainnet-warning { border: 1px solid color-mix(in srgb, var(--rose) 40%, var(--line)); background: color-mix(in srgb, var(--rose) 8%, var(--panel)); border-radius: 12px; padding: 14px 16px; font-size: 13px; color: var(--tx-2); line-height: 1.55; margin-bottom: 16px; }
+.gw .mainnet-warning b { color: var(--tx); }
+
+/* restore box */
+.gw .restore-box { display: flex; flex-direction: column; gap: 10px; background: var(--ground-2); border: 1px solid var(--line); border-radius: 12px; padding: 15px 16px; margin-bottom: 16px; }
+.gw .restore-input { background: var(--ground); border: 1px solid var(--line-2); color: var(--tx); border-radius: 9px; padding: 10px 12px; font-family: var(--mono); font-size: 13px; outline: none; }
+.gw .restore-input:focus { border-color: color-mix(in srgb, var(--lime) 45%, var(--line-2)); }
+.gw .restore-preview { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.gw .restore-confirm { color: var(--mint); font-size: 12.5px; }
+.gw .switch-note { background: color-mix(in srgb, var(--gold) 7%, var(--panel)); border: 1px solid color-mix(in srgb, var(--gold) 26%, var(--line)); border-radius: 12px; padding: 14px 16px; font-size: 13px; color: var(--tx-2); line-height: 1.55; margin-bottom: 18px; }
+
+/* preset cards */
+.gw .preset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 6px; }
+.gw .preset-card { text-align: left; display: flex; flex-direction: column; gap: 5px; padding: 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s; }
+.gw .preset-card:hover { border-color: color-mix(in srgb, var(--lime) 30%, var(--line-2)); }
+.gw .preset-card.selected { border-color: var(--lime); background: color-mix(in srgb, var(--lime) 8%, var(--panel)); }
+.gw .preset-label { font-weight: 700; font-size: 13.5px; color: var(--tx); }
+.gw .preset-blurb { font-size: 12px; color: var(--dim); }
+.gw .preset-caps { font-size: 10.5px; color: var(--faint); margin-top: 4px; }
+
+/* cap fields */
+.gw .grant-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.gw .field { display: flex; flex-direction: column; gap: 7px; }
+.gw .field-label { font-size: 12.5px; color: var(--tx-2); }
+.gw .field-input { display: flex; align-items: center; gap: 8px; background: var(--ground-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 3px 12px; }
+.gw .field-input:focus-within { border-color: color-mix(in srgb, var(--lime) 45%, var(--line-2)); }
+.gw .field-input input { flex: 1; background: none; border: none; color: var(--tx); font-family: var(--mono); font-size: 15px; padding: 9px 0; outline: none; width: 100%; }
+.gw .field-unit { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+/* the plain-English summary + "what this key carries" */
+.gw .grant-summary { background: var(--ground-2); border: 1px solid var(--line); border-left: 2px solid color-mix(in srgb, var(--gold) 55%, transparent); border-radius: 10px; padding: 14px 16px; font-size: 12.5px; color: var(--dim); line-height: 1.6; margin: 18px 0; }
+.gw .grant-summary b { color: var(--tx-2); font-weight: 600; }
+.gw .grant-summary ul { margin: 10px 0 0; padding-left: 18px; }
+
+/* the primary button + kill/secondary */
+.gw .grant-btn { display: block; width: 100%; text-align: center; font-family: var(--sans); font-weight: 700; font-size: 15px; padding: 13px 20px; border-radius: 11px; background: var(--lime); color: #14210a; border: 1px solid var(--lime); cursor: pointer; transition: transform .12s, background .16s; margin-top: 6px; }
+.gw .grant-btn:hover { transform: translateY(-1px); background: var(--lime-dim); }
+.gw .grant-btn:disabled { opacity: .5; cursor: default; transform: none; background: var(--panel-2); color: var(--dim); border-color: var(--line-2); }
+.gw .copy-btn { font-family: var(--mono); font-size: 12px; color: var(--tx-2); padding: 8px 13px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line-2); cursor: pointer; transition: border-color .15s, color .15s; }
+.gw .copy-btn:hover { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 35%, var(--line-2)); }
+.gw .btn-kill { font-family: var(--mono); font-size: 12px; color: var(--rose); padding: 8px 13px; border-radius: 8px; background: color-mix(in srgb, var(--rose) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--rose) 26%, var(--line)); cursor: pointer; }
+.gw .btn-kill:hover { background: color-mix(in srgb, var(--rose) 14%, var(--panel)); }
+.gw .grant-error { color: var(--rose); font-family: var(--mono); font-size: 12.5px; margin-top: 12px; }
+.gw .grant-note { font-size: 12px; color: var(--faint); line-height: 1.6; margin-top: 14px; }
+.gw .grant-note .mono, .gw .mono { font-family: var(--mono); }
+.gw .ack-row { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--tx-2); margin: 14px 0; cursor: pointer; }
+.gw .ack-row input { margin-top: 2px; accent-color: var(--lime); }
+
+/* key backup + fund address boxes */
+.gw .key-box, .gw .fund-addr, .gw .grant-result, .gw .restore-preview { background: var(--ground-2); border: 1px solid var(--line); border-radius: 11px; padding: 14px 16px; }
+.gw .key-box { display: flex; flex-direction: column; gap: 12px; margin-bottom: 6px; }
+.gw .key-row, .gw .fund-addr { display: flex; flex-direction: column; gap: 6px; }
+.gw .key-actions { display: flex; gap: 8px; }
+.gw .fund-addr { margin: 6px 0 0; }
+.gw .rk { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.gw .rv { font-family: var(--mono); font-size: 13px; color: var(--tx-2); }
+.gw .grant-result { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.gw .grant-result > div { display: flex; flex-direction: column; gap: 3px; }
+
+/* renew / paper notes */
+.gw .renew-note, .gw .paper-note { border-radius: 11px; padding: 14px 16px; font-size: 13px; line-height: 1.55; margin-bottom: 14px; }
+.gw .renew-note { background: color-mix(in srgb, var(--gold) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--gold) 28%, var(--line)); color: var(--tx-2); }
+.gw .renew-note.expired { background: color-mix(in srgb, var(--rose) 8%, var(--panel)); border-color: color-mix(in srgb, var(--rose) 30%, var(--line)); }
+.gw .renew-note b, .gw .paper-note b { color: var(--tx); }
+.gw .paper-note { background: var(--ground-2); border: 1px solid var(--line-2); color: var(--dim); }
+.gw .paper-note a { color: var(--lime); }
+
+/* fund balances */
+.gw .fund-balances { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+.gw .fund-bal { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px; }
+.gw .fund-bal.ok { border-color: color-mix(in srgb, var(--mint) 40%, var(--line)); }
+.gw .fund-bal-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.gw .fund-bal-v { font-size: 22px; font-weight: 600; color: var(--tx); }
+.gw .fund-bal.ok .fund-bal-v { color: var(--mint); }
+.gw .fund-bal-s { font-size: 11px; color: var(--dim); }
+.gw .fund-actions { display: flex; gap: 10px; margin-top: 4px; }
+.gw .fund-actions .grant-btn { margin-top: 0; }
+.gw .fund-ready { background: color-mix(in srgb, var(--mint) 8%, var(--panel)); border: 1px solid color-mix(in srgb, var(--mint) 28%, var(--line)); border-radius: 10px; padding: 12px 15px; font-size: 12.5px; color: var(--tx-2); margin-top: 12px; line-height: 1.55; }
+.gw .fund-ready b { color: var(--mint); }
+
+/* the wall caps chips + actions */
+.gw .caps { display: flex; gap: 8px; flex-wrap: wrap; }
+.gw .cap { font-family: var(--mono); font-size: 11.5px; color: var(--dim); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; }
+.gw .cap b { color: var(--tx); }
+.gw .grant-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+.gw .grant-actions .grant-btn { width: auto; flex: 1; margin-top: 0; }
+
+.gw .desync-panel { border-color: color-mix(in srgb, var(--rose) 34%, var(--line)); }
+
+@media (max-width: 720px) {
+  .gw .chain-choice, .gw .grant-fields, .gw .preset-row, .gw .fund-balances, .gw .grant-result { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { .gw .grant-panel { animation: none; } }
