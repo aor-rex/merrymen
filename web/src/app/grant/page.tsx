@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { formatEther } from "viem";
 import { Info } from "@/components/Info";
 import { LogoMark } from "@/components/Logo";
 import {
@@ -19,6 +20,7 @@ import {
   clearGrant,
   createAgentWallet,
   FAUCET_URL,
+  listSavedWallets,
   loadGrant,
   previewOwnerAccount,
   readFunding,
@@ -28,6 +30,7 @@ import {
   type Grant,
   type GrantCaps,
   type OwnerPreview,
+  type SavedWallet,
 } from "@/lib/session";
 import "../app/console.css";
 import "./grant.css";
@@ -160,6 +163,80 @@ function CopyBtn({ value, label = "copy" }: { value: string; label?: string }) {
   );
 }
 
+/**
+ * One agent account this browser holds the key for, with what is actually in it.
+ *
+ * Exists because "I sent funds and now I can't see them" is the worst thing this
+ * product can do to someone, and it was reachable by design: the page only ever
+ * showed the CURRENT grant's address, and only once past a backup gate that a
+ * desynced wallet never reaches. The money was never lost — the account is
+ * on-chain and the key is in localStorage — but nothing on screen said so.
+ *
+ * Reads the balance directly from the chain, so it is true regardless of what
+ * the server thinks about this grant.
+ */
+function WalletRow({ w }: { w: SavedWallet }) {
+  const [bal, setBal] = useState<Funding | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    readFunding(w.smartAccount, w.chainId)
+      .then((f) => alive && setBal(f))
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, [w.smartAccount, w.chainId]);
+
+  const empty = bal !== null && bal.gasWei === 0n && bal.usdgUnits === 0n;
+  return (
+    <div className="saved-wallet">
+      <div className="sw-head">
+        <span className="rk">
+          {w.current ? "current" : "previous"} · {chainLabel(w.chainId)}
+        </span>
+        <CopyBtn value={w.smartAccount} label="copy address" />
+      </div>
+      <span className="rv mono" style={{ wordBreak: "break-all" }}>
+        {w.smartAccount}
+      </span>
+      <div className="sw-bal mono">
+        {failed
+          ? "couldn't read the balance — check your connection"
+          : bal === null
+            ? "reading the chain…"
+            : `${formatEther(bal.gasWei)} ETH · ${bal.usdg.toFixed(2)} USDG`}
+        {empty && <span className="sw-empty"> — nothing here</span>}
+      </div>
+      {w.ownerKey ? (
+        <>
+          <button className="copy-btn" onClick={() => setShowKey((v) => !v)}>
+            {showKey ? "hide recovery key" : "show recovery key"}
+          </button>
+          {showKey && (
+            <>
+              <span className="rv mono" style={{ wordBreak: "break-all" }}>
+                {w.ownerKey}
+              </span>
+              <div className="sw-note">
+                <CopyBtn value={w.ownerKey} label="copy key" /> This key controls the account above and
+                everything in it. Anyone who reads it can take the funds — save it somewhere private, and
+                never paste it into a site that asks for it.
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <div className="sw-note">
+          No recovery key is stored for this wallet in this browser.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function GrantPage() {
   const [caps, setCaps] = useState<GrantCaps>(DEFAULTS);
   const [chainId, setChainId] = useState<number>(TESTNET);
@@ -178,6 +255,8 @@ export default function GrantPage() {
   const [serverArmed, setServerArmed] = useState<boolean | null>(null);
   /** {hosted,address} from /api/auth/session. null until it resolves. */
   const [session, setSession] = useState<{ hosted: boolean; address: `0x${string}` | null } | null>(null);
+  /** Every agent account this browser holds a key for — current and superseded. */
+  const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("create");
@@ -203,6 +282,7 @@ export default function GrantPage() {
   useEffect(() => {
     const stored = loadGrant();
     setGrant(stored);
+    setSavedWallets(listSavedWallets());
     // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
     // SELECTED chain (so the page cannot lie), which makes this sync load-
     // bearing: without it the selector defaults to testnet, and a mainnet
@@ -566,9 +646,17 @@ export default function GrantPage() {
                 matter which path produced it, and pressing re-arm looked like a
                 button that did nothing. */}
             {error && <div className="grant-error mono">{error}</div>}
-            <div className="fund-addr mono">
-              <span className="rk">account · {chainLabel(grant!.chainId)}</span>
-              <span className="rv" style={{ wordBreak: "break-all" }}>{grant!.smartAccount}</span>
+            {/* WHAT IS ACTUALLY IN IT, and the key to it. A wallet reaches this
+                panel precisely when the server won't arm it, which is also when
+                someone is most likely to think their money has vanished. The
+                account is on-chain and the key is in this browser — show both
+                rather than only naming the address. */}
+            <div className="saved-wallets">
+              {savedWallets
+                .filter((w) => w.smartAccount.toLowerCase() === grant!.smartAccount.toLowerCase())
+                .map((w) => (
+                  <WalletRow key={w.smartAccount} w={w} />
+                ))}
             </div>
             <div className="fund-actions" style={{ display: "flex", gap: 10 }}>
               <button className="grant-btn" onClick={() => void reArm()} disabled={reArming} style={{ flex: 1 }}>
@@ -577,6 +665,31 @@ export default function GrantPage() {
               <button className="btn-kill" onClick={discard} style={{ flex: 1 }}>
                 discard &amp; start fresh
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ─── wallets this browser superseded ─────────────────────────────── */}
+        {/* Creating a new agent mints a new owner key, so it lands on a DIFFERENT
+            address — the old account keeps whatever was sent to it. Its key is
+            archived rather than overwritten, but an archive nothing renders is
+            the same as a deletion to the person looking for their money. Always
+            visible, on every step, because someone hunting for a missing balance
+            should not have to be at the right point in a wizard to find it. */}
+        {savedWallets.some((w) => !w.current) && (
+          <div className="grant-panel">
+            <h2 className="grant-title">wallets you used before</h2>
+            <p className="grant-sub">
+              Each agent wallet has its own address. These are ones this browser made earlier — if you
+              funded a wallet and the balance above looks wrong, the money is at one of these, and the
+              key to it is here.
+            </p>
+            <div className="saved-wallets">
+              {savedWallets
+                .filter((w) => !w.current)
+                .map((w) => (
+                  <WalletRow key={w.smartAccount} w={w} />
+                ))}
             </div>
           </div>
         )}

@@ -144,6 +144,22 @@
 
 .gw .desync-panel { border-color: color-mix(in srgb, var(--rose) 34%, var(--line)); }
 
+/* Wallets this browser holds a key for — shown wherever someone might be hunting
+   for a balance they cannot find. Deliberately plain: this is evidence. */
+.sc-root .saved-wallets { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.sc-root .saved-wallet {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px; border: 1px solid var(--line-2); border-radius: 10px;
+  background: color-mix(in srgb, var(--raised) 60%, transparent);
+}
+.sc-root .sw-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sc-root .sw-bal { font-size: 14px; color: var(--tx); }
+.sc-root .sw-empty { color: var(--faint); }
+.sc-root .sw-note {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  font-size: 12px; line-height: 1.5; color: var(--faint);
+}
+
 @media (max-width: 720px) {
   .gw .chain-choice, .gw .grant-fields, .gw .preset-row, .gw .fund-balances, .gw .grant-result { grid-template-columns: 1fr; }
 }

@@ -406,6 +406,62 @@ async function signBinding(args: {
 /** Where a superseded grant is parked, keyed by the account it controls. */
 const ARCHIVE_PREFIX = "merrymen.grant.archive.";
 
+/** An agent account this browser holds the owner key for. */
+export interface SavedWallet {
+  smartAccount: Address;
+  owner: Address;
+  chainId: number;
+  /** The key that controls the funds. Absent only on a grant that never had one. */
+  ownerKey?: `0x${string}`;
+  /** Whether this is the wallet currently armed, or one it superseded. */
+  current: boolean;
+}
+
+/**
+ * Every agent account this browser can still reach, newest first.
+ *
+ * THE POINT: an account's funds live at an address derived from an owner key,
+ * and that key exists in exactly one place — this browser's localStorage. If a
+ * grant is superseded, or the server refuses it, the money does not move and
+ * the key does not vanish; only the UI stops mentioning either. That is
+ * indistinguishable from "my funds are gone" to the person it happened to.
+ *
+ * So enumerate what is actually here — the live grant plus every archived one —
+ * and let the page show balances and hand back the key. Reads only localStorage;
+ * no server, no session, works while signed out.
+ */
+export function listSavedWallets(): SavedWallet[] {
+  const out: SavedWallet[] = [];
+  const take = (raw: string | null, current: boolean) => {
+    if (!raw) return;
+    try {
+      const g = JSON.parse(raw) as Partial<Grant>;
+      if (typeof g?.smartAccount !== "string" || typeof g?.owner !== "string") return;
+      // A wallet already listed as current must not appear twice as an archive.
+      if (out.some((w) => w.smartAccount.toLowerCase() === g.smartAccount!.toLowerCase())) return;
+      out.push({
+        smartAccount: g.smartAccount as Address,
+        owner: g.owner as Address,
+        chainId: typeof g.chainId === "number" ? g.chainId : robinhoodTestnet.id,
+        ownerKey: g.demoOwnerPrivateKey,
+        current,
+      });
+    } catch {
+      /* a corrupt blob must not hide the others */
+    }
+  };
+  try {
+    take(localStorage.getItem(STORAGE_KEY), true);
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(ARCHIVE_PREFIX)) take(localStorage.getItem(k), false);
+    }
+  } catch {
+    /* storage unavailable — return whatever was readable */
+  }
+  return out;
+}
+
 /**
  * Copy the grant currently in localStorage aside before it is overwritten.
  *
