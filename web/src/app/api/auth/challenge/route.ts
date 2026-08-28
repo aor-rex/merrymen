@@ -11,23 +11,17 @@
  */
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
-import { challengeMessage, issueChallengeNonce } from "@/lib/auth";
+import { challengeMessage, issueChallengeNonce, requestOrigin } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function originOf(req: Request): string {
-  // Trust the deployment's own configured origin over a client-settable Host —
-  // the signed message binds to THIS, so it must be the real public origin.
-  const configured = process.env.MERRYMEN_PUBLIC_ORIGIN;
-  if (configured) return configured.replace(/\/$/, "");
-  return new URL(req.url).origin;
-}
-
 export async function GET(req: Request) {
   if (!isHostedMode()) return new NextResponse("not found", { status: 404 });
   try {
-    const origin = originOf(req);
+    // Shared with the grant route, which verifies nonces this one issues — two
+    // copies of this could disagree and every binding would fail opaquely.
+    const origin = requestOrigin(req);
     const nonce = issueChallengeNonce(origin);
     return NextResponse.json({ origin, nonce, message: challengeMessage(origin, nonce) });
   } catch (e) {

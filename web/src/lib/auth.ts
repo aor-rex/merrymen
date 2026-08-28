@@ -19,7 +19,7 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress } from "viem";
-import { sessionSecret } from "@merrymen/core";
+import { bindingMessage, sessionSecret } from "@merrymen/core";
 
 /** Challenge nonces live this long. Long enough to sign, short enough to not linger. */
 const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -148,6 +148,93 @@ export async function verifySignedChallenge(args: {
     }
   }
   return { ok: true, address: address.toLowerCase() as `0x${string}` };
+}
+
+// ── grant binding: proving an account belongs to a tenant ────────────────────
+
+/**
+ * The origin a signed message is bound to.
+ *
+ * Trust the deployment's own configured origin over a client-settable Host —
+ * the signed text binds to THIS, so it must be the real public origin. Shared
+ * by every route that issues or verifies a nonce: the challenge issues one
+ * origin-bound nonce and the grant route verifies it, so if the two computed
+ * this differently every claim would fail with nothing obviously wrong.
+ */
+export function requestOrigin(req: Request): string {
+  const configured = process.env.MERRYMEN_PUBLIC_ORIGIN;
+  if (configured) return configured.replace(/\/$/, "");
+  return new URL(req.url).origin;
+}
+
+export type BindingResult =
+  | { ok: true; tenant: `0x${string}` }
+  | { ok: false; why: string };
+
+/**
+ * Verify that a tenant legitimately claims this (owner, smartAccount) pair.
+ *
+ * Reconstructs the canonical message from the values the grant actually carries
+ * and recovers both signatures over it. That is what makes the bound values
+ * trustworthy without parsing anything: alter `owner`, `smartAccount`, `chainId`
+ * or `origin` in the request and the reconstructed text differs from what was
+ * signed, so neither signature recovers to the expected address and the claim
+ * fails. The caller never gets to assert who they are.
+ *
+ * Two signatures, two different jobs:
+ *   walletSignature must recover to the SESSION TENANT — intent.
+ *   ownerSignature  must recover to `owner` — possession.
+ *
+ * Dropping the second would leave both remaining checks pure functions of
+ * public addresses, so anyone could claim anyone's account. It is the whole
+ * reason this function takes two signatures instead of one.
+ *
+ * Burns the nonce only on full success, so a partially-valid claim cannot spend
+ * someone else's nonce.
+ */
+export async function verifyGrantBinding(args: {
+  origin: string;
+  tenant: `0x${string}`;
+  nonce: string;
+  owner: `0x${string}`;
+  smartAccount: `0x${string}`;
+  chainId: number;
+  walletSignature: `0x${string}`;
+  ownerSignature: `0x${string}`;
+  now?: number;
+}): Promise<BindingResult> {
+  const now = args.now ?? Date.now();
+  const gate = checkNonce(args.nonce, args.origin, now);
+  if (!gate.ok) return { ok: false, why: gate.why };
+
+  const message = bindingMessage({
+    origin: args.origin,
+    nonce: args.nonce,
+    owner: args.owner,
+    smartAccount: args.smartAccount,
+    chainId: args.chainId,
+  });
+
+  let walletSigner: `0x${string}`;
+  let ownerSigner: `0x${string}`;
+  try {
+    [walletSigner, ownerSigner] = await Promise.all([
+      recoverMessageAddress({ message, signature: args.walletSignature }),
+      recoverMessageAddress({ message, signature: args.ownerSignature }),
+    ]);
+  } catch {
+    return { ok: false, why: "binding signature did not recover" };
+  }
+
+  if (walletSigner.toLowerCase() !== args.tenant.toLowerCase()) {
+    return { ok: false, why: "the authorization was not signed by the signed-in wallet" };
+  }
+  if (ownerSigner.toLowerCase() !== args.owner.toLowerCase()) {
+    return { ok: false, why: "the agent wallet did not co-sign — its owner key is not held here" };
+  }
+
+  usedNonces.add(args.nonce);
+  return { ok: true, tenant: args.tenant.toLowerCase() as `0x${string}` };
 }
 
 // ── session cookie ───────────────────────────────────────────────────────────

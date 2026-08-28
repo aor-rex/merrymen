@@ -99,8 +99,37 @@ describe("FileGrantStore", () => {
     );
   });
 
-  it("REFUSES a grant whose owner is not the tenant — no cross-tenant install", async () => {
-    await assert.rejects(() => store.put(ALICE, grantFor(BOB)), /does not match tenant/);
+  /**
+   * The store no longer compares grant.owner to the tenant, and MUST NOT.
+   *
+   * The owner key is generated in the browser, so `owner` can never equal the
+   * signed-in wallet — requiring it refused every hosted grant ever submitted.
+   * The tenant↔account link is proved at intake instead (verifyGrantBinding),
+   * by the wallet's authorization plus the owner key's co-signature.
+   *
+   * What the store still guarantees is the part that was always doing the real
+   * work: the record is filed under the AUTHENTICATED tenant, never under
+   * anything the grant says about itself. So a grant naming Bob, stored by
+   * Alice's session, is Alice's record and is not reachable as Bob's.
+   */
+  it("files a grant under the AUTHENTICATED tenant, never under grant.owner", async () => {
+    // A third address with no grant of its own — earlier tests in this suite
+    // already store one for BOB, so BOB cannot show "was not filed under the
+    // declared owner".
+    const CAROL = "0x00000000000000000000000000000000000000c3" as `0x${string}`;
+    await store.put(ALICE, grantFor(CAROL));
+    const asAlice = await store.get(ALICE);
+    assert.ok(asAlice, "stored under the session that put it");
+    assert.equal(asAlice!.owner, CAROL, "the declared owner is kept verbatim…");
+    assert.equal(await store.get(CAROL), null, "…but it did NOT become Carol's grant");
+  });
+
+  it("tenantForAccount finds the holder of an account, and nobody for an unclaimed one", async () => {
+    await store.put(ALICE, grantFor(ALICE));
+    // The collision guard grant intake relies on: every ledger table keys on
+    // smart_account, so a second tenant claiming this one must be refused.
+    assert.equal(await store.tenantForAccount("0x00000000000000000000000000000000000000a1"), ALICE);
+    assert.equal(await store.tenantForAccount("0x00000000000000000000000000000000000000ff"), null);
   });
 
   it("remove forgets exactly one tenant", async () => {

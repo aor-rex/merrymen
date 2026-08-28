@@ -12,7 +12,7 @@ import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient, http, parseAbi } from "viem";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
-import { tenantOf } from "@/lib/auth";
+import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { getGrantStore } from "@merrymen/grant-store";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
@@ -89,13 +89,57 @@ export async function POST(req: Request) {
     }
 
     // AUTHORIZE ON THE SESSION ADDRESS, never on the self-declared grant.owner.
-    // A tenant that could claim someone else's owner address would hijack their
-    // agent id and ledger partition (the DB keys every table on smart_account,
-    // and the account derives from the owner).
-    if (typeof grant.owner !== "string" || grant.owner.toLowerCase() !== tenant) {
+    // A tenant that could claim someone else's account would hijack their agent
+    // id and ledger partition (the DB keys every table on smart_account).
+    //
+    // `owner` is a key the BROWSER generated, so it can never equal the tenant —
+    // requiring that was why every hosted grant was refused. The claim is proved
+    // instead by two signatures over one server-issued nonce: the wallet
+    // authorizes this exact (owner, account, chain) pair, and the owner key
+    // co-signs the same text. The second is what makes it unforgeable — without
+    // it both remaining checks are functions of PUBLIC addresses, so anyone
+    // could authorize anyone else's pair and squat their partition.
+    if (!isAddr(grant.owner)) {
+      return NextResponse.json({ error: "grant owner is not an address" }, { status: 400 });
+    }
+    const binding = grant.binding;
+    if (!binding?.nonce || !binding.walletSignature || !binding.ownerSignature) {
       return NextResponse.json(
-        { error: "grant owner does not match the signed-in wallet" },
+        { error: "this grant isn't linked to your login — create it again from a signed-in browser" },
         { status: 403 },
+      );
+    }
+    const bound = await verifyGrantBinding({
+      origin: requestOrigin(req),
+      tenant,
+      nonce: binding.nonce,
+      owner: grant.owner,
+      smartAccount: grant.smartAccount,
+      chainId: grant.chainId,
+      walletSignature: binding.walletSignature,
+      ownerSignature: binding.ownerSignature,
+    });
+    if (!bound.ok) {
+      return NextResponse.json({ error: bound.why }, { status: 403 });
+    }
+
+    // FIRST CLAIM WINS. Two tenants must never share a smart account, because
+    // every ledger table keys on it — they would silently write into one
+    // partition. Possession of the owner key is already proved above, so this is
+    // not a security boundary so much as a collision guard, and it fails safe:
+    // an unreadable store refuses rather than allowing a possible collision.
+    try {
+      const holder = await getGrantStore().tenantForAccount(grant.smartAccount);
+      if (holder && holder !== tenant) {
+        return NextResponse.json(
+          { error: "this agent account is already linked to a different login" },
+          { status: 409 },
+        );
+      }
+    } catch {
+      return NextResponse.json(
+        { error: "couldn't check this account's ownership — please try again" },
+        { status: 503 },
       );
     }
 

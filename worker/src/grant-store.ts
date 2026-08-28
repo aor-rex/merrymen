@@ -52,6 +52,15 @@ export interface GrantStore {
   get(tenant: `0x${string}`): Promise<StoredGrant | null>;
   /** Every tenant with a grant — for the orchestrator to lease and arm. */
   listTenants(): Promise<`0x${string}`[]>;
+  /**
+   * Which tenant already holds this smart account, or null.
+   *
+   * The collision guard for grant intake: every ledger table keys on
+   * smart_account, so two tenants sharing one account would write into a single
+   * partition. Callers must treat a THROW as "refuse", never as "nobody holds
+   * it" — an unreadable store must not be able to wave a collision through.
+   */
+  tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
 }
@@ -61,9 +70,15 @@ function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
   if (carriesOwnerKey(grant)) {
     throw new Error("refusing to store a grant that carries an owner key");
   }
-  if (typeof grant.owner !== "string" || grant.owner.toLowerCase() !== tenant) {
-    throw new Error(`grant.owner (${grant.owner}) does not match tenant (${tenant})`);
-  }
+  // NOTE: this deliberately no longer requires grant.owner === tenant. The owner
+  // key is generated in the browser, so the two can never be equal; requiring it
+  // rejected every hosted grant ever submitted. The tenant↔account link is
+  // proved at intake instead, by two signatures over a server-issued nonce
+  // (verifyGrantBinding in web/src/lib/auth.ts) — the wallet's, and the owner
+  // key's co-signature proving the browser actually holds what it vouched for.
+  // What survives here as defence in depth is the owner-key refusal above and
+  // the fact that the record is keyed on the AUTHENTICATED tenant below, never
+  // on anything the grant declares about itself.
   const { demoSessionPrivateKey, demoOwnerPrivateKey, ...rest } = grant as StoredGrant & {
     demoOwnerPrivateKey?: string;
   };
@@ -122,6 +137,18 @@ export class FileGrantStore implements GrantStore {
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     await rm(this.file(tenant), { force: true });
+  }
+  async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
+    const want = smartAccount.toLowerCase();
+    // A scan, deliberately: the file backend is the single-service/self-hosted
+    // path where the tenant count is small, and an index would be another thing
+    // to keep in step with the files themselves. A read that throws propagates —
+    // the caller must refuse rather than assume the account is unclaimed.
+    for (const tenant of await this.listTenants()) {
+      const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
+      if (rec.grant?.smartAccount?.toLowerCase() === want) return tenant;
+    }
+    return null;
   }
 }
 
@@ -217,6 +244,18 @@ export class PgGrantStore implements GrantStore {
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
     await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+  }
+  async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
+    const c = await this.client();
+    // The account lives inside grant_json, so this reads it out of the JSONB
+    // rather than a column. Fine at this size; if the fleet grows, the index to
+    // add is on (grant_json->>'smartAccount').
+    const { rows } = await c.query(
+      `SELECT tenant FROM grants WHERE lower(grant_json->>'smartAccount') = $1 LIMIT 1`,
+      [smartAccount.toLowerCase()],
+    );
+    const row = rows[0];
+    return row ? (String(row.tenant) as `0x${string}`) : null;
   }
 }
 

@@ -176,6 +176,8 @@ export default function GrantPage() {
   // deletes the server file but not this localStorage — so the dashboard shows
   // "no merryman" while this page would happily show a wallet the worker ignores.
   const [serverArmed, setServerArmed] = useState<boolean | null>(null);
+  /** {hosted,address} from /api/auth/session. null until it resolves. */
+  const [session, setSession] = useState<{ hosted: boolean; address: `0x${string}` | null } | null>(null);
   const [reArming, setReArming] = useState(false);
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("create");
@@ -217,6 +219,17 @@ export default function GrantPage() {
       .then((r) => (r.ok ? r.json() : { exists: false }))
       .then((s: { exists?: boolean }) => setServerArmed(!!s.exists))
       .catch(() => setServerArmed(null));
+    // THE ONLY TRUSTWORTHY hosted signal on the client. isHostedMode() reads
+    // process.env, which Next does not inline into the browser bundle, so it is
+    // false in every browser regardless of how the server is configured. Left
+    // null until this resolves, and creating is blocked meanwhile — signing with
+    // the wrong assumption mints a grant the server will refuse.
+    fetch("/api/auth/session", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s: { hosted?: boolean; address?: string | null } | null) =>
+        setSession(s ? { hosted: !!s.hosted, address: (s.address ?? null) as `0x${string}` | null } : null),
+      )
+      .catch(() => setSession(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
@@ -234,8 +247,14 @@ export default function GrantPage() {
 
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
-    const g = loadGrant();
-    if (!g) return;
+    const stored = loadGrant();
+    if (!stored) return;
+    // STRIP THE OWNER KEY BEFORE RE-POSTING. loadGrant() reads the localStorage
+    // copy, and that one ALWAYS carries demoOwnerPrivateKey — it is the root of
+    // client-side recovery. Posting it verbatim tripped the hosted owner-key
+    // refusal every single time, so the desync panel's only escape button could
+    // never work on the hosted service no matter how correct the grant was.
+    const { demoOwnerPrivateKey: _ownerKey, ...g } = stored;
     setReArming(true);
     setError(null);
     try {
@@ -300,9 +319,20 @@ export default function GrantPage() {
 
   async function onCreate() {
     setError(null);
+    // Refuse rather than mint something the server will throw away. /grant is
+    // reachable directly — the connect step lives in the /app rail — so someone
+    // can land here signed out, and hosted binding needs a wallet AND a session.
+    if (session === null) {
+      setError("still checking your session — give it a second and try again.");
+      return;
+    }
+    if (session.hosted && !session.address) {
+      setError("Sign in with your wallet first — a hosted agent is linked to the wallet you sign in with.");
+      return;
+    }
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter);
+      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter, session.hosted);
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
       // left at whatever the mount-time fetch found — which is `false` on a first
@@ -352,6 +382,7 @@ export default function GrantPage() {
         chainId,
         customTokens,
         v4Adapter,
+        session?.hosted ?? false,
       );
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
@@ -423,6 +454,7 @@ export default function GrantPage() {
         chainId,
         freshTokens,
         freshAdapter,
+        session?.hosted ?? false,
       );
       setGrant(g);
       // Same correction as create/restore: report what the server said, so a

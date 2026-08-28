@@ -142,6 +142,49 @@ export interface GrantCaps {
   maxOpsPerDay: number;
 }
 
+/**
+ * The message both signatures are made over when a tenant claims an account.
+ *
+ * SHARED ON PURPOSE. The browser signs this text and the server reconstructs it
+ * to recover the signatures; if the two ever built it differently every claim
+ * would fail with nothing obviously wrong. One definition, imported by both —
+ * the same reason the wall itself lives in this package.
+ *
+ * DELIBERATELY NOT CONFUSABLE WITH THE LOGIN CHALLENGE (`challengeMessage` in
+ * web/src/lib/auth.ts). Both are plain `personal_sign` over the same key, so if
+ * the texts could be mistaken for one another a signature captured for one
+ * purpose could be replayed as the other. The opening line names a different
+ * action in different words, and every bound value appears literally — EIP-191
+ * has no domain separator to carry them.
+ *
+ * Each field earns its place:
+ *   origin  — a claim signed for one deployment cannot be replayed at another
+ *   nonce   — server-issued, expiring, single-use; stops replay of this claim
+ *   owner   — the key being vouched for
+ *   account — the smart account claimed, i.e. which ledger partition is at stake
+ *   chainId — merrymen runs testnet 46630 and mainnet 4663; without it one
+ *             signature would bind on both
+ */
+export function bindingMessage(args: {
+  origin: string;
+  nonce: string;
+  owner: `0x${string}`;
+  smartAccount: `0x${string}`;
+  chainId: number;
+}): string {
+  return [
+    `${args.origin} wants you to authorize a merrymen agent account.`,
+    "",
+    "You are linking the agent wallet below to this login. It moves no funds.",
+    "",
+    `Agent account: ${args.smartAccount.toLowerCase()}`,
+    `Owner key: ${args.owner.toLowerCase()}`,
+    `Chain ID: ${args.chainId}`,
+    `URI: ${args.origin}`,
+    `Nonce: ${args.nonce}`,
+  ].join("\n");
+}
+
 export interface StoredGrant {
   smartAccount: `0x${string}`;
   owner: `0x${string}`;
@@ -176,6 +219,41 @@ export interface StoredGrant {
    * the only reader and requires the GRANT_V4_ADAPTER marker alongside it.
    */
   v4AdapterAddress?: string;
+  /**
+   * HOSTED ONLY — the two signatures that bind this account to a tenant.
+   *
+   * The account's owner key is generated in the browser, so `owner` can never
+   * equal the signed-in wallet and the server cannot authorize on it directly.
+   * Instead the browser proves the pairing with two signatures over ONE
+   * server-issued nonce:
+   *
+   *   wallet — the signed-in wallet authorizes this (owner, smartAccount) pair.
+   *            Proves INTENT: this tenant meant to claim this account.
+   *   owner  — the generated owner key signs the same message, locally.
+   *            Proves POSSESSION: whoever claimed it actually holds the key.
+   *
+   * BOTH are required, and the second is the load-bearing one. With only the
+   * wallet signature the server's checks reduce to functions of PUBLIC
+   * addresses — anyone could authorize someone else's pair and squat their
+   * ledger partition, which keys on smart_account. The co-signature is what
+   * makes the claim unforgeable. See verifyGrantBinding in web/src/lib/auth.ts.
+   *
+   * Both are `personal_sign` (EIP-191), deliberately: it carries no domain and
+   * no chainId, so it needs no network switch and works in wallets that cannot
+   * reach this chain at all — Phantom among them, which supports Robinhood
+   * Chain for assets but refuses dApp connections on it.
+   *
+   * Absent on self-hosted grants, where localhost is the perimeter and there is
+   * no tenant to bind to.
+   */
+  binding?: {
+    /** The nonce both signatures were made over. Server-issued, single-use. */
+    nonce: string;
+    /** personal_sign by the signed-in wallet — must recover to the tenant. */
+    walletSignature: `0x${string}`;
+    /** personal_sign by the generated owner key — must recover to `owner`. */
+    ownerSignature: `0x${string}`;
+  };
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
   /**

@@ -3,9 +3,11 @@
 /**
  * The permission wall — creating an agent account and granting it a scoped key.
  *
- * NO EXTERNAL WALLET. The account's owner key is generated in the browser, so
- * there's nothing to connect — you create the wallet, back up its owner key,
- * and fund the account address. The flow (all counterfactual — nothing is
+ * NO EXTERNAL WALLET OWNS THE FUNDS. The account's owner key is generated in
+ * the browser — you create the wallet, back up its owner key, and fund the
+ * account address. Hosted adds ONE wallet popup on top of that, and only to
+ * link the account to your login (see step 5); the wallet never owns the
+ * account and never signs a trade. The flow (all counterfactual — nothing is
  * deployed until the agent's first trade):
  *  1. A fresh OWNER keypair is generated → it's the Kernel account's sudo
  *     validator (ECDSA). The smart-account address derives from it.
@@ -18,6 +20,12 @@
  *       - timestamp: hard expiry
  *  4. The owner key signs the grant locally (no popup); the serialized grant is
  *     what the worker uses to act. Revocation = expiry (or nonce invalidation).
+ *  5. HOSTED ONLY — the account is bound to the signed-in tenant by two
+ *     signatures over one server-issued nonce: the wallet authorizes the pair
+ *     (intent) and the owner key co-signs it (possession). Both personal_sign,
+ *     so no chain switch is ever required. Without step 5 the server has no way
+ *     to tell whose account this is, because `owner` is a key minted here and
+ *     can never equal the signed-in wallet.
  *
  * TESTNET DEMO CAVEATS (labeled in the UI): both private keys are kept in
  * localStorage so you can inspect and back them up; production owner keys live
@@ -61,13 +69,14 @@ import {
   GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
-  isHostedMode,
+  bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
 } from "@merrymen/core";
+import { findInjectedProvider, requestAccount } from "./wallet";
 
 export type { GrantCaps, StoredGrant };
 
@@ -126,6 +135,18 @@ async function mintGrant(
    * together below, or not at all.
    */
   v4AdapterAddress?: `0x${string}`,
+  /**
+   * Whether this deployment is the hosted service, from GET /api/auth/session.
+   *
+   * PASSED IN, NOT DETECTED. `isHostedMode()` reads process.env, and this module
+   * is `"use client"` — Next inlines only NEXT_PUBLIC_* into the browser bundle
+   * and next.config.mjs declares no `env` block, so it evaluated to `false` in
+   * every browser no matter how the server was configured. That silently
+   * attached the owner key to every hosted POST, which the server then refused
+   * with a 422 nobody could see. The runtime endpoint is the only signal the
+   * client can trust.
+   */
+  hosted = false,
 ): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -269,12 +290,36 @@ async function mintGrant(
     // custodian of a single owner key. The owner key still lives in this
     // browser's localStorage below, which is what makes client-side recovery
     // work with no server involvement.
-    ...(isHostedMode() ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
+    ...(hosted ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
   };
+
+  // HOSTED: prove this account belongs to the signed-in wallet before offering
+  // it. The owner key was generated right here, so `owner` can never equal the
+  // tenant and the server cannot authorize on it — two signatures over one
+  // server-issued nonce stand in for that. See bindingMessage in packages/core.
+  if (hosted) {
+    onStatus("linking this wallet to your account…");
+    const binding = await signBinding({
+      owner,
+      smartAccount: account.address,
+      chainId,
+      ownerAccount,
+    });
+    grant.binding = binding;
+  }
+
   // localStorage ALWAYS gets the full grant WITH the owner key — hosted or not.
   // This is the browser's own copy, the root of client-side recovery, and it
   // never crosses the network. Losing it is the same as losing the key, which
   // is why the UI forces a backup before funding.
+  //
+  // ARCHIVE FIRST. This is a single key, so writing it destroys whatever grant
+  // was here — and for a hosted grant that blob is the ONLY copy of its owner
+  // key, never shown to the user and never sent anywhere. Overwriting it
+  // silently strands any funds in the old account, so the outgoing grant is
+  // copied aside under its own address, the same safety net archiveCurrentGrant
+  // gives the self-hosted file (web/src/app/api/grants/route.ts).
+  archivePreviousGrant();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...grant, demoOwnerPrivateKey: ownerPrivateKey }));
 
   // Hand the grant to the worker. Self-hosted: a localhost file handoff.
@@ -283,6 +328,83 @@ async function mintGrant(
   // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
   return { grant, handoff: await postGrant(grant) };
+}
+
+/**
+ * Produce the two signatures that bind this account to the signed-in wallet.
+ *
+ * The nonce comes from /api/auth/challenge — the same server-issued,
+ * origin-bound, expiring, single-use nonce the login uses. Reused deliberately
+ * rather than adding a second nonce system: the two messages are textually
+ * distinct (see bindingMessage), so a nonce spent on one can never be replayed
+ * as the other, and there is one piece of nonce machinery to get right.
+ *
+ * The wallet signature is the only popup in the whole flow. The owner
+ * co-signature is local and silent — it exists to prove the browser actually
+ * holds the key it is vouching for, without which the server's remaining checks
+ * are just arithmetic over public addresses.
+ *
+ * `personal_sign` for both, which is why this works at all: it carries no
+ * domain and no chainId, so no wallet is asked to switch to (or even know
+ * about) Robinhood Chain. Phantom cannot connect to dApps on 4663 at all, and
+ * still signs this fine.
+ */
+async function signBinding(args: {
+  owner: Address;
+  smartAccount: Address;
+  chainId: number;
+  ownerAccount: ReturnType<typeof privateKeyToAccount>;
+}): Promise<NonNullable<Grant["binding"]>> {
+  const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
+    if (!r.ok) throw new Error("couldn't start the account link — please sign in again.");
+    return r.json();
+  })) as { origin: string; nonce: string };
+
+  const message = bindingMessage({
+    origin: ch.origin,
+    nonce: ch.nonce,
+    owner: args.owner,
+    smartAccount: args.smartAccount,
+    chainId: args.chainId,
+  });
+
+  const provider = findInjectedProvider();
+  if (!provider) {
+    throw new Error("No wallet found in this browser to authorize the agent — sign in again from a browser with your wallet.");
+  }
+  const account = await requestAccount(provider);
+  const walletSignature = (await provider.request({
+    method: "personal_sign",
+    // [message, address] — the order Onboarding.tsx's sign-in already uses.
+    params: [message, account],
+  })) as `0x${string}`;
+
+  // Local, no popup: the generated owner key vouches for itself.
+  const ownerSignature = await args.ownerAccount.signMessage({ message });
+
+  return { nonce: ch.nonce, walletSignature, ownerSignature };
+}
+
+/** Where a superseded grant is parked, keyed by the account it controls. */
+const ARCHIVE_PREFIX = "merrymen.grant.archive.";
+
+/**
+ * Copy the grant currently in localStorage aside before it is overwritten.
+ *
+ * Best-effort and deliberately silent: this must never be able to stop someone
+ * creating a wallet. Keyed by smart account, so re-creating over the same
+ * account just refreshes its copy while a different account gets its own slot.
+ */
+function archivePreviousGrant(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const prev = JSON.parse(raw) as Partial<Grant>;
+    if (typeof prev?.smartAccount !== "string") return;
+    localStorage.setItem(`${ARCHIVE_PREFIX}${prev.smartAccount.toLowerCase()}`, raw);
+  } catch {
+    /* unreadable or storage full — never block the create */
+  }
 }
 
 /**
@@ -357,9 +479,10 @@ export async function createAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
+  hosted = false,
 ): Promise<MintedGrant> {
   onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress);
+  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, hosted);
 }
 
 /**
@@ -380,9 +503,10 @@ export async function restoreAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
+  hosted = false,
 ): Promise<MintedGrant> {
   onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress);
+  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, hosted);
 }
 
 /**
