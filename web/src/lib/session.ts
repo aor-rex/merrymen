@@ -107,6 +107,9 @@ export function clearGrant(): void {
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
 
+/** An address, abbreviated for a sentence a person has to read. */
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
 /**
  * Mint a grant for a given OWNER key: derive the Kernel account, generate a
  * fresh session key, wrap it in the policy validator, and seal the grant.
@@ -146,7 +149,7 @@ async function mintGrant(
    * with a 422 nobody could see. The runtime endpoint is the only signal the
    * client can trust.
    */
-  hosted = false,
+  hostedAs?: Address,
 ): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -290,20 +293,21 @@ async function mintGrant(
     // custodian of a single owner key. The owner key still lives in this
     // browser's localStorage below, which is what makes client-side recovery
     // work with no server involvement.
-    ...(hosted ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
+    ...(hostedAs ? {} : { demoOwnerPrivateKey: ownerPrivateKey }),
   };
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
   // tenant and the server cannot authorize on it — two signatures over one
   // server-issued nonce stand in for that. See bindingMessage in packages/core.
-  if (hosted) {
+  if (hostedAs) {
     onStatus("linking this wallet to your account…");
     const binding = await signBinding({
       owner,
       smartAccount: account.address,
       chainId,
       ownerAccount,
+      tenant: hostedAs,
     });
     grant.binding = binding;
   }
@@ -354,6 +358,8 @@ async function signBinding(args: {
   smartAccount: Address;
   chainId: number;
   ownerAccount: ReturnType<typeof privateKeyToAccount>;
+  /** The wallet the session belongs to — what the server will check against. */
+  tenant: Address;
 }): Promise<NonNullable<Grant["binding"]>> {
   const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
     if (!r.ok) throw new Error("couldn't start the account link — please sign in again.");
@@ -373,6 +379,18 @@ async function signBinding(args: {
     throw new Error("No wallet found in this browser to authorize the agent — sign in again from a browser with your wallet.");
   }
   const account = await requestAccount(provider);
+  // CHECK BEFORE PROMPTING. The wallet's ACTIVE account is whatever the user
+  // last selected, which is not necessarily the one they signed in with — and
+  // the server checks the signature against the session. Without this they
+  // approve a signature and only then get a 403 naming a wallet mismatch they
+  // cannot act on. Catch it while it is still a sentence about switching
+  // accounts, not a failed grant.
+  if (account.toLowerCase() !== args.tenant.toLowerCase()) {
+    throw new Error(
+      `Your wallet is on ${short(account)} but you signed in as ${short(args.tenant)}. ` +
+        `Switch back to that account in your wallet, or sign out and in again.`,
+    );
+  }
   const walletSignature = (await provider.request({
     method: "personal_sign",
     // [message, address] — the order Onboarding.tsx's sign-in already uses.
@@ -479,10 +497,10 @@ export async function createAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
-  hosted = false,
+  hostedAs?: Address,
 ): Promise<MintedGrant> {
   onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, hosted);
+  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, hostedAs);
 }
 
 /**
@@ -503,10 +521,10 @@ export async function restoreAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
-  hosted = false,
+  hostedAs?: Address,
 ): Promise<MintedGrant> {
   onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, hosted);
+  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, hostedAs);
 }
 
 /**

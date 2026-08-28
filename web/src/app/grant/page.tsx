@@ -332,7 +332,7 @@ export default function GrantPage() {
     }
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter, session.hosted);
+      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter, session.hosted ? session.address ?? undefined : undefined);
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
       // left at whatever the mount-time fetch found — which is `false` on a first
@@ -382,7 +382,7 @@ export default function GrantPage() {
         chainId,
         customTokens,
         v4Adapter,
-        session?.hosted ?? false,
+        session?.hosted ? session.address ?? undefined : undefined,
       );
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
@@ -454,7 +454,7 @@ export default function GrantPage() {
         chainId,
         freshTokens,
         freshAdapter,
-        session?.hosted ?? false,
+        session?.hosted ? session.address ?? undefined : undefined,
       );
       setGrant(g);
       // Same correction as create/restore: report what the server said, so a
