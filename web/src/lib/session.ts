@@ -126,7 +126,7 @@ async function mintGrant(
    * together below, or not at all.
    */
   v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
+): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -282,18 +282,68 @@ async function mintGrant(
   // own store. In hosted mode the browser sends its session cookie so the
   // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
+  return { grant, handoff: await postGrant(grant) };
+}
+
+/**
+ * Hand a signed grant to the server, and REPORT WHAT IT SAID.
+ *
+ * This used to be a bare `await fetch(...)` inside a `try {} catch {}`, and the
+ * comment explained only why a failure must not lose the grant — which is true,
+ * and is handled by the localStorage write above. What it missed is that a
+ * rejected POST does not throw: `fetch` resolves normally for 401/403/422/500,
+ * so the catch never ran and nothing ever read `res.ok`. Every server refusal
+ * looked identical to success, and the caller happily reported a wallet the
+ * server had thrown away. That is why hosted onboarding could be broken for
+ * every tester with nobody able to say more than "it doesn't work".
+ *
+ * So: never throw (the grant is safe in localStorage either way), but always
+ * return what happened, and prefer the server's OWN message — it is the only
+ * text that can say which of the six hosted checks refused this grant.
+ */
+/**
+ * Turn a refusal into something the reader can ACT on.
+ *
+ * The server's own strings are accurate but written for whoever is reading the
+ * route — "not signed in" is true and tells a user nothing about what to do
+ * next. Each hosted check gets a sentence naming the fix; anything unmapped
+ * falls through to the server's text, which is still better than the silence
+ * this replaced. The raw message is kept on the end where it adds detail, so a
+ * bug report can still quote the exact check that refused.
+ */
+export function refusalMessage(status: number, serverError?: string): string {
+  switch (status) {
+    case 401:
+      return "Sign in with your wallet first — a hosted agent is bound to the wallet you sign in with.";
+    case 422:
+      // carriesOwnerKey. Today this is reachable from this very client, which is
+      // a bug on our side, not something the reader did wrong — say so.
+      return "This wallet can't be armed on the hosted service yet: the grant still carries its owner key. That's a bug on our side, not yours.";
+    case 403:
+      return "This agent wallet isn't owned by the wallet you signed in with, so the server won't arm it.";
+    case 503:
+      return "Couldn't verify the account on-chain just now — try again in a moment.";
+    default:
+      return serverError ?? `the server refused the grant (${status})`;
+  }
+}
+
+async function postGrant(grant: Grant): Promise<GrantHandoff> {
   try {
-    await fetch("/api/grants", {
+    const res = await fetch("/api/grants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
       body: JSON.stringify(grant),
     });
+    if (res.ok) return { ok: true };
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: refusalMessage(res.status, body.error) };
   } catch {
-    // Worker handoff failing must not lose the signed grant — it's in localStorage.
+    // A genuine network failure, as opposed to a refusal. Still not fatal — the
+    // grant is in localStorage and `re-arm` can push it again later.
+    return { ok: false, error: "couldn't reach the server to hand over the grant — it's saved in this browser, try re-arming." };
   }
-
-  return grant;
 }
 
 /**
@@ -307,7 +357,7 @@ export async function createAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
+): Promise<MintedGrant> {
   onStatus("minting your agent's owner key…");
   return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress);
 }
@@ -330,9 +380,30 @@ export async function restoreAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
+): Promise<MintedGrant> {
   onStatus("re-deriving your smart account from the owner key…");
   return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress);
+}
+
+/**
+ * What the server said when the signed grant was handed over.
+ *
+ * Separate from the grant itself because the two succeed independently: the
+ * grant is signed and in localStorage regardless, while the handoff can be
+ * refused (not signed in, carries an owner key, owner isn't the tenant…). The
+ * UI must be able to show a wallet AND say the server rejected it, which is
+ * exactly the state a desynced browser is in.
+ */
+export interface GrantHandoff {
+  ok: boolean;
+  /** The server's own message, shown verbatim — it names which check refused. */
+  error?: string;
+}
+
+/** A freshly signed grant plus the outcome of handing it to the server. */
+export interface MintedGrant {
+  grant: Grant;
+  handoff: GrantHandoff;
 }
 
 export interface OwnerPreview {

@@ -22,6 +22,7 @@ import {
   loadGrant,
   previewOwnerAccount,
   readFunding,
+  refusalMessage,
   restoreAgentWallet,
   type Funding,
   type Grant,
@@ -236,15 +237,28 @@ export default function GrantPage() {
     const g = loadGrant();
     if (!g) return;
     setReArming(true);
+    setError(null);
     try {
       const r = await fetch("/api/grants", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // Explicit, matching the mint-time POST. This is fetch's default for a
+        // same-origin request, so it is not a fix — it just stops the two grant
+        // POSTs looking like they disagree about whether auth matters.
+        credentials: "same-origin",
         body: JSON.stringify(g),
       });
-      if (r.ok) setServerArmed(true);
+      if (r.ok) {
+        setServerArmed(true);
+      } else {
+        // The button that did nothing. `if (r.ok)` with no else meant a refusal
+        // left the banner up, re-enabled the button, and said NOTHING — so the
+        // only feedback was "press it again", forever. Show what the server said.
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
+        setError(refusalMessage(r.status, body.error));
+      }
     } catch {
-      /* leave the banner up; the button re-enables */
+      setError("couldn't reach the server to re-arm this wallet.");
     }
     setReArming(false);
   }
@@ -288,8 +302,16 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter);
+      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter);
       setGrant(g);
+      // Take the ARMED state from what the server actually said. This used to be
+      // left at whatever the mount-time fetch found — which is `false` on a first
+      // visit, because there was no grant yet — so a brand-new wallet dropped
+      // straight into the "this wallet isn't active" desync panel even when the
+      // handoff had succeeded. The panel is for a wallet the server has genuinely
+      // forgotten, not for one it just accepted.
+      setServerArmed(handoff.ok);
+      if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
       setStatus(null);
     } catch (e) {
       setStatus(null);
@@ -323,7 +345,7 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const g = await restoreAgentWallet(
+      const { grant: g, handoff } = await restoreAgentWallet(
         restoreKey.trim() as `0x${string}`,
         caps,
         setStatus,
@@ -339,7 +361,11 @@ export default function GrantPage() {
       setRestoreKey("");
       setPreview(null);
       setSwitching(false); // the restored wallet IS the active one now
-      setServerArmed(true);
+      // Was an unconditional `true` — the mirror of the create bug: it claimed the
+      // worker had the grant whether or not the server took it, so a refusal was
+      // reported as a live agent.
+      setServerArmed(handoff.ok);
+      if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
       setStatus(null);
     } catch (e) {
       setStatus(null);
@@ -390,7 +416,7 @@ export default function GrantPage() {
       // selector showed mainnet silently re-signed on testnet, and any cap the
       // owner had just edited in the form was ignored. What the page shows is
       // what gets signed, or the page is lying.
-      const g = await restoreAgentWallet(
+      const { grant: g, handoff } = await restoreAgentWallet(
         grant.demoOwnerPrivateKey,
         caps,
         setStatus,
@@ -399,7 +425,10 @@ export default function GrantPage() {
         freshAdapter,
       );
       setGrant(g);
-      setServerArmed(true);
+      // Same correction as create/restore: report what the server said, so a
+      // renewed key that the server refused doesn't read as a renewed agent.
+      setServerArmed(handoff.ok);
+      if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -494,9 +523,17 @@ export default function GrantPage() {
             <p className="grant-sub">
               Your browser still has this wallet, but the worker no longer holds its grant — so the
               dashboard shows no merryman and it won&apos;t trade. This happens after a{" "}
-              <b>kill switch</b> or a <code>merrymen kill</code>. Re-arm it to make the band obey it
-              again, or discard it and start fresh.
+              <b>kill switch</b> or a <code>merrymen kill</code> — or because the server refused the
+              grant, in which case the reason is below. Re-arm it to make the band obey it again, or
+              discard it and start fresh.
             </p>
+            {/* THE REASON, ON THE SCREEN THAT REPORTS THE PROBLEM. The shared
+                error line lives inside the create panel (it is nested under
+                `!grant || switching`), so once a grant exists it cannot render —
+                which is every desync. A refusal here was therefore invisible no
+                matter which path produced it, and pressing re-arm looked like a
+                button that did nothing. */}
+            {error && <div className="grant-error mono">{error}</div>}
             <div className="fund-addr mono">
               <span className="rk">account · {chainLabel(grant!.chainId)}</span>
               <span className="rv" style={{ wordBreak: "break-all" }}>{grant!.smartAccount}</span>
