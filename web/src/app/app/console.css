@@ -42,6 +42,10 @@
 .sc-root a { color: inherit; text-decoration: none; }
 .sc-root ::selection { background: color-mix(in srgb, var(--lime) 30%, transparent); color: #fff; }
 
+/* The LogoMark's shaft/fletching are "cut" in var(--bg); .sc-root doesn't define
+   it, so point it at the mark's own dark ground and light the feather. */
+.sc-root .mark, .sc-root .glyph, .sc-root .ob-mark, .sc-root .gate-mark, .sc-root .gw-brand .m { color: var(--tx); --bg: var(--panel-2); }
+
 .sc-root .num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .sc-root .kick { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); }
 

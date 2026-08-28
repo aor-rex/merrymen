@@ -40,26 +40,89 @@ const DEFAULTS: GrantCaps = {
 };
 
 /** One-click cap presets — pick a temperament, tweak if you like, ride. */
-const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] = [
+const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: GrantCaps }[] = [
   {
     id: "scout",
-    label: "🌱 cautious · the scout",
+    icon: "shield",
+    label: "cautious · the scout",
     blurb: "dip a toe — tiny trades, tight leash",
     caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
   },
   {
     id: "outlaw",
-    label: "🏹 balanced · the outlaw",
+    icon: "target",
+    label: "balanced · the outlaw",
     blurb: "the sensible default",
     caps: DEFAULTS,
   },
   {
     id: "warlord",
-    label: "⚔️ bold · the warlord",
+    icon: "bolt",
+    label: "bold · the warlord",
     blurb: "bigger arrows, wider walls",
     caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
+
+/** Inline line-icons — real vector marks in place of emoji, themed by currentColor. */
+function GI({ d, size = 15 }: { d: string; size?: number }) {
+  const paths: Record<string, React.ReactNode> = {
+    shield: <path d="M12 3 20 6v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />,
+    target: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="12" cy="12" r="3.5" />
+      </>
+    ),
+    bolt: <path d="M13 2 5 13h5l-1 9 9-12h-5l1-8z" />,
+    tree: (
+      <>
+        <path d="M12 3 6 13h3l-3.5 5h13L18 13h3z" />
+        <path d="M12 18v3" />
+      </>
+    ),
+    coin: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v10M9.5 9.5h4a1.5 1.5 0 0 1 0 3h-3a1.5 1.5 0 0 0 0 3h4" />
+      </>
+    ),
+    lock: (
+      <>
+        <rect x="5" y="11" width="14" height="9" rx="2" />
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+      </>
+    ),
+    clock: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7.5V12l3 2" />
+      </>
+    ),
+    scroll: (
+      <>
+        <path d="M6 3h11a2 2 0 0 1 2 2v13a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V5.5" />
+        <path d="M9 8h7M9 12h7M9 16h4" />
+      </>
+    ),
+  };
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ verticalAlign: "-0.15em", flex: "none" }}
+      aria-hidden="true"
+    >
+      {paths[d]}
+    </svg>
+  );
+}
 
 const sameCaps = (a: GrantCaps, b: GrantCaps) =>
   (Object.keys(a) as (keyof GrantCaps)[]).every((k) => a[k] === b[k]);
@@ -529,7 +592,7 @@ export default function GrantPage() {
                 className={`chain-card ${!isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(TESTNET)}
               >
-                <span className="chain-card-title">🌲 Practice (testnet)</span>
+                <span className="chain-card-title"><GI d="tree" size={16} /> Practice (testnet)</span>
                 <span className="chain-card-body">
                   Your band trades a simulated book at real live prices. Nothing routes on-chain and
                   USDG sent here won&apos;t show up — so don&apos;t fund it. Best place to watch it
@@ -541,7 +604,7 @@ export default function GrantPage() {
                 className={`chain-card danger ${isMainnet ? "selected" : ""}`}
                 onClick={() => setChainId(MAINNET)}
               >
-                <span className="chain-card-title">⚔️ Real money (mainnet)</span>
+                <span className="chain-card-title"><GI d="coin" size={16} /> Real money (mainnet)</span>
                 <span className="chain-card-body">
                   The real Robinhood Chain — real funds, real trades. Only when you&apos;re ready.
                 </span>
@@ -615,7 +678,7 @@ export default function GrantPage() {
                   className={`preset-card ${sameCaps(caps, p.caps) ? "selected" : ""}`}
                   onClick={() => setCaps(p.caps)}
                 >
-                  <span className="preset-label">{p.label}</span>
+                  <span className="preset-label"><GI d={p.icon} size={14} /> {p.label}</span>
                   <span className="preset-blurb">{p.blurb}</span>
                   <span className="preset-caps mono">
                     {p.caps.perTradeUsdg}/trade · {p.caps.dailyUsdg}/day · {p.caps.maxDrawdownPct}% breaker ·{" "}
@@ -783,7 +846,7 @@ export default function GrantPage() {
                 and put the fix one click away. */}
             {uncoveredNames.length > 0 && grant.demoOwnerPrivateKey && (
               <div className="renew-note">
-                🔒 <b>
+                <GI d="lock" size={14} /> <b>
                   {uncoveredNames.length === 1
                     ? "One token in your basket isn't"
                     : `${uncoveredNames.length} tokens in your basket aren't`}
@@ -817,9 +880,9 @@ export default function GrantPage() {
               return (
                 <div className={expired ? "renew-note expired" : "renew-note"}>
                   {expired ? (
-                    <>⏳ <b>Your agent&apos;s key has expired</b> — it stopped trading (the safety timer did its job). Your funds are untouched.</>
+                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key has expired</b> — it stopped trading (the safety timer did its job). Your funds are untouched.</>
                   ) : (
-                    <>⏳ <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
+                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
                   Renewing is free and instant — same wallet, same funds, fresh key under the same
                   caps. Nothing is sent on-chain. The new key is signed against{" "}
@@ -851,7 +914,7 @@ export default function GrantPage() {
             </p>
 
             <div className="paper-note mono" style={{ marginBottom: 14 }}>
-              📜 <b>Already riding.</b> Your band is trading in <b>paper mode</b> right now — real
+              <GI d="scroll" size={14} /> <b>Already riding.</b> Your band is trading in <b>paper mode</b> right now — real
               live prices, simulated fills — so you can watch it work before funding anything. Head
               to the <Link href="/">dashboard</Link> to see it.{" "}
               {grantIsTestnet

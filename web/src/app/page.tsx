@@ -1,78 +1,17 @@
-import Link from "next/link";
-import { LogoMark } from "@/components/Logo";
-import { BandSection } from "@/components/BandSection";
-import { ChainStats } from "@/components/ChainStats";
-import { FeedPanel } from "@/components/FeedPanel";
-import { KillSwitch } from "@/components/KillSwitch";
-import { MarketTable } from "@/components/MarketTable";
-import { MerryCirclePanel } from "@/components/MerryCirclePanel";
-import { RecoverPanel } from "@/components/RecoverPanel";
-import { Statusbar } from "@/components/Statusbar";
-import { TelegramCta } from "@/components/TelegramCta";
-import { TradesPanel } from "@/components/TradesPanel";
-import { WallPanel } from "@/components/WallPanel";
+import type { Metadata } from "next";
+import "./app/console.css";
+import Console from "./app/Console";
 
-export default function Dashboard() {
-  return (
-    <>
-      <header className="topbar">
-        <div className="brand">
-          <span className="arrow"><LogoMark size={20} /></span>
-          <span>merrymen</span>
-          <span className="tagline">your AI trader, working 24/7 🏹</span>
-        </div>
-        <span className="chain-pill">
-          <span className="dot" />
-          Robinhood Chain · 4663
-        </span>
-        <ChainStats />
-        <Link href="/scoreboard" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
-          scoreboard
-        </Link>
-        <Link href="/playground" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
-          playground
-        </Link>
-        <Link href="/settings" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
-          settings
-        </Link>
-        <TelegramCta variant="pill" />
-        <Link href="/grant" className="connect-btn" style={{ textDecoration: "none" }}>
-          deploy an agent
-        </Link>
-      </header>
+// The product lives at the bare domain now (app.merrymen.dev), not /app. The
+// old dense control dashboard moved to /home; /app still renders this same
+// Console so existing links, bookmarks and the PWA start_url keep working.
+export const metadata: Metadata = {
+  title: "merrymen — the console",
+  description: "Run your merryman: equity, the wall, the decision tape, and talk to the agent — one sleek surface.",
+};
 
-      <main className="shell">
-        <section className="agents">
-          <div className="section-title">the band</div>
-          <BandSection />
+export const dynamic = "force-dynamic";
 
-          <TradesPanel />
-
-          <div className="section-title market-title">sherwood market · chainlink prices</div>
-          <MarketTable />
-        </section>
-
-        <aside className="rail">
-          <TelegramCta />
-
-          <WallPanel />
-
-          <MerryCirclePanel />
-
-          <div className="panel">
-            <KillSwitch />
-          </div>
-
-          <RecoverPanel />
-
-          <div className="panel">
-            <div className="section-title">activity</div>
-            <FeedPanel />
-          </div>
-        </aside>
-      </main>
-
-      <Statusbar />
-    </>
-  );
+export default function HomeConsolePage() {
+  return <Console />;
 }

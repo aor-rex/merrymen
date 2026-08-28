@@ -17,6 +17,7 @@ import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
 import Onboarding, { type OnboardStep } from "./Onboarding";
+import { LogoMark } from "@/components/Logo";
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -188,7 +189,7 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
         {/* rail */}
         <aside className="rail">
           <div className="brand">
-            <span className="mark">🏹</span>
+            <span className="mark"><LogoMark size={18} /></span>
             <span>
               <b>merrymen</b>
               <br />
@@ -229,7 +230,7 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
         <main className="main">
           <div className="topbar">
             <div className="agentchip">
-              <span className="glyph">🏹</span>
+              <span className="glyph"><LogoMark size={19} /></span>
               <span>
                 <span className="nm">{agentName}</span>
                 <br />

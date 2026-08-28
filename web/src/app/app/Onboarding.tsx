@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { getInjectedProvider, requestAccount } from "@/lib/wallet";
+import { LogoMark } from "@/components/Logo";
 
 export type OnboardStep = "connect" | "create" | "fund";
 
@@ -163,7 +164,7 @@ export default function Onboarding(props: {
 
         <header className="ob-top">
           <span className="ob-brand">
-            <span className="ob-mark">🏹</span> merrymen
+            <span className="ob-mark"><LogoMark size={16} /></span> merrymen
           </span>
           <span className="ob-crumb">
             SETUP · {String(activeIdx + 1).padStart(2, "0")}_{String(order.length).padStart(2, "0")}
