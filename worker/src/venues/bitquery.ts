@@ -82,6 +82,26 @@ export function resolveBitquery(cfg: {
   return null;
 }
 
+/**
+ * The right auth header for whichever Bitquery credential the operator set.
+ *
+ * Bitquery has two credential types and two eras of endpoint. The legacy V1 API
+ * key goes in `X-API-KEY`; the V2 OAuth access token (`ory_at_…`, issued from
+ * Authorization -> Applications) goes in `Authorization: Bearer`. Sending BOTH
+ * with the same value is fine for a V1 key but hands a V2 endpoint two
+ * conflicting credentials and invites an opaque 402 — which reads as a billing
+ * problem and sends you to the wrong console entirely.
+ *
+ * Mirrors gateway/lib/core.mjs:bitqueryAuthHeaders, which shipped this fix after
+ * exactly that misdiagnosis. Kept as its own exported function so the rule is
+ * testable rather than buried in a fetch call.
+ */
+export function bitqueryAuthHeaders(key: string): Record<string, string> {
+  return String(key).startsWith("ory_at_")
+    ? { Authorization: `Bearer ${key}` }
+    : { "X-API-KEY": key };
+}
+
 export interface BitqueryResult<T> {
   ok: boolean;
   data?: T;
@@ -110,11 +130,14 @@ export async function bitqueryQuery<T = unknown>(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // V2 takes a bearer token; V1 took X-API-KEY. Sending both is harmless
-        // and means a key from either console works without the owner having to
-        // know which generation of the API they signed up for.
-        Authorization: `Bearer ${creds.apiKey}`,
-        "X-API-KEY": creds.apiKey,
+        // ONE header, chosen by what the key actually is. Sending BOTH — which
+        // this did — is fine for a V1 key but hands a V2 endpoint two
+        // conflicting credentials, and buys an opaque 402 that looks like a
+        // billing problem rather than an auth one. gateway/lib/core.mjs learned
+        // this the hard way ("the opaque 402 we spent a deploy chasing") and
+        // ships bitqueryAuthHeaders; the worker never got the same fix, so
+        // discovery could be returning nothing on a perfectly good V2 key.
+        ...bitqueryAuthHeaders(creds.apiKey),
       },
       body: JSON.stringify({ query, variables }),
       signal: controller.signal,
