@@ -11,7 +11,7 @@ import {
   TRADEABLE_SYMBOLS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
-  V4SELFSWAP_ABI,
+  PONS_SELFTRADE_ABI, V4SELFSWAP_ABI,
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
@@ -507,4 +507,113 @@ test("the adapter opt-in is INDEPENDENT of the legacy v4 route, and a junk addre
       `"${bad}" must be refused before it becomes policy`,
     );
   }
+});
+
+test("the PONS ADAPTER opt-in: one permission, both asset legs pinned, curve deliberately not, at proven offsets", () => {
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+  const CUSTOM = { symbol: "WIF", address: "0x00000000000000000000000000000000000000e7", decimals: 9 } as const;
+
+  // Absent by default — the closed position, like every opt-in here.
+  assert.equal(find(PONS).length, 0, "no Pons permission without the opt-in");
+
+  const withPons = buildCallPermissions(CAPS, SELF, {
+    ponsAdapterAddress: PONS,
+    extraTokens: [CUSTOM],
+  }) as unknown as Perm[];
+  const mine = withPons.filter((p) => p.target.toLowerCase() === PONS);
+  assert.equal(mine.length, 1, "exactly one call permission on the adapter");
+  const [trade] = mine;
+  assert.equal(trade!.functionName, "tradeExactIn");
+  // NOT covered by the default-wall loop above, which only walks perms() — an
+  // opt-in permission needs its own assertion or the invariant has a hole.
+  // Load-bearing here specifically: the adapter is non-payable, which is the
+  // whole reason native-quoted curves are out of reach.
+  assert.equal(trade!.valueLimit, 0n, "granting Pons must not become the first permission that moves native ETH");
+
+  // The adapter joined the SPENDER set, so the existing approves can name it —
+  // zero new approve entries, exactly as the v4 adapter did.
+  const usdgApprove = withPons.find(
+    (p) => p.target.toLowerCase() === CASH.USDG.toLowerCase() && p.functionName === "approve",
+  )!;
+  const spenderCond = (usdgApprove.args as { value: string[] }[])[0]!;
+  assert.ok(
+    spenderCond.value.map((a) => a.toLowerCase()).includes(PONS),
+    "the adapter must be an allowed spender, or it can never pull assetIn",
+  );
+
+  const args = trade!.args as (null | { condition: number; value: string | string[] })[];
+  assert.equal(args.length, 6, "six declared args, six policy slots — all static, no pointer words");
+
+  // THE CURVE IS UNPINNED, AND THAT IS THE DESIGN. A buy goes to a per-token
+  // address (~475 new ones an hour), so any ONE_OF over word 0 is stale
+  // tomorrow or unbounded today. Asserted rather than left to a reader's
+  // assumption: if someone later "tightens" this, the test says why not to.
+  assert.equal(args[0], null, "the curve cannot be pinned — see wall.ts");
+
+  // BOTH ASSET LEGS PINNED, from the same list the approves cover, so the
+  // trade set and the approve set cannot drift inside one grant.
+  for (const i of [1, 2] as const) {
+    const cond = args[i] as { condition: number; value: string[] };
+    assert.equal(cond.condition, ParamCondition.ONE_OF, `arg ${i} must be pinned`);
+    const set = cond.value.map((a) => a.toLowerCase());
+    assert.ok(set.includes(CASH.USDG.toLowerCase()), "cash is an asset");
+    assert.ok(set.includes(CUSTOM.address.toLowerCase()), "the owner's own token is an asset");
+    assert.ok(!set.includes("0x00000000000000000000000000000000000000ff"), "an unnamed token is not");
+  }
+  for (const i of [3, 4, 5]) assert.equal(args[i], null, `arg ${i} stays unconstrained — see wall.ts for why each`);
+
+  // AND PROVE THE OFFSETS against viem's encoder, not against the reasoning.
+  // There is no ABI arity check in the policy layer: a wrong-length args array
+  // builds rules over garbage silently, and this is the only thing that catches
+  // it. All six params are static, so the flat args[i] -> word i mapping is
+  // exact — which is the claim that must fail loudly if the contract's
+  // signature ever grows a struct or a `bytes`.
+  const calldata = encodeFunctionData({
+    abi: PONS_SELFTRADE_ABI,
+    functionName: "tradeExactIn",
+    args: [
+      "0x00000000000000000000000000000000000000cc",
+      CASH.USDG as `0x${string}`,
+      CUSTOM.address as `0x${string}`,
+      1_000_000n,
+      999n,
+      1_800_000_000n,
+    ],
+  });
+  const body = calldata.slice(10);
+  const word = (i: number) => `0x${body.slice(i * 64, (i + 1) * 64)}`;
+  assert.equal(
+    word(0).toLowerCase(),
+    pad("0x00000000000000000000000000000000000000cc", { size: 32 }).toLowerCase(),
+    "word 0 = curve",
+  );
+  assert.equal(word(1).toLowerCase(), pad(CASH.USDG as `0x${string}`, { size: 32 }).toLowerCase(), "word 1 = assetIn");
+  assert.equal(word(2).toLowerCase(), pad(CUSTOM.address as `0x${string}`, { size: 32 }).toLowerCase(), "word 2 = assetOut");
+  assert.equal(BigInt(word(3)), 1_000_000n, "word 3 = amountIn");
+  assert.equal(BigInt(word(4)), 999n, "word 4 = minAmountOut");
+  assert.equal(BigInt(word(5)), 1_800_000_000n, "word 5 = deadline");
+});
+
+test("the Pons opt-in is INDEPENDENT of the v4 adapter, and a junk address throws", () => {
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+  const V4 = "0x00000000000000000000000000000000000000d4" as const;
+  const base = perms().length;
+
+  // Each alone adds exactly its own call permission, and neither implies the
+  // other. Two venues, two risks, two decisions — one flag granting both would
+  // make the owner's only choice all-or-nothing.
+  assert.equal(buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: PONS }).length, base + 1);
+  assert.equal(buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4 }).length, base + 1);
+  assert.equal(
+    buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: PONS, v4AdapterAddress: V4 }).length,
+    base + 2,
+    "both opt-ins are additive, not overlapping",
+  );
+
+  // A malformed address must throw rather than be sealed into a signature: a
+  // policy that can never match is a bricked route that looks granted.
+  assert.throws(
+    () => buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: "0xnope" as never }),
+    /ponsAdapterAddress is not an address/,
+  );
 });

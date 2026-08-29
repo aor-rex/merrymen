@@ -147,3 +147,34 @@ export const V4SELFSWAP_ABI = [
     outputs: [{ name: "amountOut", type: "uint256" }],
   },
 ] as const;
+
+/**
+ * PonsSelfTrade — the bonding-curve adapter. See contracts/PonsSelfTrade.sol.
+ *
+ * ALL-STATIC, and that is the whole reason the shape looks like this. The call
+ * policy maps args[i] to calldata offset i*32 with a flat positional rule and
+ * no ABI arity check, so a signature with no struct, no `bytes` and no dynamic
+ * array makes the policy's view of the calldata and the ABI's view the same
+ * thing by construction. wall.ts carries the cautionary tale next to the
+ * SwapRouter02 permissions: one leading `bytes` moved `exactInput`'s recipient
+ * from word 3 to word 2, and reasoning that out instead of proving it is how a
+ * policy ends up constraining the wrong word while looking strict.
+ *
+ * There is no recipient argument. It is msg.sender, in bytecode.
+ */
+export const PONS_SELFTRADE_ABI = [
+  {
+    type: "function",
+    name: "tradeExactIn",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "assetIn", type: "address" },
+      { name: "assetOut", type: "address" },
+      { name: "amountIn", type: "uint128" },
+      { name: "minAmountOut", type: "uint128" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+] as const;

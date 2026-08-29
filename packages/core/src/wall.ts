@@ -2,7 +2,7 @@ import { erc20Abi, parseAbi, type Address } from "viem";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toRateLimitPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
-import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI } from "./abis";
+import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI, PONS_SELFTRADE_ABI } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
@@ -90,6 +90,7 @@ export function allowedSpenders(
   allowRialto = false,
   allowUniswapV4 = false,
   v4AdapterAddress?: Address,
+  ponsAdapterAddress?: Address,
 ): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
@@ -114,6 +115,18 @@ export function allowedSpenders(
     // itself: everything it pulls it settles into the pool, and everything
     // that comes out lands with msg.sender. See contracts/V4SelfSwap.sol.
     ...(v4AdapterAddress ? [v4AdapterAddress] : []),
+    // The PonsSelfTrade adapter, on exactly the same terms and for exactly the
+    // same reason: it pulls assetIn with a plain transferFrom, so it must be
+    // nameable as a spender, and that is ALL it gets here — zero new approve
+    // permissions, inside the existing caps.
+    //
+    // The licence-to-move-shares caveat above is answered the same way it is
+    // for the v4 adapter, by the contract: everything it pulls it either
+    // spends on the curve or hands straight back, everything the curve pays
+    // goes to msg.sender, and nothing survives the call. Where it differs is
+    // that its CURVE argument cannot be pinned by any policy — see the call
+    // permission below, which says so rather than implying otherwise.
+    ...(ponsAdapterAddress ? [ponsAdapterAddress] : []),
   ];
 }
 
@@ -202,6 +215,43 @@ export interface WallOptions {
    * calls that address and no other.
    */
   v4AdapterAddress?: Address;
+  /**
+   * The PonsSelfTrade adapter to grant, or absent for none — CLOSED by default.
+   *
+   * A SECOND, SEPARATE opt-in from the v4 adapter, not a widening of it. The two
+   * reach different venues with different risks, and one address granting both
+   * would make the owner's only choice all-or-nothing.
+   *
+   * WHAT THIS ONE CANNOT PIN, SAID PLAINLY. Every other call permission in this
+   * file names a target the policy vouches for. A Pons buy goes to a PER-TOKEN
+   * bonding curve — roughly 475 new addresses an hour — so the curve is an
+   * argument, and no ONE_OF list over it would be anything but wrong tomorrow or
+   * unbounded today. The bound is therefore NOT "the policy checks the venue".
+   * It is:
+   *
+   *   - `assetIn` and `assetOut` pinned ONE_OF the same asset list the approve
+   *     permissions cover, so a trade can only move assets this signature
+   *     already covers;
+   *   - the amount bounded by those same approve caps;
+   *   - and the adapter refusing to deliver anywhere but `msg.sender`, checked
+   *     against the account's own balance rather than the curve's word for it.
+   *
+   * That is the same exposure the v4 adapter carries with its caller-chosen pool
+   * key, and the same one SwapRouter02 carries today: a compromised session key
+   * can trade an allowlisted asset into a venue the attacker controls, at a
+   * price they pick, up to the standing allowance. Not zero, and worth the owner
+   * knowing before they turn it on.
+   *
+   * Note also what it does NOT reach: native-quoted curves, which are 53.6% of
+   * the launchpad. The adapter is non-payable so this permission keeps
+   * `valueLimit: 0n`, and native support would be a different contract behind a
+   * different selector — see contracts/PonsSelfTrade.sol.
+   *
+   * An ADDRESS rather than a boolean, for the same reason as the v4 adapter:
+   * per-deploy and per-chain, so the wall names the exact contract the signature
+   * covers.
+   */
+  ponsAdapterAddress?: Address;
 }
 
 /**
@@ -260,7 +310,14 @@ export function buildCallPermissions(
     }
     adapter = opts.v4AdapterAddress.toLowerCase() as Address;
   }
-  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter);
+  let ponsAdapter: Address | undefined;
+  if (opts.ponsAdapterAddress !== undefined) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(opts.ponsAdapterAddress)) {
+      throw new Error(`ponsAdapterAddress is not an address: ${JSON.stringify(opts.ponsAdapterAddress)}`);
+    }
+    ponsAdapter = opts.ponsAdapterAddress.toLowerCase() as Address;
+  }
+  const spenders = allowedSpenders(opts.allowRialto, opts.allowUniswapV4, adapter, ponsAdapter);
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
   // approve permissions below cover. This is what the adapter's tokenIn and
@@ -456,6 +513,44 @@ export function buildCallPermissions(
               null, // hooks — see above
               null, // amountIn — bounded by the approve caps
               null, // minAmountOut — see above
+              null, // deadline
+            ],
+          } as const,
+        ]
+      : []),
+    // The Pons bonding-curve adapter. Same shape, one honest difference.
+    //
+    // THE CURVE IS NOT PINNED AND CANNOT BE. A buy goes to a per-token curve —
+    // ~475 new addresses an hour — so any ONE_OF list over word 0 is either
+    // stale tomorrow or unbounded today. This comment exists to say that
+    // outright, because the failure mode this file keeps warning about is a
+    // comment describing intent over a policy allowing the opposite, and a
+    // reader skimming `null` deserves to know it is deliberate rather than an
+    // oversight.
+    //
+    // What still binds: both asset legs are pinned to the SAME list the approve
+    // permissions cover — same variable, same call, so the trade set cannot
+    // drift from the approve set within one grant — the size is bounded by
+    // those approves, and the adapter delivers only to msg.sender, verified
+    // against the account's own balance rather than the curve's claim.
+    //
+    // `valueLimit: 0n` like every other entry here, and that is load-bearing
+    // rather than incidental: the adapter is non-payable, which is exactly why
+    // native-quoted curves are out of reach and why granting this does not
+    // become the first permission in the wall that can move native ETH.
+    ...(ponsAdapter
+      ? [
+          {
+            target: ponsAdapter,
+            valueLimit: 0n,
+            abi: PONS_SELFTRADE_ABI,
+            functionName: "tradeExactIn",
+            args: [
+              null, // curve — unpinnable, see above
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              { condition: ParamCondition.ONE_OF, value: adapterAssets },
+              null, // amountIn — bounded by the approve caps
+              null, // minAmountOut — denominated in the output asset, says nothing useful
               null, // deadline
             ],
           } as const,
