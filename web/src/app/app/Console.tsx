@@ -27,6 +27,22 @@ type ChatMsg = { role: "me" | "them"; html: string };
 
 type Session = { hosted: boolean; address: string | null };
 
+type DiscoveryRow = {
+  token: string;
+  name: string;
+  venue: string;
+  priceUsd: number | null;
+  reserveUsd: number | null;
+  fdvUsd: number | null;
+  volume24hUsd: number | null;
+  change24hPct: number | null;
+  buyers24h: number | null;
+  ageDays: number | null;
+  graduated: boolean;
+  onCurve: boolean;
+};
+type DiscoveriesPayload = { fetchedAt: number; scanned: number; rows: DiscoveryRow[]; graduated: number };
+
 export default function Console() {
   const [feed, setFeed] = useState<FeedResponse | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -144,7 +160,24 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
   // One focus at a time. The rail used to be dead links over a wall of panels;
   // now it switches the main view — Home (the overview), Chat, or Positions — so
   // the console is calm and scannable instead of everything at once.
-  const [view, setView] = useState<"home" | "chat" | "positions">("home");
+  const [view, setView] = useState<"home" | "chat" | "positions" | "sherwood">("home");
+  // Fetched from /api/discoveries, which reads the index server-side rather
+  // than the ledger — see that route for why a DB-backed panel would render
+  // empty on the hosted deploy.
+  const [disc, setDisc] = useState<DiscoveriesPayload | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      fetch("/api/discoveries")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (alive) setDisc(d); })
+        .catch(() => {});
+    load();
+    // Slower than the feed: the upstream API is keyless and rate-limited, and
+    // a coin trending this minute is still trending in two.
+    const t = setInterval(load, 120_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
   const grant = status.grant;
   const caps = grant?.caps;
   const chainId = grant?.chainId ?? null;
@@ -205,6 +238,9 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             </button>
             <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
               <Ic d="chart" /> Positions <span className="tally">{feed?.positions?.length ?? 0}</span>
+            </button>
+            <button type="button" className={`navlink ${view === "sherwood" ? "on" : ""}`} onClick={() => setView("sherwood")}>
+              <Ic d="spark" /> Sherwood {disc && <span className="tally">{disc.rows.length}</span>}
             </button>
             <Link className="navlink" href="/grant">
               <Ic d="wallet" /> Wallet
@@ -387,6 +423,74 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             </section>
           )}
 
+          {/* ── SHERWOOD: what is trading, from a third-party index ── */}
+          {view === "sherwood" && (
+            <section className="floor one">
+              <div className="col">
+                <div className="panel">
+                  <div className="panel-h">
+                    <h3>Fresh in Sherwood</h3>
+                    <span className="kick">
+                      {disc ? `${disc.rows.length} of ${disc.scanned} · ${disc.graduated} graduated` : "looking…"}
+                    </span>
+                  </div>
+                  <div className="pos">
+                    {!disc ? (
+                      <div className="empty-note">Reading the tape…</div>
+                    ) : disc.rows.length === 0 ? (
+                      <div className="empty-note">Nothing clearing the floor right now.</div>
+                    ) : (
+                      disc.rows.map((r: DiscoveryRow) => (
+                        <div className="prow" key={r.token}>
+                          <span className="s">
+                            <span
+                              className="tk"
+                              style={{ background: r.graduated ? "var(--lime)" : "var(--mint)" }}
+                            />{" "}
+                            {r.name}
+                            {r.graduated && <span className="tagpx">graduated</span>}
+                            {r.onCurve && <span className="tagpx">on its curve</span>}
+                          </span>
+                          <span className="px">
+                            {/* A coin still on its bonding curve reports a
+                                reserve that is mostly the VIRTUAL SEED — about
+                                $4,100 it does not hold — so its depth is not
+                                shown as though it were money. */}
+                            {r.onCurve
+                              ? "pre-graduation"
+                              : r.reserveUsd === null
+                                ? "depth unknown"
+                                : `${Math.round(r.reserveUsd).toLocaleString()} deep`}
+                          </span>
+                          <span
+                            className="val"
+                            style={{
+                              color:
+                                r.change24hPct === null
+                                  ? undefined
+                                  : r.change24hPct >= 0
+                                    ? "var(--lime)"
+                                    : "var(--rose, #e57)",
+                            }}
+                          >
+                            {r.change24hPct === null
+                              ? "—"
+                              : `${r.change24hPct > 0 ? "+" : ""}${r.change24hPct.toFixed(1)}%`}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="empty-note" style={{ opacity: 0.7 }}>
+                    A third party&rsquo;s reading of the market, not mine — nothing here has been
+                    checked against the chain. I can&rsquo;t trade any of it until you add the token
+                    in <Link href="/settings">settings</Link> and re-sign at <Link href="/grant">grant</Link>.
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* ── CHAT: the agent, full width ── */}
           {view === "chat" && (
             <section className="floor one chatview">
@@ -412,6 +516,9 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
         </button>
         <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
           <Ic d="chart" /> Positions
+        </button>
+        <button type="button" className={`navlink ${view === "sherwood" ? "on" : ""}`} onClick={() => setView("sherwood")}>
+          <Ic d="spark" /> Sherwood
         </button>
         <Link className="navlink" href="/settings">
           <Ic d="gear" /> Settings
@@ -819,6 +926,16 @@ function Ic({ d }: { d: string }) {
       <>
         <path d="M3 12l9-8 9 8" />
         <path d="M5 10v10h14V10" />
+      </>
+    ),
+    spark: (
+      <>
+        <path d="M12 3v4" />
+        <path d="M12 17v4" />
+        <path d="M5 12H3" />
+        <path d="M21 12h-2" />
+        <path d="M7 7l3 3" />
+        <path d="M14 14l3 3" />
       </>
     ),
     chat: <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
