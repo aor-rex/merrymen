@@ -30,6 +30,8 @@ import { CASH, type StockToken } from "../../packages/core/src/index";
 import { poolPriceUsable, readRoutedPrice } from "./venues/pool-price";
 import { readTokenStats } from "./venues/token-stats";
 import { recentPools, resolveBitquery, type BitqueryCreds, type NewPair } from "./venues/bitquery";
+import { readCurveReserves, recentPonsLaunches, type PonsLaunch } from "./venues/pons";
+import { curveDepthFraction, curveGraduated, curvePrice, type CurveReserves } from "./venues/pons-price";
 
 const ERC20 = parseAbi([
   "function symbol() view returns (string)",
@@ -64,6 +66,27 @@ export interface Discovery {
    * keeps a captured key even when later sightings are keyless.
    */
   key?: NewPair["key"];
+  /**
+   * Set when this came from the Pons LAUNCHPAD rather than a Uniswap pool.
+   *
+   * A pre-graduation token has no pool at all — it trades only on this curve —
+   * so the address is not a routing convenience, it is the only way to reach
+   * the token. Its presence is also what tells every consumer that the pool
+   * guards did NOT run on this sighting.
+   */
+  curve?: {
+    curve: `0x${string}`;
+    /** `0x000…0` means native ETH, which is 53.6% of launches. */
+    quoteToken: `0x${string}`;
+    /**
+     * Real quote raised as a fraction of this curve's own graduation threshold.
+     *
+     * The comparable measure across a launchpad where only half the curves are
+     * ETH-quoted and the thresholds are not a constant USD value. Excludes the
+     * virtual seed — see venues/pons-price.ts.
+     */
+    depthFraction: number;
+  };
 }
 
 /**
@@ -183,6 +206,176 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
 }
 
 /**
+ * How much of its own graduation threshold a curve must really have raised
+ * before the owner hears about it.
+ *
+ * MEASURED, and the single most consequential constant in this file. The
+ * launchpad runs at ~475 launches/hour, so announcing everything is not a
+ * feature, it is a denial of service against the owner's attention — and
+ * against the events table, which has no pruning.
+ *
+ * Against 60 curves sampled live: 78% hold EXACTLY ZERO real quote, and 1.7%
+ * clear 5% of their threshold — about 6–8 an hour. Independently, a replay of
+ * 249 curves' full trade history puts the base graduation rate at 0.96% while
+ * curves that reach a quarter of their threshold graduate 18.2% of the time, so
+ * this measure is genuinely predictive rather than merely selective.
+ *
+ * Expressed as a FRACTION, never a dollar figure: 42.8% of launches are quoted
+ * in Robinhood stock tokens and 2.3% in cbBTC, which this repo cannot price at
+ * all, and the thresholds themselves range $7,737–$10,377 having been set at
+ * different times and never repriced. A USD floor would silently exclude half
+ * the launchpad for want of a feed.
+ */
+export const PONS_MIN_DEPTH_FRACTION = 0.05;
+
+export interface PonsDiscoveryDeps {
+  client: PublicClient;
+  /** Bounded by the caller from elapsed wall-clock — see MAX_LOOKBACK_BLOCKS. */
+  lookbackBlocks: bigint;
+  seen: ReadonlySet<string>;
+  known: readonly StockToken[];
+  /** USD price of native ETH, 8dp. Null when the worker could not price it. */
+  ethUsd8: bigint | null;
+  minDepthFraction?: number;
+}
+
+export interface PonsScanResult {
+  found: Discovery[];
+  /** Launches read this pass, before filtering — the denominator for the log. */
+  scanned: number;
+  /** The node refused the query. `found` is then empty but MEANINGLESS. */
+  failed: boolean;
+  /** The lookback was clamped; launches older than the clamp were not seen. */
+  clamped: boolean;
+}
+
+/**
+ * One pass over the Pons launchpad.
+ *
+ * WHY THIS IS NOT A VARIANT OF discoverPools. That function asks Bitquery for
+ * pool Initialize events and prices what it finds through the Uniswap guards.
+ * A Pons launch has neither: there is no pool, and the guards structurally
+ * refuse a curve (`no-twap`, before they even look at depth). Sharing the code
+ * path would mean either weakening those guards or pretending they ran.
+ *
+ * COST SHAPE, because this runs against ~475 launches/hour. The filter needs
+ * only ONE call per launch — getReserves() — because the depth fraction is a
+ * ratio of raw quote units and needs no decimals and no price. Symbol, decimals
+ * and any USD figure are read only for the handful that survive.
+ */
+export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<PonsScanResult> {
+  const scan = await recentPonsLaunches(deps.client, deps.lookbackBlocks);
+  if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped };
+
+  const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
+  const minFraction = deps.minDepthFraction ?? PONS_MIN_DEPTH_FRACTION;
+  const seenThisPass = new Set<string>();
+  const survivors: { launch: PonsLaunch; reserves: CurveReserves; fraction: number }[] = [];
+
+  for (const launch of scan.launches) {
+    const key = launch.token.toLowerCase();
+    if (deps.seen.has(key) || knownAddrs.has(key) || seenThisPass.has(key)) continue;
+    seenThisPass.add(key);
+
+    // Decimals are placeholders here and that is exact, not sloppy: the depth
+    // fraction is realQuote/threshold, both in the same raw units, so it is
+    // independent of what those units are. Real decimals are read below, only
+    // for what survives.
+    const reserves = await readCurveReserves(deps.client, launch, { quote: 18, token: 18 });
+    if (!reserves) continue;
+    // A graduated curve resets — token side emptied, quote side back to the
+    // virtual seed — so it reads EXACTLY like a launch nobody bought. Announcing
+    // one as a new launch would be announcing a token whose market has already
+    // moved to a pool the ordinary discoverer handles.
+    if (curveGraduated(reserves)) continue;
+    const fraction = curveDepthFraction(reserves);
+    if (fraction === null || fraction < minFraction) continue;
+    survivors.push({ launch, reserves, fraction });
+  }
+
+  const found: Discovery[] = [];
+  for (const { launch, reserves, fraction } of survivors) {
+    // Identity from the CONTRACT, never from the log — same reasoning as
+    // discoverPools: a symbol is attacker-chosen text headed for a human.
+    let symbol = `${launch.token.slice(0, 10)}…`;
+    let decimals = 18;
+    try {
+      const [s, d] = await Promise.all([
+        deps.client.readContract({ address: launch.token, abi: ERC20, functionName: "symbol" }) as Promise<string>,
+        deps.client.readContract({ address: launch.token, abi: ERC20, functionName: "decimals" }) as Promise<number>,
+      ]);
+      if (typeof s === "string" && s.length > 0) symbol = sanitizeSymbol(s);
+      const dn = Number(d);
+      if (Number.isInteger(dn) && dn >= 0 && dn <= 36) decimals = dn;
+    } catch {
+      /* not a readable ERC-20; it still launched, so report it by address */
+    }
+
+    const quoteUsd8 = quoteUsdOf(launch.quoteToken, deps.ethUsd8);
+    let liquidityUsdg: bigint | null = null;
+    let reason = quoteUsd8 === null ? "no USD price for what this curve is quoted in" : undefined;
+    if (quoteUsd8 !== null) {
+      const priced = curvePrice({ ...reserves, quoteDecimals: quoteDecimalsOfKnown(launch.quoteToken), tokenDecimals: decimals }, quoteUsd8);
+      // 8dp → 6dp. Discovery.liquidityUsdg is raw USDG like every other depth
+      // figure in the worker; handing it an 8dp number reports 100x the real
+      // depth and would clear a $25,000 floor with $250.
+      if (priced) liquidityUsdg = priced.depthUsd8 / 100n;
+    }
+
+    found.push({
+      token: launch.token,
+      symbol,
+      decimals,
+      createdAt: 0, // the store stamps first_seen, as it does for discoverPools
+      liquidityUsdg,
+      // NEVER true for a curve. `priceable` means the owner's depth and
+      // divergence guards passed, and they cannot even run here — claiming it
+      // would report a confidence nothing established.
+      priceable: false,
+      reason: reason ?? `trades on a Pons curve at ${(fraction * 100).toFixed(1)}% of graduation`,
+      price8: null,
+      // Null, not a number. FDV gates spending, and discoverPools only sets it
+      // behind a PASSED guard for exactly that reason. A curve price is
+      // unguarded by construction, so deriving a spending gate from it would
+      // launder an unchecked number into a check.
+      fdvUsd: null,
+      curve: { curve: launch.curve, quoteToken: launch.quoteToken, depthFraction: fraction },
+    });
+  }
+
+  return { found, scanned: scan.launches.length, failed: false, clamped: scan.clamped };
+}
+
+/**
+ * USD price of a curve's quote asset, 8dp — or null when there isn't one.
+ *
+ * Only two quote assets are priceable with what this repo has. Native ETH goes
+ * through the worker's own guarded WETH/USDG reading, and USDG is $1 by the
+ * same hardcoded convention the pool pricer already uses.
+ *
+ * Everything else is null ON PURPOSE. The stock tokens that quote 42.8% of
+ * launches have Chainlink feeds that are 24/5 and stale by this repo's own rule
+ * every weekend, and cbBTC has no usable pool on this chain at all — its v3
+ * pools hold dust and the guard already refuses them as "too-thin: $0", while
+ * still computing a plausible-looking price off the tick. That plausible number
+ * is the trap; null is the honest answer.
+ */
+function quoteUsdOf(quoteToken: `0x${string}`, ethUsd8: bigint | null): bigint | null {
+  const q = quoteToken.toLowerCase();
+  if (q === "0x0000000000000000000000000000000000000000") return ethUsd8;
+  if (q === (CASH.WETH as string).toLowerCase()) return ethUsd8;
+  // Cash IS USDG here, so a whole unit is $1 — the same literal as
+  // venues/pool-price.ts uses, kept identical so the two cannot drift.
+  if (q === (CASH.USDG as string).toLowerCase()) return 100_000_000n;
+  return null;
+}
+
+/** Decimals for the only quote assets `quoteUsdOf` will price. */
+function quoteDecimalsOfKnown(quoteToken: `0x${string}`): number {
+  return quoteToken.toLowerCase() === (CASH.USDG as string).toLowerCase() ? 6 : 18;
+}
+
+/**
  * A token's own symbol is attacker-chosen and ends up in a Telegram message and
  * an event line. Strip anything that could pass for markup or a separator, and
  * cap the length — the same reasoning as the memory sanitizers.
@@ -202,6 +395,15 @@ export function describeDiscovery(d: Discovery): string {
   const verdict = d.priceable
     ? "deep enough for me to price"
     : `I can't price it yet — ${d.reason ?? "guards refused it"}`;
+  // A launchpad token is a different KIND of sighting and says so. "new pair"
+  // would be wrong twice over: there is no pair, and there is no pool — the
+  // token trades only on its own curve until it graduates. The progress figure
+  // replaces the depth figure because it is the one that is comparable across a
+  // launchpad where half the curves are quoted in things we cannot price.
+  if (d.curve) {
+    const pct = `${(d.curve.depthFraction * 100).toFixed(1)}% to graduation`;
+    return `🚀 pons launch: ${d.symbol} (${d.token.slice(0, 10)}…) · ${pct} · ${depth}${fdv} · no pool yet, trades on its curve`;
+  }
   return `🌱 new pair: ${d.symbol} (${d.token.slice(0, 10)}…) · ${depth}${fdv} · ${verdict}`;
 }
 

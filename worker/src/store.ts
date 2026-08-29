@@ -320,6 +320,18 @@ const SQLITE_ALTERS: string[] = [
     // NET of it. NULL means the ETH price was refused at the time — unpriced,
     // which is a different fact from free, and reported as such.
     "ALTER TABLE trades ADD COLUMN gas_usdg REAL",
+    // Where a Pons launch actually trades. A pre-graduation token has NO pool
+    // at all — it lives on its own bonding curve — so without this the token is
+    // recorded and then unreachable: there is no tier-scan fallback the way
+    // findV4Pool can guess an unhooked pool. NULLABLE with no default, like the
+    // pool-key columns and for the same reason.
+    "ALTER TABLE discovered_pools ADD COLUMN curve TEXT",
+    // What that curve is priced in. NO DEFAULT, and readers must test `!= null`
+    // rather than truthiness: `0x000…0` is the legitimate NATIVE ETH case and
+    // covers 53.6% of launches, so an all-zero address here means "native", not
+    // "unknown". Defaulting this would be the unknown-as-zero bug the pool_fee
+    // comment above warns about, with the zero already meaning something else.
+    "ALTER TABLE discovered_pools ADD COLUMN quote_token TEXT",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -1618,6 +1630,17 @@ export interface PoolCandidate {
     tickSpacing: number;
     hooks: string;
   };
+  /**
+   * Where a bonding-curve token trades, when this came from the Pons launchpad.
+   *
+   * `quoteToken` is `0x000…0` for native ETH — a meaningful zero, not a missing
+   * one — so absence is expressed by the whole object being undefined rather
+   * than by any field inside it.
+   */
+  curve?: {
+    curve: string;
+    quoteToken: string;
+  };
 }
 
 /**
@@ -1638,17 +1661,41 @@ export async function recordCandidate(c: PoolCandidate): Promise<void> {
         // Bitquery hiccup — can never blank a key that was already captured.
         // Keys are learned once from the Initialize event and then only ever
         // replaced by another full key.
+        // The pool-key and curve columns use COALESCE(excluded.x, x) so a
+        // re-sighting that lacks them — the gateway path, an older worker, a
+        // Bitquery hiccup, or simply the OTHER discoverer — can never blank
+        // what was already captured. Both are learned once and then only ever
+        // replaced by another full reading.
+        //
+        // liquidity_usd and fdv_usd use CASE ... > 0 for a related but distinct
+        // reason. There are now TWO discoverers writing this table, and the Pons
+        // one legitimately has no USD figures for a curve quoted in an asset
+        // this repo cannot price. Left unconditional, such a re-sighting would
+        // overwrite a Uniswap pass's real figures with zeros — silently, since
+        // the catch below only logs — and the trencher's $25,000 depth and
+        // $50,000 FDV gates would then disqualify a candidate that had
+        // previously qualified.
+        //
+        // The cost of this choice, stated plainly: a pool that genuinely drained
+        // to zero keeps its last non-zero figure here. That is the safer of the
+        // two errors because this column is a snapshot from announce time, not
+        // a live reading — trencher re-derives depth every tick from
+        // lastLiquidityUsd and only falls back to this value.
         `INSERT INTO discovered_pools (address, symbol, decimals, liquidity_usd, fdv_usd,
-                                       pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks,
+                                       curve, quote_token)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(address) DO UPDATE SET
            symbol = excluded.symbol, decimals = excluded.decimals,
-           liquidity_usd = excluded.liquidity_usd, fdv_usd = excluded.fdv_usd,
+           liquidity_usd = CASE WHEN excluded.liquidity_usd > 0 THEN excluded.liquidity_usd ELSE liquidity_usd END,
+           fdv_usd = CASE WHEN excluded.fdv_usd > 0 THEN excluded.fdv_usd ELSE fdv_usd END,
            pool_currency0 = COALESCE(excluded.pool_currency0, pool_currency0),
            pool_currency1 = COALESCE(excluded.pool_currency1, pool_currency1),
            pool_fee = COALESCE(excluded.pool_fee, pool_fee),
            pool_tick_spacing = COALESCE(excluded.pool_tick_spacing, pool_tick_spacing),
-           pool_hooks = COALESCE(excluded.pool_hooks, pool_hooks)`,
+           pool_hooks = COALESCE(excluded.pool_hooks, pool_hooks),
+           curve = COALESCE(excluded.curve, curve),
+           quote_token = COALESCE(excluded.quote_token, quote_token)`,
       )
       .run(
         c.address.toLowerCase(),
@@ -1661,6 +1708,8 @@ export async function recordCandidate(c: PoolCandidate): Promise<void> {
         c.key ? c.key.fee : null,
         c.key ? c.key.tickSpacing : null,
         c.key ? c.key.hooks.toLowerCase() : null,
+        c.curve ? c.curve.curve.toLowerCase() : null,
+        c.curve ? c.curve.quoteToken.toLowerCase() : null,
       );
   } catch (e) {
     console.error("[store] candidate upsert failed:", e);
@@ -1717,13 +1766,18 @@ export async function recentCandidates(maxAgeSec: number, limit = 25): Promise<P
   try {
     const rows = await getDb()
       .prepare(
-        `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen
+        // The curve columns ARE selected, unlike the pool-key ones. Those have
+        // their own accessor (poolKeysFor, which the router asks directly); a
+        // curve has none, and a pre-graduation token cannot be reached at all
+        // without it — so a caller holding a candidate needs it in hand.
+        `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen, curve, quote_token
          FROM discovered_pools WHERE first_seen > unixepoch() - ?
          ORDER BY first_seen DESC LIMIT ?`,
       )
       .all(maxAgeSec, limit) as {
       address: string; symbol: string; decimals: number;
       liquidity_usd: number; fdv_usd: number; first_seen: number;
+      curve: string | null; quote_token: string | null;
     }[];
     return rows.map((r) => ({
       address: r.address,
@@ -1732,6 +1786,12 @@ export async function recentCandidates(maxAgeSec: number, limit = 25): Promise<P
       liquidityUsd: Number(r.liquidity_usd) || 0,
       fdvUsd: Number(r.fdv_usd) || 0,
       firstSeen: Number(r.first_seen) || 0,
+      // `!= null` rather than truthiness: quote_token is legitimately the
+      // all-zero address for a native-ETH curve, which is 53.6% of launches
+      // and would read as absent under a truthy test.
+      ...(r.curve != null && r.quote_token != null
+        ? { curve: { curve: r.curve, quoteToken: r.quote_token } }
+        : {}),
     }));
   } catch {
     return [];

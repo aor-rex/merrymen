@@ -97,7 +97,7 @@ import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName } from "./soul";
 import { positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
-import { describeDiscovery, discoverPools, resolveBitquery } from "./discovery";
+import { describeDiscovery, discoverPools, discoverPonsLaunches, resolveBitquery } from "./discovery";
 import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
@@ -767,7 +767,17 @@ async function main() {
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
     for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25)) {
-      const quote = lastPrices.get(c.symbol);
+      // Look the price up by ADDRESS, not by the symbol alone. `lastPrices` is
+      // symbol-keyed and filled only from watchTokens, while a candidate's
+      // symbol is attacker-chosen text out of the launchpad — so a memecoin
+      // that calls itself NVDA would otherwise read the real NVDA Chainlink
+      // price, come back priceable with a stock's price8, and be judged against
+      // memecoin depth. The asset allowlist stops the buy, but the strategy
+      // still burns its one entry per tick on it, every tick, forever.
+      const sameToken = watchTokens.find(
+        (t) => t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
+      );
+      const quote = sameToken ? lastPrices.get(c.symbol) : undefined;
       out.push({
         symbol: c.symbol,
         token: c.address as `0x${string}`,
@@ -872,6 +882,93 @@ async function main() {
         `${line} — I can't trade it until you add it in /settings and re-sign at /grant.`,
       );
     }
+  }
+
+  /**
+   * The Pons launchpad, on its own clock and its own credentials.
+   *
+   * SEPARATE FROM runDiscovery ON PURPOSE, for two reasons that both bite.
+   * First, runDiscovery returns early when there is no Bitquery key or holder
+   * token — and that check sits BEFORE its interval gate — so folding this in
+   * would silently disable the launchpad for every owner who has no Bitquery
+   * account, even though Pons needs none: this reads the owner's own RPC.
+   * Second, discoveryIntervalMin exists to protect the holder gateway's quota,
+   * which is not a constraint that applies here.
+   */
+  let lastPonsAt = 0;
+  const PONS_INTERVAL_SEC = 300;
+  /** ~0.101 s/block on this chain, measured across spans up to 864,000 blocks. */
+  const BLOCKS_PER_SEC = 10n;
+  async function runPonsDiscovery(agentId: string): Promise<void> {
+    if (!cfg.discoveryEnabled) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const elapsed = lastPonsAt === 0 ? PONS_INTERVAL_SEC : nowSec - lastPonsAt;
+    if (elapsed < PONS_INTERVAL_SEC) return;
+    lastPonsAt = nowSec;
+
+    // Look back over exactly the gap since the last pass, so a launch is
+    // evaluated once and no window is skipped. Bounded inside the reader,
+    // which reports when it had to clamp.
+    const lookback = BigInt(elapsed + 60) * BLOCKS_PER_SEC;
+    // Read the ETH price ONCE for the whole pass. It shares a 300s cache with
+    // the gas path, so this is usually free, but a cold read is a full routed
+    // pool read and doing it per launch would be absurd.
+    const eth = await ethPrice8();
+
+    const scan = await discoverPonsLaunches({
+      client: mainnetClient(),
+      lookbackBlocks: lookback,
+      seen: await seenPools(),
+      known: watchTokens,
+      ethUsd8: eth.price8,
+    });
+
+    if (scan.failed) {
+      // Distinguished from a quiet launchpad deliberately: the RPC refuses this
+      // query when it would match over 10,000 logs, and a silent empty result
+      // would look identical to "nothing launched" forever.
+      console.log("[pons] the launch scan was refused — treating as unknown, not as empty");
+      return;
+    }
+    if (scan.clamped) {
+      console.log(`[pons] lookback clamped; launches older than the clamp were not seen`);
+    }
+    if (!scan.found.length) {
+      if (scan.scanned > 0) console.log(`[pons] ${scan.scanned} launches, none deep enough to mention`);
+      return;
+    }
+
+    for (const d of scan.found) {
+      // Persist before announcing, exactly as runDiscovery does — and only for
+      // what cleared the filter. Recording all ~475 launches/hour would evict
+      // the whole discovered_pools table (capped at 5,000 rows) roughly every
+      // ten hours, taking the Uniswap discoveries down with it.
+      await markPoolSeen(d.token, d.symbol);
+      await recordCandidate({
+        address: d.token,
+        symbol: d.symbol,
+        decimals: d.decimals,
+        liquidityUsd: d.liquidityUsdg === null ? 0 : Number(d.liquidityUsdg) / 1e6,
+        fdvUsd: 0,
+        firstSeen: 0,
+        // The curve is the only way to reach a pre-graduation token. There is
+        // no tier-scan fallback the way there is for an unhooked pool.
+        ...(d.curve ? { curve: { curve: d.curve.curve, quoteToken: d.curve.quoteToken } } : {}),
+      });
+      console.log(`[pons] ${describeDiscovery(d)}`);
+    }
+
+    // ONE event per pass, not one per launch. At ~475 launches/hour even a
+    // filtered feed can outpace the dashboard's 40-row window and bury every
+    // warn-level event under memecoin names; the events table has no pruning at
+    // all. The individual lines are still in the log above.
+    const names = scan.found.map((d) => d.symbol).join(", ");
+    await addEvent(
+      agentId,
+      "ok",
+      `🚀 pons: ${scan.found.length} of ${scan.scanned} launches worth a look — ${names}. ` +
+        `They trade on bonding curves, not pools; I can't trade one until you add it in /settings and re-sign at /grant.`,
+    );
   }
 
   let lastCoverageKey: string | null = null;
@@ -2608,6 +2705,8 @@ async function main() {
     // the trading path in a way that could stall it — a data provider having a
     // bad minute must not delay a sell.
     void runDiscovery(agentId).catch(() => {});
+    // The launchpad keeps its own clock and needs no Bitquery credential.
+    void runPonsDiscovery(agentId).catch(() => {});
 
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
