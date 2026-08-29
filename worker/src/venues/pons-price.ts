@@ -127,6 +127,13 @@ export interface CurvePrice {
 export function curvePrice(r: CurveReserves, quoteUsd8: bigint): CurvePrice | null {
   if (r.quoteRaw <= 0n || r.tokenRaw <= 0n || quoteUsd8 <= 0n) return null;
   if (r.quoteDecimals < 0 || r.tokenDecimals < 0) return null;
+  // Without a threshold the seed cannot be subtracted, and depthUsd8 would
+  // silently become the pre-fix figure — the full seeded reserve reported as
+  // money. Every current caller supplies one (parseLaunchLogs refuses a
+  // zero-threshold log and readCurveReserves checks it again), so this is
+  // defence in depth rather than a live path; it is here because the cost of it
+  // being wrong is a confident number on a curve holding nothing.
+  if (r.graduationThresholdRaw <= 0n) return null;
 
   // price_usd = (quoteRaw / 10^qd) / (tokenRaw / 10^td) * quoteUsd
   //

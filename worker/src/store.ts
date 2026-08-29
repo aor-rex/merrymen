@@ -332,6 +332,23 @@ const SQLITE_ALTERS: string[] = [
     // "unknown". Defaulting this would be the unknown-as-zero bug the pool_fee
     // comment above warns about, with the zero already meaning something else.
     "ALTER TABLE discovered_pools ADD COLUMN quote_token TEXT",
+    // When the POOL discoverer announced this token — as distinct from merely
+    // having a row, which the launchpad discoverer also creates.
+    //
+    // The two discoverers need INDEPENDENT dedupe. A Pons launch and that same
+    // token's graduation into a Uniswap pool are two different events, and the
+    // second is the one that matters most: it is when the token becomes
+    // tradeable, and the only moment its v4 PoolKey can ever be captured (hook
+    // addresses cannot be guessed, so a hooked pool is unroutable without it).
+    // Sharing one seen-set keyed on "is there a row" meant a launchpad sighting
+    // permanently suppressed the graduation sighting.
+    "ALTER TABLE discovered_pools ADD COLUMN pool_announced_at INTEGER",
+    // Backfill: every row that predates the launchpad path WAS announced by the
+    // pool discoverer, because nothing else could have created it. Without this
+    // the column reads NULL for all of them and the next pass re-announces the
+    // entire history as new. Idempotent — rows the launchpad creates carry a
+    // curve and are excluded, and rows already stamped are not matched.
+    "UPDATE discovered_pools SET pool_announced_at = first_seen WHERE pool_announced_at IS NULL AND curve IS NULL",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -1588,28 +1605,81 @@ export async function setPaperBook(agentId: string, book: PaperBookRow): Promise
 }
 
 /** Addresses discovery has already reported. Bounded — old rows are pruned. */
+/**
+ * Tokens the POOL discoverer has already announced.
+ *
+ * Filtered on `pool_announced_at`, NOT on "a row exists". The launchpad
+ * discoverer also writes rows, and a token that launched on Pons must still be
+ * announced when it later graduates into a real pool — that is the moment it
+ * becomes tradeable, and the only moment its v4 PoolKey can be captured.
+ * Keying this on row existence made a launch permanently suppress the
+ * graduation.
+ */
 export async function seenPools(): Promise<Set<string>> {
   try {
-    const rows = await getDb().prepare("SELECT address FROM discovered_pools").all() as { address: string }[];
+    const rows = await getDb()
+      .prepare("SELECT address FROM discovered_pools WHERE pool_announced_at IS NOT NULL")
+      .all() as { address: string }[];
     return new Set(rows.map((r) => r.address.toLowerCase()));
   } catch {
     return new Set();
   }
 }
 
-/** Record a reported pair so it is never announced twice. */
+/**
+ * Tokens the LAUNCHPAD discoverer has already announced.
+ *
+ * The curve column is the marker because only that path ever writes it, so this
+ * needs no flag of its own. Independent of `seenPools` by design — see above.
+ */
+export async function seenCurves(): Promise<Set<string>> {
+  try {
+    const rows = await getDb()
+      .prepare("SELECT address FROM discovered_pools WHERE curve IS NOT NULL")
+      .all() as { address: string }[];
+    return new Set(rows.map((r) => r.address.toLowerCase()));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Record a POOL sighting so the pool discoverer never announces it twice. */
 export async function markPoolSeen(address: string, symbol: string): Promise<void> {
   try {
     await getDb()
-      .prepare("INSERT OR IGNORE INTO discovered_pools (address, symbol) VALUES (?, ?)")
+      .prepare(
+        // Upsert rather than INSERT OR IGNORE: the launchpad may have created
+        // this row already, and an IGNORE would leave pool_announced_at NULL —
+        // re-announcing the same pool on every pass, forever.
+        `INSERT INTO discovered_pools (address, symbol, pool_announced_at)
+         VALUES (?, ?, unixepoch())
+         ON CONFLICT(address) DO UPDATE SET pool_announced_at = COALESCE(pool_announced_at, unixepoch())`,
+      )
       .run(address.toLowerCase(), symbol.slice(0, 16));
-    // A launchy chain could otherwise grow this forever. 5k rows is far more
-    // than dedupe needs and keeps the table trivial to scan.
+    await pruneDiscovered();
+  } catch (e) {
+    console.error("[store] discovered_pools insert failed:", e);
+  }
+}
+
+/**
+ * Keep the dedupe table bounded.
+ *
+ * Called from BOTH discoverers. It used to live inside markPoolSeen, which was
+ * fine when that was the only writer; with a launchpad also inserting, a quiet
+ * period for pool discovery would mean the prune never ran while rows kept
+ * arriving.
+ */
+export async function pruneDiscovered(): Promise<void> {
+  try {
+    // Not parameterised on purpose: this goes through Db.exec, whose Postgres
+    // path applies translateSchema and does NO placeholder translation, so a
+    // `?` here would ship literally and throw on every pass.
     await getDb().exec(
       "DELETE FROM discovered_pools WHERE address NOT IN (SELECT address FROM discovered_pools ORDER BY first_seen DESC LIMIT 5000)",
     );
   } catch (e) {
-    console.error("[store] discovered_pools insert failed:", e);
+    console.error("[store] discovered_pools prune failed:", e);
   }
 }
 
@@ -1761,8 +1831,25 @@ export async function poolKeysFor(
   }
 }
 
-/** Candidates seen within `maxAgeSec`, freshest first. */
-export async function recentCandidates(maxAgeSec: number, limit = 25): Promise<PoolCandidate[]> {
+/**
+ * Candidates seen within `maxAgeSec`, freshest first.
+ *
+ * `poolsOnly` excludes bonding-curve rows, and the caller that wants candidates
+ * to TRADE must pass it. The launchpad adds roughly ten rows an hour against a
+ * 25-row window ordered by recency, so within a few hours the window is nothing
+ * but curve tokens — which have no pool, cannot be priced by the pool guards
+ * and cannot be entered at all today. They would crowd out every genuine pool
+ * discovery, and "nothing qualified" would be indistinguishable from "the one
+ * that qualified fell off the end of the list".
+ *
+ * Filtered in SQL rather than after the fact, because the LIMIT is applied by
+ * the database: dropping them in JavaScript would still leave the window full.
+ */
+export async function recentCandidates(
+  maxAgeSec: number,
+  limit = 25,
+  opts: { poolsOnly?: boolean } = {},
+): Promise<PoolCandidate[]> {
   try {
     const rows = await getDb()
       .prepare(
@@ -1772,6 +1859,7 @@ export async function recentCandidates(maxAgeSec: number, limit = 25): Promise<P
         // without it — so a caller holding a candidate needs it in hand.
         `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen, curve, quote_token
          FROM discovered_pools WHERE first_seen > unixepoch() - ?
+         ${opts.poolsOnly ? "AND curve IS NULL" : ""}
          ORDER BY first_seen DESC LIMIT ?`,
       )
       .all(maxAgeSec, limit) as {

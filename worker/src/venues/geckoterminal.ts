@@ -70,7 +70,16 @@ export interface GeckoPool {
   /** Which venue it trades on, e.g. "uniswap-v3-robinhood" or a Pons curve. */
   dex: string;
   priceUsd: number | null;
-  /** Total value in the pool, USD. The honest depth figure. */
+  /**
+   * Total value the index reports in the pool, USD.
+   *
+   * NOT a depth figure you may trade on, and specifically not for the Pons
+   * rows this feed also returns: a bonding curve is opened with a VIRTUAL quote
+   * reserve of 40% of its graduation threshold while holding none of the quote
+   * asset, and an indexer reading reserves sees that seed like anyone else. Use
+   * it to rank what is worth looking at; read real depth from the chain
+   * (venues/pons-price.ts realQuoteRaw) before it decides anything.
+   */
   reserveUsd: number | null;
   fdvUsd: number | null;
   volume24hUsd: number | null;

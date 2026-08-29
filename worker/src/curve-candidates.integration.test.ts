@@ -20,7 +20,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-curves-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, recentCandidates, recordCandidate } = await import("./store");
+const { initStore, markPoolSeen, recentCandidates, recordCandidate, seenCurves, seenPools } = await import("./store");
 
 await initStore();
 after(() => {
@@ -109,5 +109,80 @@ describe("one discoverer must not zero the other's figures", () => {
     // lastLiquidityUsd, falling back to this only when it has no live reading —
     // so a stale non-zero here is the safer of the two available errors.
     assert.ok(true);
+  });
+});
+
+/**
+ * The two discoverers must dedupe INDEPENDENTLY.
+ *
+ * A Pons launch and that same token's graduation into a Uniswap pool are two
+ * different events, and the second matters more: it is when the token becomes
+ * tradeable, and the only moment its v4 PoolKey can ever be captured — hook
+ * addresses cannot be guessed, so a hooked pool is unroutable without it. An
+ * earlier version marked launchpad tokens into the shared seen-set, which
+ * permanently suppressed the graduation sighting.
+ */
+describe("launchpad and pool discovery dedupe separately", () => {
+  const LAUNCHED = "0x00000000000000000000000000000000000000d1";
+
+  it("a launchpad row does NOT count as seen by the pool discoverer", async () => {
+    await recordCandidate({
+      address: LAUNCHED, symbol: "GRADS", decimals: 18, liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
+      curve: { curve: "0x00000000000000000000000000000000000000f1", quoteToken: NATIVE },
+    });
+    assert.equal((await seenCurves()).has(LAUNCHED), true, "the launchpad must not re-announce it");
+    assert.equal(
+      (await seenPools()).has(LAUNCHED),
+      false,
+      "but the pool discoverer must still announce it when it graduates",
+    );
+  });
+
+  it("once the pool discoverer announces it, it stops re-announcing", async () => {
+    await markPoolSeen(LAUNCHED, "GRADS");
+    assert.equal((await seenPools()).has(LAUNCHED), true);
+    // And the curve it launched on survives that write.
+    const got = await find(LAUNCHED);
+    assert.ok(got?.curve, "marking a pool seen must not blank the curve");
+  });
+
+  it("a pool-only token is seen by pools and not by curves", async () => {
+    const poolOnly = "0x00000000000000000000000000000000000000d2";
+    await markPoolSeen(poolOnly, "PLAIN");
+    assert.equal((await seenPools()).has(poolOnly), true);
+    assert.equal((await seenCurves()).has(poolOnly), false);
+  });
+
+  it("re-marking a pool seen does not move its timestamp", async () => {
+    // COALESCE on the upsert: the first sighting is the one that counts, and a
+    // repeated one must not look like a fresh discovery.
+    const before = (await seenPools()).size;
+    await markPoolSeen(LAUNCHED, "GRADS");
+    assert.equal((await seenPools()).size, before);
+  });
+});
+
+describe("curve rows do not crowd out the trencher's window", () => {
+  it("poolsOnly excludes bonding-curve candidates", async () => {
+    // The launchpad adds ~10 rows/hour against a 25-row window ordered by
+    // recency, so within hours it would contain nothing else — and those rows
+    // can never be entered. Filtered in SQL because the LIMIT is applied by the
+    // database; dropping them afterwards would still leave the window full.
+    for (let i = 0; i < 30; i++) {
+      await recordCandidate({
+        address: `0x${String(i).padStart(40, "b")}`, symbol: `C${i}`, decimals: 18,
+        liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
+        curve: { curve: "0x00000000000000000000000000000000000000f9", quoteToken: NATIVE },
+      });
+    }
+    const pool = "0x00000000000000000000000000000000000000d3";
+    await recordCandidate({ address: pool, symbol: "REAL", decimals: 18, liquidityUsd: 90_000, fdvUsd: 200_000, firstSeen: 0 });
+
+    const windowed = await recentCandidates(3600, 25, { poolsOnly: true });
+    assert.ok(windowed.some((c) => c.address === pool), "the one enterable candidate must survive the window");
+    assert.equal(windowed.every((c) => !c.curve), true, "no curve rows may consume a slot");
+    // Without the filter it is buried.
+    const unfiltered = await recentCandidates(3600, 25);
+    assert.ok(unfiltered.some((c) => c.curve), "the unfiltered view still shows them");
   });
 });

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CASH } from "../../packages/core/src/index";
-import { describeDiscovery, newTokenOf, sanitizeSymbol, type Discovery } from "./discovery";
+import { PONS_MAX_EVALUATE, describeDiscovery, newTokenOf, ponsScanWindow, sanitizeSymbol, type Discovery } from "./discovery";
 
 const USDG = (CASH.USDG as string).toLowerCase() as `0x${string}`;
 const WETH = (CASH.WETH as string).toLowerCase() as `0x${string}`;
@@ -185,5 +185,82 @@ describe("describeDiscovery — a Pons launch", () => {
     // The two shapes share one function; the pool wording is asserted above and
     // by four other tests in this file.
     assert.match(describeDiscovery({ ...launch, curve: undefined, priceable: true }), /new pair/);
+  });
+});
+
+/**
+ * The scan clock, which is where a silent hole would open.
+ *
+ * The window is measured from the last SUCCESSFUL pass. An earlier version
+ * advanced it before the RPC call and returned early on failure, so the ~40
+ * launches inside a failed window were read by no pass ever — and one transient
+ * 429 from the RPC was enough to open one. These tests exist because that
+ * failure produces no error and no log anyone would notice.
+ */
+describe("ponsScanWindow", () => {
+  const base = { intervalSec: 300, blocksPerSec: 10n };
+
+  it("is not due before the interval, and is due after", () => {
+    assert.equal(ponsScanWindow({ ...base, lastSuccessAt: 1000, nowSec: 1200 }).due, false);
+    assert.equal(ponsScanWindow({ ...base, lastSuccessAt: 1000, nowSec: 1300 }).due, true);
+  });
+
+  it("runs immediately on a cold start, looking back one interval", () => {
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 0, nowSec: 50_000 });
+    assert.equal(w.due, true);
+    assert.equal(w.lookbackBlocks, BigInt(300 + 60) * 10n);
+  });
+
+  it("WIDENS after a failure instead of skipping the window", () => {
+    // The whole point. The caller does not advance lastSuccessAt on failure, so
+    // the next pass must cover the failed window too.
+    const first = ponsScanWindow({ ...base, lastSuccessAt: 1000, nowSec: 1300 });
+    const afterFailure = ponsScanWindow({ ...base, lastSuccessAt: 1000, nowSec: 1600 });
+    assert.ok(afterFailure.lookbackBlocks > first.lookbackBlocks, "the retry must reach further back");
+    assert.equal(afterFailure.elapsedSec, 600, "two intervals of ground to make up");
+  });
+
+  it("covers the whole gap with no hole, across consecutive failures", () => {
+    // Walk five passes where every one fails, then one succeeds, and check the
+    // final window reaches back to the last success.
+    const lastSuccess = 1000;
+    for (let n = 1; n <= 5; n++) {
+      const now = lastSuccess + 300 * n;
+      const w = ponsScanWindow({ ...base, lastSuccessAt: lastSuccess, nowSec: now });
+      const reachesBackTo = now - Number(w.lookbackBlocks / 10n);
+      assert.ok(reachesBackTo <= lastSuccess, `pass ${n} left a hole: reaches ${reachesBackTo}, needs ${lastSuccess}`);
+    }
+  });
+
+  it("overlaps rather than abutting — re-reading is free, missing is permanent", () => {
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 1000, nowSec: 1300 });
+    const reachesBackTo = 1300 - Number(w.lookbackBlocks / 10n);
+    assert.ok(reachesBackTo < 1000, "the window must extend past the last success, not stop at it");
+  });
+
+  it("never produces a negative lookback from a clock that went backwards", () => {
+    // NTP correction, or a restored snapshot. A negative here would throw on
+    // the BigInt conversion and take the pass down.
+    const w = ponsScanWindow({ ...base, lastSuccessAt: 9_999, nowSec: 1_000 });
+    assert.equal(w.elapsedSec, 0);
+    assert.ok(w.lookbackBlocks >= 0n);
+    assert.equal(w.due, false);
+  });
+});
+
+/**
+ * The per-pass evaluation cap.
+ *
+ * A normal pass sees ~40 launches. After an outage the lookback widens until it
+ * clamps at ~8.4 hours — roughly 4,000 launches, and one sequential eth_call
+ * each against a public RPC that already returns 429s under much less. The cap
+ * exists so a catch-up pass cannot rate-limit the agent out of its own chain,
+ * and the shortfall is reported rather than absorbed.
+ */
+describe("PONS_MAX_EVALUATE", () => {
+  it("is large enough for an ordinary pass and small enough for a catch-up", () => {
+    // ~40 launches per 5-minute pass at the measured 475/hour.
+    assert.ok(PONS_MAX_EVALUATE >= 200, "an ordinary pass must never be truncated");
+    assert.ok(PONS_MAX_EVALUATE <= 1000, "a clamped catch-up must not fire thousands of sequential calls");
   });
 });

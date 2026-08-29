@@ -228,6 +228,38 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
  */
 export const PONS_MIN_DEPTH_FRACTION = 0.05;
 
+/**
+ * When the next launchpad pass is due, and how far back it must look.
+ *
+ * PURE, AND SEPARATE, because getting it wrong is invisible. The window is
+ * measured from the last SUCCESSFUL pass, never from the last attempt — so a
+ * refused scan simply widens the next one instead of leaving a hole. The
+ * earlier version advanced its clock before the RPC call and returned early on
+ * failure, which meant the ~40 launches inside a failed window were read by no
+ * pass, ever, and a single transient 429 was enough to open one.
+ *
+ * The overlap is deliberate and one-directional: re-reading a launch is free
+ * (the seen-set drops it), while missing one is permanent.
+ */
+export function ponsScanWindow(opts: {
+  /** Unix seconds of the last pass that actually returned data; 0 if never. */
+  lastSuccessAt: number;
+  nowSec: number;
+  intervalSec: number;
+  blocksPerSec: bigint;
+  /** Seconds of deliberate overlap, to absorb block-time variance. */
+  overlapSec?: number;
+}): { due: boolean; elapsedSec: number; lookbackBlocks: bigint } {
+  const overlap = opts.overlapSec ?? 60;
+  const since = opts.lastSuccessAt === 0 ? opts.nowSec - opts.intervalSec : opts.lastSuccessAt;
+  const elapsedSec = Math.max(0, opts.nowSec - since);
+  return {
+    due: elapsedSec >= opts.intervalSec,
+    elapsedSec,
+    lookbackBlocks: BigInt(elapsedSec + overlap) * opts.blocksPerSec,
+  };
+}
+
 export interface PonsDiscoveryDeps {
   client: PublicClient;
   /** Bounded by the caller from elapsed wall-clock — see MAX_LOOKBACK_BLOCKS. */
@@ -237,7 +269,25 @@ export interface PonsDiscoveryDeps {
   /** USD price of native ETH, 8dp. Null when the worker could not price it. */
   ethUsd8: bigint | null;
   minDepthFraction?: number;
+  /** Cap on launches evaluated in one pass — see PONS_MAX_EVALUATE. */
+  maxEvaluate?: number;
 }
+
+/**
+ * How many launches one pass will actually read reserves for.
+ *
+ * The filter costs one sequential eth_call per launch. A normal pass sees ~40,
+ * which is nothing — but after an outage the lookback widens until it clamps at
+ * ~8.4 hours, which is roughly 4,000 launches and therefore 4,000 sequential
+ * calls against a public RPC that already returns 429s under far less. Bounded
+ * so a catch-up pass cannot turn into a self-inflicted rate-limit, and the
+ * shortfall is REPORTED rather than absorbed.
+ *
+ * The most RECENT launches are kept when the cap bites, because depth on this
+ * launchpad arrives at birth and decays — an older launch is the less likely
+ * of the two to still be worth anything.
+ */
+export const PONS_MAX_EVALUATE = 400;
 
 export interface PonsScanResult {
   found: Discovery[];
@@ -247,6 +297,8 @@ export interface PonsScanResult {
   failed: boolean;
   /** The lookback was clamped; launches older than the clamp were not seen. */
   clamped: boolean;
+  /** Launches inside the window that the per-pass cap left unevaluated. */
+  skipped: number;
 }
 
 /**
@@ -265,14 +317,18 @@ export interface PonsScanResult {
  */
 export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<PonsScanResult> {
   const scan = await recentPonsLaunches(deps.client, deps.lookbackBlocks);
-  if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped };
+  if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped, skipped: 0 };
 
   const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
   const minFraction = deps.minDepthFraction ?? PONS_MIN_DEPTH_FRACTION;
+  const cap = deps.maxEvaluate ?? PONS_MAX_EVALUATE;
+  // Newest first when the cap bites: depth arrives at birth and decays here.
+  const considered = scan.launches.length > cap ? scan.launches.slice(-cap) : scan.launches;
+  const skipped = scan.launches.length - considered.length;
   const seenThisPass = new Set<string>();
   const survivors: { launch: PonsLaunch; reserves: CurveReserves; fraction: number }[] = [];
 
-  for (const launch of scan.launches) {
+  for (const launch of considered) {
     const key = launch.token.toLowerCase();
     if (deps.seen.has(key) || knownAddrs.has(key) || seenThisPass.has(key)) continue;
     seenThisPass.add(key);
@@ -343,7 +399,7 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
     });
   }
 
-  return { found, scanned: scan.launches.length, failed: false, clamped: scan.clamped };
+  return { found, scanned: scan.launches.length, failed: false, clamped: scan.clamped, skipped };
 }
 
 /**
