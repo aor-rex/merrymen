@@ -85,6 +85,26 @@ export interface PriceQuote {
   source: "chainlink" | "pool" | "broker";
   /** For pool prices: route + depth, so a human can judge the number. */
   detail?: string;
+  /**
+   * Depth behind this price, raw USDG (6dp) — the same unit as
+   * `PriceGuard.minLiquidityUsdg` and `Discovery.liquidityUsdg`.
+   *
+   * OPTIONAL, AND ABSENCE IS A REAL VALUE. Chainlink and broker quotes have no
+   * depth concept at all, and downstream is written so that null SKIPS the
+   * liquidity-drain check while 0 FIRES it — so collapsing "I could not read
+   * depth" into "the pool is empty" would turn a missing fact into a forced
+   * liquidation. Never write 0n to mean unknown.
+   *
+   * This exists because the number used to be recovered by running a regex over
+   * `detail`, which is prose formatted with `toLocaleString`. On any host whose
+   * locale groups with dots or uses non-Latin digits — de-DE, fr-FR, ru-RU,
+   * ar-EG — that match failed for every pool over $1,000, silently emptying the
+   * depth map. Two live consequences: trencher's rug defence was off, and the
+   * trench entry baseline was stamped 0 through an ON CONFLICT DO NOTHING
+   * upsert, so it stayed 0 for the position's whole life. A number should never
+   * have been round-tripped through a sentence.
+   */
+  liquidityUsdg?: bigint;
 }
 
 /** Reject anything that isn't a plausible ERC-20 entry before it can reach a

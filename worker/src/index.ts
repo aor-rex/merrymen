@@ -696,11 +696,17 @@ async function main() {
     // explicit rather than incidental.
     for (const [symbol, quote] of quotes) if (!prices.has(symbol)) prices.set(symbol, quote);
     // Depth per token, so a trench exit can tell a drain from a price move.
+    //
+    // Read from the quote's own numeric field. This used to run a regex over
+    // describeRoute's PROSE, which is formatted with toLocaleString — so on any
+    // host grouping with dots or using non-Latin digits it matched nothing for
+    // every pool over $1,000, and the depth map stayed empty. That silently
+    // turned off trencher's liquidity-drain exit and made the trench entry
+    // baseline 0 forever, through an upsert that never corrects itself.
     for (const t of feedless) {
       const q = quotes.get(t.symbol);
-      if (!q?.detail) continue;
-      const m = /\$([\d,]+)\s+deep/.exec(q.detail);
-      if (m) lastLiquidityUsd.set(t.address.toLowerCase(), Number(m[1]!.replace(/,/g, "")));
+      if (q?.liquidityUsdg === undefined) continue;
+      lastLiquidityUsd.set(t.address.toLowerCase(), Number(q.liquidityUsdg) / 1e6);
     }
 
     poolRefusals = new Map(refused.map((r) => [r.symbol, r.reason]));
@@ -1347,7 +1353,16 @@ async function main() {
     if (cfg.strategy === "trencher") {
       const tok = watchTokens.find((t) => t.symbol === f.symbol);
       if (f.side === "buy" && tok) {
-        await setTrenchEntry(agentId, mode, f.symbol, lastLiquidityUsd.get(tok.address.toLowerCase()) ?? 0);
+        const depth = lastLiquidityUsd.get(tok.address.toLowerCase());
+        // Only stamp a baseline we actually HAVE. The row is written ON
+        // CONFLICT DO NOTHING, so a 0 recorded here is never corrected — not on
+        // a later tick, a top-up, or a restart — and trencher's drain exit is
+        // gated on `entryLiquidityUsd > 0`. Defaulting an unknown to 0 turned
+        // the rug defence off for that position's entire life, silently.
+        // Leaving the row unwritten is honest: the exit then reports no
+        // baseline rather than a false one.
+        if (depth !== undefined) await setTrenchEntry(agentId, mode, f.symbol, depth);
+        else console.log(`[trench] no depth reading for ${f.symbol} — not stamping an entry baseline`);
       }
       // Flat again: forget the baseline so a later re-entry starts fresh rather
       // than being judged against a position that closed hours ago.
