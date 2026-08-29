@@ -65,6 +65,16 @@ export interface MerrymenSettings {
    * re-sign. The worker executes against the grant-sealed address, never this.
    */
   v4AdapterAddress?: string;
+  /**
+   * The deployed PonsSelfTrade adapter for this chain, or absent.
+   *
+   * A HINT, never the authority. The worker calls whatever address the grant
+   * was SEALED against (grantPonsAdapter); this field only lets the dashboard
+   * offer it at signing time and lets the worker warn when the two have
+   * drifted. Reading it at tick time would let a setting redirect trades at a
+   * contract the signature never covered.
+   */
+  ponsAdapterAddress?: string;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as

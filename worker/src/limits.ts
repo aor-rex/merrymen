@@ -7,6 +7,7 @@ import {
   grantHasTransfer,
   grantHasV4,
   grantV4Adapter,
+  grantPonsAdapter,
   sellableAssets,
   usdgUnits,
   type StockToken,
@@ -40,6 +41,23 @@ export function limitsFromGrant(
       // silent sibling.
       ...((): `0x${string}`[] => {
         const a = grantV4Adapter(grant);
+        return a ? [a] : [];
+      })(),
+      // THE PONS ADAPTER, MIRRORED, on exactly the same terms and from the same
+      // authority: the GRANT, never settings. `cfg.ponsAdapterAddress` is a
+      // configuration field anyone with the dashboard can edit; the address the
+      // `tradeExactIn` permission was actually sealed against is the only one
+      // the chain will honour, and grantPonsAdapter returns it only when the
+      // marker and a valid address both exist.
+      //
+      // Reading settings here would let a setting silently redirect the
+      // agent's trades at a contract the signature never covered — the mirror
+      // going LOOSER than the chain, which is the one direction that is never
+      // safe. Omitting it entirely would be the other failure: a correctly
+      // granted adapter call dying off-chain at `target-allowlist`, a route
+      // that looks granted and never fires.
+      ...((): `0x${string}`[] => {
+        const a = grantPonsAdapter(grant);
         return a ? [a] : [];
       })(),
     ],

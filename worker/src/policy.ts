@@ -129,6 +129,44 @@ export type TradeIntent = {
   side: "buy" | "sell";
   /** USD notional, 6dp — same unit as USDG, judged by the same caps. */
   notionalUsdg: bigint;
+} | {
+  /**
+   * A trade on a Pons bonding curve, through the PonsSelfTrade adapter.
+   *
+   * ITS OWN KIND rather than a `swap`, for a reason that is about safety and
+   * not tidiness. A curve has no fee tier, no path and no PoolKey, so it does
+   * not fit the Quote that `swap` dispatches on — and forcing it through would
+   * mean either inventing a sentinel for the native side or having
+   * `asset-allowlist` reject the venue outright, which is a mirror STRICTER
+   * than the chain. A distinct kind also makes the compiler ask every consumer
+   * what a curve trade means to it, the same reasoning that leaves
+   * `equity-order` without a `target`.
+   *
+   * `target` IS here, and it is the ADAPTER — never the curve. The curve is a
+   * call argument the wall cannot pin (a new address per token, ~475 an hour),
+   * so `target-allowlist` covers the one address that IS pinned, unchanged.
+   */
+  kind: "curve-trade";
+  /** The PonsSelfTrade adapter. What the wall pinned and what gets called. */
+  target: `0x${string}`;
+  /** The bonding curve. An argument, vouched for by nobody — see wall.ts. */
+  curve: `0x${string}`;
+  assetIn: `0x${string}`;
+  assetOut: `0x${string}`;
+  /** Raw units of assetIn — what executes. */
+  amountInRaw: bigint;
+  /**
+   * Slippage floor in assetOut units, from the SAME quote that sized this
+   * intent. Carried on the intent rather than recomputed at execution time so
+   * the number the trade is judged against and the number the chain enforces
+   * cannot come from two different readings of a curve that moves 1,546 bps at
+   * p99 over four minutes.
+   *
+   * checkPolicy ignores it, like every other execution detail here.
+   */
+  minAmountOutRaw: bigint;
+  /** USDG-equivalent size (6dp) — what the caps judge. */
+  notionalUsdg: bigint;
 });
 
 export type Verdict =
@@ -326,7 +364,9 @@ export function checkPolicy(
     // Equity orders count on BOTH sides, like swaps: a sell is still an op and
     // still market exposure, and on this rail these caps are the only wall.
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" ? intent.notionalUsdg : intent.amountUsdg;
+      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+        ? intent.notionalUsdg
+        : intent.amountUsdg;
     const isDeposit = intent.kind === "vault-deposit";
     const perOpCap = isDeposit ? limits.dailyUsdg : limits.perTradeUsdg;
     if (notional > perOpCap) {
@@ -364,7 +404,14 @@ export function checkPolicy(
     (intent.kind === "swap" &&
       limits.cashToken !== undefined &&
       lc(intent.buyToken) === lc(limits.cashToken)) ||
-    (intent.kind === "equity-order" && intent.side === "sell");
+    (intent.kind === "equity-order" && intent.side === "sell") ||
+    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
+    // into cash is. Leaving it out would have the breaker block the one
+    // direction it should never block — getting out of a memecoin — while a
+    // drawdown is in progress, which is precisely when it matters most.
+    (intent.kind === "curve-trade" &&
+      limits.cashToken !== undefined &&
+      lc(intent.assetOut) === lc(limits.cashToken));
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

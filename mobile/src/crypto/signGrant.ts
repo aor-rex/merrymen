@@ -9,6 +9,7 @@ import {
   GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
+  GRANT_PONS_ADAPTER,
   TRADEABLE_V2,
   buildWallPolicies,
   WALL_POLICY_FLAG,
@@ -61,6 +62,14 @@ export async function signGrant(args: {
    * lockstep rule: the marker is minted by the permission, never ahead of it.
    */
   v4AdapterAddress?: `0x${string}`;
+  /**
+   * The deployed PonsSelfTrade adapter to seal into the wall, or absent for no
+   * bonding-curve route. A SECOND, SEPARATE opt-in from the v4 adapter. Like
+   * its sibling above, the phone passes nothing today, so phone grants
+   * honestly carry no Pons marker -- the marker is minted by the permission,
+   * never ahead of it.
+   */
+  ponsAdapterAddress?: `0x${string}`;
   rpcUrl?: string;
   onProgress?: SignProgress;
 }): Promise<SignedGrant> {
@@ -133,6 +142,7 @@ export async function signGrant(args: {
     extraTokens: args.extraTokens,
     allowUniswapV4,
     v4AdapterAddress: args.v4AdapterAddress,
+    ponsAdapterAddress: args.ponsAdapterAddress,
   });
 
   say("attaching the permissions");
@@ -189,8 +199,10 @@ export async function signGrant(args: {
         GRANT_MULTIHOP,
         ...(allowUniswapV4 ? [GRANT_V4] : []),
         ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+        ...(args.ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
+      ...(args.ponsAdapterAddress ? { ponsAdapterAddress: args.ponsAdapterAddress.toLowerCase() } : {}),
       grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },

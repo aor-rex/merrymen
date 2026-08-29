@@ -88,6 +88,43 @@ export function grantV4Adapter(
   return a.toLowerCase() as `0x${string}`;
 }
 
+/**
+ * grantFeatures marker meaning "this signature can call the PonsSelfTrade
+ * adapter" — the contract that makes a bonding curve constrainable by the wall.
+ *
+ * DISTINCT FROM GRANT_V4_ADAPTER, and the distinction is the point. The two
+ * adapters reach different venues, carry different risks, and are granted by
+ * separate opt-ins; one marker covering both would tell the worker a route
+ * exists that the signature does not carry. It would also make the owner's
+ * only choice all-or-nothing.
+ *
+ * What this marker does NOT mean, so nobody reads more into it than is there:
+ * it does not mean native-quoted curves are reachable — they are 53.6% of the
+ * launchpad and the adapter is non-payable, so they are not — and it does not
+ * mean the wall vouches for the curve, which it structurally cannot.
+ */
+export const GRANT_PONS_ADAPTER = "pons-adapter";
+
+/**
+ * The Pons adapter address this signature can actually call, or null.
+ *
+ * BOTH the marker and a valid address are required, for the same reason
+ * grantV4Adapter demands both: a marker alone is a claim, not evidence, and a
+ * claim the wall does not back means the worker builds a UserOp the account
+ * contract refuses — gas spent to be told no, with a revert reason that
+ * explains nothing. The address is per-deploy and sealed into the signature at
+ * signing time; the worker must call THIS address, never whatever settings says
+ * at tick time.
+ */
+export function grantPonsAdapter(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsAdapterAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_ADAPTER)) return null;
+  const a = grant.ponsAdapterAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
 export const GRANT_TRANSFER = "transfer";
 
 /**
@@ -219,6 +256,14 @@ export interface StoredGrant {
    * the only reader and requires the GRANT_V4_ADAPTER marker alongside it.
    */
   v4AdapterAddress?: string;
+  /**
+   * The PonsSelfTrade adapter this signature's `tradeExactIn` permission was
+   * sealed against, lowercased. Per-deploy and per-chain like its v4 sibling,
+   * so it lives on the grant rather than in a registry constant — see
+   * grantPonsAdapter, which is the only reader and requires the
+   * GRANT_PONS_ADAPTER marker alongside it.
+   */
+  ponsAdapterAddress?: string;
   /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *

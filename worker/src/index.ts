@@ -48,6 +48,7 @@ import {
   // to the Telegram executor, and the two must not shadow each other.
   grantHasTransfer as grantCarriesTransfer,
   grantV4Adapter,
+  grantPonsAdapter,
   grantHasV4,
   tokenCoverage,
   uncoveredBasketSymbols,
@@ -99,6 +100,17 @@ import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, 
 import { quarantineOf } from "./quarantine";
 import { describeDiscovery, discoverPools, discoverPonsLaunches, ponsScanWindow, quoteUsdOf, resolveBitquery } from "./discovery";
 import { readCurvePrices } from "./venues/curve-prices";
+import { buildCurveTradeCalls } from "./venues/pons-trade";
+
+/**
+ * How long a curve trade stays valid, seconds.
+ *
+ * Much shorter than a pool trade would need, and measured rather than picked:
+ * the p99 price move on an active curve over four minutes is 1,546 bps and the
+ * observed maximum 5,511. A UserOp held back by a bundler and landed late is
+ * the exact failure this bounds.
+ */
+const CURVE_DEADLINE_SEC = 60;
 import { CURVE_GUARD_DEFAULTS } from "./venues/pons-price";
 import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
@@ -206,6 +218,9 @@ interface ActiveAgent {
   breakerLive: boolean;
   /** The grant-sealed V4SelfSwap has CODE on this chain — see the arm check. */
   v4AdapterLive: boolean;
+  /** The Pons adapter has code on THIS chain. Separate from v4AdapterLive:
+   *  a grant may carry either, both or neither. */
+  ponsAdapterLive: boolean;
 }
 
 async function main() {
@@ -1294,6 +1309,33 @@ async function main() {
       }
     }
 
+    // The same check for the Pons adapter, and it earns its own copy rather
+    // than a loop: the two are separate opt-ins, and a grant can carry either,
+    // both or neither. Folding them together would make one address's absence
+    // read as the other's.
+    let ponsAdapterLive = false;
+    const sealedPons = grantPonsAdapter(grant);
+    if (sealedPons) {
+      const code = await client.getCode({ address: sealedPons }).catch(() => undefined);
+      ponsAdapterLive = code !== undefined && code !== "0x";
+      if (!ponsAdapterLive) {
+        console.log(`[worker] pons adapter ${sealedPons} has no code on chain ${chain.id} — curve routing disabled`);
+        await addEvent(
+          agentId,
+          "warn",
+          `Pons adapter has no code on chain ${chain.id} — bonding-curve routing is OFF for this grant. ` +
+            `Deploy the adapter on this chain (or fix ponsAdapterAddress) and re-sign.`,
+        );
+      } else if (cfg.ponsAdapterAddress && cfg.ponsAdapterAddress.toLowerCase() !== sealedPons) {
+        await addEvent(
+          agentId,
+          "warn",
+          `settings name a different Pons adapter (${cfg.ponsAdapterAddress}) than this grant was sealed against ` +
+            `(${sealedPons}). The worker uses the SEALED one — re-sign at /grant to switch.`,
+        );
+      }
+    }
+
     active = {
       grant,
       agentId,
@@ -1306,6 +1348,7 @@ async function main() {
       limits: limitsFromGrant(grant, watchTokens),
       breakerLive,
       v4AdapterLive,
+      ponsAdapterLive,
     };
     // Nothing is in flight at arm time, so clear any stale reservation with it.
     inFlightSpentUsdg = 0n;
@@ -1381,6 +1424,11 @@ async function main() {
     if (intent.kind === "transfer") return { action: "transfer", sizeUsdg: usdgNum(intent.amountUsdg) };
     if (intent.kind === "equity-order") {
       return { action: intent.side, symbol: intent.ticker, sizeUsdg: usdgNum(intent.notionalUsdg) };
+    }
+    // A curve trade is sized in USDG-equivalent like a swap, not in an
+    // amountUsdg field it does not have.
+    if (intent.kind === "curve-trade") {
+      return { action: intent.kind, sizeUsdg: usdgNum(intent.notionalUsdg) };
     }
     return { action: intent.kind, sizeUsdg: usdgNum(intent.amountUsdg) };
   }
@@ -1584,7 +1632,9 @@ async function main() {
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" ? intent.notionalUsdg : intent.amountUsdg;
+      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+        ? intent.notionalUsdg
+        : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
     // on the broker rail. Step 5's schema work gives broker rows their own
     // columns — until then the ticker in `target` keeps the tape readable.
@@ -2240,7 +2290,7 @@ async function main() {
           },
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
-      } else {
+      } else if (intent.kind === "vault-withdraw") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
           functionName: "withdraw",
@@ -2249,6 +2299,53 @@ async function main() {
         exec = await executor.execute([
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
+      } else if (intent.kind === "curve-trade") {
+        // A bonding-curve trade, through the adapter the GRANT was sealed
+        // against — never `cfg.ponsAdapterAddress`, which anyone with the
+        // dashboard can edit. If the grant carries no Pons marker, or the
+        // adapter has no code on this chain, there is nothing to call and
+        // saying so beats building a UserOp the account contract refuses.
+        const sealed = grantPonsAdapter(active.grant);
+        if (!sealed || !active.ponsAdapterLive) {
+          await addEvent(
+            agentId,
+            "warn",
+            `can't trade ${intent.assetOut.slice(0, 10)}… on its curve — this grant carries no live Pons adapter. ` +
+              `Deploy it, set it in /settings and re-sign at /grant.`,
+          );
+          // RELEASE BEFORE RETURNING. This sits inside processIntent's reserved
+          // region, and a return that skips the release leaks the day's budget
+          // for the rest of the run — the Rialto bug, which is why
+          // budget-reservation.invariant.test.ts walks every return in here.
+          // It caught this one.
+          releaseBudget();
+          return;
+        }
+        // The minimum is computed from the same quote the caps judged, with the
+        // owner's slippage tolerance — the adapter enforces it against the
+        // account's own balance, so this number is the whole protection.
+        exec = await executor.execute(
+          buildCurveTradeCalls({
+            adapter: sealed,
+            curve: intent.curve,
+            assetIn: intent.assetIn,
+            assetOut: intent.assetOut,
+            amountInRaw: intent.amountInRaw,
+            minAmountOutRaw: intent.minAmountOutRaw,
+            deadline: BigInt(Math.floor(Date.now() / 1000) + CURVE_DEADLINE_SEC),
+          }),
+        );
+      } else {
+        // Every EVM kind is handled above, and this arm refuses rather than
+        // falling through. It is deliberately NOT a `const never: never`
+        // exhaustiveness check: the vault member declares
+        // `kind: "vault-deposit" | "vault-withdraw"` as one union entry, so
+        // narrowing on each literal leaves the object type un-exhausted and the
+        // assignment fails to compile even though every case IS handled. A
+        // compile-time check that cannot be made to pass is worse than a
+        // runtime one that says what happened — this throws loudly instead of
+        // executing something built for a different kind.
+        throw new Error(`unhandled intent kind: ${(intent as { kind: string }).kind}`);
       }
 
       const txHash = exec.txHash;

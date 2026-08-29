@@ -69,6 +69,7 @@ import {
   GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
+  GRANT_PONS_ADAPTER,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -139,6 +140,13 @@ async function mintGrant(
    */
   v4AdapterAddress?: `0x${string}`,
   /**
+   * The deployed PonsSelfTrade adapter to seal into the wall, or absent for no
+   * bonding-curve route. A SECOND, SEPARATE opt-in from the v4 adapter: two
+   * venues, two risks, two decisions. Marker and permission are minted
+   * together below, or not at all.
+   */
+  ponsAdapterAddress?: `0x${string}`,
+  /**
    * Whether this deployment is the hosted service, from GET /api/auth/session.
    *
    * PASSED IN, NOT DETECTED. `isHostedMode()` reads process.env, and this module
@@ -203,6 +211,7 @@ async function mintGrant(
     extraTokens,
     allowUniswapV4,
     v4AdapterAddress,
+    ponsAdapterAddress,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -276,8 +285,10 @@ async function mintGrant(
       GRANT_MULTIHOP,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+      ...(ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
+    ...(ponsAdapterAddress ? { ponsAdapterAddress: ponsAdapterAddress.toLowerCase() } : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what
@@ -553,10 +564,11 @@ export async function createAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
+  ponsAdapterAddress?: `0x${string}`,
   hostedAs?: Address,
 ): Promise<MintedGrant> {
   onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, hostedAs);
+  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, ponsAdapterAddress, hostedAs);
 }
 
 /**
@@ -577,10 +589,11 @@ export async function restoreAgentWallet(
   chainId: number = robinhoodTestnet.id,
   extraTokens: readonly CustomToken[] = [],
   v4AdapterAddress?: `0x${string}`,
+  ponsAdapterAddress?: `0x${string}`,
   hostedAs?: Address,
 ): Promise<MintedGrant> {
   onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, hostedAs);
+  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, ponsAdapterAddress, hostedAs);
 }
 
 /**

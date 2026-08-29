@@ -69,3 +69,47 @@ test("both signers persist the sealed address alongside the marker", () => {
     );
   }
 });
+
+test("both signers mint the PONS adapter marker only when the permission was sealed", () => {
+  // Same lockstep rule as GRANT_V4_ADAPTER, and it has to be re-pinned rather
+  // than assumed: the two adapters are separate opt-ins, so a signer could
+  // thread one and forget the other and nothing else would notice. The failure
+  // is the transfer saga again — a marker the wall does not back means the
+  // worker builds a UserOp the account contract refuses.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("GRANT_PONS_ADAPTER"), `${name} must mint the marker`);
+    assert.ok(src.includes("ponsAdapterAddress"), `${name} must thread the sealed address`);
+    assert.match(
+      src,
+      /ponsAdapterAddress\s*\?\s*\[GRANT_PONS_ADAPTER\]\s*:\s*\[\]/,
+      `${name} must mint GRANT_PONS_ADAPTER only when the permission was sealed`,
+    );
+    assert.match(
+      src,
+      /ponsAdapterAddress:\s*(args\.)?ponsAdapterAddress\.toLowerCase\(\)/,
+      `${name} must persist the sealed address — the marker alone is a claim`,
+    );
+  }
+});
+
+test("the two adapter opt-ins stay INDEPENDENT in both signers", () => {
+  // One venue must never imply the other. If a future edit collapses them into
+  // a single flag, this fails and demands the author read the wall's note on
+  // why the owner's choice is not all-or-nothing.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/v4AdapterAddress\s*\?\s*\[GRANT_V4_ADAPTER,\s*GRANT_PONS_ADAPTER\]/.test(src),
+      `${name} must not mint the Pons marker off the v4 address`,
+    );
+    assert.ok(
+      !/ponsAdapterAddress\s*\?\s*\[GRANT_PONS_ADAPTER,\s*GRANT_V4_ADAPTER\]/.test(src),
+      `${name} must not mint the v4 marker off the Pons address`,
+    );
+  }
+});
