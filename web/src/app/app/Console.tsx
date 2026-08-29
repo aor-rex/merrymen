@@ -41,7 +41,24 @@ type DiscoveryRow = {
   graduated: boolean;
   onCurve: boolean;
 };
-type DiscoveriesPayload = { fetchedAt: number; scanned: number; rows: DiscoveryRow[]; graduated: number };
+type FreshRow = {
+  token: string;
+  curve: string;
+  trades: number;
+  traders: number;
+  description: string;
+  twitter: string;
+  telegram: string;
+  website: string;
+  bare: boolean;
+};
+type DiscoveriesPayload = {
+  fetchedAt: number;
+  scanned: number;
+  rows: DiscoveryRow[];
+  graduated: number;
+  fresh: FreshRow[];
+};
 
 export default function Console() {
   const [feed, setFeed] = useState<FeedResponse | null>(null);
@@ -427,9 +444,59 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
           {view === "sherwood" && (
             <section className="floor one">
               <div className="col">
+                {/* Launched minutes ago, and someone is trading it. The gate is
+                    25 trades from 3 distinct addresses, which keeps about an
+                    eighth of a launchpad running at ~940/hour. */}
                 <div className="panel">
                   <div className="panel-h">
-                    <h3>Fresh in Sherwood</h3>
+                    <h3>Just launched</h3>
+                    <span className="kick">
+                      {disc ? `${disc.fresh.length} with a tape · last 15 min` : "looking…"}
+                    </span>
+                  </div>
+                  <div className="pos">
+                    {!disc ? (
+                      <div className="empty-note">Reading the launchpad…</div>
+                    ) : disc.fresh.length === 0 ? (
+                      <div className="empty-note">Nothing launched in the last few minutes has anyone trading it.</div>
+                    ) : (
+                      disc.fresh.map((f: FreshRow) => (
+                        <div className="prow" key={f.token}>
+                          <span className="s">
+                            <span className="tk" style={{ background: f.bare ? "var(--mint)" : "var(--lime)" }} />{" "}
+                            {f.description || <span style={{ opacity: 0.5 }}>published nothing</span>}
+                          </span>
+                          <span className="px">
+                            {f.twitter && (
+                              <a href={f.twitter} target="_blank" rel="noreferrer noopener" className="tagpx">
+                                x
+                              </a>
+                            )}
+                            {f.website && (
+                              <a href={f.website} target="_blank" rel="noreferrer noopener" className="tagpx">
+                                web
+                              </a>
+                            )}
+                            {f.telegram && <span className="tagpx">tg</span>}
+                          </span>
+                          {/* Distinct ADDRESSES, not trade count: 291 trades from
+                              25 addresses is a different thing from 223 from 176. */}
+                          <span className="val">
+                            {f.traders} <span style={{ opacity: 0.55 }}>/ {f.trades}</span>
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="empty-note" style={{ opacity: 0.7 }}>
+                    traders / trades over the last 15 minutes. Every word above was written by
+                    whoever launched the coin.
+                  </div>
+                </div>
+
+                <div className="panel">
+                  <div className="panel-h">
+                    <h3>Trading now</h3>
                     <span className="kick">
                       {disc ? `${disc.rows.length} of ${disc.scanned} · ${disc.graduated} graduated` : "looking…"}
                     </span>

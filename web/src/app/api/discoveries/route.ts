@@ -1,9 +1,17 @@
 import { NextResponse } from "next/server";
+import { createPublicClient, http } from "viem";
 import {
   fetchGeckoPools,
   screenPools,
   type GeckoPool,
 } from "../../../../../worker/src/venues/geckoterminal";
+import { recentPonsLaunches } from "../../../../../worker/src/venues/pons";
+import {
+  readCurveActivity,
+  isActive,
+  MAX_ACTIVITY_BLOCKS,
+} from "../../../../../worker/src/venues/pons-activity";
+import { readTokenMeta } from "../../../../../worker/src/venues/pons-meta";
 
 /**
  * What is trading on this chain, for the dashboard.
@@ -81,8 +89,78 @@ function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
   };
 }
 
+/** A launch from the last few minutes that people are actually trading. */
+export interface FreshRow {
+  token: string;
+  curve: string;
+  trades: number;
+  /** Distinct trading ADDRESSES, from the trade event's own indexed field. */
+  traders: number;
+  /** The launcher's own words. Sanitised, and a claim rather than a fact. */
+  description: string;
+  twitter: string;
+  telegram: string;
+  website: string;
+  /** Published nothing at all — the shape an abandoned template has. */
+  bare: boolean;
+}
+
+/**
+ * The other end of the launchpad: what launched in the last quarter hour and
+ * has a tape.
+ *
+ * Pons runs at roughly 940 launches an hour, so this is a FUNNEL rather than a
+ * list. The gate is trading — 25 trades and 3 distinct addresses — which keeps
+ * about an eighth of launches and holds 96% of the ones that go on to graduate.
+ * A dev buy, having socials, and the creator's history were all measured and
+ * are worth nothing as filters.
+ *
+ * Three RPC calls for the whole thing, whatever the launch rate: the launches,
+ * one chain-wide sweep of every curve trade, and one Multicall3 batch for the
+ * survivors' metadata.
+ */
+async function readFresh(): Promise<FreshRow[]> {
+  try {
+    const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+    const W = MAX_ACTIVITY_BLOCKS;
+    const [scan, activity] = await Promise.all([
+      recentPonsLaunches(client as never, W),
+      readCurveActivity(client as never, W),
+    ]);
+    // A null activity map means the node refused, which is a different fact
+    // from a quiet launchpad — showing nothing is right, inventing an empty
+    // tape for every launch is not.
+    if (scan.failed || !activity) return [];
+    const live = scan.launches.filter((l) => isActive(activity.get(l.curve.toLowerCase())));
+    const meta = await readTokenMeta(client as never, live.map((l) => l.token));
+    return live
+      .map((l) => {
+        const a = activity.get(l.curve.toLowerCase())!;
+        const m = meta.get(l.token.toLowerCase());
+        return {
+          token: l.token,
+          curve: l.curve,
+          trades: a.buys + a.sells,
+          traders: a.traders,
+          description: m?.description ?? "",
+          twitter: m?.twitter ?? "",
+          telegram: m?.telegram ?? "",
+          website: m?.website ?? "",
+          bare: m ? m.bare : true,
+        };
+      })
+      // By distinct addresses, not trade count: 291 trades from 25 addresses is
+      // a different thing from 223 trades from 176, and only one of them looks
+      // like people.
+      .sort((x, y) => y.traders - x.traders);
+  } catch {
+    return [];
+  }
+}
+
 export async function GET() {
   const nowSec = Math.floor(Date.now() / 1000);
+  const fresh = await readFresh();
   const byToken = new Map<string, GeckoPool>();
   for (const feed of ["trending_pools", "new_pools", "pools"] as const) {
     for (const p of await fetchGeckoPools(feed)) {
@@ -107,6 +185,7 @@ export async function GET() {
       scanned: all.length,
       rows,
       graduated: rows.filter((r) => r.graduated).length,
+      fresh,
     },
     {
       // 120s, not the 30s /api/market uses: this API is keyless and
