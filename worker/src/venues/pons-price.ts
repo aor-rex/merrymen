@@ -14,11 +14,21 @@
  * the guard would then report a confidence it does not have. A curve needs its
  * own safety model, and this module says plainly what that model is:
  *
- *   DEPTH IS THE GUARD. A constant-product curve's price is an exact function
- *   of its reserves — there is no oracle to disagree with and nothing to
- *   manipulate through a stale window. What CAN hurt you is size: the reserve
- *   is the entire market, so what matters is how much is really in there and
- *   how much of it your own trade would move.
+ *   OVERHANG IS THE GUARD. A constant-product curve's price is an exact
+ *   function of its reserves — there is no oracle to disagree with and nothing
+ *   to manipulate through a stale window. What hurts you is that the real quote
+ *   reserve IS the aggregate cost basis of everyone ahead of you, and if they
+ *   leave, the price returns to the virtual seed. See curveFloorDrawdownBps.
+ *
+ * AN EARLIER VERSION OF THIS COMMENT SAID "depth is the guard", and that was
+ * an instinct imported from Uniswap where deeper is safer. On a bonding curve
+ * it is backwards: more depth is MORE downside, not less, because depth is
+ * other people's exit. Depth still sets a FLOOR — below a few hundred dollars
+ * there is no market to speak of — but it is a liveness test, not a safety
+ * margin, and the thing that bounds the risk is how much of the current price
+ * is other people's money. Size matters too, but far less than it looks:
+ * impact is bounded below by the seed, so a 300bps cap does not bind until
+ * about $124 of notional and is dead code at the configured entry sizes.
  *
  * THE VIRTUAL SEED, AND THE BUG IT CAUSED HERE. Pons opens every curve with a
  * VIRTUAL quote reserve of exactly 40% of that curve's graduation threshold —
@@ -244,3 +254,209 @@ export function curveGraduated(r: CurveReserves): boolean {
  * quantity here expressed for different audiences.
  */
 export const graduationProgress = curveDepthFraction;
+
+/**
+ * How far the price would fall if every prior buyer sold, in bps.
+ *
+ * THE CURVE'S ANSWER TO DIVERGENCE, and the number this safety model is built
+ * on. A pool pricer asks "has spot run away from the time-weighted average" — a
+ * question about manipulation, answerable only because an oracle remembers the
+ * past. A curve has no memory and nothing to manipulate: its price is an exact
+ * function of its reserves. What it has instead is OVERHANG.
+ *
+ * The real quote reserve is the aggregate cost basis of everyone who bought
+ * before you. If they all leave, the reserve returns to the virtual seed and the
+ * price returns with it. Since the constant product fixes tokenRaw = k/quoteRaw,
+ * price is proportional to quoteRaw², so that floor is exactly (seed/quoteRaw)²
+ * of the current price.
+ *
+ * THE INVERSION WORTH STATING PLAINLY: on a bonding curve, MORE DEPTH IS MORE
+ * DOWNSIDE. Depth here is not a cushion, it is other people's exit. That runs
+ * opposite to every instinct imported from Uniswap, where deeper is safer:
+ *
+ *    5% of threshold → 2,099 bps of floor drawdown
+ *   10%              → 3,600 bps
+ *   25%              → 6,213 bps
+ *  100%              → 9,184 bps
+ *
+ * Past ~9.61% of threshold the curve merely doing what a curve does exceeds
+ * trencher's 3,500 bps stop — so beyond that the stop can no longer distinguish
+ * "this trade went wrong" from "this is a bonding curve".
+ */
+export function curveFloorDrawdownBps(r: CurveReserves): number | null {
+  const seed = virtualSeedRaw(r.graduationThresholdRaw);
+  if (seed <= 0n || r.quoteRaw < seed) return null;
+  // 10_000 * (1 - (seed/quoteRaw)^2) in integers. Scaled before dividing so a
+  // ratio near 1 does not floor away to nothing.
+  const SCALE = 1_000_000n;
+  const ratio = (seed * SCALE) / r.quoteRaw;
+  const squared = (ratio * ratio) / SCALE;
+  return Number(((SCALE - squared) * 10_000n) / SCALE);
+}
+
+/**
+ * Fully diluted value of the launched token, USD 8dp.
+ *
+ * Exact, and free — no totalSupply() call. The curve mints the entire supply
+ * into itself at launch, so k = seed x S; therefore tokenRaw = seed·S/quoteRaw,
+ * price = quoteRaw²/(seed·S), and FDV = S x price = quoteRaw²/seed, with the
+ * supply cancelling out entirely.
+ *
+ * Worth having because it BOUNDS what a curve can ever be worth. At the instant
+ * of graduation quoteRaw is seed + threshold = 1.4 x threshold, so FDV is
+ * (1.4T)²/0.4T = 4.9 x threshold — $50,218 on an ETH curve, and that is the
+ * ceiling, reached only at the moment the curve stops existing. Across 1,680
+ * live curves the highest observed was $26,953.
+ *
+ * That matters for a specific reason: trencher's minFdvUsd default is $50,000,
+ * which no curve reaches in practice and only the very last block of one could
+ * reach in theory. A gate set there refuses every curve forever while its
+ * refusal reads as a judgement about the token rather than about the venue.
+ */
+export function curveFdvUsd8(r: CurveReserves, quoteUsd8: bigint): bigint | null {
+  const seed = virtualSeedRaw(r.graduationThresholdRaw);
+  if (seed <= 0n || r.quoteRaw <= 0n || quoteUsd8 <= 0n) return null;
+  const fdvRaw = (r.quoteRaw * r.quoteRaw) / seed;
+  return (fdvRaw * quoteUsd8) / 10n ** BigInt(r.quoteDecimals);
+}
+
+/**
+ * What a curve price must clear before anything may act on it.
+ *
+ * Deliberately NOT PriceGuard. That guard's two questions — is the pool deep
+ * enough, and has spot run from the TWAP — are the wrong two here: a curve has
+ * no TWAP, and its depth means the opposite of what pool depth means. Reusing it
+ * would report a confidence built for a different instrument.
+ */
+export interface CurveGuard {
+  /** Raw USDG, 6dp — the same unit as PriceGuard.minLiquidityUsdg. */
+  minRealDepthUsdg: bigint;
+  /** The same floor without a price feed, for a quote asset we cannot price. */
+  minDepthFraction: number;
+  /** Refuse when reverting to the curve's own floor would exceed this. */
+  maxFloorDrawdownBps: number;
+  /** Refuse a trade whose own size moves the price more than this. */
+  maxImpactBps: number;
+  /** Refuse a reading older than this many seconds. */
+  maxReadAgeSec: number;
+}
+
+export type CurveRefusalKind =
+  | "graduated"
+  | "no-quote-price"
+  | "too-thin"
+  | "overhang"
+  | "impact-cap"
+  | "stale-read";
+
+/**
+ * Measured defaults. Every number came off chain 4663 rather than out of taste.
+ *
+ * Sample: 4,043 launches over 8.41h, 1,697 curves' reserves read, ETH at
+ * $2,440.16 — every ETH curve carries the same 4.2 ETH threshold ($10,249) and
+ * the same 1.68 ETH seed ($4,099).
+ */
+export const CURVE_GUARD_DEFAULTS: CurveGuard = {
+  // 78% of live curves hold under $1 of real quote and 13.3% hold exactly zero
+  // wei — their entire "market" is the virtual seed. $250 admits about 2.2%.
+  minRealDepthUsdg: 250_000_000n,
+  // $250 / $10,249, i.e. the same floor stated without a feed. That matters
+  // because 42.8% of launches are quoted in stock tokens and 2.3% in cbBTC,
+  // which have no usable USD price in this repo at all.
+  minDepthFraction: 0.025,
+  // Tied to TRENCHER_DEFAULTS.stopLossBps rather than picked: at 9.61% of
+  // threshold the floor drawdown is 3,499 bps, so past it the stop-loss can no
+  // longer tell a bad trade from ordinary curve behaviour.
+  maxFloorDrawdownBps: 3_500,
+  maxImpactBps: 300,
+  // NOT the pool pricer's 60s TTL, and emphatically not its 600s route age.
+  // Over 240 seconds the p99 price move among active curves was 1,546 bps and
+  // the max 5,511 bps; a curve reading is worth about the block it was read at.
+  maxReadAgeSec: 30,
+};
+
+/**
+ * Is this curve price safe to act on?
+ *
+ * ORDER MATTERS, and the first check is the surprising one. A GRADUATED curve
+ * resets — token side drained, quote side back to the seed — so its reserves
+ * read identically to a curve nobody ever bought. Checking depth first would
+ * report "too thin" about a token whose market has simply moved elsewhere,
+ * which is a refusal naming the wrong reason. And it has moved to a Uniswap v4
+ * pool this repo cannot read: of 17 graduated tokens sampled, 16 had no v3 pool
+ * against WETH or USDG at any tier and the 17th held 13 wei. There is no
+ * fallback to take, so saying so plainly is the only honest answer.
+ */
+export function curvePriceUsable(
+  p: {
+    price8: bigint;
+    depthUsdg: bigint | null;
+    depthFraction: number | null;
+    graduated: boolean;
+    floorDrawdownBps: number | null;
+    impactBps: number | null;
+    readAgeSec: number;
+  },
+  guard: CurveGuard,
+): { ok: true } | { ok: false; kind: CurveRefusalKind; reason: string } {
+  if (p.graduated) {
+    return {
+      ok: false,
+      kind: "graduated",
+      reason: "this curve has graduated — its market moved to a Uniswap v4 pool I cannot read yet",
+    };
+  }
+  if (p.price8 <= 0n) {
+    return { ok: false, kind: "no-quote-price", reason: "no USD price for what this curve is quoted in" };
+  }
+  if (p.readAgeSec > guard.maxReadAgeSec) {
+    // Not pedantry: a curve has no time-average to smooth anything, and half a
+    // percent of them move more than 55% inside four minutes.
+    return {
+      ok: false,
+      kind: "stale-read",
+      reason: `this reading is ${p.readAgeSec}s old and a curve moves too fast for that`,
+    };
+  }
+  // Depth in USD when we have it, as a fraction of threshold when we do not.
+  // Both express the same floor; only one of them needs a price feed.
+  if (p.depthUsdg !== null) {
+    if (p.depthUsdg < guard.minRealDepthUsdg) {
+      return {
+        ok: false,
+        kind: "too-thin",
+        reason: `only $${(Number(p.depthUsdg) / 1e6).toFixed(0)} has really been raised into this curve, under the $${Number(guard.minRealDepthUsdg) / 1e6} floor`,
+      };
+    }
+  } else if (p.depthFraction === null || p.depthFraction < guard.minDepthFraction) {
+    const share = p.depthFraction === null ? "an unknown share" : `${(p.depthFraction * 100).toFixed(1)}%`;
+    return {
+      ok: false,
+      kind: "too-thin",
+      reason: `only ${share} of the way to graduation, under the ${(guard.minDepthFraction * 100).toFixed(1)}% floor`,
+    };
+  }
+  if (p.floorDrawdownBps === null || p.floorDrawdownBps > guard.maxFloorDrawdownBps) {
+    return {
+      ok: false,
+      kind: "overhang",
+      reason:
+        p.floorDrawdownBps === null
+          ? "I cannot tell how far this would fall back to the curve's own floor"
+          : `${(p.floorDrawdownBps / 100).toFixed(0)}% of this price is other people's cost basis — it returns to the floor if they leave`,
+    };
+  }
+  // Last, and honestly: impact on a curve is 10,000 x quoteIn/quoteRaw, and
+  // quoteRaw is never below the seed (~$4,099 on an ETH curve), so a 300bps cap
+  // first binds at about $124 of notional. At the default $5 entry size this
+  // never fires. It is a ticket-size sanity check, NOT the safety model — the
+  // overhang check above is.
+  if (p.impactBps !== null && p.impactBps > guard.maxImpactBps) {
+    return {
+      ok: false,
+      kind: "impact-cap",
+      reason: `a trade this size would move the curve ${(p.impactBps / 100).toFixed(1)}%`,
+    };
+  }
+  return { ok: true };
+}

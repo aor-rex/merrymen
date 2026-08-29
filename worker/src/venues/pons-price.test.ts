@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  CURVE_GUARD_DEFAULTS,
   curveBuyImpactBps,
+  curveFdvUsd8,
+  curveFloorDrawdownBps,
+  curvePriceUsable,
   curveDepthFraction,
   curveGraduated,
   curvePrice,
@@ -221,5 +225,178 @@ describe("curveGraduated", () => {
     assert.equal(curveDepthFraction(graduated), curveDepthFraction(fresh), "depth genuinely cannot tell them apart");
     assert.equal(curveGraduated(graduated), true);
     assert.equal(curveGraduated(fresh), false);
+  });
+});
+
+/**
+ * The curve's own safety model.
+ *
+ * The thing these tests exist to pin is an INVERSION. Every instinct here is
+ * imported from Uniswap, where a deeper pool is a safer one; on a bonding curve
+ * the real reserve is the aggregate cost basis of everyone ahead of you, so more
+ * depth is more overhang and more downside. A guard written the Uniswap way
+ * would pass exactly the curves it should refuse.
+ */
+
+/** An ETH-quoted curve at a chosen fraction of its own graduation threshold. */
+const atFraction = (f: number): CurveReserves => {
+  const threshold = 4_200_000_000_000_000_000n;
+  const seed = (threshold * 4n) / 10n;
+  const real = BigInt(Math.round(f * 4.2e18));
+  const quoteRaw = seed + real;
+  // k is fixed at launch: seed x initial supply (1e27 tokens).
+  const k = seed * 10n ** 27n;
+  return {
+    quoteRaw,
+    tokenRaw: k / quoteRaw,
+    quoteDecimals: 18,
+    tokenDecimals: 18,
+    graduationThresholdRaw: threshold,
+  };
+};
+const ETH_GUARD_USD8 = 244_016_000_000n; // $2,440.16, when the guard sample was taken
+
+describe("curveFloorDrawdownBps — more depth is MORE downside", () => {
+  it("matches the closed form at every scale", () => {
+    // 10_000 * (1 - (0.4/(0.4+f))^2). These are the figures the guard's
+    // threshold was chosen against, so they are worth pinning exactly.
+    for (const [f, want] of [[0.05, 2099], [0.10, 3600], [0.25, 6213], [1.0, 9184]] as const) {
+      const got = curveFloorDrawdownBps(atFraction(f));
+      assert.ok(got !== null);
+      assert.ok(Math.abs(got! - want) <= 2, `f=${f}: expected ~${want}bps, got ${got}`);
+    }
+  });
+
+  it("RISES with depth — the whole point", () => {
+    const shallow = curveFloorDrawdownBps(atFraction(0.05))!;
+    const deep = curveFloorDrawdownBps(atFraction(0.5))!;
+    assert.ok(deep > shallow, "a deeper curve carries MORE overhang, not less");
+  });
+
+  it("is zero for a curve nobody has bought", () => {
+    // Nothing above the floor means nothing to fall back to. This is the one
+    // sense in which an empty curve is genuinely safe — and it is refused
+    // elsewhere for having no market at all.
+    assert.equal(curveFloorDrawdownBps(atFraction(0)), 0);
+  });
+
+  it("crosses trencher's stop-loss at about 9.6% of threshold", () => {
+    // The justification for maxFloorDrawdownBps = 3,500. Past this point the
+    // curve reverting to its own floor is by itself enough to trip the stop, so
+    // the stop stops meaning "this trade went wrong".
+    assert.ok(curveFloorDrawdownBps(atFraction(0.096))! <= 3_500);
+    assert.ok(curveFloorDrawdownBps(atFraction(0.10))! > 3_500);
+  });
+
+  it("refuses rather than guessing when the seed model does not hold", () => {
+    assert.equal(curveFloorDrawdownBps({ ...atFraction(0.1), graduationThresholdRaw: 0n }), null);
+    assert.equal(curveFloorDrawdownBps({ ...atFraction(0.1), quoteRaw: 1n }), null, "below its own seed");
+  });
+});
+
+describe("curveFdvUsd8", () => {
+  it("bounds what a curve can ever be worth", () => {
+    // At graduation quoteRaw is 1.4 x threshold, so FDV is 4.9 x threshold —
+    // $50,218 on an ETH curve, and that is the CEILING, touched only at the
+    // instant the curve stops existing. Highest observed across 1,680 live
+    // curves was $26,953. Trencher's $50,000 FDV gate sits above both.
+    const atGraduation = curveFdvUsd8(atFraction(1.0), ETH_GUARD_USD8)!;
+    const usd = Number(atGraduation) / 1e8;
+    assert.ok(usd > 45_000 && usd < 55_000, `expected ~$50,218 at graduation, got ${usd.toFixed(0)}`);
+    assert.ok(usd > 50_000, 'and it only just exceeds the $50,000 gate, at the last possible moment');
+  });
+
+  it("needs no totalSupply call — the supply cancels out", () => {
+    // A fresh curve's FDV is seed^2/seed = seed, valued in USD: ~$4,099.
+    const fresh = Number(curveFdvUsd8(atFraction(0), ETH_GUARD_USD8)!) / 1e8;
+    assert.ok(fresh > 3_900 && fresh < 4_300, `expected ~$4,099, got $${fresh.toFixed(0)}`);
+  });
+
+  it("returns null rather than zero when it cannot be computed", () => {
+    assert.equal(curveFdvUsd8(atFraction(0.1), 0n), null);
+    assert.equal(curveFdvUsd8({ ...atFraction(0.1), graduationThresholdRaw: 0n }, ETH_GUARD_USD8), null);
+  });
+});
+
+describe("curvePriceUsable", () => {
+  const ok = {
+    price8: 1_000n,
+    depthUsdg: 500_000_000n, // $500
+    depthFraction: 0.05,
+    graduated: false,
+    floorDrawdownBps: 2_099,
+    impactBps: 60,
+    readAgeSec: 2,
+  };
+  const G = CURVE_GUARD_DEFAULTS;
+
+  it("admits a curve that clears every gate", () => {
+    assert.deepEqual(curvePriceUsable(ok, G), { ok: true });
+  });
+
+  it("checks GRADUATED first, before anything else", () => {
+    // A graduated curve resets to look exactly like a never-traded one, so a
+    // depth-first order would refuse it as "too thin" — naming the wrong
+    // reason about a token whose market simply moved to a v4 pool.
+    const v = curvePriceUsable({ ...ok, graduated: true, depthUsdg: 0n, depthFraction: 0, floorDrawdownBps: 0 }, G);
+    assert.equal(v.ok, false);
+    assert.equal((v as { kind: string }).kind, "graduated");
+  });
+
+  it("refuses a curve with no real money in it", () => {
+    const v = curvePriceUsable({ ...ok, depthUsdg: 40_000_000n }, G); // $40
+    assert.equal((v as { kind: string }).kind, "too-thin");
+  });
+
+  it("falls back to the FRACTION when the quote asset has no USD price", () => {
+    // 42.8% of launches are quoted in stock tokens and 2.3% in cbBTC. Without
+    // this the majority of the launchpad would be unjudgeable for want of a feed.
+    assert.deepEqual(curvePriceUsable({ ...ok, depthUsdg: null, depthFraction: 0.05 }, G), { ok: true });
+    const thin = curvePriceUsable({ ...ok, depthUsdg: null, depthFraction: 0.01 }, G);
+    assert.equal((thin as { kind: string }).kind, "too-thin");
+  });
+
+  it("refuses a curve whose price is mostly other people's cost basis", () => {
+    // The check that has no Uniswap analogue, and the reason this guard exists.
+    const v = curvePriceUsable({ ...ok, depthUsdg: 2_000_000_000n, depthFraction: 0.25, floorDrawdownBps: 6_213 }, G);
+    assert.equal((v as { kind: string }).kind, "overhang");
+    assert.match((v as { reason: string }).reason, /other people/);
+  });
+
+  it("a DEEPER curve can be refused where a shallower one passes", () => {
+    // States the inversion as a behaviour, not a comment. $500 deep passes;
+    // $2,000 deep does not — because the extra $1,500 is overhang.
+    assert.equal(curvePriceUsable(ok, G).ok, true);
+    const deeper = curvePriceUsable({ ...ok, depthUsdg: 2_000_000_000n, floorDrawdownBps: 6_213 }, G);
+    assert.equal(deeper.ok, false);
+  });
+
+  it("refuses a reading older than a handful of seconds", () => {
+    // A curve has no time-average to smooth anything: p99 move over 240s was
+    // 1,546 bps. The pool pricer's 60s TTL would be a category error here.
+    const v = curvePriceUsable({ ...ok, readAgeSec: 45 }, G);
+    assert.equal((v as { kind: string }).kind, "stale-read");
+    assert.ok(G.maxReadAgeSec <= 30);
+  });
+
+  it("refuses when it has no USD price at all", () => {
+    const v = curvePriceUsable({ ...ok, price8: 0n }, G);
+    assert.equal((v as { kind: string }).kind, "no-quote-price");
+  });
+
+  it("treats an UNKNOWN overhang as a refusal, not a pass", () => {
+    const v = curvePriceUsable({ ...ok, floorDrawdownBps: null }, G);
+    assert.equal((v as { kind: string }).kind, "overhang");
+  });
+
+  it("keeps the impact cap, while being honest that it rarely binds", () => {
+    // impact = 10_000 * quoteIn/quoteRaw and quoteRaw >= the ~$4,099 seed, so
+    // 300bps first binds at about $124 of notional — well above the default $5
+    // entry. It must still refuse when it DOES bind, but it is a ticket-size
+    // check, not the safety model.
+    const v = curvePriceUsable({ ...ok, impactBps: 900 }, G);
+    assert.equal((v as { kind: string }).kind, "impact-cap");
+    // A null impact is not a refusal: not every caller is sizing a trade.
+    assert.equal(curvePriceUsable({ ...ok, impactBps: null }, G).ok, true);
   });
 });
