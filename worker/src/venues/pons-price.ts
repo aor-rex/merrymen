@@ -331,8 +331,6 @@ export function curveFdvUsd8(r: CurveReserves, quoteUsd8: bigint): bigint | null
 export interface CurveGuard {
   /** Raw USDG, 6dp — the same unit as PriceGuard.minLiquidityUsdg. */
   minRealDepthUsdg: bigint;
-  /** The same floor without a price feed, for a quote asset we cannot price. */
-  minDepthFraction: number;
   /** Refuse when reverting to the curve's own floor would exceed this. */
   maxFloorDrawdownBps: number;
   /** Refuse a trade whose own size moves the price more than this. */
@@ -360,10 +358,6 @@ export const CURVE_GUARD_DEFAULTS: CurveGuard = {
   // 78% of live curves hold under $1 of real quote and 13.3% hold exactly zero
   // wei — their entire "market" is the virtual seed. $250 admits about 2.2%.
   minRealDepthUsdg: 250_000_000n,
-  // $250 / $10,249, i.e. the same floor stated without a feed. That matters
-  // because 42.8% of launches are quoted in stock tokens and 2.3% in cbBTC,
-  // which have no usable USD price in this repo at all.
-  minDepthFraction: 0.025,
   // Tied to TRENCHER_DEFAULTS.stopLossBps rather than picked: at 9.61% of
   // threshold the floor drawdown is 3,499 bps, so past it the stop-loss can no
   // longer tell a bad trade from ordinary curve behaviour.
@@ -418,22 +412,25 @@ export function curvePriceUsable(
       reason: `this reading is ${p.readAgeSec}s old and a curve moves too fast for that`,
     };
   }
-  // Depth in USD when we have it, as a fraction of threshold when we do not.
-  // Both express the same floor; only one of them needs a price feed.
-  if (p.depthUsdg !== null) {
-    if (p.depthUsdg < guard.minRealDepthUsdg) {
-      return {
-        ok: false,
-        kind: "too-thin",
-        reason: `only $${(Number(p.depthUsdg) / 1e6).toFixed(0)} has really been raised into this curve, under the $${Number(guard.minRealDepthUsdg) / 1e6} floor`,
-      };
-    }
-  } else if (p.depthFraction === null || p.depthFraction < guard.minDepthFraction) {
-    const share = p.depthFraction === null ? "an unknown share" : `${(p.depthFraction * 100).toFixed(1)}%`;
+  // Depth in USD, with deliberately NO feed-free fallback.
+  //
+  // An earlier version carried one — a fraction-of-threshold floor for curves
+  // whose quote asset has no USD price — and it could never fire. Reaching this
+  // line at all means a price8 was computed, which means the quote asset WAS
+  // priceable; anything else was already refused above as `no-quote-price`.
+  // Replayed against 900 live curves, not one of the 316 feedless-quote curves
+  // reached that branch. A guard field that cannot fire is worse than no field:
+  // someone eventually tunes it, nothing changes, and nothing says so.
+  //
+  // The feed-free floor is real, it just belongs one layer out. Discovery's
+  // PONS_MIN_DEPTH_FRACTION judges the ~45% of launches quoted in stock tokens
+  // and cbBTC, and there it does real work.
+  if (p.depthUsdg === null || p.depthUsdg < guard.minRealDepthUsdg) {
+    const have = p.depthUsdg === null ? "an unknown amount" : `$${(Number(p.depthUsdg) / 1e6).toFixed(0)}`;
     return {
       ok: false,
       kind: "too-thin",
-      reason: `only ${share} of the way to graduation, under the ${(guard.minDepthFraction * 100).toFixed(1)}% floor`,
+      reason: `only ${have} has really been raised into this curve, under the $${Number(guard.minRealDepthUsdg) / 1e6} floor`,
     };
   }
   if (p.floorDrawdownBps === null || p.floorDrawdownBps > guard.maxFloorDrawdownBps) {

@@ -95,7 +95,7 @@ import { bestCashPool } from "./venues/pool-price";
 import { readPoolDepth } from "./venues/depth";
 import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName } from "./soul";
-import { positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
+import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import { describeDiscovery, discoverPools, discoverPonsLaunches, ponsScanWindow, quoteUsdOf, resolveBitquery } from "./discovery";
 import { readCurvePrices } from "./venues/curve-prices";
@@ -745,6 +745,14 @@ async function main() {
         guard: CURVE_GUARD_DEFAULTS,
       });
       for (const [symbol, quote] of curveRes.quotes) if (!prices.has(symbol)) prices.set(symbol, quote);
+      // A token the curve PRICED is no longer refused. Its pool refusal said
+      // "no Uniswap v3 pool — nothing to price it from", which was true and is
+      // now beside the point: leaving it in place tells the owner the token
+      // stays unpriced while its price sits on the dashboard feeding equity.
+      for (const symbol of curveRes.quotes.keys()) {
+        const i = refused.findIndex((x) => x.symbol === symbol);
+        if (i >= 0) refused.splice(i, 1);
+      }
       // Curve depth feeds the drain exit exactly as pool depth does — it is the
       // same question (has the money left since I got in) and the same units.
       for (const t of noPool) {
@@ -2597,7 +2605,25 @@ async function main() {
         })
         .map((t) => t.address.toLowerCase()),
     );
-    lastQuarantinedUsdg = quarantine.totalCostUsdg;
+    // The scout BUDGET must count curve-marked holdings too.
+    //
+    // Keeping them in `lastUnpriceable` above preserves the scout GATE, but the
+    // budget is a different number: it is the total already sunk into things
+    // that cannot really be valued, and it comes from the quarantine — which a
+    // curve-priced holding now leaves, because it HAS a price and so lands in
+    // `positions` instead of `unpricedByDesign`.
+    //
+    // Left alone, giving a held curve token a price would drop the running
+    // total to zero and free the whole budget for the next unpriceable buy.
+    // Gate closed, ceiling open. Cost, not mark, because the budget bounds what
+    // was SPENT on this class of thing — and because a curve mark is exactly
+    // the number that should not be deciding how much more may be spent.
+    let curveCostUsdg = 0n;
+    for (const p of positions) {
+      if (p.priceSource !== "curve") continue;
+      curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
+    }
+    lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
     const bookIncomplete = unknownCost.length > 0;
@@ -2666,6 +2692,21 @@ async function main() {
     }
     const effFeeBps = effectivePerfFeeBps(cfg.perfFeeBps, holderTier);
 
+    // A CURVE-VALUED POSITION MAY NOT RATCHET ANY HIGH-WATER MARK.
+    //
+    // Both marks are monotonic and persisted -- the live one through
+    // setAgentHwm (MAX(hwm_usdg, ?), with a performance fee written in the same
+    // breath) and the paper one through setPaperBook. Nothing walks either
+    // back. A bonding-curve mark has no oracle behind it, moves 1,546 bps at
+    // p99 over four minutes, and arrives DISCONTINUOUSLY: the tick a curve
+    // first clears the guard, that holding jumps from carried-at-cost to
+    // carried-at-mark with no trade having happened.
+    //
+    // Skipping is conservative in both directions that matter: a fee not
+    // charged, and a drawdown measured from the last honest peak. The breaker
+    // still works -- a curve token falling is still measured against that peak.
+    const curveMarked = curveMarkedSymbols(positions);
+
     // With an unvaluable holding on the books, equity is UNKNOWN — not lower.
     // Ratcheting the HWM, accruing a performance fee or judging drawdown off a
     // partial total would all be arithmetic pretending to be information, and
@@ -2678,8 +2719,14 @@ async function main() {
       // HWM — mixing paper peaks into real accounting would trip the breaker
       // (or charge fees) against money that never existed. The paper book
       // keeps its own HWM so the drawdown breaker still works in practice.
+      //
+      // The curve rule applies here too. The paper HWM is persisted and
+      // monotonic exactly like the real one, and it is what the paper drawdown
+      // breaker measures against — so an unoracled curve mark could halt paper
+      // trading on a peak that never happened, which is precisely the signal
+      // the owner would be reading to decide whether to go live.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      if (usdgNum(equityUsdg) > bookRow.hwmUsdg) {
+      if (usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
         bookRow.hwmUsdg = usdgNum(equityUsdg);
         await setPaperBook(agentId, bookRow);
       }
@@ -2715,7 +2762,6 @@ async function main() {
       // they are owed: an unrecorded peak means a fee not charged and a
       // drawdown measured from a lower reference. The breaker still works — a
       // curve token falling still shows up against the existing peak.
-      const curveMarked = positions.filter((p) => p.priceSource === "curve").map((p) => p.symbol);
       if (curveMarked.length > 0 && accrual.profitUsdg > 0n) {
         console.log(
           `[fees] not ratcheting the high-water mark: ${curveMarked.join(", ")} valued off a bonding curve`,
@@ -2751,7 +2797,16 @@ async function main() {
           );
         }
       }
-      highWaterMarkUsdg = accrual.newHwmUsdg;
+      // Inside the guard, not after it. This is the variable the drawdown
+      // BREAKER actually judges against (it is copied into AgentState and
+      // divided by in checkPolicy), and it is re-read from the database only
+      // at arm time and on a capital flow -- so an inflated value survives for
+      // the whole process. Leaving it outside meant the fee and the DB write
+      // were skipped while the peak that gates trading ratcheted anyway, and a
+      // curve mark reverting would then halt every non-exit intent on a
+      // drawdown that never happened. accrueAboveHwm returns the mark
+      // unchanged when there is no profit, so this is a no-op in that case.
+      if (curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +

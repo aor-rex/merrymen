@@ -275,3 +275,25 @@ export function priceSourceTag(source: string): string {
       return "";
   }
 }
+
+/**
+ * One sentence explaining what a price source's tag means.
+ *
+ * Kept beside `priceSourceTag` so a tag can never be shown with the wrong
+ * explanation. That is not hypothetical: widening a `=== "pool"` test to
+ * `!== "chainlink"` without touching the label showed a bonding-curve mark as
+ * "pool px" under a tooltip asserting it had passed depth AND divergence
+ * checks — two guards that cannot even run on a curve.
+ */
+export function priceSourceNote(source: string): string {
+  switch (source) {
+    case "pool":
+      return "pool px = a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim.";
+    case "broker":
+      return "broker px = the venue's own last-trade print, not a Chainlink feed.";
+    case "curve":
+      return "curve px = read straight off a bonding curve. There is no oracle behind it and no divergence check — the reserves are the entire market, so one trade can move it a long way.";
+    default:
+      return "";
+  }
+}

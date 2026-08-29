@@ -272,15 +272,24 @@ export function BandSection() {
                   {" "}
                   ${p.value_usdg.toFixed(2)}
                   {p.price_stale ? " · px 24/5" : ""}
-                  {/* A Uniswap TWAP passed the depth and divergence guards, but it
-                      isn't a Chainlink feed — say which one you're looking at. */}
+                  {/* Say WHICH non-feed source this is, not merely that it is
+                      one. A pool TWAP passed depth and divergence guards; a
+                      bonding curve passed neither and cannot. Labelling both
+                      "pool px" under the pool's tooltip claims two checks that
+                      never ran. */}
                   {p.price_source !== "chainlink" ? (
                     <span
                       className="px-pool"
-                      title="valued from a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim"
+                      title={
+                        p.price_source === "curve"
+                          ? "read straight off a bonding curve — no oracle behind it and no divergence check, and the reserves are the entire market"
+                          : p.price_source === "broker"
+                            ? "the venue's own last-trade print, not a Chainlink feed"
+                            : "valued from a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim"
+                      }
                     >
                       {" "}
-                      · pool px
+                      · {p.price_source === "curve" ? "curve px" : p.price_source === "broker" ? "broker px" : "pool px"}
                     </span>
                   ) : null}
                 </span>

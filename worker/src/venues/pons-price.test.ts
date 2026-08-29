@@ -348,12 +348,18 @@ describe("curvePriceUsable", () => {
     assert.equal((v as { kind: string }).kind, "too-thin");
   });
 
-  it("falls back to the FRACTION when the quote asset has no USD price", () => {
-    // 42.8% of launches are quoted in stock tokens and 2.3% in cbBTC. Without
-    // this the majority of the launchpad would be unjudgeable for want of a feed.
-    assert.deepEqual(curvePriceUsable({ ...ok, depthUsdg: null, depthFraction: 0.05 }, G), { ok: true });
-    const thin = curvePriceUsable({ ...ok, depthUsdg: null, depthFraction: 0.01 }, G);
-    assert.equal((thin as { kind: string }).kind, "too-thin");
+  it("has NO feed-free fallback here — it cannot be reached", () => {
+    // A price8 exists only if the quote asset was priceable, so a
+    // fraction-of-threshold branch could never fire at this point. Replayed
+    // against 900 live curves, none of the 316 feedless-quote ones got past
+    // the no-quote-price check. The feed-free floor lives in discovery, where
+    // it judges the ~45% of launches quoted in stock tokens and cbBTC.
+    const noQuote = curvePriceUsable({ ...ok, price8: 0n, depthUsdg: null, depthFraction: 0.5 }, G);
+    assert.equal((noQuote as { kind: string }).kind, "no-quote-price", "the true reason, not a depth verdict");
+    // And an unknown depth WITH a price is refused, never waved through.
+    const unknown = curvePriceUsable({ ...ok, depthUsdg: null }, G);
+    assert.equal((unknown as { kind: string }).kind, "too-thin");
+    assert.match((unknown as { reason: string }).reason, /unknown amount/);
   });
 
   it("refuses a curve whose price is mostly other people's cost basis", () => {

@@ -282,3 +282,32 @@ export async function readPositions(
   }
   return { positions, missingPrice, unpricedByDesign, readFailed: false };
 }
+
+/**
+ * Positions valued off a bonding curve. None of them may ratchet a peak.
+ *
+ * A NAMED RULE RATHER THAN AN INLINE FILTER, because it has to hold in three
+ * places at once and got half-applied the first time: the live fee accrual, the
+ * live in-memory peak the drawdown breaker divides by, and the persisted paper
+ * peak. Guarding only the first two left the breaker measuring against a mark
+ * no oracle stands behind — so a curve spike, then a revert, halted every
+ * non-exit intent on a drawdown that never happened, for the whole process.
+ *
+ * Why it exists at all: both high-water marks are monotonic and persisted
+ * (`MAX(hwm_usdg, ?)` for the live one, with a performance fee written in the
+ * same breath), and nothing walks either back. A curve mark has no oracle
+ * behind it, moves 1,546 bps at p99 over four minutes, and arrives
+ * DISCONTINUOUSLY — the tick a curve first clears its guard, the holding jumps
+ * from carried-at-cost to carried-at-mark with no trade having happened.
+ *
+ * Skipping is conservative in both directions: a fee not charged, and a
+ * drawdown measured from the last peak that a feed or a pool stood behind.
+ */
+export function curveMarkedSymbols(positions: readonly Position[]): string[] {
+  return positions.filter((p) => p.priceSource === "curve").map((p) => p.symbol);
+}
+
+/** May this book's equity set a new high-water mark? */
+export function mayRatchetHwm(positions: readonly Position[]): boolean {
+  return curveMarkedSymbols(positions).length === 0;
+}

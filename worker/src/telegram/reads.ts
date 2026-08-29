@@ -13,7 +13,7 @@ import { gasQualifier } from "../equity";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
+import { priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();

@@ -32,9 +32,11 @@ export const PositionRowView = memo(function PositionRowView({ symbol }: { symbo
   // A pool price cleared the depth and divergence guards, so it's actionable —
   // but it's a thinner claim than an external feed and the row says which. Never
   // render both the same way.
-  // Any non-feed price, not only a pool one: a bonding-curve mark is a
-  // weaker number than a pool price and must not render as a feed.
+  // Any non-feed price, not only a pool one — but the CHIP must name which.
+  // A bonding-curve mark labelled "pool" claims a depth floor and a divergence
+  // band that a curve cannot be given.
   const pooled = p.price_source !== "chainlink";
+  const pxTag = p.price_source === "curve" ? "curve" : p.price_source === "broker" ? "broker" : "pool";
   const stale = p.price_stale === 1;
 
   return (
@@ -49,7 +51,7 @@ export const PositionRowView = memo(function PositionRowView({ symbol }: { symbo
             that lined up. */}
         {(pooled || stale) && (
           <View style={styles.tags}>
-            {pooled && <Text style={[styles.tag, styles.tagPool]}>pool</Text>}
+            {pooled && <Text style={[styles.tag, styles.tagPool]}>{pxTag}</Text>}
             {stale && <Text style={[styles.tag, styles.tagStale]}>stale</Text>}
           </View>
         )}
