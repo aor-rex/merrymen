@@ -63,6 +63,7 @@ export interface StrategyBuildOpts {
     candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
     open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
     liquidityOf: (token: `0x${string}`) => number | null;
+    unpriceable?: () => ReadonlySet<string>;
   };
 }
 
@@ -190,6 +191,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       candidates: t?.candidates ?? (() => []),
       open: t?.open ?? (() => []),
       liquidityOf: t?.liquidityOf ?? (() => null),
+      unpriceable: t?.unpriceable ?? (() => new Set<string>()),
       onNote: opts.onNote,
     });
   }

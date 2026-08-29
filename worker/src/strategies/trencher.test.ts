@@ -8,12 +8,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   TRENCHER_DEFAULTS,
+  makeTrencher,
   priceMoveBps,
   shouldEnter,
   shouldExit,
   type Candidate,
   type OpenPosition,
 } from "./trencher";
+import type { Snapshot } from "./types";
 
 const p8 = (v: number) => BigInt(Math.round(v * 1e8));
 
@@ -93,6 +95,7 @@ const position = (over: Partial<OpenPosition> = {}): OpenPosition => ({
   entryLiquidityUsd: 120_000,
   entrySec: NOW - 3600,
   costUsdg: 5_000_000n,
+  qtyRaw: 10n ** 18n,
   ...over,
 });
 
@@ -161,5 +164,86 @@ describe("priceMoveBps", () => {
 
   it("returns 0 on a zero entry rather than dividing by it", () => {
     assert.equal(priceMoveBps(0n, p8(1)), 0);
+  });
+});
+
+/**
+ * The exit that exists for "the venue went dark", and could never fire.
+ *
+ * shouldExit checks `price8 === null` FIRST, deliberately: a position nobody can
+ * value may not be exitable at all in an hour. But makeTrencher skipped anything
+ * missing from snap.holdings, and readPositions only reports what it could
+ * value — so the branch was unreachable by construction. The most urgent exit
+ * was the one guaranteed never to run.
+ */
+describe("the unpriceable exit, once it can actually be reached", () => {
+  const HELD = "0x00000000000000000000000000000000000000c1" as const;
+
+  const snap = (over: Partial<Snapshot> = {}): Snapshot =>
+    ({
+      cashUsdg: 1_000_000_000n,
+      vaultUsdg: 0n,
+      holdings: new Map(),
+      prices: new Map(),
+      pausedTokens: new Set<string>(),
+      staleFeeds: new Set<string>(),
+      sequencerUp: true,
+      spendHeadroomUsdg: 1_000_000_000n,
+      perTradeCapUsdg: 100_000_000n,
+      ...over,
+    }) as Snapshot;
+
+  const deps = (over: Record<string, unknown> = {}) => ({
+    cfg: TRENCHER_DEFAULTS,
+    swapRouter: "0x00000000000000000000000000000000000000f0" as `0x${string}`,
+    usdgToken: "0x00000000000000000000000000000000000000aa" as `0x${string}`,
+    candidates: async () => [],
+    open: async () => [position({ symbol: "CATE", token: HELD, qtyRaw: 7n * 10n ** 18n })],
+    liquidityOf: () => null,
+    unpriceable: () => new Set<string>(["CATE"]),
+    ...over,
+  });
+
+  it("SELLS a held position nobody can price, sized from the ledger", async () => {
+    // The position is absent from snap.holdings — that is what "unpriceable"
+    // means here — so the quantity has to come from the cost-basis ledger.
+    const intents = await makeTrencher(deps() as never).tick(snap());
+    assert.equal(intents.length, 1, "the whole point: an exit is proposed at all");
+    const sell = intents[0] as unknown as { kind: string; sellToken: string; sellAmountRaw: bigint; notionalUsdg: bigint };
+    assert.equal(sell.kind, "swap");
+    assert.equal(sell.sellToken, HELD);
+    assert.equal(sell.sellAmountRaw, 7n * 10n ** 18n, "the whole position, from the ledger");
+  });
+
+  it("values that sell at COST, because there is no mark to use", async () => {
+    // The same substitution quarantine makes carrying an unvaluable holding
+    // into equity. Inventing a mark for a token nobody can price would be
+    // exactly the fabrication this repo keeps getting burned by.
+    const intents = await makeTrencher(deps() as never).tick(snap());
+    assert.equal((intents[0] as { notionalUsdg: bigint }).notionalUsdg, 5_000_000n);
+  });
+
+  it("does NOT sell a position that is simply absent from the ledger's view", async () => {
+    // Absence from snap.holdings has two causes and only one of them is a
+    // reason to sell. A drifted ledger must not produce a phantom exit.
+    const intents = await makeTrencher(deps({ unpriceable: () => new Set<string>() }) as never).tick(snap());
+    assert.deepEqual(intents, []);
+  });
+
+  it("does not sell a position with nothing left in it", async () => {
+    const d = deps({ open: async () => [position({ symbol: "CATE", token: HELD, qtyRaw: 0n })] });
+    assert.deepEqual(await makeTrencher(d as never).tick(snap()), []);
+  });
+
+  it("still prefers the PRICED holding's own numbers when there is one", async () => {
+    // The unpriceable path must not take over the ordinary one.
+    const holdings = new Map([["CATE", { symbol: "CATE", token: HELD, rawBalance: 3n * 10n ** 18n, valueUsdg: 9_000_000n, decimals: 18 }]]);
+    const prices = new Map([["CATE", { price8: 1n, stale: false, source: "pool" as const }]]);
+    const d = deps({ unpriceable: () => new Set<string>() });
+    const intents = await makeTrencher(d as never).tick(snap({ holdings: holdings as never, prices: prices as never }));
+    // price8 of 1 against an entry of 0.001 is a catastrophic drop — the stop
+    // fires, and it sizes from the holding, not the ledger.
+    assert.equal(intents.length, 1);
+    assert.equal((intents[0] as { sellAmountRaw: bigint }).sellAmountRaw, 3n * 10n ** 18n);
   });
 });

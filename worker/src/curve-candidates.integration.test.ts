@@ -20,7 +20,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-curves-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, markPoolSeen, recentCandidates, recordCandidate, seenCurves, seenPools } = await import("./store");
+const { initStore, markPoolSeen, recentCandidates, recordCandidate, seenCurves, seenPools, setTrenchEntry, getTrenchEntry, upgradeTrenchEntry } = await import("./store");
 
 await initStore();
 after(() => {
@@ -186,5 +186,49 @@ describe("curve rows do not crowd out the trencher's window", () => {
     // Without the filter it is buried.
     const unfiltered = await recentCandidates(3600, 25);
     assert.ok(unfiltered.some((c) => c.curve), "the unfiltered view still shows them");
+  });
+});
+
+/**
+ * A trench baseline that starts unknown must be able to become known.
+ *
+ * The row's ABSENCE means "another strategy's position", so a fill with no
+ * depth reading still has to write one — and 0 is the honest value, which the
+ * drain guard reads as "this check is off". What was missing was the way back:
+ * the insert is ON CONFLICT DO NOTHING, so a 0 written at fill time stayed 0
+ * for the position's whole life and the rug defence stayed off with it.
+ */
+describe("trench entry baselines", () => {
+  const A = "agent-trench";
+
+  it("a zero baseline is filled in the first time depth is readable", async () => {
+    await setTrenchEntry(A, "paper", "UNK", 0);
+    assert.equal((await getTrenchEntry(A, "paper", "UNK"))?.liquidityUsd, 0);
+    assert.equal(await upgradeTrenchEntry(A, "paper", "UNK", 42_000), true);
+    assert.equal((await getTrenchEntry(A, "paper", "UNK"))?.liquidityUsd, 42_000);
+  });
+
+  it("NEVER moves a baseline that is already real", async () => {
+    // The drain check measures against depth AT ENTRY. Re-anchoring it later
+    // would make a drain that already happened stop counting as one — the
+    // check would keep reporting healthy all the way down.
+    await setTrenchEntry(A, "paper", "REAL", 100_000);
+    await upgradeTrenchEntry(A, "paper", "REAL", 5);
+    assert.equal((await getTrenchEntry(A, "paper", "REAL"))?.liquidityUsd, 100_000);
+  });
+
+  it("refuses to upgrade to a non-positive reading", async () => {
+    await setTrenchEntry(A, "paper", "ZERO", 0);
+    assert.equal(await upgradeTrenchEntry(A, "paper", "ZERO", 0), false);
+    assert.equal(await upgradeTrenchEntry(A, "paper", "ZERO", -1), false);
+  });
+
+  it("the row EXISTS even with an unknown baseline, so the position stays owned", async () => {
+    // trenchOpen skips a position with no row, treating it as another
+    // strategy's. Not writing one made the position invisible to every exit —
+    // stop-loss and max-hold included — which is strictly worse than a zero
+    // that only disables the drain check.
+    await setTrenchEntry(A, "paper", "OWNED", 0);
+    assert.notEqual(await getTrenchEntry(A, "paper", "OWNED"), null);
   });
 });

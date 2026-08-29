@@ -47,6 +47,14 @@ export interface OpenPosition {
   entryLiquidityUsd: number;
   entrySec: number;
   costUsdg: bigint;
+  /**
+   * Raw quantity from the cost-basis ledger.
+   *
+   * Needed because an exit sometimes has to be sized WITHOUT a priced holding:
+   * a position nobody can value this tick is absent from snap.holdings, and
+   * that is precisely the position most urgent to leave.
+   */
+  qtyRaw: bigint;
 }
 
 export interface TrencherConfig {
@@ -167,6 +175,14 @@ export interface TrencherDeps {
   open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
   /** Live depth for a held token, when it's still readable. */
   liquidityOf: (token: `0x${string}`) => number | null;
+  /**
+   * Symbols HELD but which produced no price this tick.
+   *
+   * Passed in rather than inferred from absence, because absence from
+   * snap.holdings has two causes -- unpriceable, or the ledger drifting from
+   * the chain -- and only one of them should trigger a sell.
+   */
+  unpriceable?: () => ReadonlySet<string>;
   onNote?: (level: "ok" | "warn", message: string) => void;
 }
 
@@ -188,14 +204,25 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
 
       // ── exits first, always ────────────────────────────────────────────
       const openNow = await deps.open();
+      const unpriceable = deps.unpriceable?.() ?? new Set<string>();
       for (const pos of openNow) {
         const held = snap.holdings.get(pos.symbol);
-        if (!held || held.rawBalance <= 0n) continue;
+        // A HELD-BUT-UNPRICEABLE position is the case this loop used to drop,
+        // and it is the one shouldExit's first branch was written for. Such a
+        // position is absent from snap.holdings — readPositions only reports
+        // what it could value — so `if (!held) continue` made that branch
+        // unreachable, and the exit designed for "the venue went dark" could
+        // never fire. The ledger still knows the quantity, which is enough to
+        // sell.
+        const stillUnpriceable = unpriceable.has(pos.symbol);
+        if (!held || held.rawBalance <= 0n) {
+          if (!stillUnpriceable || pos.qtyRaw <= 0n) continue;
+        }
         const quote = snap.prices.get(pos.symbol);
         const verdict = shouldExit(
           pos,
           {
-            price8: quote?.price8 ?? null,
+            price8: stillUnpriceable ? null : (quote?.price8 ?? null),
             liquidityUsd: deps.liquidityOf(pos.token),
             nowSec,
           },
@@ -208,8 +235,13 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           target: deps.swapRouter,
           sellToken: pos.token,
           buyToken: deps.usdgToken,
-          sellAmountRaw: held.rawBalance, // the whole position; partials leave a tail
-          notionalUsdg: held.valueUsdg,
+          // The whole position; partials leave a tail. From the ledger when
+          // there is no priced holding to read it from.
+          sellAmountRaw: held?.rawBalance ?? pos.qtyRaw,
+          // Cost is the honest stand-in for a position with no mark — the same
+          // substitution quarantine makes when it carries an unvaluable
+          // holding into equity at what was paid for it.
+          notionalUsdg: held?.valueUsdg ?? pos.costUsdg,
         });
       }
 

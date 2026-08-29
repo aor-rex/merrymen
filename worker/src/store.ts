@@ -1917,6 +1917,46 @@ export async function setTrenchEntry(agentId: string, mode: BasisMode, symbol: s
   }
 }
 
+/**
+ * Fill in a baseline that was stamped as UNKNOWN, once depth becomes readable.
+ *
+ * THE ROW MUST ALWAYS EXIST, because its ABSENCE is what tells trenchOpen a
+ * position belongs to another strategy — so a fill with no depth reading has to
+ * write something, and 0 is the honest value (the drain guard reads
+ * `entryLiquidityUsd > 0` and turns itself off, which is exactly right for a
+ * baseline nobody knows).
+ *
+ * What was missing was the way back. `setTrenchEntry` is ON CONFLICT DO NOTHING,
+ * so a 0 written at fill time stayed 0 for the position's whole life and the rug
+ * defence stayed off with it. This upgrades a zero — and ONLY a zero — the first
+ * time a real reading arrives.
+ *
+ * Never overwrites a real baseline. The drain check compares against depth AT
+ * ENTRY, so moving that reference later would quietly re-anchor it to a level
+ * the position was not opened at, and a drain that had already happened would
+ * stop counting as one.
+ */
+export async function upgradeTrenchEntry(
+  agentId: string,
+  mode: BasisMode,
+  symbol: string,
+  liquidityUsd: number,
+): Promise<boolean> {
+  if (!(liquidityUsd > 0)) return false;
+  try {
+    const res = await getDb()
+      .prepare(
+        `UPDATE trench_positions SET entry_liquidity_usd = ?
+         WHERE agent_id = ? AND mode = ? AND symbol = ? AND entry_liquidity_usd <= 0`,
+      )
+      .run(liquidityUsd, agentId, mode, symbol);
+    return (res as { changes?: number }).changes === undefined || (res as { changes?: number }).changes! > 0;
+  } catch (e) {
+    console.error("[store] trench entry upgrade failed:", e);
+    return false;
+  }
+}
+
 export async function getTrenchEntry(
   agentId: string,
   mode: BasisMode,

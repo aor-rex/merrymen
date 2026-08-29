@@ -156,6 +156,7 @@ import {
   recordCandidate,
   seenPools,
   setTrenchEntry,
+  upgradeTrenchEntry,
   setPositions,
   type TradeRow,
 } from "./store";
@@ -284,6 +285,7 @@ async function main() {
         candidates: trenchCandidates,
         open: trenchOpen,
         liquidityOf: (token) => lastLiquidityUsd.get(token.toLowerCase()) ?? null,
+        unpriceable: () => lastUnpricedSymbols,
       },
       usdg6: usdg,
       basketSymbols: c.basketSymbols,
@@ -834,6 +836,14 @@ async function main() {
    */
   /** Depth per token from the last pool read — what an exit judges a drain against. */
   const lastLiquidityUsd = new Map<string, number>();
+  /**
+   * Symbols HELD this tick that nobody could price.
+   *
+   * Published for the strategy layer, because a position absent from
+   * snap.holdings is the one most urgent to leave and the strategy has no
+   * other way to tell that case from a ledger that has drifted.
+   */
+  let lastUnpricedSymbols: ReadonlySet<string> = new Set<string>();
 
   /**
    * Candidates the trencher may enter.
@@ -895,6 +905,17 @@ async function main() {
       if (basis.qtyRaw <= 0n || basis.costUsdg <= 0n) continue;
       const entry = await getTrenchEntry(active.agentId, mode, t.symbol);
       if (!entry) continue; // not a trench entry — another strategy's position
+      // Fill in a baseline that was stamped unknown, now that depth is
+      // readable. Only ever upgrades a zero, and never moves a real one: the
+      // drain check measures against depth AT ENTRY, so re-anchoring it later
+      // would make a drain that already happened stop counting as one.
+      if (entry.liquidityUsd <= 0) {
+        const now = lastLiquidityUsd.get(t.address.toLowerCase());
+        if (now !== undefined && now > 0 && (await upgradeTrenchEntry(active.agentId, mode, t.symbol, now))) {
+          entry.liquidityUsd = now;
+          console.log(`[trench] ${t.symbol} baseline filled in at $${Math.round(now).toLocaleString()}`);
+        }
+      }
       // costUsdg(6dp) / qty(10^dec) → USD per whole token at 8dp.
       const entryPrice8 =
         (basis.costUsdg * 10n ** BigInt(t.decimals ?? 18) * 100n) / basis.qtyRaw;
@@ -905,6 +926,7 @@ async function main() {
         entryLiquidityUsd: entry.liquidityUsd,
         entrySec: entry.entrySec,
         costUsdg: basis.costUsdg,
+        qtyRaw: basis.qtyRaw,
       });
     }
     return out;
@@ -1474,15 +1496,25 @@ async function main() {
       const tok = watchTokens.find((t) => t.symbol === f.symbol);
       if (f.side === "buy" && tok) {
         const depth = lastLiquidityUsd.get(tok.address.toLowerCase());
-        // Only stamp a baseline we actually HAVE. The row is written ON
-        // CONFLICT DO NOTHING, so a 0 recorded here is never corrected — not on
-        // a later tick, a top-up, or a restart — and trencher's drain exit is
-        // gated on `entryLiquidityUsd > 0`. Defaulting an unknown to 0 turned
-        // the rug defence off for that position's entire life, silently.
-        // Leaving the row unwritten is honest: the exit then reports no
-        // baseline rather than a false one.
-        if (depth !== undefined) await setTrenchEntry(agentId, mode, f.symbol, depth);
-        else console.log(`[trench] no depth reading for ${f.symbol} — not stamping an entry baseline`);
+        // ALWAYS stamp a row, even with an unknown baseline.
+        //
+        // This reverses a change that was half right. The original bug was real
+        // — a 0 written here is never corrected, because the insert is ON
+        // CONFLICT DO NOTHING, and the drain exit is gated on
+        // `entryLiquidityUsd > 0`, so an unknown silently turned the rug
+        // defence off for the position's whole life. But NOT writing the row
+        // was worse: trenchOpen uses the row's ABSENCE to mean "another
+        // strategy's position" and skips it, so an unstamped position became
+        // invisible to EVERY exit — stop-loss, take-profit and max-hold as
+        // well as drain. One silent failure traded for a bigger one.
+        //
+        // The row goes in with 0 when depth is unknown, which the drain guard
+        // already reads as "no baseline, this check is off" — and
+        // upgradeTrenchEntry fills it in the first tick a real reading arrives.
+        await setTrenchEntry(agentId, mode, f.symbol, depth ?? 0);
+        if (depth === undefined) {
+          console.log(`[trench] no depth reading for ${f.symbol} — baseline stamped unknown, will fill in later`);
+        }
       }
       // Flat again: forget the baseline so a later re-entry starts fresh rather
       // than being judged against a position that closed hours ago.
@@ -2606,6 +2638,7 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
+      lastUnpricedSymbols = new Set(unpricedByDesign);
       unreadBook = bookGaps({
         unreadBalances: bal.unread,
         positionsReadFailed: posRead.readFailed,
