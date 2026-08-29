@@ -125,6 +125,16 @@ export function valuationMultiplierFor(source: PriceQuote["source"], uiMultiplie
       return uiMultiplier;
     case "pool":
     case "broker":
+    // A Pons bonding curve quotes USD per whole ERC-20, exactly as a pool does.
+    // Curve tokens are plain ERC-20s with no ERC-8056 multiplier to apply — and
+    // if one ever grew a split, the curve's reserves would already reflect it,
+    // so applying a multiplier here would count it twice.
+    //
+    // Note this is the ONLY question this switch asks. It decides a UNIT, not
+    // whether the price can be trusted: a curve quote is a weaker kind of
+    // evidence than a pool quote, and that difference is enforced elsewhere —
+    // it stays inside the scout ceiling and out of the high-water mark.
+    case "curve":
       return UI_MULTIPLIER_ONE;
     default: {
       const never: never = source;

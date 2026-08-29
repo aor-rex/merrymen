@@ -13,7 +13,7 @@ import { gasQualifier } from "../equity";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { isHostedMode } from "../../../packages/core/src/index";
+import { priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -255,12 +255,14 @@ export function readPositions(agentId?: string | null): string {
         // a Chainlink-priced one. Marking it inline means the owner never has
         // to remember which is which.
         const src =
-          r.price_source === "pool" ? " (pool px)" : r.price_source === "broker" ? " (broker px)" : "";
+          priceSourceTag(r.price_source) ? ` (${priceSourceTag(r.price_source)})` : "";
         const stale = r.price_stale ? " (px 24/5)" : "";
         return `• ${esc(r.symbol)}: $${r.value_usdg.toFixed(2)}${stale}${src} @ $${r.price_usd.toFixed(2)}`;
       })
       .join("\n");
-    const anyPool = rows.some((r) => r.price_source === "pool");
+    // Any non-feed price, not just a pool one — a curve mark needs the same
+    // footnote, and more so.
+    const anyPool = rows.some((r) => priceSourceTag(r.price_source) !== "");
     const note = anyPool
       ? "\n<i>pool px = a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim.</i>"
       : "";

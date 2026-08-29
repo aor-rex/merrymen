@@ -81,8 +81,15 @@ export interface PriceQuote {
   price8: bigint;
   /** Chainlink feed older than 2h. Expected on weekends (feeds run 24/5). */
   stale: boolean;
-  /** "broker" = Robinhood get_equity_quotes on the Agentic-account rail. */
-  source: "chainlink" | "pool" | "broker";
+  /**
+   * "broker" = Robinhood get_equity_quotes on the Agentic-account rail.
+   * "curve" = a Pons bonding curve. A DIFFERENT EVIDENTIAL CLASS from "pool":
+   * a pool quote passed a depth floor AND a spot-vs-TWAP divergence band, and
+   * a curve quote passed neither because a curve has no oracle to diverge
+   * from. It is good enough to value something already held; it is not good
+   * enough to authorise a new buy, and the scout ceiling still applies to it.
+   */
+  source: "chainlink" | "pool" | "broker" | "curve";
   /** For pool prices: route + depth, so a human can judge the number. */
   detail?: string;
   /**
@@ -238,3 +245,33 @@ export const STOCK_ABI = [
   { type: "event", name: "Transfer", inputs: [{ name: "from", type: "address", indexed: true }, { name: "to", type: "address", indexed: true }, { name: "value", type: "uint256", indexed: false }] },
   { type: "event", name: "UIMultiplierUpdated", inputs: [{ name: "oldMultiplier", type: "uint256", indexed: false }, { name: "newMultiplier", type: "uint256", indexed: false }, { name: "effectiveAtTimestamp", type: "uint256", indexed: false }] },
 ] as const;
+
+/**
+ * Short provenance tag for a price, for anywhere a human or a model reads one.
+ *
+ * Exists because the display sites all used to ask `source === "pool"` with an
+ * implicit else meaning "Chainlink-grade". That is fine while there are two
+ * sources and silently wrong the moment there are four: a bonding-curve mark
+ * would have rendered with the feed's colour, no tag, and — worst of the three
+ * — no marker in the ledger string handed to the strategist, which would then
+ * narrate an unoracled number as if a feed had published it.
+ *
+ * Chainlink returns "" because it is the baseline every other source is being
+ * distinguished FROM; tagging it would put a label on every row and so label
+ * nothing.
+ */
+export function priceSourceTag(source: string): string {
+  switch (source) {
+    case "pool":
+      return "pool px";
+    case "broker":
+      return "broker px";
+    case "curve":
+      // Deliberately not "pool px". A curve price passed no divergence band and
+      // has no oracle behind it; showing it as a pool price would overstate
+      // what is known about it.
+      return "curve px";
+    default:
+      return "";
+  }
+}

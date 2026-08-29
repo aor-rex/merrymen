@@ -369,13 +369,13 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                           <span className="s">
                             <span
                               className="tk"
-                              style={{ background: p.price_source === "pool" ? "var(--lime)" : "var(--mint)" }}
+                              style={{ background: p.price_source === "chainlink" ? "var(--mint)" : "var(--lime)" }}
                             />{" "}
                             {p.symbol}
                           </span>
                           <span className="px">
                             ${usd(p.price_usd)}
-                            {p.price_source === "pool" && <span className="tagpx">pool px</span>}
+                            {p.price_source !== "chainlink" && <span className="tagpx">{p.price_source === "curve" ? "curve px" : p.price_source === "broker" ? "broker px" : "pool px"}</span>}
                           </span>
                           <span className="val">{usd(p.value_usdg)}</span>
                         </div>
@@ -534,7 +534,7 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
     const posLine = ledger.positions.length
       ? ledger.positions
           .slice(0, 8)
-          .map((p) => `${p.symbol} ${usd(p.value_usdg)} USDG @ $${usd(p.price_usd)}${p.price_source === "pool" ? " (pool px)" : ""}`)
+          .map((p) => `${p.symbol} ${usd(p.value_usdg)} USDG @ $${usd(p.price_usd)}${p.price_source === "chainlink" ? "" : ` (${p.price_source} px)`}`)
           .join("; ")
       : "all in cash and the vault";
     const last = ledger.events.find((e) => e.level === "ok")?.message || ledger.events[0]?.message || "";

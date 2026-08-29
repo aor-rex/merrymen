@@ -32,6 +32,8 @@ after(() => {
 });
 
 const NATIVE = `0x${"0".repeat(40)}`;
+// 4.2 ETH — the graduation threshold every native-quoted Pons curve carries.
+const THRESHOLD = "4200000000000000000";
 const find = async (addr: string) => (await recentCandidates(3600, 100)).find((c) => c.address === addr);
 
 describe("curve columns in the candidate store", () => {
@@ -39,7 +41,7 @@ describe("curve columns in the candidate store", () => {
     const token = "0x00000000000000000000000000000000000000c1";
     await recordCandidate({
       address: token, symbol: "PONSY", decimals: 18, liquidityUsd: 900, fdvUsd: 12_000, firstSeen: 0,
-      curve: { curve: "0x00000000000000000000000000000000000000e1", quoteToken: NATIVE },
+      curve: { curve: "0x00000000000000000000000000000000000000e1", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
     });
     const got = await find(token);
     assert.ok(got?.curve, "a pre-graduation token is unreachable without its curve");
@@ -53,7 +55,7 @@ describe("curve columns in the candidate store", () => {
     const token = "0x00000000000000000000000000000000000000c2";
     await recordCandidate({
       address: token, symbol: "NATIVE", decimals: 18, liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
-      curve: { curve: "0x00000000000000000000000000000000000000e2", quoteToken: NATIVE },
+      curve: { curve: "0x00000000000000000000000000000000000000e2", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
     });
     const got = await find(token);
     assert.ok(got?.curve, "a native-quoted curve must not vanish");
@@ -67,7 +69,7 @@ describe("curve columns in the candidate store", () => {
     const token = "0x00000000000000000000000000000000000000c3";
     await recordCandidate({
       address: token, symbol: "KEEP", decimals: 18, liquidityUsd: 100, fdvUsd: 1_000, firstSeen: 0,
-      curve: { curve: "0x00000000000000000000000000000000000000e3", quoteToken: NATIVE },
+      curve: { curve: "0x00000000000000000000000000000000000000e3", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
     });
     await recordCandidate({ address: token, symbol: "KEEP", decimals: 18, liquidityUsd: 200, fdvUsd: 2_000, firstSeen: 0 });
     assert.equal((await find(token))?.curve?.curve, "0x00000000000000000000000000000000000000e3");
@@ -85,7 +87,7 @@ describe("one discoverer must not zero the other's figures", () => {
     await recordCandidate({ address: token, symbol: "RICH", decimals: 18, liquidityUsd: 80_000, fdvUsd: 500_000, firstSeen: 0 });
     await recordCandidate({
       address: token, symbol: "RICH", decimals: 18, liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
-      curve: { curve: "0x00000000000000000000000000000000000000e4", quoteToken: NATIVE },
+      curve: { curve: "0x00000000000000000000000000000000000000e4", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
     });
     const got = await find(token);
     assert.equal(got?.liquidityUsd, 80_000, "depth was zeroed by a pass that could not price it");
@@ -128,7 +130,7 @@ describe("launchpad and pool discovery dedupe separately", () => {
   it("a launchpad row does NOT count as seen by the pool discoverer", async () => {
     await recordCandidate({
       address: LAUNCHED, symbol: "GRADS", decimals: 18, liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
-      curve: { curve: "0x00000000000000000000000000000000000000f1", quoteToken: NATIVE },
+      curve: { curve: "0x00000000000000000000000000000000000000f1", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
     });
     assert.equal((await seenCurves()).has(LAUNCHED), true, "the launchpad must not re-announce it");
     assert.equal(
@@ -172,7 +174,7 @@ describe("curve rows do not crowd out the trencher's window", () => {
       await recordCandidate({
         address: `0x${String(i).padStart(40, "b")}`, symbol: `C${i}`, decimals: 18,
         liquidityUsd: 0, fdvUsd: 0, firstSeen: 0,
-        curve: { curve: "0x00000000000000000000000000000000000000f9", quoteToken: NATIVE },
+        curve: { curve: "0x00000000000000000000000000000000000000f9", quoteToken: NATIVE, graduationThresholdRaw: THRESHOLD },
       });
     }
     const pool = "0x00000000000000000000000000000000000000d3";

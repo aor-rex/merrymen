@@ -66,7 +66,12 @@ export interface PoolQuoteRefusal {
    * live pool balance and a divergence percentage, so it changes every time
    * anyone trades, and a change-detector built on it fires forever.
    */
-  kind: RefusalKind | "no-pool" | "stale-read";
+  /**
+   * Curve refusals arrive here too, prefixed `curve-`, when a token has no
+   * pool but does have a bonding curve. Same contract: stable identifier, never
+   * the prose.
+   */
+  kind: RefusalKind | "no-pool" | "stale-read" | `curve-${string}`;
   reason: string;
 }
 

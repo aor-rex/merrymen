@@ -141,6 +141,7 @@ describe("describeDiscovery — a Pons launch", () => {
     curve: {
       curve: "0x00000000000000000000000000000000000000e1",
       quoteToken: `0x${"0".repeat(40)}`,
+      graduationThresholdRaw: 4_200_000_000_000_000_000n,
       depthFraction: 0.08,
     },
   };

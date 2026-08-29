@@ -97,7 +97,9 @@ import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName } from "./soul";
 import { positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
-import { describeDiscovery, discoverPools, discoverPonsLaunches, ponsScanWindow, resolveBitquery } from "./discovery";
+import { describeDiscovery, discoverPools, discoverPonsLaunches, ponsScanWindow, quoteUsdOf, resolveBitquery } from "./discovery";
+import { readCurvePrices } from "./venues/curve-prices";
+import { CURVE_GUARD_DEFAULTS } from "./venues/pons-price";
 import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
@@ -137,6 +139,7 @@ import {
   markPoolSeen,
   recentCandidates,
   pruneDiscovered,
+  curveFor,
   seenCurves,
   recordCandidate,
   seenPools,
@@ -709,6 +712,57 @@ async function main() {
       lastLiquidityUsd.set(t.address.toLowerCase(), Number(q.liquidityUsdg) / 1e6);
     }
 
+    // Anything the POOL pricer could not reach, try on the launchpad.
+    //
+    // Only tokens it actually refused, and only for the reason that means "there
+    // is no pool here" — a token refused as too thin or divergent has a pool and
+    // failed its guards, and pricing it off a curve instead would be looking for
+    // a venue that answers rather than a price that is true.
+    const noPool = feedless.filter(
+      (t) => !quotes.has(t.symbol) && refused.some((r) => r.symbol === t.symbol && r.kind === "no-pool"),
+    );
+    if (noPool.length) {
+      // One ETH price for the whole pass, shared with the gas path's 300s cache.
+      const eth = await ethPrice8();
+      const curveRes = await readCurvePrices({
+        client: mainnetClient(),
+        tokens: noPool,
+        // The store types addresses as plain strings; every value here was
+        // written by parseLaunchLogs, which lowercases and shapes them.
+        curveOf: async (a) => {
+          const r = await curveFor(a);
+          return r
+            ? {
+                curve: r.curve as `0x${string}`,
+                quoteToken: r.quoteToken as `0x${string}`,
+                graduationThresholdRaw: r.graduationThresholdRaw,
+              }
+            : null;
+        },
+        quoteUsd8Of: (q) => quoteUsdOf(q, eth.price8),
+        quoteDecimalsOf: (q) =>
+          q.toLowerCase() === (CASH.USDG as string).toLowerCase() ? 6 : 18,
+        guard: CURVE_GUARD_DEFAULTS,
+      });
+      for (const [symbol, quote] of curveRes.quotes) if (!prices.has(symbol)) prices.set(symbol, quote);
+      // Curve depth feeds the drain exit exactly as pool depth does — it is the
+      // same question (has the money left since I got in) and the same units.
+      for (const t of noPool) {
+        const q = curveRes.quotes.get(t.symbol);
+        if (q?.liquidityUsdg === undefined) continue;
+        lastLiquidityUsd.set(t.address.toLowerCase(), Number(q.liquidityUsdg) / 1e6);
+      }
+      // A curve refusal REPLACES the pool's "no-pool" for that token: the pool
+      // pricer's reason would say there is no pool, which is true and unhelpful
+      // once we know there is a curve and why it was not good enough.
+      for (const r of curveRes.refused) {
+        const i = refused.findIndex((x) => x.symbol === r.symbol);
+        const row = { symbol: r.symbol, kind: `curve-${r.kind}`, reason: r.reason };
+        if (i >= 0) refused[i] = row as (typeof refused)[number];
+        else refused.push(row as (typeof refused)[number]);
+      }
+    }
+
     poolRefusals = new Map(refused.map((r) => [r.symbol, r.reason]));
     // Key on the refusal KIND, never the prose. The reasons embed a live pool
     // balance and a divergence percentage, so a key built from them changes
@@ -978,16 +1032,26 @@ async function main() {
         // tradeable, and the only moment its v4 PoolKey can be captured.
         // recordCandidate writes the curve, which is this path's own dedupe.
         await recordCandidate({
-        address: d.token,
-        symbol: d.symbol,
-        decimals: d.decimals,
-        liquidityUsd: d.liquidityUsdg === null ? 0 : Number(d.liquidityUsdg) / 1e6,
-        fdvUsd: 0,
-        firstSeen: 0,
-        // The curve is the only way to reach a pre-graduation token. There is
-        // no tier-scan fallback the way there is for an unhooked pool.
-        ...(d.curve ? { curve: { curve: d.curve.curve, quoteToken: d.curve.quoteToken } } : {}),
-      });
+          address: d.token,
+          symbol: d.symbol,
+          decimals: d.decimals,
+          liquidityUsd: d.liquidityUsdg === null ? 0 : Number(d.liquidityUsdg) / 1e6,
+          fdvUsd: 0,
+          firstSeen: 0,
+          // The curve is the only way to reach a pre-graduation token. There is
+          // no tier-scan fallback the way there is for an unhooked pool — and
+          // the threshold rides along because without it the reserves cannot be
+          // read as money at all (the seed is 40% of it).
+          ...(d.curve
+            ? {
+                curve: {
+                  curve: d.curve.curve,
+                  quoteToken: d.curve.quoteToken,
+                  graduationThresholdRaw: d.curve.graduationThresholdRaw.toString(),
+                },
+              }
+            : {}),
+        });
         console.log(`[pons] ${describeDiscovery(d)}`);
       }
       // The prune used to live inside markPoolSeen, which this path no longer
@@ -2510,9 +2574,27 @@ async function main() {
     // couldn't value AND a watched token we've never bought, since neither has
     // an entry in the price map. That second case is the one that matters: it's
     // the fresh launch the owner is deciding whether to scout into.
+    //
+    // A CURVE PRICE DOES NOT COUNT AS PRICED HERE, and that distinction is the
+    // reason this filter is no longer a bare `!has()`. The scout ceiling is the
+    // only control designed for tokens nobody can really value, and it hangs
+    // entirely off membership of this set — so simply emitting a curve quote
+    // would have removed it, silently, with no policy code touched and nothing
+    // logged. The default posture would have flipped from "refuse every buy"
+    // (scoutEnabled is false and the budget is 0) to "bounded by the per-trade
+    // cap alone".
+    //
+    // The two questions must not share one boolean: "can I put a number on
+    // this?" and "may I spend into this?" have different answers for a curve. A
+    // curve mark is good enough to value a position already held; it is not
+    // good enough to authorise a new one, because nothing checked it against an
+    // oracle — there is no oracle to check it against.
     lastUnpriceable = new Set(
       watchTokens
-        .filter((t) => !market.prices.has(t.symbol))
+        .filter((t) => {
+          const q = market.prices.get(t.symbol);
+          return !q || q.source === "curve";
+        })
         .map((t) => t.address.toLowerCase()),
     );
     lastQuarantinedUsdg = quarantine.totalCostUsdg;
@@ -2615,7 +2697,31 @@ async function main() {
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);
-      if (accrual.profitUsdg > 0n) {
+      // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
+      //
+      // `setAgentHwm` is MAX(hwm_usdg, ?) — a one-way door in SQL, with a real
+      // performance fee written in the same breath. There is no procedure that
+      // walks either back. A bonding-curve mark has no oracle behind it and can
+      // be moved a long way by one small trade (p99 move over four minutes:
+      // 1,546 bps), so letting one set a peak would charge the owner a fee on a
+      // profit that a single seller can erase in the next block.
+      //
+      // Worse, the transition itself is discontinuous: the moment a curve quote
+      // first appears, that holding jumps from being carried at COST to being
+      // carried at MARK, in one tick, with no trade having happened. That jump
+      // alone could ratchet the peak.
+      //
+      // Skipping is the conservative direction and it costs the owner nothing
+      // they are owed: an unrecorded peak means a fee not charged and a
+      // drawdown measured from a lower reference. The breaker still works — a
+      // curve token falling still shows up against the existing peak.
+      const curveMarked = positions.filter((p) => p.priceSource === "curve").map((p) => p.symbol);
+      if (curveMarked.length > 0 && accrual.profitUsdg > 0n) {
+        console.log(
+          `[fees] not ratcheting the high-water mark: ${curveMarked.join(", ")} valued off a bonding curve`,
+        );
+      }
+      if (accrual.profitUsdg > 0n && curveMarked.length === 0) {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),

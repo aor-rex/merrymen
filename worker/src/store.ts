@@ -349,6 +349,13 @@ const SQLITE_ALTERS: string[] = [
     // entire history as new. Idempotent — rows the launchpad creates carry a
     // curve and are excluded, and rows already stamped are not matched.
     "UPDATE discovered_pools SET pool_announced_at = first_seen WHERE pool_announced_at IS NULL AND curve IS NULL",
+    // The quote raised at which this curve graduates, raw quote units, as a
+    // decimal string (TEXT because it does not fit an INTEGER for an 18dp
+    // asset). Stored rather than re-read because CurveReserves cannot be
+    // assembled without it -- the virtual seed is 40% of this number, so
+    // without it no depth figure for the curve is real. It never changes for a
+    // given curve, so one write beats an eth_call per token per tick.
+    "ALTER TABLE discovered_pools ADD COLUMN graduation_threshold TEXT",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -1710,6 +1717,8 @@ export interface PoolCandidate {
   curve?: {
     curve: string;
     quoteToken: string;
+    /** Raw quote units, decimal string. Required to interpret the reserves. */
+    graduationThresholdRaw: string;
   };
 }
 
@@ -1753,8 +1762,8 @@ export async function recordCandidate(c: PoolCandidate): Promise<void> {
         // lastLiquidityUsd and only falls back to this value.
         `INSERT INTO discovered_pools (address, symbol, decimals, liquidity_usd, fdv_usd,
                                        pool_currency0, pool_currency1, pool_fee, pool_tick_spacing, pool_hooks,
-                                       curve, quote_token)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       curve, quote_token, graduation_threshold)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(address) DO UPDATE SET
            symbol = excluded.symbol, decimals = excluded.decimals,
            liquidity_usd = CASE WHEN excluded.liquidity_usd > 0 THEN excluded.liquidity_usd ELSE liquidity_usd END,
@@ -1765,7 +1774,8 @@ export async function recordCandidate(c: PoolCandidate): Promise<void> {
            pool_tick_spacing = COALESCE(excluded.pool_tick_spacing, pool_tick_spacing),
            pool_hooks = COALESCE(excluded.pool_hooks, pool_hooks),
            curve = COALESCE(excluded.curve, curve),
-           quote_token = COALESCE(excluded.quote_token, quote_token)`,
+           quote_token = COALESCE(excluded.quote_token, quote_token),
+           graduation_threshold = COALESCE(excluded.graduation_threshold, graduation_threshold)`,
       )
       .run(
         c.address.toLowerCase(),
@@ -1780,6 +1790,7 @@ export async function recordCandidate(c: PoolCandidate): Promise<void> {
         c.key ? c.key.hooks.toLowerCase() : null,
         c.curve ? c.curve.curve.toLowerCase() : null,
         c.curve ? c.curve.quoteToken.toLowerCase() : null,
+        c.curve ? c.curve.graduationThresholdRaw : null,
       );
   } catch (e) {
     console.error("[store] candidate upsert failed:", e);
@@ -1857,7 +1868,7 @@ export async function recentCandidates(
         // their own accessor (poolKeysFor, which the router asks directly); a
         // curve has none, and a pre-graduation token cannot be reached at all
         // without it — so a caller holding a candidate needs it in hand.
-        `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen, curve, quote_token
+        `SELECT address, symbol, decimals, liquidity_usd, fdv_usd, first_seen, curve, quote_token, graduation_threshold
          FROM discovered_pools WHERE first_seen > unixepoch() - ?
          ${opts.poolsOnly ? "AND curve IS NULL" : ""}
          ORDER BY first_seen DESC LIMIT ?`,
@@ -1865,7 +1876,7 @@ export async function recentCandidates(
       .all(maxAgeSec, limit) as {
       address: string; symbol: string; decimals: number;
       liquidity_usd: number; fdv_usd: number; first_seen: number;
-      curve: string | null; quote_token: string | null;
+      curve: string | null; quote_token: string | null; graduation_threshold: string | null;
     }[];
     return rows.map((r) => ({
       address: r.address,
@@ -1877,8 +1888,8 @@ export async function recentCandidates(
       // `!= null` rather than truthiness: quote_token is legitimately the
       // all-zero address for a native-ETH curve, which is 53.6% of launches
       // and would read as absent under a truthy test.
-      ...(r.curve != null && r.quote_token != null
-        ? { curve: { curve: r.curve, quoteToken: r.quote_token } }
+      ...(r.curve != null && r.quote_token != null && r.graduation_threshold != null
+        ? { curve: { curve: r.curve, quoteToken: r.quote_token, graduationThresholdRaw: r.graduation_threshold } }
         : {}),
     }));
   } catch {
@@ -1929,5 +1940,41 @@ export async function clearTrenchEntry(agentId: string, mode: BasisMode, symbol:
       .run(agentId, mode, symbol);
   } catch {
     /* nothing to clear */
+  }
+}
+
+/**
+ * Where a specific token trades on the launchpad — by address, not by recency.
+ *
+ * `recentCandidates` cannot serve this: it is age-windowed, LIMIT-bounded, and
+ * its only production caller passes `poolsOnly`, whose SQL filters out exactly
+ * these rows. Pricing asks a different question — "this token, right now" — and
+ * needs its own query.
+ *
+ * All three fields or nothing. The threshold is what makes the reserves
+ * interpretable (the virtual seed is 40% of it), so a row missing it can be
+ * READ but not priced, and returning a partial answer would invite a caller to
+ * fill the gap with a zero.
+ */
+export async function curveFor(
+  address: string,
+): Promise<{ curve: string; quoteToken: string; graduationThresholdRaw: bigint } | null> {
+  try {
+    const row = (await getDb()
+      .prepare(
+        `SELECT curve, quote_token, graduation_threshold FROM discovered_pools
+         WHERE address = ? AND curve IS NOT NULL AND graduation_threshold IS NOT NULL`,
+      )
+      .get(address.toLowerCase())) as
+      | { curve: string; quote_token: string | null; graduation_threshold: string }
+      | undefined;
+    // `!= null` on quote_token, never truthiness: the all-zero address is the
+    // legitimate native-ETH case and covers 53.6% of launches.
+    if (!row || row.quote_token == null) return null;
+    const threshold = BigInt(row.graduation_threshold);
+    if (threshold <= 0n) return null;
+    return { curve: row.curve, quoteToken: row.quote_token, graduationThresholdRaw: threshold };
+  } catch {
+    return null;
   }
 }

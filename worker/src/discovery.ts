@@ -78,6 +78,8 @@ export interface Discovery {
     curve: `0x${string}`;
     /** `0x000…0` means native ETH, which is 53.6% of launches. */
     quoteToken: `0x${string}`;
+    /** Raw quote units. Without it the virtual seed cannot be subtracted. */
+    graduationThresholdRaw: bigint;
     /**
      * Real quote raised as a fraction of this curve's own graduation threshold.
      *
@@ -395,7 +397,12 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
       // unguarded by construction, so deriving a spending gate from it would
       // launder an unchecked number into a check.
       fdvUsd: null,
-      curve: { curve: launch.curve, quoteToken: launch.quoteToken, depthFraction: fraction },
+      curve: {
+        curve: launch.curve,
+        quoteToken: launch.quoteToken,
+        graduationThresholdRaw: launch.graduationThresholdRaw,
+        depthFraction: fraction,
+      },
     });
   }
 
@@ -416,7 +423,7 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
  * still computing a plausible-looking price off the tick. That plausible number
  * is the trap; null is the honest answer.
  */
-function quoteUsdOf(quoteToken: `0x${string}`, ethUsd8: bigint | null): bigint | null {
+export function quoteUsdOf(quoteToken: `0x${string}`, ethUsd8: bigint | null): bigint | null {
   const q = quoteToken.toLowerCase();
   if (q === "0x0000000000000000000000000000000000000000") return ethUsd8;
   if (q === (CASH.WETH as string).toLowerCase()) return ethUsd8;
