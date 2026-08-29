@@ -7,7 +7,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CASH } from "../../packages/core/src/index";
-import { PONS_MAX_EVALUATE, describeDiscovery, newTokenOf, ponsScanWindow, sanitizeSymbol, type Discovery } from "./discovery";
+import {
+  PONS_MAX_EVALUATE,
+  describeDiscovery,
+  describeTrending,
+  discoverTrending,
+  newTokenOf,
+  ponsScanWindow,
+  sanitizeSymbol,
+  type Discovery,
+} from "./discovery";
+import { applyVerdicts, nullScout } from "./strategist/memecoin-scout";
+import type { GeckoPool } from "./venues/geckoterminal";
 
 const USDG = (CASH.USDG as string).toLowerCase() as `0x${string}`;
 const WETH = (CASH.WETH as string).toLowerCase() as `0x${string}`;
@@ -263,5 +274,117 @@ describe("PONS_MAX_EVALUATE", () => {
     // ~40 launches per 5-minute pass at the measured 475/hour.
     assert.ok(PONS_MAX_EVALUATE >= 200, "an ordinary pass must never be truncated");
     assert.ok(PONS_MAX_EVALUATE <= 1000, "a clamped catch-up must not fire thousands of sequential calls");
+  });
+});
+
+/**
+ * Trending and graduated coins — the discoverer that sees what is TRADING.
+ *
+ * The other two discoverers watch things being born: a Uniswap Initialize
+ * event, or a Pons launch. Both are blind by construction to a coin that
+ * launched last week and is up 40% today. These tests are mostly about the
+ * boundaries of what this one is allowed to do with what it finds.
+ */
+describe("discoverTrending", () => {
+  const pool = (over: Partial<GeckoPool> = {}): GeckoPool => ({
+    poolId: "0x" + "1".repeat(40),
+    poolAddress: null,
+    tokenAddress: `0x${"a".repeat(40)}`,
+    name: "AAA / WETH",
+    dex: "uniswap-v3-robinhood",
+    priceUsd: 1,
+    reserveUsd: 500_000,
+    fdvUsd: 5_000_000,
+    volume24hUsd: 900_000,
+    change24hPct: 20,
+    change1hPct: 1,
+    buys24h: 900,
+    sells24h: 700,
+    buyers24h: 400,
+    createdAt: 1,
+    ...over,
+  });
+  const LIMITS = { minReserveUsd: 25_000, minVolume24hUsd: 50_000, minBuyers24h: 100 };
+  const keepAll = {
+    name: "t",
+    rank: async (ps: readonly GeckoPool[]) =>
+      applyVerdicts(ps, { keep: ps.map((_, i) => ({ index: i, conviction: 3, reason: "r" })) }),
+  };
+  // A client whose ERC-20 reads always fail, so identity falls back to the
+  // address — the path that must not throw.
+  const blindClient = { async readContract() { throw new Error("no"); } } as never;
+
+  const deps = (pools: GeckoPool[], over: Record<string, unknown> = {}) => ({
+    client: blindClient,
+    seen: new Set<string>(),
+    known: [],
+    fetchPools: async () => pools,
+    scout: keepAll,
+    limits: LIMITS,
+    nowSec: 1_000,
+    ...over,
+  });
+
+  it("dedupes a coin that appears on several venues, keeping the DEEPEST", async () => {
+    // The owner cares about the coin, not the pool — and the deepest venue is
+    // the one a trade would actually reach.
+    const res = await discoverTrending(deps([pool({ reserveUsd: 100_000 }), pool({ reserveUsd: 800_000 })]) as never);
+    assert.equal(res.picks.length, 1);
+    assert.equal(res.picks[0]!.pool.reserveUsd, 800_000);
+  });
+
+  it("labels a GRADUATED coin as such, by venue slug", async () => {
+    // pons-v2-dex is a coin that made it off its bonding curve into a real
+    // pool; pons-v2 is one still on the curve, whose reported reserve is mostly
+    // the virtual seed.
+    const res = await discoverTrending(deps([pool({ dex: "pons-v2-dex" })]) as never);
+    assert.equal(res.picks[0]!.graduated, true);
+    const curve = await discoverTrending(deps([pool({ dex: "pons-v2", tokenAddress: `0x${"b".repeat(40)}` })]) as never);
+    assert.equal(curve.picks[0]!.graduated, false);
+  });
+
+  it("says which kind it is in the owner-facing line", async () => {
+    const grad = await discoverTrending(deps([pool({ dex: "pons-v2-dex" })]) as never);
+    assert.match(describeTrending(grad.picks[0]!), /graduated/);
+    const curve = await discoverTrending(deps([pool({ dex: "pons-v2" })]) as never);
+    assert.match(describeTrending(curve.picks[0]!), /still on its curve/);
+  });
+
+  it("skips what the owner already has and what has already been reported", async () => {
+    const seen = new Set([pool().tokenAddress]);
+    assert.equal((await discoverTrending(deps([pool()], { seen }) as never)).picks.length, 0);
+    const known = [{ symbol: "AAA", name: "AAA", address: pool().tokenAddress, chainlinkFeed: null, kind: "memecoin" }];
+    assert.equal((await discoverTrending(deps([pool()], { known }) as never)).picks.length, 0);
+  });
+
+  it("does not fall over when the token is not a readable ERC-20", async () => {
+    // It still trades, so it is still worth reporting — by address rather than
+    // by a name nobody could verify.
+    const res = await discoverTrending(deps([pool()]) as never);
+    assert.match(res.picks[0]!.symbol, /^0x/);
+  });
+
+  it("NEVER takes the index's own label as the symbol", async () => {
+    // GeckoTerminal's `name` is attacker-chosen text headed for a human and
+    // could be picked to impersonate a real ticker. Identity comes from the
+    // contract or from the address, never from the feed.
+    const res = await discoverTrending(deps([pool({ name: "USDG / WETH" })]) as never);
+    assert.ok(!res.picks[0]!.symbol.includes("USDG"));
+  });
+
+  it("picks NOTHING when there is no brain to narrow with", async () => {
+    // nullScout is the safe default: this step exists to exclude, so with
+    // nothing doing the excluding, nothing has been vetted.
+    const res = await discoverTrending(deps([pool()], { scout: nullScout }) as never);
+    assert.equal(res.picks.length, 0);
+    assert.equal(res.screened, 1, "but it still reports what the screen kept");
+  });
+
+  it("reports the funnel honestly at every stage", async () => {
+    const thin = pool({ tokenAddress: `0x${"c".repeat(40)}`, reserveUsd: 10 });
+    const res = await discoverTrending(deps([pool(), thin]) as never);
+    assert.equal(res.scanned, 2, "both were seen");
+    assert.equal(res.screened, 1, "one cleared the screen");
+    assert.equal(res.picks.length, 1);
   });
 });

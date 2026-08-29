@@ -31,6 +31,8 @@ import { poolPriceUsable, readRoutedPrice } from "./venues/pool-price";
 import { readTokenStats } from "./venues/token-stats";
 import { recentPools, resolveBitquery, type BitqueryCreds, type NewPair } from "./venues/bitquery";
 import { readCurveReserves, recentPonsLaunches, type PonsLaunch } from "./venues/pons";
+import { screenPools, type GeckoPool, type PoolFeed, type ScreenLimits } from "./venues/geckoterminal";
+import type { MemecoinScout } from "./strategist/memecoin-scout";
 import { curveDepthFraction, curveGraduated, curvePrice, type CurveReserves } from "./venues/pons-price";
 
 const ERC20 = parseAbi([
@@ -471,3 +473,136 @@ export function describeDiscovery(d: Discovery): string {
 }
 
 export { resolveBitquery };
+
+/** GeckoTerminal's venue slug for a Pons curve that has GRADUATED to a pool. */
+export const PONS_GRADUATED_DEX = "pons-v2-dex";
+/** ...and for one still on its bonding curve. */
+export const PONS_CURVE_DEX = "pons-v2";
+
+/** A trending or graduated token, with the model's opinion attached. */
+export interface TrendingFind {
+  pool: GeckoPool;
+  /** Read from the CONTRACT, never from the index's own label. */
+  symbol: string;
+  decimals: number;
+  /** 1..5, advisory ordering only. Never a size and never a permission. */
+  conviction: number;
+  reason: string;
+  /** This token graduated off a Pons curve rather than launching as a pool. */
+  graduated: boolean;
+}
+
+export interface TrendingResult {
+  /** Distinct pools seen across every feed, before any filtering. */
+  scanned: number;
+  /** How many cleared the numeric screen. */
+  screened: number;
+  picks: TrendingFind[];
+  /** Answers from the scout that referred to nothing real — see memecoin-scout. */
+  ignored: string[];
+}
+
+export interface TrendingDeps {
+  client: PublicClient;
+  seen: ReadonlySet<string>;
+  known: readonly StockToken[];
+  /** Injected so the pipeline can be tested without the network. */
+  fetchPools: (feed: PoolFeed) => Promise<GeckoPool[]>;
+  scout: MemecoinScout;
+  limits: ScreenLimits;
+  nowSec: number;
+}
+
+/**
+ * One pass over what is actually TRADING on this chain — trending, newly
+ * listed, and the coins that have graduated off the launchpad.
+ *
+ * COMPLEMENTS the other two discoverers rather than replacing them. discoverPools
+ * watches Uniswap Initialize events and discoverPonsLaunches watches the
+ * launchpad, so both only ever see a token at the MOMENT IT IS BORN. A coin that
+ * launched last week and is up 40% today is invisible to both by construction.
+ * This is the one that sees it.
+ *
+ * A GRADUATED COIN IS A DIFFERENT ANIMAL and is labelled as such. Pons graduates
+ * about 8.5 tokens an hour into a hooked Uniswap v4 pool, which is a real market
+ * with real depth — the sampled ones carry six figures against the ~$4,100 a
+ * fresh curve reports. The index distinguishes them by venue slug, which costs
+ * nothing and is the only cheap source of their USD price and volume.
+ *
+ * WHAT THIS IS NOT, and the whole file is written around it: it does not add a
+ * token, widen a cap, or produce a trade. Every name it surfaces still has to be
+ * added in /settings and covered by a re-signed grant before the agent can touch
+ * it — owner, then wall, then agent. A feed that could open a position by
+ * itself would be a feed that decides what to buy.
+ */
+export async function discoverTrending(deps: TrendingDeps): Promise<TrendingResult> {
+  const byToken = new Map<string, GeckoPool>();
+  for (const feed of ["trending_pools", "new_pools", "pools"] as const) {
+    for (const p of await deps.fetchPools(feed)) {
+      // Deduped by TOKEN, not by pool: the same coin appears in several feeds
+      // and often on several venues, and the owner cares about the coin.
+      // Deepest wins, since that is the one a trade would actually reach.
+      const prev = byToken.get(p.tokenAddress);
+      if (!prev || (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0)) byToken.set(p.tokenAddress, p);
+    }
+  }
+  const scanned = byToken.size;
+
+  const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
+  const fresh = [...byToken.values()].filter(
+    (p) => !deps.seen.has(p.tokenAddress) && !knownAddrs.has(p.tokenAddress),
+  );
+  const { kept } = screenPools(fresh, deps.limits);
+
+  // The model NARROWS what the screen admitted. It never widens it, and it
+  // never sees an address — see strategist/memecoin-scout.ts.
+  const ranked = await deps.scout.rank(kept, deps.nowSec);
+
+  const picks: TrendingFind[] = [];
+  for (const pick of ranked.picks) {
+    // Identity from the CONTRACT. GeckoTerminal's `name` is attacker-chosen
+    // text that would be shown to a human and could be picked to impersonate a
+    // real ticker — the same reasoning discoverPools already applies.
+    let symbol = `${pick.pool.tokenAddress.slice(0, 10)}…`;
+    let decimals = 18;
+    try {
+      const [s, d] = await Promise.all([
+        deps.client.readContract({ address: pick.pool.tokenAddress, abi: ERC20, functionName: "symbol" }) as Promise<string>,
+        deps.client.readContract({ address: pick.pool.tokenAddress, abi: ERC20, functionName: "decimals" }) as Promise<number>,
+      ]);
+      if (typeof s === "string" && s.length > 0) symbol = sanitizeSymbol(s);
+      const dn = Number(d);
+      if (Number.isInteger(dn) && dn >= 0 && dn <= 36) decimals = dn;
+    } catch {
+      /* not a readable ERC-20; it still trades, so report it by address */
+    }
+    picks.push({
+      pool: pick.pool,
+      symbol,
+      decimals,
+      conviction: pick.conviction,
+      reason: pick.reason,
+      graduated: pick.pool.dex === PONS_GRADUATED_DEX,
+    });
+  }
+
+  return { scanned, screened: kept.length, picks, ignored: ranked.ignored };
+}
+
+/**
+ * The owner-facing line for a trending find.
+ *
+ * Says which KIND of thing it is, because the three read very differently: a
+ * graduated coin has a real pool behind it, a coin still on its curve mostly
+ * has a virtual seed, and an ordinary pool token is neither.
+ */
+export function describeTrending(f: TrendingFind): string {
+  const depth =
+    f.pool.reserveUsd === null
+      ? "depth unknown"
+      : `$${Math.round(f.pool.reserveUsd).toLocaleString()} deep`;
+  const move =
+    f.pool.change24hPct === null ? "" : ` · ${f.pool.change24hPct > 0 ? "+" : ""}${f.pool.change24hPct.toFixed(1)}% 24h`;
+  const kind = f.graduated ? "graduated" : f.pool.dex === PONS_CURVE_DEX ? "still on its curve" : "trading";
+  return `📈 ${f.symbol} (${f.pool.tokenAddress.slice(0, 10)}…) · ${kind} · ${depth}${move} · ${f.reason || `conviction ${f.conviction}/5`}`;
+}

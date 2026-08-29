@@ -98,8 +98,32 @@ import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName } from "./soul";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
-import { describeDiscovery, discoverPools, discoverPonsLaunches, ponsScanWindow, quoteUsdOf, resolveBitquery } from "./discovery";
+import {
+  describeDiscovery,
+  describeTrending,
+  discoverPools,
+  discoverPonsLaunches,
+  discoverTrending,
+  ponsScanWindow,
+  quoteUsdOf,
+  resolveBitquery,
+} from "./discovery";
+import { fetchGeckoPools, type ScreenLimits } from "./venues/geckoterminal";
+import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
+
+/**
+ * What a coin has to clear before the model is even asked about it.
+ *
+ * Measured against live data: these keep roughly 32 of 56 distinct pools, so it
+ * is a cheapness filter rather than a judgement. Distinct BUYERS rather than
+ * trade count, because a wash-trader inflates the second cheaply.
+ */
+const TRENDING_SCREEN: ScreenLimits = {
+  minReserveUsd: 25_000,
+  minVolume24hUsd: 50_000,
+  minBuyers24h: 100,
+};
 import { buildCurveTradeCalls } from "./venues/pons-trade";
 
 /**
@@ -1122,6 +1146,82 @@ async function main() {
       );
     } finally {
       ponsInFlight = false;
+    }
+  }
+
+  /**
+   * What is actually TRADING — trending, newly listed, and freshly graduated.
+   *
+   * A third sibling of runDiscovery and runPonsDiscovery, on its own clock and
+   * needing no credential of its own: GeckoTerminal is keyless. Its own clock
+   * because the API is rate-limited and shared, and because nothing here is
+   * urgent — a coin trending this minute is still trending in ten.
+   */
+  let lastTrendAt = 0;
+  let trendInFlight = false;
+  const TREND_INTERVAL_SEC = 600;
+  async function runTrendingDiscovery(agentId: string): Promise<void> {
+    if (!cfg.discoveryEnabled || trendInFlight) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (lastTrendAt !== 0 && nowSec - lastTrendAt < TREND_INTERVAL_SEC) return;
+
+    trendInFlight = true;
+    try {
+      // The scout is the LLM narrowing step. With no brain configured it is
+      // nullScout, which picks NOTHING — this step exists to exclude, and with
+      // nothing to do the excluding the honest answer is "nothing has been
+      // vetted", not "everything has".
+      const creds = resolveLlm(cfg);
+      const res = await discoverTrending({
+        client: mainnetClient(),
+        seen: await seenPools(),
+        known: watchTokens,
+        fetchPools: (feed) => fetchGeckoPools(feed),
+        scout: creds ? createMemecoinScout(creds) : nullScout,
+        limits: TRENDING_SCREEN,
+        nowSec,
+      });
+      lastTrendAt = nowSec;
+
+      if (res.ignored.length) {
+        // A model referring to candidates that do not exist is the signature of
+        // one that has stopped tracking its input. Surfaced rather than
+        // swallowed, because it is the single symptom worth alerting on.
+        console.log(`[trending] scout returned ${res.ignored.length} answers that referred to nothing real`);
+      }
+      if (!res.picks.length) {
+        if (res.scanned > 0) {
+          console.log(`[trending] ${res.scanned} coins, ${res.screened} past the screen, none worth mentioning`);
+        }
+        return;
+      }
+
+      for (const f of res.picks) {
+        await markPoolSeen(f.pool.tokenAddress, f.symbol);
+        await recordCandidate({
+          address: f.pool.tokenAddress,
+          symbol: f.symbol,
+          decimals: f.decimals,
+          // A graduated coin's reserve is a real pool. A coin still on its
+          // curve is mostly the virtual seed — which is why the screen's floor
+          // sits well above it, and why this figure must never be read as
+          // "money you could sell into" without the chain-side check.
+          liquidityUsd: f.pool.reserveUsd ?? 0,
+          fdvUsd: f.pool.fdvUsd ?? 0,
+          firstSeen: 0,
+        });
+        console.log(`[trending] ${describeTrending(f)}`);
+      }
+
+      const names = res.picks.map((f) => (f.graduated ? `${f.symbol} (graduated)` : f.symbol)).join(", ");
+      await addEvent(
+        agentId,
+        "ok",
+        `📈 ${res.picks.length} of ${res.scanned} coins worth a look — ${names}. ` +
+          `I can't trade any of them until you add it in /settings and re-sign at /grant.`,
+      );
+    } finally {
+      trendInFlight = false;
     }
   }
 
@@ -3052,6 +3152,8 @@ async function main() {
     void runDiscovery(agentId).catch(() => {});
     // The launchpad keeps its own clock and needs no Bitquery credential.
     void runPonsDiscovery(agentId).catch(() => {});
+    // What is TRADING, as opposed to what just launched. Keyless, own clock.
+    void runTrendingDiscovery(agentId).catch(() => {});
 
     // Pause marker (toggled from Telegram/dashboard): keep reading state, but
     // the strategy stops proposing trades until resumed.
