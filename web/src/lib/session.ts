@@ -527,7 +527,20 @@ export function refusalMessage(status: number, serverError?: string): string {
       // a bug on our side, not something the reader did wrong — say so.
       return "This wallet can't be armed on the hosted service yet: the grant still carries its owner key. That's a bug on our side, not yours.";
     case 403:
-      return "This agent wallet isn't owned by the wallet you signed in with, so the server won't arm it.";
+      // TWO DIFFERENT REFUSALS ARRIVE AS 403 and they need different actions:
+      // the grant carries no binding at all ("create it again from a signed-in
+      // browser"), or it carries one that does not verify against this login.
+      // A single hardcoded sentence for both said "isn't owned by the wallet
+      // you signed in with" about a wallet created seconds earlier by that very
+      // wallet — which sent the reader looking for a wallet-mixup that did not
+      // exist, and hid a real bug for the length of a debugging session.
+      //
+      // This function's own docstring says to prefer the server's message
+      // because it is the only text that can name which check refused. This arm
+      // was the one place that ignored it.
+      return serverError
+        ? `${serverError} (the server refused to arm this wallet)`
+        : "The server won't arm this wallet: it isn't linked to the wallet you signed in with.";
     case 503:
       return "Couldn't verify the account on-chain just now — try again in a moment.";
     default:
@@ -558,17 +571,48 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
  * (this is the account's sudo signer and the root of fund custody — no external
  * wallet, nothing to connect), then a grant is sealed on it.
  */
-export async function createAgentWallet(
-  caps: GrantCaps,
-  onStatus: (status: string) => void,
-  chainId: number = robinhoodTestnet.id,
-  extraTokens: readonly CustomToken[] = [],
-  v4AdapterAddress?: `0x${string}`,
-  ponsAdapterAddress?: `0x${string}`,
-  hostedAs?: Address,
-): Promise<MintedGrant> {
-  onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress, ponsAdapterAddress, hostedAs);
+/**
+ * Everything a mint needs, NAMED.
+ *
+ * An options object rather than positional arguments, because of a bug that
+ * actually shipped. These entry points took seven positional parameters, four
+ * optional and three of them the same type — so inserting a new one
+ * (`ponsAdapterAddress`) before `hostedAs` silently shifted every existing call
+ * site: the signed-in WALLET address landed in the adapter slot and `hostedAs`
+ * became undefined. TypeScript cannot catch that, because an optional address
+ * is an optional address whatever it is supposed to mean.
+ *
+ * The consequences were not cosmetic. No `hostedAs` meant no binding, so the
+ * server refused every newly created hosted wallet with "this grant isn't
+ * linked to your login" — and the owner's own wallet address was being sealed
+ * into the wall as a Pons adapter, i.e. as a call target and an approve spender
+ * it should never have been.
+ *
+ * With names, adding a field can only ever be additive.
+ */
+export interface MintOptions {
+  caps: GrantCaps;
+  onStatus: (status: string) => void;
+  chainId?: number;
+  extraTokens?: readonly CustomToken[];
+  v4AdapterAddress?: `0x${string}`;
+  ponsAdapterAddress?: `0x${string}`;
+  /** The signed-in wallet, on the hosted service. Absent when self-hosted. */
+  hostedAs?: Address;
+}
+
+export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
+  o.onStatus("minting your agent's owner key…");
+  return mintGrant(
+    generatePrivateKey(),
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodTestnet.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+  );
 }
 
 /**
@@ -584,16 +628,19 @@ export async function createAgentWallet(
  */
 export async function restoreAgentWallet(
   ownerPrivateKey: `0x${string}`,
-  caps: GrantCaps,
-  onStatus: (status: string) => void,
-  chainId: number = robinhoodTestnet.id,
-  extraTokens: readonly CustomToken[] = [],
-  v4AdapterAddress?: `0x${string}`,
-  ponsAdapterAddress?: `0x${string}`,
-  hostedAs?: Address,
+  o: MintOptions,
 ): Promise<MintedGrant> {
-  onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress, ponsAdapterAddress, hostedAs);
+  o.onStatus("re-deriving your smart account from the owner key…");
+  return mintGrant(
+    ownerPrivateKey,
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodTestnet.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+  );
 }
 
 /**

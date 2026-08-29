@@ -412,7 +412,14 @@ export default function GrantPage() {
     }
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await createAgentWallet(caps, setStatus, chainId, customTokens, v4Adapter, session.hosted ? session.address ?? undefined : undefined);
+      const { grant: g, handoff } = await createAgentWallet({
+        caps,
+        onStatus: setStatus,
+        chainId,
+        extraTokens: customTokens,
+        v4AdapterAddress: v4Adapter,
+        hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
+      });
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
       // left at whatever the mount-time fetch found — which is `false` on a first
@@ -455,15 +462,14 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await restoreAgentWallet(
-        restoreKey.trim() as `0x${string}`,
+      const { grant: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
         caps,
-        setStatus,
+        onStatus: setStatus,
         chainId,
-        customTokens,
-        v4Adapter,
-        session?.hosted ? session.address ?? undefined : undefined,
-      );
+        extraTokens: customTokens,
+        v4AdapterAddress: v4Adapter,
+        hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
+      });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
       localStorage.setItem(BACKUP_KEY, "1");
@@ -527,15 +533,14 @@ export default function GrantPage() {
       // selector showed mainnet silently re-signed on testnet, and any cap the
       // owner had just edited in the form was ignored. What the page shows is
       // what gets signed, or the page is lying.
-      const { grant: g, handoff } = await restoreAgentWallet(
-        grant.demoOwnerPrivateKey,
+      const { grant: g, handoff } = await restoreAgentWallet(grant.demoOwnerPrivateKey, {
         caps,
-        setStatus,
+        onStatus: setStatus,
         chainId,
-        freshTokens,
-        freshAdapter,
-        session?.hosted ? session.address ?? undefined : undefined,
-      );
+        extraTokens: freshTokens,
+        v4AdapterAddress: freshAdapter,
+        hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
+      });
       setGrant(g);
       // Same correction as create/restore: report what the server said, so a
       // renewed key that the server refused doesn't read as a renewed agent.
