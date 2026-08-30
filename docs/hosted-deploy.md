@@ -48,6 +48,15 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `MERRYMEN_SESSION_SECRET` | the secret from step 2 |
 | `MERRYMEN_PUBLIC_ORIGIN` | the web service's public URL, e.g. `https://merrymen.up.railway.app` — auth binds signatures to it |
 | `PORT` | set by Railway automatically; `start:web` honours it |
+| `GROQ_API_KEY` *(or `ANTHROPIC_API_KEY`)* | **the dashboard chat's brain.** Not optional if you want the chat to think — see below |
+
+> **The chat needs a key on the WEB service, not just the orchestrator.**
+> `/api/chat` resolves a model from the web container's own environment, so
+> without one the agent can only answer the exact commands (`/status`,
+> `/positions`, `/pnl`) and says so. This is easy to get wrong because it looks
+> like an unbuilt feature rather than a missing variable: the route is real, the
+> prompt is real, and the only thing absent is the key. The same key may be used
+> on both services.
 
 **orchestrator only** (the house keys from step 3):
 | Var | Value |
@@ -57,7 +66,7 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `MERRYMEN_RPC_TESTNET` | `https://rpc.testnet.chain.robinhood.com` (or a private endpoint) |
 | `GROQ_API_KEY` *(optional)* | strategist brain |
 
-> The orchestrator must NOT get `MERRYMEN_SESSION_SECRET`, and the web service does not need the house keys. The DEK is the one secret both hold. Children get the house keys but never the DEK / session secret / `DATABASE_URL` (the supervisor strips them at fork).
+> The orchestrator must NOT get `MERRYMEN_SESSION_SECRET`. The web service needs no BUNDLER or RPC key — it signs nothing — but it does need its own LLM key for the dashboard chat, as above. The DEK is the one secret both hold. Children get the house keys but never the DEK / session secret / `DATABASE_URL` (the supervisor strips them at fork).
 
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
