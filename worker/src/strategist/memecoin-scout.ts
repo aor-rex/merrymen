@@ -35,6 +35,7 @@
 import { llmToolCall, type LlmCreds } from "../llm";
 import type { GeckoPool } from "../venues/geckoterminal";
 import type { ScoutSiteFields } from "./coin-research";
+import { sanitizeMeta } from "../venues/pons-meta";
 
 /**
  * One candidate as the MODEL sees it — a label and numbers, no address.
@@ -120,7 +121,17 @@ export function toScoutCandidates(
     index,
     // The pool's own name, which is a label the INDEX already disambiguates.
     // Deliberately not the token address: see the header.
-    label: p.name || `#${index}`,
+    //
+    // SANITISED AND BOUNDED, because this is the ONE attacker-controlled string
+    // that reaches the prompt. `p.name` is whatever the launcher typed, relayed
+    // by GeckoTerminal and never inspected — Vex measured a live baseToken.name
+    // of 34,090 characters. JSON.stringify at the call site escapes C0 and
+    // nothing else, so invisibles arrived verbatim; and with no length cap at
+    // all, one such name blows the 8,000 TPM budget that SCOUT_MAX_CANDIDATES
+    // exists to stay inside. That failure has the dangerous shape: the request
+    // 413s, the catch below fails closed, and a gate slammed shut by one
+    // hostile name reads on every surface as "nothing was worth picking".
+    label: sanitizeMeta(p.name ?? "", SCOUT_LABEL_MAX) || `#${index}`,
     venue: p.dex,
     liquidityUsd: p.reserveUsd,
     volume24hUsd: p.volume24hUsd,
@@ -192,6 +203,16 @@ conviction is 1..5 and is an ordering, not a size: 5 means look here first, not 
  * candidates plus this system prompt and the output reservation sit inside that
  * with room to spare.
  */
+/**
+ * How much of a launcher-written name the model is shown.
+ *
+ * Short on purpose. A name is a LABEL here, not content: the numbers beside it
+ * are what the model ranks on and the index is what it answers in, so nothing
+ * downstream needs the 65th character. Against a 34,090-character name this is
+ * the difference between one candidate and no scout pass at all.
+ */
+export const SCOUT_LABEL_MAX = 64;
+
 export const SCOUT_MAX_CANDIDATES = 20;
 
 const RANK_TOOL = {

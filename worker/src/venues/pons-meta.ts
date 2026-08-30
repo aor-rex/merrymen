@@ -133,17 +133,55 @@ export interface TokenMeta {
  * because a description containing "\n\nIGNORE THE ABOVE" is the cheapest
  * prompt injection there is, and length is capped because a token can publish a
  * kilobyte and a model will read all of it.
+ *
+ * WHAT THIS CLASS MISSED, and why the list below is longer. Serializing through
+ * `JSON.stringify` escapes C0, so the naive injection above really was
+ * neutralised — but that is the ONLY class it handles. Zero-width characters,
+ * BiDi overrides and isolates, and Unicode tag characters all survive
+ * JSON.stringify VERBATIM, and every one of them is invisible: a name can carry
+ * a second sentence a reader cannot see and a model reads plainly. The tag
+ * block (U+E0000–U+E007F) is the sharpest of them, being a whole shadow ASCII
+ * alphabet. Reimplemented from the equivalent guard in Vex
+ * (github.com/Vex-Foundation/Vex), used with its author's permission.
+ *
+ * U+200D ZERO WIDTH JOINER is deliberately KEPT: it is load-bearing inside emoji
+ * sequences, which memecoin names are made of, and dropping it turns one glyph
+ * into three. TAB/LF/CR stay in the C0 class above only to be collapsed into a
+ * space by the whitespace rule, which is what they were always doing.
+ *
+ * SANITISING AND BOUNDING STAY SEPARATE, and the second one is lossy. Removing
+ * invisibles costs a reader nothing they could see; a length cut removes
+ * meaning, so it is applied once, last, and counted the way a reader counts.
  */
+const INVISIBLE = new RegExp(
+  [
+    // zero-width space / non-joiner, word joiner, the BOM (a.k.a. ZWNBSP)
+    "[\\u200B\\u200C\\u2060\\uFEFF]",
+    // BiDi: the LRM/RLM marks, the embedding+override controls, the isolates
+    "[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]",
+    // Unicode TAG characters — an invisible ASCII alphabet
+    "[\\u{E0000}-\\u{E007F}]",
+  ].join("|"),
+  "gu",
+);
+
 export function sanitizeMeta(raw: string, max = 200): string {
-  return raw
+  const cleaned = raw
     // C0 and C1 control characters, written as ESCAPES. They used to sit in
     // this class as literal bytes — a real NUL among them — which made the file
     // read as binary to grep and diff, and left the class one careless
     // save-with-normalisation away from silently changing meaning.
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+    .replace(INVISIBLE, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+    .trim();
+  // COUNT BY CODE POINT, not by UTF-16 unit. `slice` cuts at a unit boundary,
+  // so a cap landing mid-surrogate leaves a lone half — an unpaired surrogate
+  // that JSON.stringify emits as a literal \udXXX escape and that some
+  // consumers reject outright. An emoji is two units and one character, and
+  // the reader's count is the one worth honouring.
+  const points = [...cleaned];
+  return points.length <= max ? cleaned : points.slice(0, max).join("");
 }
 
 /** Decode one metadata return, or null when it is not a Pons template token. */

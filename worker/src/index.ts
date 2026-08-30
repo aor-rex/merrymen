@@ -61,6 +61,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
+import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { findOrphanOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
@@ -1819,7 +1820,7 @@ async function main() {
     equityKnown = true,
   ): Promise<void> {
     if (!active) return;
-    const { agentId, limits, executor } = active;
+    const { agentId, limits, executor, client: chainClient } = active;
     const decision_id = intent.decisionId;
     // This intent's reservation against the daily budget, held only while its
     // trade row does NOT yet exist in the ledger. Once the row is written the
@@ -2178,7 +2179,7 @@ async function main() {
       // so analysis never mistakes an estimate for a settled figure.
       let liveFill: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number } | null = null;
       // The pair this trade is about, kept so the receipt can be attributed.
-      let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint } | null = null;
+      let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint; floorOut: bigint } | null = null;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -2304,7 +2305,7 @@ async function main() {
           if (sellIsUsdg !== buyIsUsdg) {
             const stockToken = sellIsUsdg ? intent.buyToken : intent.sellToken;
             const symbol = symbolOfToken(stockToken);
-            if (symbol) fillPair = { stockToken, symbol, quotedOut: quote.amountOut };
+            if (symbol) fillPair = { stockToken, symbol, quotedOut: quote.amountOut, floorOut: minOut };
             // Quantity is always the STOCK side (18dp); cash always the USDG side (6dp).
             // The RECEIVED side uses minOut, not the quote: the fill can come in
             // worse than quoted but never better, so this is the conservative
@@ -2638,6 +2639,41 @@ async function main() {
           // is the stock leg on a buy and the cash leg on a sell.
           const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
           slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
+
+          // ── DID IT ACTUALLY ARRIVE? ────────────────────────────────────────
+          // Everything above this line was read from logs the token contract
+          // wrote. On a buy that is the whole basis, so ask the chain the one
+          // question a fabricated log cannot answer. See delivery.ts for why
+          // this is exact-zero-only, why a failed read is not a zero, and why
+          // it can never fail the trade.
+          if (measured.side === "buy") {
+            const delivery = await checkDelivery({
+              balanceOf: () =>
+                chainClient.readContract({
+                  address: fillPair.stockToken,
+                  abi: erc20Abi,
+                  functionName: "balanceOf",
+                  args: [executor.address],
+                }) as Promise<bigint>,
+            });
+            const note = describeDelivery(fillPair.symbol, delivery);
+            // "delivered" says nothing, deliberately — a tape of non-events is
+            // noise, and this runs on every buy.
+            if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
+
+            // And the floor, which is a different question from the quote. A
+            // settled output BELOW the minOut we signed cannot come from a
+            // well-behaved router — it would have reverted — so it is the
+            // signature of a token that takes a cut on transfer.
+            const short = belowFloorBps(fillPair.floorOut, receivedOut);
+            if (short !== null) {
+              await addEvent(
+                agentId,
+                "warn",
+                `${fillPair.symbol}: settled ${short} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
+              );
+            }
+          }
         } else {
           await addEvent(
             agentId,
