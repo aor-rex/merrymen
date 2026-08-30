@@ -167,6 +167,16 @@ export interface V4Pool {
   id: `0x${string}`;
   /** In-range liquidity. Zero means initialized but nothing to trade against. */
   liquidity: bigint;
+  /**
+   * slot0's price, kept rather than discarded.
+   *
+   * Routing only needed `liquidity` to pick the deepest pool, so this was read
+   * and thrown away. VALUING a token needs both: `cashDepthFromLiquidity` turns
+   * (L, sqrtPrice) into cash depth at the current price, and the same sqrtPrice
+   * is the only price a v4 pool offers — there is no observation oracle to read
+   * a TWAP from. See venues/v4-price.ts.
+   */
+  sqrtPriceX96: bigint;
 }
 
 /**
@@ -200,7 +210,7 @@ export async function findV4Pool(
           functionName: "getLiquidity",
           args: [id],
         })) as bigint;
-        return { key, id, liquidity } satisfies V4Pool;
+        return { key, id, liquidity, sqrtPriceX96: slot0[0] } satisfies V4Pool;
       } catch {
         return null;
       }

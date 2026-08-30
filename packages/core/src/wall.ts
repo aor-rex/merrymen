@@ -647,12 +647,24 @@ export function buildWallPolicies(args: {
     toRateLimitPolicy({ count: args.caps.maxOpsPerDay, interval: 86_400 }),
     toCallPolicy({
       policyVersion: CallPolicyVersion.V0_0_4,
+      // EVERY adapter must be forwarded, and the type system will not tell you.
+      // `ponsAdapterAddress` was missing here and it type-checked, because this
+      // function's argument is an intersection with WallOptions — so the field
+      // was accepted at the call site and silently dropped one line later. The
+      // result would be the exact failure the grant module warns about: a
+      // signature carrying the `pons-adapter` MARKER and a sealed address, over
+      // a call policy with no `tradeExactIn` permission and no adapter in the
+      // approve spender set. `limitsFromGrant` would allow the target, the
+      // worker would build the UserOp, and both calls would revert at the wall.
+      // A mirror looser than the chain is the one shape this file exists to
+      // prevent.
       permissions: buildCallPermissions(args.caps, args.smartAccount, {
         extraTokens: args.extraTokens,
         withdrawalAddresses: args.withdrawalAddresses,
         allowRialto: args.allowRialto,
         allowUniswapV4: args.allowUniswapV4,
         v4AdapterAddress: args.v4AdapterAddress,
+        ponsAdapterAddress: args.ponsAdapterAddress,
       }) as never,
     }),
   ];

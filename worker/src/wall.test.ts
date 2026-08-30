@@ -617,3 +617,66 @@ test("the Pons opt-in is INDEPENDENT of the v4 adapter, and a junk address throw
     /ponsAdapterAddress is not an address/,
   );
 });
+
+/**
+ * EVERY ADAPTER REACHES THE CHAIN — the assertion that was missing.
+ *
+ * `buildWallPolicies` forwarded `v4AdapterAddress` to `buildCallPermissions` and
+ * silently dropped `ponsAdapterAddress`. It type-checked, because the function's
+ * argument is an intersection with `WallOptions`: the field was accepted at the
+ * call site and discarded one line later.
+ *
+ * That is the precise failure this whole file exists to prevent, and every other
+ * Pons assertion here missed it by calling `buildCallPermissions` DIRECTLY —
+ * bypassing the wrapper that both signers actually use. The one existing
+ * `buildWallPolicies` test passes no adapters at all and counts policies.
+ *
+ * A grant signed through that path would carry the `pons-adapter` marker and a
+ * sealed address over a call policy containing no `tradeExactIn` permission and
+ * no adapter in the approve spender set. `grantPonsAdapter` would return the
+ * address, `limitsFromGrant` would allow the target, `checkPolicy` would pass,
+ * the arm-time liveness check would pass — and both calls would revert at the
+ * wall. A mirror looser than the chain.
+ *
+ * So this asserts the WRAPPER, for both adapters, forever.
+ */
+test("buildWallPolicies forwards EVERY adapter into the call policy", () => {
+  const V4 = "0x00000000000000000000000000000000000000d4" as const;
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+
+  const call = (opts: Parameters<typeof buildWallPolicies>[0]) => {
+    const { policies } = buildWallPolicies(opts);
+    // The call policy is the third, and its permissions live under policyParams
+    // — the zerodev policy object exposes only getPolicyData/getPolicyInfoInBytes
+    // /policyParams, so reading `.permissions` off the top level silently yields
+    // an empty list and this test would pass for the wrong reason.
+    const p = policies[2] as unknown as { policyParams?: { permissions?: { target: string }[] } };
+    const perms = p.policyParams?.permissions ?? [];
+    assert.ok(perms.length > 0, "the call policy must expose its permissions, or this test proves nothing");
+    return perms.map((x) => x.target.toLowerCase());
+  };
+
+  const bare = call({ caps: CAPS, smartAccount: SELF });
+  assert.ok(!bare.includes(V4), "no adapter asked for, none granted");
+  assert.ok(!bare.includes(PONS), "no adapter asked for, none granted");
+
+  // Each one alone must reach the permission list.
+  assert.ok(
+    call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4 }).includes(V4),
+    "v4AdapterAddress must survive buildWallPolicies",
+  );
+  assert.ok(
+    call({ caps: CAPS, smartAccount: SELF, ponsAdapterAddress: PONS }).includes(PONS),
+    "ponsAdapterAddress must survive buildWallPolicies — it did not, and the grant still carried the marker",
+  );
+
+  // And together, because forwarding one is what made the other's absence invisible.
+  const both = call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4, ponsAdapterAddress: PONS });
+  assert.ok(both.includes(V4) && both.includes(PONS), "both adapters must reach the chain");
+
+  // The wrapper must agree with the function it wraps — no path may be looser.
+  const direct = buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4, ponsAdapterAddress: PONS }).map((p) =>
+    p.target.toLowerCase(),
+  );
+  assert.deepEqual(both, direct, "buildWallPolicies must mirror buildCallPermissions exactly");
+});
