@@ -92,17 +92,39 @@ export interface FeedResponse {
 }
 
 /** The configured strategy + basket, straight from settings.json (live). */
-function readIdentitySettings(): { strategy: string; basket: string[] } {
+function readIdentitySettings(): { strategy: string; basket: string[]; agentName: string | null } {
   try {
     const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
     const s = JSON.parse(raw) as MerrymenSettings;
     return {
       strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
       basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
+      agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
     };
   } catch {
-    return { strategy: "steady-basket", basket: DEFAULT_BASKET };
+    return { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
   }
+}
+
+/**
+ * The agent's name: what the owner CONFIGURED, else what the ledger recorded.
+ *
+ * The two can disagree for a while, and the settings value has to win. The
+ * worker reconciles a configured name into the soul at arm time, so between
+ * saving one and the worker's next arm the ledger still holds the old name —
+ * and preferring the ledger there makes a rename that genuinely succeeded
+ * revert to "Robin" on the next page load, which reads exactly like a failed
+ * save. Settings is where the owner's intent lives; the soul is the runtime
+ * seat that catches up to it.
+ */
+function resolveAgentName(configured: string | null, fromLedger: string): string {
+  return configured || fromLedger;
+}
+
+/** Name + strategy + basket, with the configured name preferred. */
+function identityOf(fromLedger: string): AgentIdentity {
+  const { agentName, ...rest } = readIdentitySettings();
+  return { name: resolveAgentName(agentName, fromLedger), ...rest };
 }
 
 /** The empty feed — no ledger, no session, or an unreadable db. Never a leak. */
@@ -115,7 +137,7 @@ function emptyFeed(): FeedResponse {
     trades: [],
     financials: null,
     // Identity still resolves live from settings + default name.
-    agent: { name: "Robin", ...readIdentitySettings() },
+    agent: identityOf("Robin"),
     netContributionsUsdg: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
@@ -333,7 +355,7 @@ export async function GET(req: Request) {
       positions,
       trades,
       financials,
-      agent: { name, ...readIdentitySettings() },
+      agent: identityOf(name),
       netContributionsUsdg,
       gasUsdg,
       gasUnpricedTrades,

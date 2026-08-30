@@ -170,18 +170,31 @@ export function parseGeckoPool(raw: unknown): GeckoPool | null {
   };
 }
 
+/** A pool list, and whether the index could actually be asked. */
+export interface GeckoFetch {
+  pools: GeckoPool[];
+  /**
+   * True when the request failed — a rate limit, an outage, a changed shape.
+   *
+   * SEPARATE FROM AN EMPTY LIST ON PURPOSE, because the two are different facts
+   * and one of them is a lie when reported as the other. This API is keyless
+   * and rate-limited, so a refusal is routine; a dashboard that renders it as
+   * "nothing is trading right now" states something false about the market
+   * while looking completely normal. The same mistake has been made twice in
+   * this repo already — the node's 10,000-log cap turned into `[]`, and a null
+   * activity map read as a quiet launchpad.
+   */
+  failed: boolean;
+}
+
 /**
- * Fetch one of GeckoTerminal's pool lists for this chain.
- *
- * Returns [] on any failure — a rate limit, an outage, a shape that changed
- * under us. This is a discovery input, not a trading dependency: it must never
- * be able to take the tick down, and an empty list correctly means "nothing to
- * consider right now" rather than an error nobody handles.
+ * Fetch one of GeckoTerminal's pool lists for this chain, saying whether it
+ * could be reached.
  */
-export async function fetchGeckoPools(
+export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
   opts: { timeoutMs?: number; page?: number } = {},
-): Promise<GeckoPool[]> {
+): Promise<GeckoFetch> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
@@ -189,15 +202,36 @@ export async function fetchGeckoPools(
       headers: { accept: "application/json" },
       signal: controller.signal,
     });
-    if (!res.ok) return [];
+    if (!res.ok) return { pools: [], failed: true };
     const body = (await res.json()) as { data?: unknown[] };
-    if (!Array.isArray(body?.data)) return [];
-    return body.data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null);
+    // A body with no `data` array is a shape we do not understand, not an empty
+    // market. An empty `data` array IS an empty market, and reads as one.
+    if (!Array.isArray(body?.data)) return { pools: [], failed: true };
+    return {
+      pools: body.data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null),
+      failed: false,
+    };
   } catch {
-    return [];
+    return { pools: [], failed: true };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The same fetch, as a plain list.
+ *
+ * Kept because the tick genuinely wants this shape: discovery is not a trading
+ * dependency and must never be able to take the loop down, so "could not ask"
+ * and "nothing to consider" lead to the same action there. Anything that
+ * REPORTS to a human should use `fetchGeckoPoolsResult` instead — see its
+ * `failed` field for why.
+ */
+export async function fetchGeckoPools(
+  feed: PoolFeed,
+  opts: { timeoutMs?: number; page?: number } = {},
+): Promise<GeckoPool[]> {
+  return (await fetchGeckoPoolsResult(feed, opts)).pools;
 }
 
 /** What a pool has to clear before it is even worth an opinion. */

@@ -71,6 +71,11 @@
 .sc-root .navlink.on svg { color: var(--lime); }
 .sc-root .navlink .tally { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .sc-root .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+/* Wallet and Settings sit below the fold as utilities, so they read as things
+   you visit rather than as peers of the three views you live in. */
+.sc-root .nav.util { padding-top: 10px; border-top: 1px solid var(--line); }
+.sc-root .nav.util .navlink { font-size: 13px; padding: 7px 11px; color: var(--faint); }
+.sc-root .nav.util .navlink:hover { color: var(--tx-2); }
 .sc-root .wallet { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--panel); border: 1px solid var(--line); }
 .sc-root .wallet .av { width: 26px; height: 26px; border-radius: 50%; flex: none; background: conic-gradient(from 210deg, var(--lime), var(--mint), var(--gold), var(--lime)); opacity: .9; }
 .sc-root .wallet .who { line-height: 1.2; min-width: 0; }
@@ -80,10 +85,22 @@
 
 /* main */
 .sc-root .main { min-width: 0; padding: 0 clamp(18px, 3.2vw, 44px) 64px; }
-.sc-root .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px; padding: 18px 0 16px; background: linear-gradient(180deg, var(--ground) 62%, transparent); backdrop-filter: blur(2px); }
+/* 12px of padding, not 18/16: the topbar carries three short strings and was
+   taking 126px of a 667px phone before a single number appeared. */
+.sc-root .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 12px 0 10px; background: linear-gradient(180deg, var(--ground) 62%, transparent); backdrop-filter: blur(2px); flex-wrap: wrap; }
 .sc-root .agentchip { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .sc-root .agentchip .glyph { width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center; font-size: 17px; background: var(--panel-2); border: 1px solid var(--line-2); }
 .sc-root .agentchip .nm { font-weight: 700; font-size: 16px; letter-spacing: -0.02em; }
+/* The name is the control. No new button for people who don't care what he's
+   called — the nudge shows only while he's still the default "Robin". */
+.sc-root .namechip { display: inline-flex; align-items: center; gap: 8px; }
+.sc-root button.nm { font-family: inherit; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; border-bottom: 1px dashed transparent; transition: border-color .16s; }
+.sc-root button.nm:hover { border-bottom-color: var(--line-2); }
+.sc-root .nametag { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--lime); background: color-mix(in srgb, var(--lime) 11%, transparent); border: 1px solid color-mix(in srgb, var(--lime) 30%, var(--line)); border-radius: 999px; padding: 3px 8px; cursor: pointer; }
+.sc-root .nametag:hover { background: color-mix(in srgb, var(--lime) 18%, transparent); }
+.sc-root .nameinput { font-family: inherit; font-weight: 700; font-size: 16px; letter-spacing: -0.02em; color: var(--tx); background: var(--ground-2); border: 1px solid color-mix(in srgb, var(--lime) 45%, var(--line-2)); border-radius: 7px; padding: 3px 9px; width: 11ch; outline: none; }
+.sc-root .nameinput.bad { border-color: var(--rose); }
+.sc-root .namehint { font-family: var(--mono); font-size: 10px; color: var(--rose); }
 .sc-root .agentchip .sub { font-size: 12px; color: var(--dim); }
 .sc-root .agentchip .sub b { color: var(--tx-2); font-weight: 600; }
 .sc-root .live { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; color: var(--gold); letter-spacing: 0.04em; }
@@ -117,25 +134,19 @@
 .sc-root .spark { position: relative; height: 128px; }
 .sc-root .spark canvas { width: 100%; height: 100%; display: block; }
 
-/* split */
-.sc-root .split { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 20px 0; border-bottom: 1px solid var(--line); }
-.sc-root .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 15px; }
-.sc-root .tile .lab { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
-.sc-root .tile .v { font-family: var(--mono); font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin-top: 8px; }
-.sc-root .tile .bar { height: 3px; border-radius: 2px; background: var(--line-2); margin-top: 12px; overflow: hidden; }
-.sc-root .tile .bar i { display: block; height: 100%; border-radius: 2px; }
-
-/* the wall */
-.sc-root .wall { padding: 20px 0; border-bottom: 1px solid var(--line); }
-.sc-root .wall-head { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
-.sc-root .wall-head .by { margin-left: auto; font-size: 12px; color: var(--dim); display: inline-flex; align-items: center; gap: 7px; }
-.sc-root .wall-head .by svg { width: 13px; height: 13px; color: var(--gold); }
-.sc-root .caps { display: flex; gap: 10px; flex-wrap: wrap; }
-.sc-root .cap { flex: 1 1 148px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 11px 13px; display: flex; flex-direction: column; gap: 3px; position: relative; overflow: hidden; }
-.sc-root .cap::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: color-mix(in srgb, var(--gold) 55%, transparent); }
-.sc-root .cap .cl { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint); }
-.sc-root .cap .cv { font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--tx); }
-.sc-root .cap .cv small { color: var(--dim); font-weight: 400; font-size: 12px; }
+/* the strip — where the money sits + what the chain allows, in two lines.
+   Replaces three balance cards and five cap cards: eight bordered boxes for
+   numbers you read once and stop looking at. */
+.sc-root .strip { padding: 16px 0 18px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 14px; }
+.sc-root .bal { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(14px, 2.4vw, 34px); }
+.sc-root .slice { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+.sc-root .slice .lab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+.sc-root .slice .v { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.sc-root .slice .bar { grid-column: 1 / -1; height: 3px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
+.sc-root .slice .bar i { display: block; height: 100%; border-radius: 2px; }
+.sc-root .wallline { display: flex; align-items: flex-start; gap: 9px; margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--dim); }
+.sc-root .wallline svg { width: 14px; height: 14px; color: var(--gold); flex: none; margin-top: 2px; }
+.sc-root .wallline b { color: var(--tx-2); font-family: var(--mono); font-weight: 600; }
 
 /* floor */
 .sc-root .floor { display: grid; grid-template-columns: 1.12fr 1fr; gap: clamp(16px, 2vw, 26px); padding-top: 24px; }
@@ -204,6 +215,102 @@
 .sc-root .chips { display: flex; gap: 7px; padding: 0 12px 12px; flex-wrap: wrap; background: var(--panel); }
 .sc-root .chip { font-family: var(--mono); font-size: 11.5px; color: var(--tx-2); padding: 6px 10px; border-radius: 999px; background: var(--ground-2); border: 1px solid var(--line-2); cursor: pointer; transition: border-color .16s, color .16s; }
 .sc-root .chip:hover { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 35%, var(--line-2)); }
+
+/* ── coins — the launchpad and the market, as cards ──────────────────────
+   A launchpad row is a picture, a ticker, an age in seconds and a progress
+   bar; none of that survives being crushed into a three-column table row,
+   which is what this page used to be. */
+.sc-root .coins { padding-top: 20px; display: flex; flex-direction: column; gap: 16px; }
+.sc-root .coins-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sc-root .coins-when { margin-left: auto; }
+.sc-root .seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px; gap: 2px; }
+.sc-root .seg button { font-family: inherit; font-size: 13px; font-weight: 600; color: var(--dim); background: transparent; border: 0; border-radius: 999px; padding: 7px 15px; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; transition: color .16s, background .16s; }
+.sc-root .seg button:hover { color: var(--tx-2); }
+.sc-root .seg button.on { background: color-mix(in srgb, var(--lime) 13%, var(--panel-2)); color: var(--tx); }
+.sc-root .seg button i { font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.sc-root .seg button.on i { color: var(--lime); }
+
+.sc-root .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(288px, 1fr)); gap: 12px; }
+.sc-root .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 14px 11px; display: flex; flex-direction: column; gap: 11px; transition: border-color .16s, transform .16s; }
+.sc-root .card:hover { border-color: var(--line-2); transform: translateY(-1px); }
+.sc-root .card header { display: grid; grid-template-columns: 44px 1fr auto; gap: 11px; align-items: center; }
+.sc-root .card .art { width: 44px; height: 44px; border-radius: 11px; object-fit: cover; background: var(--panel-2); border: 1px solid var(--line-2); flex: none; }
+.sc-root .card .art.fallback { display: grid; place-items: center; font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--faint); letter-spacing: -0.02em; }
+.sc-root .card .idc { min-width: 0; }
+.sc-root .card .tick { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.sc-root .card .tick b { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.sc-root .card .tick .nm { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+/* Wide gaps rather than interpunct separators: a wrapped line that begins with
+   a lone "·" reads as a typo, and these three facts wrap constantly. */
+.sc-root .card .meta { display: flex; align-items: center; gap: 4px 11px; flex-wrap: wrap; font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+.sc-root .card .meta .age { color: var(--lime-dim); }
+.sc-root .card .chg { font-size: 14px; font-weight: 600; }
+.sc-root .card .chg.up { color: var(--mint); }
+.sc-root .card .chg.down { color: var(--rose); }
+
+.sc-root .pill { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 5px; }
+.sc-root .pill.lime { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 34%, var(--line)); }
+.sc-root .badge { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; border-radius: 999px; padding: 4px 9px; white-space: nowrap; flex: none; }
+.sc-root .badge.in { color: var(--lime); background: color-mix(in srgb, var(--lime) 11%, transparent); border: 1px solid color-mix(in srgb, var(--lime) 30%, var(--line)); }
+.sc-root .badge.out { color: var(--faint); background: var(--ground-2); border: 1px solid var(--line); }
+
+.sc-root .card .grad { display: flex; align-items: center; gap: 10px; }
+.sc-root .card .gbar { flex: 1; height: 4px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
+.sc-root .card .gbar i { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--lime-dim), var(--lime)); }
+.sc-root .card .glab { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+
+.sc-root .card .say { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--tx-2); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sc-root .card .say.none { color: var(--faint); font-style: italic; }
+
+.sc-root .card .figs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.sc-root .card .figs span { display: flex; flex-direction: column; gap: 2px; font-size: 13px; font-weight: 600; }
+.sc-root .card .figs i { font-style: normal; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 400; }
+
+.sc-root .card footer { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding-top: 9px; border-top: 1px solid var(--line); margin-top: auto; }
+.sc-root .card footer .badge { margin-left: auto; }
+.sc-root .soc { font-family: var(--mono); font-size: 10.5px; color: var(--tx-2); border: 1px solid var(--line-2); border-radius: 5px; padding: 3px 8px; transition: color .16s, border-color .16s; }
+.sc-root a.soc:hover { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 40%, var(--line-2)); }
+.sc-root .soc.mute { color: var(--faint); border-color: transparent; padding-left: 0; }
+.sc-root .coins-foot { margin: 0; font-size: 11.5px; line-height: 1.55; color: var(--faint); max-width: 68ch; }
+
+/* ── the mascot ──────────────────────────────────────────────────────────
+   State comes from timestamps in the feed, never from a timer: see
+   `mascotMood`. The CSS only renders the state it is told. */
+/* He floats over whatever is in the corner, so at rest he is ambient rather
+   than opaque furniture — and comes fully present exactly when something is
+   actually happening, which makes the state change itself legible. */
+.sc-root .mascot { position: fixed; right: clamp(14px, 2vw, 26px); bottom: clamp(14px, 2vw, 26px); z-index: 15; width: 74px; pointer-events: none; display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: .6; transition: opacity .35s; }
+.sc-root .mascot.thinking, .sc-root .mascot.loosed { opacity: 1; }
+.sc-root .mascot svg { width: 100%; height: auto; overflow: visible; }
+.sc-root .mascot .cloak { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1.6; }
+.sc-root .mascot .face { fill: var(--ground); }
+.sc-root .mascot .eye { fill: var(--lime); }
+.sc-root .mascot .feather { stroke: var(--lime-dim); stroke-width: 1.8; fill: none; stroke-linecap: round; }
+.sc-root .mascot .bow { stroke: var(--gold); stroke-width: 1.8; fill: none; stroke-linecap: round; opacity: 0; transition: opacity .3s; }
+.sc-root .mascot .think { fill: var(--lime); opacity: 0; }
+/* The bubble is WIDER than he is, so it is anchored to his right edge and only
+   appears when there is something to say — otherwise it hangs off the side of a
+   phone, and "watching" is not worth a label that never goes away. */
+.sc-root .mascot .bub { display: none; align-self: flex-end; max-width: min(46vw, 190px); font-family: var(--mono); font-size: 10px; letter-spacing: 0.03em; color: var(--dim); background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; backdrop-filter: blur(6px); }
+.sc-root .mascot:hover .bub { display: block; }
+
+.sc-root .mascot.thinking .think { opacity: 1; }
+.sc-root .mascot.thinking .bub { display: block; color: var(--lime-dim); }
+.sc-root .mascot.loosed .bow { opacity: 1; }
+.sc-root .mascot.loosed .bub { display: block; color: var(--gold); border-color: color-mix(in srgb, var(--gold) 30%, var(--line)); }
+/* Asleep is a real state — the worker is not running — so he must LOOK it
+   rather than resting identically to an agent that is alive and quiet. */
+.sc-root .mascot.asleep { opacity: .32; }
+.sc-root .mascot.asleep .eye { fill: var(--faint); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .sc-root .mascot.thinking .think circle { animation: sc-ponder 1.6s ease-in-out infinite; }
+  .sc-root .mascot.thinking .think circle:nth-child(2) { animation-delay: .22s; }
+  .sc-root .mascot.thinking .think circle:nth-child(3) { animation-delay: .44s; }
+  .sc-root .mascot.loosed svg { animation: sc-loose .7s cubic-bezier(.2,.7,.3,1); }
+}
+@keyframes sc-ponder { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@keyframes sc-loose { 0% { transform: translateX(3px); } 60% { transform: translateX(-2px); } 100% { transform: none; } }
 
 /* connect / empty-agent state */
 .sc-root .gate { min-height: 100vh; display: grid; place-items: center; padding: 40px 20px; position: relative; z-index: 1; }
@@ -304,8 +411,13 @@
   .sc-root .app { grid-template-columns: 1fr; }
   .sc-root .rail { display: none; }
   .sc-root .main { padding: 0 16px 92px; }
-  .sc-root .split { grid-template-columns: 1fr 1fr; }
-  .sc-root .split .tile:last-child { grid-column: 1 / -1; }
+  .sc-root .bal { grid-template-columns: 1fr; gap: 10px; }
+  .sc-root .slice { grid-template-columns: auto 1fr; }
+  .sc-root .slice .v { text-align: right; }
+  .sc-root .cards { grid-template-columns: 1fr; }
+  /* Clear of the tab bar, and smaller — a phone has no corner to spare. */
+  .sc-root .mascot { width: 54px; bottom: calc(70px + env(safe-area-inset-bottom)); right: 12px; }
+  .sc-root .mascot .bub { font-size: 9px; padding: 3px 7px; }
   .sc-root .tabbar { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(12px); border-top: 1px solid var(--line); padding: 8px 6px calc(8px + env(safe-area-inset-bottom)); }
   .sc-root .tabbar .navlink { flex: 1; flex-direction: column; gap: 4px; font-size: 10px; padding: 6px 2px; justify-content: center; align-items: center; }
   .sc-root .tabbar .navlink .tally { display: none; }

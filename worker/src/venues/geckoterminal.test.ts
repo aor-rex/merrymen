@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseGeckoPool, screenPools, type GeckoPool } from "./geckoterminal";
+import {
+  parseGeckoPool,
+  screenPools,
+  fetchGeckoPools,
+  fetchGeckoPoolsResult,
+  type GeckoPool,
+} from "./geckoterminal";
 
 /**
  * Reading the market the agent could not see.
@@ -202,5 +208,78 @@ describe("screenPools", () => {
 
   it("returns empty, not everything, on a quiet chain", () => {
     assert.deepEqual(screenPools([], LIMITS), { kept: [], dropped: [] });
+  });
+});
+
+/**
+ * "Could not ask" and "nothing to see" are different facts.
+ *
+ * This API is keyless and rate-limited, so a refusal is routine — and a
+ * dashboard that renders one as an empty market states something false about
+ * the world while looking like a perfectly normal quiet page. The same mistake
+ * has already been made twice in this repo: the node's 10,000-log cap turned
+ * into `[]`, and a null activity map read as a quiet launchpad. `failed` is
+ * what keeps it from being made a third time.
+ */
+describe("fetchGeckoPoolsResult separates a refusal from an empty market", () => {
+  const realFetch = globalThis.fetch;
+  const withFetch = async (impl: typeof globalThis.fetch, run: () => Promise<void>) => {
+    globalThis.fetch = impl;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  it("a rate limit is failed, NOT an empty market", async () => {
+    await withFetch(
+      (async () => new Response("slow down", { status: 429 })) as typeof globalThis.fetch,
+      async () => {
+        const r = await fetchGeckoPoolsResult("trending_pools");
+        assert.equal(r.failed, true);
+        assert.deepEqual(r.pools, []);
+      },
+    );
+  });
+
+  it("a genuinely empty list is NOT failed", async () => {
+    await withFetch(
+      (async () => Response.json({ data: [] })) as typeof globalThis.fetch,
+      async () => {
+        const r = await fetchGeckoPoolsResult("trending_pools");
+        assert.equal(r.failed, false);
+        assert.deepEqual(r.pools, []);
+      },
+    );
+  });
+
+  it("a body whose shape changed is failed, not empty", async () => {
+    await withFetch(
+      (async () => Response.json({ notData: true })) as typeof globalThis.fetch,
+      async () => {
+        assert.equal((await fetchGeckoPoolsResult("trending_pools")).failed, true);
+      },
+    );
+  });
+
+  it("a thrown request is failed", async () => {
+    await withFetch(
+      (async () => {
+        throw new Error("network down");
+      }) as typeof globalThis.fetch,
+      async () => {
+        assert.equal((await fetchGeckoPoolsResult("trending_pools")).failed, true);
+      },
+    );
+  });
+
+  it("the plain-list wrapper still exists for the tick, which cannot act on the difference", async () => {
+    await withFetch(
+      (async () => new Response("nope", { status: 500 })) as typeof globalThis.fetch,
+      async () => {
+        assert.deepEqual(await fetchGeckoPools("trending_pools"), []);
+      },
+    );
   });
 });

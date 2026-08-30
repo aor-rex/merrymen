@@ -18,6 +18,7 @@ import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
 import Onboarding, { type OnboardStep } from "./Onboarding";
 import { LogoMark } from "@/components/Logo";
+import { mascotMood } from "@/lib/mascot";
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -51,6 +52,11 @@ type FreshRow = {
   telegram: string;
   website: string;
   bare: boolean;
+  symbol: string;
+  name: string;
+  logo: string;
+  ageSec: number | null;
+  progressBps: number | null;
 };
 type DiscoveriesPayload = {
   fetchedAt: number;
@@ -58,6 +64,8 @@ type DiscoveriesPayload = {
   rows: DiscoveryRow[];
   graduated: number;
   fresh: FreshRow[];
+  /** Not one market feed answered. Different from an empty market — see the route. */
+  indexUnreachable: boolean;
 };
 
 export default function Console() {
@@ -177,7 +185,8 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
   // One focus at a time. The rail used to be dead links over a wall of panels;
   // now it switches the main view — Home (the overview), Chat, or Positions — so
   // the console is calm and scannable instead of everything at once.
-  const [view, setView] = useState<"home" | "chat" | "positions" | "sherwood">("home");
+  const [view, setView] = useState<"home" | "chat" | "coins">("home");
+  const [feedTab, setFeedTab] = useState<"fresh" | "trading">("fresh");
   // Fetched from /api/discoveries, which reads the index server-side rather
   // than the ledger — see that route for why a DB-backed panel would render
   // empty on the hosted deploy.
@@ -229,8 +238,39 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
     (t) => t.status === "rejected" && new Date(String(t.created_at).replace(" ", "T") + "Z") >= midnight,
   ).length;
 
-  const agentName = feed?.agent?.name || "your merryman";
+  /**
+   * The name, with a just-renamed override.
+   *
+   * The override is held HERE rather than inside the chip because the name is
+   * on screen in more than one place — the topbar and the chat header — and an
+   * optimistic update that only refreshed the control you clicked left the page
+   * disagreeing with itself: "Little John" above, "Talk to Robin" below.
+   *
+   * It has to be optimistic at all because the worker reconciles the name into
+   * the soul at its next arm, so /api/feed can report the old one for a tick or
+   * two after a save that genuinely succeeded. It clears itself the moment the
+   * server agrees, which is what keeps the server the source of truth.
+   */
+  const [renamed, setRenamed] = useState<string | null>(null);
+  const serverName = feed?.agent?.name || "";
+  useEffect(() => {
+    if (renamed && serverName === renamed) setRenamed(null);
+  }, [renamed, serverName]);
+  const agentName = renamed || serverName || "your merryman";
   const strategy = feed?.agent?.strategy || grant?.grantFeatures?.[0] || "steady-basket";
+
+  /**
+   * The coins this agent could actually trade — the addresses baked into the
+   * signature it is holding right now.
+   *
+   * This is the honest version of "the agent picks what to trade". Every card
+   * carries it, because the alternative is a page of coins the agent is
+   * structurally incapable of touching, presented as though it were choosing
+   * between them. `grantTokens` is what the wall's approve permissions actually
+   * name; a coin outside it cannot be bought or sold at any size, and adding it
+   * needs the owner in settings and a re-signature.
+   */
+  const reach = new Set((grant?.grantTokens ?? []).map((a) => a.toLowerCase()));
 
   return (
     <div className="sc-root">
@@ -246,27 +286,31 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
               <span className="dev">/app</span>
             </span>
           </div>
+          {/* THREE places to be, not six. Positions folded into Home — it was
+              already a tile there and a whole nav entry for one list is a
+              button that does not earn its place. Wallet and Settings are the
+              things you visit occasionally, so they read as utilities below the
+              fold rather than peers of the three you actually live in. */}
           <nav className="nav">
             <button type="button" className={`navlink ${view === "home" ? "on" : ""}`} onClick={() => setView("home")}>
               <Ic d="home" /> Home
             </button>
+            <button type="button" className={`navlink ${view === "coins" ? "on" : ""}`} onClick={() => setView("coins")}>
+              <Ic d="spark" /> Coins {disc && <span className="tally">{disc.fresh.length + disc.rows.length}</span>}
+            </button>
             <button type="button" className={`navlink ${view === "chat" ? "on" : ""}`} onClick={() => setView("chat")}>
               <Ic d="chat" /> Chat
             </button>
-            <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
-              <Ic d="chart" /> Positions <span className="tally">{feed?.positions?.length ?? 0}</span>
-            </button>
-            <button type="button" className={`navlink ${view === "sherwood" ? "on" : ""}`} onClick={() => setView("sherwood")}>
-              <Ic d="spark" /> Sherwood {disc && <span className="tally">{disc.rows.length}</span>}
-            </button>
-            <Link className="navlink" href="/grant">
-              <Ic d="wallet" /> Wallet
-            </Link>
-            <Link className="navlink" href="/settings">
-              <Ic d="gear" /> Settings
-            </Link>
           </nav>
           <div className="rail-foot">
+            <nav className="nav util">
+              <Link className="navlink" href="/grant">
+                <Ic d="wallet" /> Wallet
+              </Link>
+              <Link className="navlink" href="/settings">
+                <Ic d="gear" /> Settings
+              </Link>
+            </nav>
             <div className="wallet">
               <span className="av" />
               <span className="who">
@@ -285,7 +329,7 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
             <div className="agentchip">
               <span className="glyph"><LogoMark size={19} /></span>
               <span>
-                <span className="nm">{agentName}</span>
+                <NameChip name={agentName} onRenamed={setRenamed} />
                 <br />
                 <span className="sub">
                   <b>{strategy}</b>
@@ -354,32 +398,32 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                 </div>
               </section>
 
-              <section className="split">
-                <Tile label="Cash" v={split.cash} pct={(split.cash / total) * 100} color="var(--mint)" />
-                <Tile label="Vault" v={split.vault} pct={(split.vault / total) * 100} color="var(--gold)" />
-                <Tile label="Positions" v={split.positions} pct={(split.positions / total) * 100} color="var(--lime)" />
-              </section>
-
-              <section className="wall">
-                <div className="wall-head">
-                  <span className="kick">The wall</span>
-                  <span className="by">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                      <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />
-                    </svg>
-                    enforced by the chain, not by us
+              {/* Where the money sits, and what the chain will let the agent do
+                  with it — two LINES where there used to be three cards and
+                  five more. Nothing was dropped: every figure below appeared on
+                  a card of its own before, which is a lot of furniture for
+                  numbers you read in a second and then stop looking at. */}
+              <section className="strip">
+                <div className="bal">
+                  <Slice label="Cash" v={split.cash} pct={(split.cash / total) * 100} color="var(--mint)" />
+                  <Slice label="Vault" v={split.vault} pct={(split.vault / total) * 100} color="var(--gold)" />
+                  <Slice label="Positions" v={split.positions} pct={(split.positions / total) * 100} color="var(--lime)" />
+                </div>
+                <p className="wallline">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                    <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />
+                  </svg>
+                  <span>
+                    The chain caps it at <b>{caps ? usd(caps.perTradeUsdg) : "—"}</b> a trade and{" "}
+                    <b>{caps ? usd(caps.dailyUsdg) : "—"}</b> a day, halts at{" "}
+                    <b>{caps ? `${caps.maxDrawdownPct}%` : "—"}</b> drawdown, and{" "}
+                    <b>cannot move your money out</b>
+                    {daysLeft !== null && <> · key dies in <b>{daysLeft}d</b></>}.
                   </span>
-                </div>
-                <div className="caps">
-                  <Cap l="Per trade" v={caps ? `${usd(caps.perTradeUsdg)}` : "—"} u="USDG" />
-                  <Cap l="Per day" v={caps ? `${usd(caps.dailyUsdg)}` : "—"} u="USDG" />
-                  <Cap l="Key dies in" v={daysLeft !== null ? `${daysLeft}` : "—"} u="days" />
-                  <Cap l="Breaker" v={caps ? `${caps.maxDrawdownPct}%` : "—"} u="drawdown" />
-                  <Cap l="Move out" v="blocked" u="· no-transfer" />
-                </div>
+                </p>
               </section>
 
-              <section className="floor one">
+              <section className="floor">
                 <div className="col">
                   <div className="panel">
                     <div className="panel-h">
@@ -390,7 +434,7 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                       {(feed?.trades ?? []).length === 0 ? (
                         <div className="empty-note">No trades yet — the band hasn&apos;t ridden.</div>
                       ) : (
-                        (feed?.trades ?? []).slice(0, 6).map((t, i) => <TradeRow key={i} t={t} />)
+                        (feed?.trades ?? []).slice(0, 7).map((t, i) => <TradeRow key={i} t={t} />)
                       )}
                     </div>
                     {refusedToday > 0 && (
@@ -400,161 +444,119 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                     )}
                   </div>
                 </div>
+                <div className="col">
+                  <div className="panel">
+                    <div className="panel-h">
+                      <h3>Positions</h3>
+                      <span className="kick">{feed?.positions?.length ?? 0} open</span>
+                    </div>
+                    <div className="pos">
+                      {(feed?.positions ?? []).length === 0 ? (
+                        <div className="empty-note">All in cash and the vault.</div>
+                      ) : (
+                        (feed?.positions ?? []).map((p, i) => (
+                          <div className="prow" key={i}>
+                            <span className="s">
+                              <span
+                                className="tk"
+                                style={{ background: p.price_source === "chainlink" ? "var(--mint)" : "var(--lime)" }}
+                              />{" "}
+                              {p.symbol}
+                            </span>
+                            <span className="px">
+                              ${usd(p.price_usd)}
+                              {p.price_source !== "chainlink" && <span className="tagpx">{p.price_source === "curve" ? "curve px" : p.price_source === "broker" ? "broker px" : "pool px"}</span>}
+                            </span>
+                            <span className="val">{usd(p.value_usdg)}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
               </section>
             </>
           )}
 
-          {/* ── POSITIONS: just the book ── */}
-          {view === "positions" && (
-            <section className="floor one">
-              <div className="col">
-                <div className="panel">
-                  <div className="panel-h">
-                    <h3>Positions</h3>
-                    <span className="kick">{feed?.positions?.length ?? 0} open</span>
-                  </div>
-                  <div className="pos">
-                    {(feed?.positions ?? []).length === 0 ? (
-                      <div className="empty-note">All in cash and the vault.</div>
-                    ) : (
-                      (feed?.positions ?? []).map((p, i) => (
-                        <div className="prow" key={i}>
-                          <span className="s">
-                            <span
-                              className="tk"
-                              style={{ background: p.price_source === "chainlink" ? "var(--mint)" : "var(--lime)" }}
-                            />{" "}
-                            {p.symbol}
-                          </span>
-                          <span className="px">
-                            ${usd(p.price_usd)}
-                            {p.price_source !== "chainlink" && <span className="tagpx">{p.price_source === "curve" ? "curve px" : p.price_source === "broker" ? "broker px" : "pool px"}</span>}
-                          </span>
-                          <span className="val">{usd(p.value_usdg)}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
+          {/* ── COINS: the launchpad and the market, as cards ── */}
+          {view === "coins" && (
+            <section className="coins">
+              <div className="coins-head">
+                <div className="seg">
+                  <button
+                    type="button"
+                    className={feedTab === "fresh" ? "on" : ""}
+                    onClick={() => setFeedTab("fresh")}
+                  >
+                    Just launched {disc && <i>{disc.fresh.length}</i>}
+                  </button>
+                  <button
+                    type="button"
+                    className={feedTab === "trading" ? "on" : ""}
+                    onClick={() => setFeedTab("trading")}
+                  >
+                    Trading now {disc && <i>{disc.rows.length}</i>}
+                  </button>
                 </div>
+                <span className="kick coins-when">
+                  {/* Seconds, not a ledger timestamp: `timeAgo` re-appends a Z
+                      to whatever it is given, which turns an ISO string into an
+                      unparseable one and renders as a bare "read". */}
+                  {disc ? `read ${agoFromEpoch(disc.fetchedAt)}` : "looking…"}
+                </span>
               </div>
-            </section>
-          )}
 
-          {/* ── SHERWOOD: what is trading, from a third-party index ── */}
-          {view === "sherwood" && (
-            <section className="floor one">
-              <div className="col">
-                {/* Launched minutes ago, and someone is trading it. The gate is
-                    25 trades from 3 distinct addresses, which keeps about an
-                    eighth of a launchpad running at ~940/hour. */}
-                <div className="panel">
-                  <div className="panel-h">
-                    <h3>Just launched</h3>
-                    <span className="kick">
-                      {disc ? `${disc.fresh.length} with a tape · last 15 min` : "looking…"}
-                    </span>
-                  </div>
-                  <div className="pos">
-                    {!disc ? (
-                      <div className="empty-note">Reading the launchpad…</div>
-                    ) : disc.fresh.length === 0 ? (
-                      <div className="empty-note">Nothing launched in the last few minutes has anyone trading it.</div>
-                    ) : (
-                      disc.fresh.map((f: FreshRow) => (
-                        <div className="prow" key={f.token}>
-                          <span className="s">
-                            <span className="tk" style={{ background: f.bare ? "var(--mint)" : "var(--lime)" }} />{" "}
-                            {f.description || <span style={{ opacity: 0.5 }}>published nothing</span>}
-                          </span>
-                          <span className="px">
-                            {f.twitter && (
-                              <a href={f.twitter} target="_blank" rel="noreferrer noopener" className="tagpx">
-                                x
-                              </a>
-                            )}
-                            {f.website && (
-                              <a href={f.website} target="_blank" rel="noreferrer noopener" className="tagpx">
-                                web
-                              </a>
-                            )}
-                            {f.telegram && <span className="tagpx">tg</span>}
-                          </span>
-                          {/* Distinct ADDRESSES, not trade count: 291 trades from
-                              25 addresses is a different thing from 223 from 176. */}
-                          <span className="val">
-                            {f.traders} <span style={{ opacity: 0.55 }}>/ {f.trades}</span>
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                  <div className="empty-note" style={{ opacity: 0.7 }}>
-                    traders / trades over the last 15 minutes. Every word above was written by
-                    whoever launched the coin.
-                  </div>
-                </div>
-
-                <div className="panel">
-                  <div className="panel-h">
-                    <h3>Trading now</h3>
-                    <span className="kick">
-                      {disc ? `${disc.rows.length} of ${disc.scanned} · ${disc.graduated} graduated` : "looking…"}
-                    </span>
-                  </div>
-                  <div className="pos">
-                    {!disc ? (
-                      <div className="empty-note">Reading the tape…</div>
-                    ) : disc.rows.length === 0 ? (
-                      <div className="empty-note">Nothing clearing the floor right now.</div>
-                    ) : (
-                      disc.rows.map((r: DiscoveryRow) => (
-                        <div className="prow" key={r.token}>
-                          <span className="s">
-                            <span
-                              className="tk"
-                              style={{ background: r.graduated ? "var(--lime)" : "var(--mint)" }}
-                            />{" "}
-                            {r.name}
-                            {r.graduated && <span className="tagpx">graduated</span>}
-                            {r.onCurve && <span className="tagpx">on its curve</span>}
-                          </span>
-                          <span className="px">
-                            {/* A coin still on its bonding curve reports a
-                                reserve that is mostly the VIRTUAL SEED — about
-                                $4,100 it does not hold — so its depth is not
-                                shown as though it were money. */}
-                            {r.onCurve
-                              ? "pre-graduation"
-                              : r.reserveUsd === null
-                                ? "depth unknown"
-                                : `${Math.round(r.reserveUsd).toLocaleString()} deep`}
-                          </span>
-                          <span
-                            className="val"
-                            style={{
-                              color:
-                                r.change24hPct === null
-                                  ? undefined
-                                  : r.change24hPct >= 0
-                                    ? "var(--lime)"
-                                    : "var(--rose, #e57)",
-                            }}
-                          >
-                            {r.change24hPct === null
-                              ? "—"
-                              : `${r.change24hPct > 0 ? "+" : ""}${r.change24hPct.toFixed(1)}%`}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                  <div className="empty-note" style={{ opacity: 0.7 }}>
-                    A third party&rsquo;s reading of the market, not mine — nothing here has been
-                    checked against the chain. I can&rsquo;t trade any of it until you add the token
-                    in <Link href="/settings">settings</Link> and re-sign at <Link href="/grant">grant</Link>.
-                  </div>
-                </div>
-              </div>
+              {feedTab === "fresh" ? (
+                <>
+                  {!disc ? (
+                    <div className="empty-note">Reading the launchpad…</div>
+                  ) : disc.fresh.length === 0 ? (
+                    <div className="empty-note">
+                      Nothing launched in the last few minutes has anyone trading it. Pons runs at
+                      roughly 940 launches an hour; the gate here is 25 trades from 3 different
+                      addresses, which keeps about an eighth of them.
+                    </div>
+                  ) : (
+                    <div className="cards">
+                      {disc.fresh.map((f) => (
+                        <FreshCard key={f.token} f={f} reachable={reach.has(f.token.toLowerCase())} />
+                      ))}
+                    </div>
+                  )}
+                  <p className="coins-foot">
+                    Every word and picture on these cards was written by whoever launched the coin.
+                    The ticker, the name and the curve progress come from the chain; the rest is a
+                    claim.
+                  </p>
+                </>
+              ) : (
+                <>
+                  {!disc ? (
+                    <div className="empty-note">Reading the tape…</div>
+                  ) : disc.indexUnreachable ? (
+                    // NOT "nothing is trading". The index is keyless and
+                    // rate-limited, so a refusal is routine — and rendering it
+                    // as an empty market states something false about the world
+                    // while looking exactly like a normal, quiet page.
+                    <div className="empty-note">
+                      Couldn&rsquo;t reach the market index just now — so this is what I don&rsquo;t
+                      know, not an empty market. It retries on its own.
+                    </div>
+                  ) : disc.rows.length === 0 ? (
+                    <div className="empty-note">Nothing clearing the floor right now.</div>
+                  ) : (
+                    <div className="cards">
+                      {disc.rows.map((r) => (
+                        <MarketCard key={r.token} r={r} reachable={reach.has(r.token.toLowerCase())} />
+                      ))}
+                    </div>
+                  )}
+                  <p className="coins-foot">
+                    A third party&rsquo;s reading of the market, not mine — {disc?.scanned ?? 0} pools
+                    seen, nothing here checked against the chain.
+                  </p>
+                </>
+              )}
             </section>
           )}
 
@@ -573,19 +575,19 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
         </main>
       </div>
 
-      {/* mobile tabs */}
+      <Mascot mode={mode} feed={feed} />
+
+      {/* mobile tabs — the same three, plus settings. Five tabs on a 375px
+          screen gave each one 71px and a label too small to read. */}
       <nav className="tabbar">
         <button type="button" className={`navlink ${view === "home" ? "on" : ""}`} onClick={() => setView("home")}>
           <Ic d="home" /> Home
         </button>
+        <button type="button" className={`navlink ${view === "coins" ? "on" : ""}`} onClick={() => setView("coins")}>
+          <Ic d="spark" /> Coins
+        </button>
         <button type="button" className={`navlink ${view === "chat" ? "on" : ""}`} onClick={() => setView("chat")}>
           <Ic d="chat" /> Chat
-        </button>
-        <button type="button" className={`navlink ${view === "positions" ? "on" : ""}`} onClick={() => setView("positions")}>
-          <Ic d="chart" /> Positions
-        </button>
-        <button type="button" className={`navlink ${view === "sherwood" ? "on" : ""}`} onClick={() => setView("sherwood")}>
-          <Ic d="spark" /> Sherwood
         </button>
         <Link className="navlink" href="/settings">
           <Ic d="gear" /> Settings
@@ -638,6 +640,14 @@ function symbolish(t: TradeRecord): string {
   return t.kind === "vault-deposit" || t.kind === "vault-withdraw" ? "VAULT" : "TRADE";
 }
 
+/** "just now" / "4m ago", from unix SECONDS. */
+function agoFromEpoch(sec: number): string {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - sec) / 60));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+
 function timeAgo(s: string): string {
   const then = new Date(String(s).replace(" ", "T") + "Z").getTime();
   if (Number.isNaN(then)) return "";
@@ -649,28 +659,277 @@ function timeAgo(s: string): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
-function Tile({ label, v, pct, color }: { label: string; v: number; pct: number; color: string }) {
+/**
+ * Name your merryman — in place, where you first meet him.
+ *
+ * "Robin" is `DEFAULT_NAME` in the worker's soul, and until now the only way to
+ * change it was a Telegram command, so every hosted agent was called the same
+ * thing. This is deliberately NOT a new onboarding step or a new button: it is
+ * the name you were already looking at, made editable, with a nudge shown only
+ * while it is still the default. Someone who does not care never sees a control
+ * they have to dismiss.
+ *
+ * The same regex as the API and the soul, so the field rejects what the server
+ * would reject rather than accepting it and quietly keeping the old name.
+ */
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/;
+
+function NameChip({ name, onRenamed }: { name: string; onRenamed: (n: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+  const [err, setErr] = useState(false);
+  const shown = name;
+  const unnamed = shown === "Robin" || shown === "your merryman";
+
+  const save = async () => {
+    const v = val.trim();
+    if (!NAME_RE.test(v)) {
+      setErr(true);
+      return;
+    }
+    setEditing(false);
+    setErr(false);
+    // Optimistic, and lifted to the page: the worker reconciles the name into
+    // the soul at its next arm, so the feed lags a tick behind a save that
+    // worked. Every place the name appears has to move together.
+    onRenamed(v);
+    try {
+      await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentName: v }),
+      });
+    } catch {
+      /* the next feed poll is the source of truth */
+    }
+  };
+
+  if (editing) {
+    return (
+      <span className="namechip">
+        <input
+          className={`nameinput ${err ? "bad" : ""}`}
+          value={val}
+          autoFocus
+          maxLength={24}
+          aria-label="Name your merryman"
+          onChange={(e) => {
+            setVal(e.target.value);
+            setErr(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") {
+              setEditing(false);
+              setErr(false);
+            }
+          }}
+          onBlur={save}
+        />
+        {err && <span className="namehint">letters or numbers to start, up to 24</span>}
+      </span>
+    );
+  }
+
   return (
-    <div className="tile">
-      <div className="l">
-        <span className="lab">{label}</span>
-      </div>
-      <div className="v">{usd(v)}</div>
-      <div className="bar">
+    <span className="namechip">
+      <button
+        type="button"
+        className="nm"
+        title="Rename"
+        onClick={() => {
+          setVal(unnamed ? "" : shown);
+          setEditing(true);
+        }}
+      >
+        {shown}
+      </button>
+      {unnamed && (
+        <button type="button" className="nametag" onClick={() => { setVal(""); setEditing(true); }}>
+          name him
+        </button>
+      )}
+    </span>
+  );
+}
+
+function Slice({ label, v, pct, color }: { label: string; v: number; pct: number; color: string }) {
+  return (
+    <div className="slice">
+      <span className="lab">{label}</span>
+      <span className="v num">{usd(v)}</span>
+      <span className="bar">
         <i style={{ width: `${Math.min(100, Math.max(2, pct))}%`, background: color }} />
-      </div>
+      </span>
     </div>
   );
 }
 
-function Cap({ l, v, u }: { l: string; v: string; u: string }) {
+/** "42s" / "7m" / "3h" — a launchpad card lives or dies on the seconds. */
+function shortAge(sec: number | null): string {
+  if (sec === null) return "—";
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86_400) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86_400)}d`;
+}
+
+/** $1.2M / $84k / $912 — never more precision than the number deserves. */
+function compactUsd(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
+  return `$${Math.round(n)}`;
+}
+
+/**
+ * A coin's picture.
+ *
+ * Two things are load-bearing. It goes through /api/coin-image, because every
+ * IPFS gateway returns 403 to a browser User-Agent and a direct src is an empty
+ * square on every device. And it falls back to the first letters of the ticker
+ * rather than a broken-image glyph, because roughly 1 in 250 launches publishes
+ * no logo at all and a card with a shattered icon reads as a broken page.
+ */
+function CoinArt({ logo, symbol }: { logo: string; symbol: string }) {
+  const [failed, setFailed] = useState(false);
+  const initials = (symbol || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+  if (!logo || failed) return <span className="art fallback">{initials}</span>;
   return (
-    <div className="cap">
-      <span className="cl">{l}</span>
-      <span className="cv">
-        {v} <small>{u}</small>
-      </span>
-    </div>
+    // eslint-disable-next-line @next/next/no-img-element -- next/image would
+    // need every launcher-chosen host in next.config; the proxy is the allowlist.
+    <img
+      className="art"
+      src={`/api/coin-image?uri=${encodeURIComponent(logo)}`}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+/** Whether the agent could act on this coin at all, as a badge. */
+function Reach({ ok }: { ok: boolean }) {
+  return ok ? (
+    <span className="badge in" title="This coin is named in the signature the agent holds — it can trade it.">
+      in range
+    </span>
+  ) : (
+    <span className="badge out" title="Not in the agent's grant. Add it in settings and re-sign, or it cannot be traded at any size.">
+      not added
+    </span>
+  );
+}
+
+/** Just launched: age, curve progress, who is trading it, what it claims to be. */
+function FreshCard({ f, reachable }: { f: FreshRow; reachable: boolean }) {
+  const pct = f.progressBps === null ? null : f.progressBps / 100;
+  return (
+    <article className="card">
+      <header>
+        <CoinArt logo={f.logo} symbol={f.symbol} />
+        <div className="idc">
+          <div className="tick">
+            <b>{f.symbol || "unnamed"}</b>
+            {f.name && f.name !== f.symbol && <span className="nm">{f.name}</span>}
+          </div>
+          <div className="meta num">
+            <span className="age">{shortAge(f.ageSec)} old</span>
+            {/* Distinct ADDRESSES first: 291 trades from 25 addresses is a
+                different thing from 223 from 176, and only one looks like people. */}
+            <span>{f.traders} traders</span>
+            <span>{f.trades} trades</span>
+          </div>
+        </div>
+        <Reach ok={reachable} />
+      </header>
+
+      {pct !== null && (
+        <div className="grad">
+          <div className="gbar">
+            <i style={{ width: `${Math.min(100, Math.max(1.5, pct))}%` }} />
+          </div>
+          <span className="glab num">{pct < 0.05 ? "<0.1" : pct.toFixed(1)}% to graduation</span>
+        </div>
+      )}
+
+      {f.description ? (
+        <p className="say">{f.description}</p>
+      ) : (
+        <p className="say none">Published nothing about itself.</p>
+      )}
+
+      <footer>
+        {f.twitter && (
+          <a className="soc" href={f.twitter} target="_blank" rel="noreferrer noopener nofollow">
+            X
+          </a>
+        )}
+        {f.telegram && (
+          <a className="soc" href={f.telegram} target="_blank" rel="noreferrer noopener nofollow">
+            Telegram
+          </a>
+        )}
+        {f.website && (
+          <a className="soc" href={f.website} target="_blank" rel="noreferrer noopener nofollow">
+            Site
+          </a>
+        )}
+        {f.bare && <span className="soc mute">no socials</span>}
+      </footer>
+    </article>
+  );
+}
+
+/** Trading now: the index's numbers, with the curve caveat kept visible. */
+function MarketCard({ r, reachable }: { r: DiscoveryRow; reachable: boolean }) {
+  const up = (r.change24hPct ?? 0) >= 0;
+  return (
+    <article className="card">
+      <header>
+        <CoinArt logo="" symbol={r.name.split(/[\s/]/)[0] ?? ""} />
+        <div className="idc">
+          <div className="tick">
+            <b>{r.name}</b>
+            {r.graduated && <span className="pill lime">graduated</span>}
+            {r.onCurve && <span className="pill">on its curve</span>}
+          </div>
+          <div className="meta num">
+            <span>{r.ageDays === null ? "—" : shortAge(Math.round(r.ageDays * 86_400))} old</span>
+            <span>{r.buyers24h === null ? "—" : `${r.buyers24h} buyers`}</span>
+            <span>{compactUsd(r.volume24hUsd)} vol</span>
+          </div>
+        </div>
+        <span className={`chg num ${up ? "up" : "down"}`}>
+          {r.change24hPct === null ? "—" : `${up ? "+" : ""}${r.change24hPct.toFixed(1)}%`}
+        </span>
+      </header>
+
+      <div className="figs num">
+        <span>
+          <i>Price</i>
+          {r.priceUsd === null ? "—" : `$${r.priceUsd < 0.01 ? r.priceUsd.toPrecision(2) : r.priceUsd.toFixed(4)}`}
+        </span>
+        <span>
+          <i>Market cap</i>
+          {compactUsd(r.fdvUsd)}
+        </span>
+        <span>
+          <i>Depth</i>
+          {/* A coin still on its bonding curve reports a reserve that is mostly
+              the VIRTUAL SEED — about $4,100 it does not hold — so it is never
+              shown here as though it were money you could sell into. */}
+          {r.onCurve ? "pre-graduation" : compactUsd(r.reserveUsd)}
+        </span>
+      </div>
+
+      <footer>
+        <span className="soc mute">{r.venue}</span>
+        <Reach ok={reachable} />
+      </footer>
+    </article>
   );
 }
 
@@ -723,7 +982,19 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
       .join("\n");
   };
 
-  const answer = (raw: string): string => {
+  /**
+   * The answers that come straight from the ledger, or null when there is no
+   * exact one.
+   *
+   * RETURNING NULL IS THE POINT. This used to return a shrug for anything it
+   * did not recognise, which made "I answered exactly" and "I have nothing"
+   * indistinguishable to the caller — so when the model was unavailable, a
+   * `/status` with a precise answer sitting right there got an apology about a
+   * failed model call instead. An exact figure from the tenant's own book beats
+   * both a model and an excuse, and the caller can only prefer it if it can
+   * tell the two apart.
+   */
+  const exactAnswer = (raw: string): string | null => {
     const q = raw.trim().toLowerCase();
     if (q.startsWith("/status") || q === "status") {
       const d =
@@ -757,8 +1028,12 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
     if (q.includes("pause") || q.includes("stop") || q.includes("kill")) {
       return "Giving orders through chat — pause, kill, buy, sell — runs next, each checked against the wall before I move a thing. For now, pause and the kill switch live on the Wallet screen.";
     }
-    return `Heard you — but I answered that from a lookup table, not from thinking. Ask me <span class="mono">/status</span>, <span class="mono">/positions</span> or <span class="mono">/pnl</span> for something exact.`;
+    return null;
   };
+
+  /** The shrug, for when nothing else could answer. */
+  const shrug = (): string =>
+    `Heard you — but that one needs thinking, and I can't do it from the ledger alone. Ask me <span class="mono">/status</span>, <span class="mono">/positions</span> or <span class="mono">/pnl</span> for something exact.`;
 
   /**
    * What to say when the route could not think.
@@ -791,24 +1066,30 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
       { role: "me", html: escapeHtml(v) },
       { role: "them", html: '<span style="color:var(--faint);font-family:var(--mono)">…</span>' },
     ]);
-    let replyHtml: string | null = null;
+    let modelHtml: string | null = null;
+    let why: string | null = null;
     try {
       const r = (await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: v, state: buildState(), history }),
       }).then((res) => res.json())) as { reply?: string | null; why?: string };
-      if (r && typeof r.reply === "string" && r.reply.trim()) replyHtml = escapeHtml(r.reply.trim());
-      // SAY WHY IT DID NOT ANSWER. The route already reports `why` -- no-llm,
-      // llm-error, not signed in -- and this used to throw it away and fall
-      // through to a canned line about free-form reasoning being "the next
-      // thing I learn". It reads as a missing FEATURE. It is a missing KEY, and
-      // the difference is a config change nobody could see they had to make.
-      else if (r?.why) replyHtml = escapeHtml(brainlessNote(r.why));
+      if (r && typeof r.reply === "string" && r.reply.trim()) modelHtml = escapeHtml(r.reply.trim());
+      else if (r?.why) why = r.why;
     } catch {
-      /* fall through to the deterministic answer */
+      /* the ledger answer below still works with the route unreachable */
     }
-    const finalHtml = replyHtml ?? answer(v);
+    // Order of preference, and each step is a claim about what is TRUE rather
+    // than about what is available:
+    //   1. the model, which is the only thing that can actually reason;
+    //   2. an exact figure from the tenant's own ledger — better than an
+    //      apology, and better than a model paraphrasing a number it was handed;
+    //   3. SAY WHY IT COULD NOT THINK. The route already reports this -- no-llm,
+    //      llm-error, not signed in -- and the client used to throw it away and
+    //      print a canned line about free-form reasoning being "the next thing I
+    //      learn", which reads as a missing FEATURE. It is a missing KEY, and
+    //      that difference is a config change nobody could see they had to make.
+    const finalHtml = modelHtml ?? exactAnswer(v) ?? (why ? escapeHtml(brainlessNote(why)) : shrug());
     // Replace the "…" placeholder with the real reply.
     setMsgs((m) => [...m.slice(0, -1), { role: "them", html: finalHtml }]);
     setBusy(false);
@@ -856,6 +1137,48 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
   );
 }
 
+/**
+ * The little merryman in the corner. Every mood he has is a fact with a clock
+ * behind it — see `mascotMood`, which is where the rule lives and is tested.
+ * This component only renders what it is told.
+ */
+function Mascot({ mode, feed }: { mode: string; feed: FeedResponse | null }) {
+  // Re-derives on every feed poll (10s) — no timer of its own, so he cannot
+  // animate through a stretch where nothing actually happened.
+  const { mood, say } = mascotMood({
+    mode,
+    lastEventAt: feed?.events?.[0]?.created_at,
+    lastTradeAt: feed?.trades?.[0]?.created_at,
+  });
+  return (
+    <div className={`mascot ${mood}`} aria-hidden="true">
+      <div className="bub">{say}</div>
+      <svg viewBox="0 0 64 72" fill="none">
+        {/* hood */}
+        <path className="cloak" d="M32 6c11 0 18 8 18 19 0 8-3 12-3 18l6 23H11l6-23c0-6-3-10-3-18C14 14 21 6 32 6z" />
+        {/* face in shadow */}
+        <path className="face" d="M32 15c6 0 10 5 10 11s-4 10-10 10-10-4-10-10 4-11 10-11z" />
+        <circle className="eye" cx="27.5" cy="25" r="1.9" />
+        <circle className="eye" cx="36.5" cy="25" r="1.9" />
+        {/* feather in the cap */}
+        <path className="feather" d="M44 12c5-4 9-4 12-2-2 5-6 8-11 8" />
+        {/* the bow — drawn only when he looses */}
+        <g className="bow">
+          <path className="limb" d="M52 30c6 6 6 16 0 22" />
+          <path className="string" d="M52 30l-6 11 6 11" />
+          <path className="arrow" d="M44 41h16" />
+        </g>
+        {/* three dots while he thinks */}
+        <g className="think">
+          <circle cx="14" cy="16" r="2.2" />
+          <circle cx="8" cy="11" r="1.6" />
+          <circle cx="4" cy="7" r="1.1" />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] || c);
 }
@@ -894,9 +1217,17 @@ function Spark({ points }: { points: number[] }) {
         n = pts.length;
       const min = Math.min(...pts),
         max = Math.max(...pts);
-      const range = max - min || 1;
+      // A FLAT SERIES MUST DRAW A FLAT LINE. `range = max - min || 1` sent every
+      // identical point to the TOP of the box, so an agent that has not traded —
+      // the state every new account is in — rendered as a solid block of fill
+      // reading like a chart that had gone vertical. Centre it instead.
+      const flat = max - min < 1e-9;
+      const range = flat ? 1 : max - min;
       const X = (i: number) => pad + (i / (n - 1)) * (w - 2 * pad);
-      const Y = (v: number) => pad + (1 - (v - min) / range) * (h - 2 * pad - 12) + 4;
+      const Y = (v: number) =>
+        flat
+          ? pad + 0.5 * (h - 2 * pad - 12) + 4
+          : pad + (1 - (v - min) / range) * (h - 2 * pad - 12) + 4;
       const last = Math.max(1, Math.floor(prog * (n - 1)));
       const g = ctx.createLinearGradient(0, 0, 0, h);
       g.addColorStop(0, "rgba(58,216,132,0.20)");

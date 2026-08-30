@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createPublicClient, http } from "viem";
 import {
-  fetchGeckoPools,
+  fetchGeckoPoolsResult,
   screenPools,
   type GeckoPool,
 } from "../../../../../worker/src/venues/geckoterminal";
@@ -12,6 +12,11 @@ import {
   MAX_ACTIVITY_BLOCKS,
 } from "../../../../../worker/src/venues/pons-activity";
 import { readTokenMeta } from "../../../../../worker/src/venues/pons-meta";
+import {
+  readCardFacts,
+  readBlockClock,
+  ageSecOf,
+} from "../../../../../worker/src/venues/pons-card";
 
 /**
  * What is trading on this chain, for the dashboard.
@@ -103,6 +108,21 @@ export interface FreshRow {
   website: string;
   /** Published nothing at all — the shape an abandoned template has. */
   bare: boolean;
+  /** The ERC-20's own ticker, from the chain. Empty when unreadable. */
+  symbol: string;
+  /** The ERC-20's own name, from the chain. Empty when unreadable. */
+  name: string;
+  /**
+   * The launcher's logo URI, usually `ipfs://…`. Never given to a browser
+   * directly — it goes through /api/coin-image, which is both what makes it
+   * load at all (every gateway 403s a browser User-Agent) and what keeps an
+   * attacker-chosen URL out of the reader's browser.
+   */
+  logo: string;
+  /** Seconds since it launched, measured from a real block clock. Null when unknown. */
+  ageSec: number | null;
+  /** Basis points of its own graduation threshold, net of the virtual seed. */
+  progressBps: number | null;
 }
 
 /**
@@ -132,11 +152,19 @@ async function readFresh(): Promise<FreshRow[]> {
     // tape for every launch is not.
     if (scan.failed || !activity) return [];
     const live = scan.launches.filter((l) => isActive(activity.get(l.curve.toLowerCase())));
-    const meta = await readTokenMeta(client as never, live.map((l) => l.token));
+    // Three more reads for the whole page, not per coin: the launcher's claims,
+    // the chain's own symbol/name/curve-progress, and one block clock so age
+    // can be derived from a block number without asking per launch.
+    const [meta, facts, clock] = await Promise.all([
+      readTokenMeta(client as never, live.map((l) => l.token)),
+      readCardFacts(client as never, live),
+      readBlockClock(client as never),
+    ]);
     return live
       .map((l) => {
         const a = activity.get(l.curve.toLowerCase())!;
         const m = meta.get(l.token.toLowerCase());
+        const f = facts.get(l.token.toLowerCase());
         return {
           token: l.token,
           curve: l.curve,
@@ -147,6 +175,11 @@ async function readFresh(): Promise<FreshRow[]> {
           telegram: m?.telegram ?? "",
           website: m?.website ?? "",
           bare: m ? m.bare : true,
+          symbol: f?.symbol ?? "",
+          name: f?.name ?? "",
+          logo: m?.logo ?? "",
+          ageSec: ageSecOf(clock, l.blockNumber),
+          progressBps: f?.progressBps ?? null,
         };
       })
       // By distinct addresses, not trade count: 291 trades from 25 addresses is
@@ -162,8 +195,17 @@ export async function GET() {
   const nowSec = Math.floor(Date.now() / 1000);
   const fresh = await readFresh();
   const byToken = new Map<string, GeckoPool>();
+  // Every feed refused is a different fact from every feed being empty, and
+  // only one of them means the market is quiet. This API is keyless and
+  // rate-limited, so the refusal is routine — and a page that renders it as
+  // "nothing clearing the floor" states something false while looking normal.
+  let asked = 0;
+  let reached = 0;
   for (const feed of ["trending_pools", "new_pools", "pools"] as const) {
-    for (const p of await fetchGeckoPools(feed)) {
+    const r = await fetchGeckoPoolsResult(feed);
+    asked++;
+    if (!r.failed) reached++;
+    for (const p of r.pools) {
       // Deduped by TOKEN and kept at its deepest venue — the same coin appears
       // in several feeds and often on several venues, and a reader cares about
       // the coin.
@@ -183,6 +225,8 @@ export async function GET() {
     {
       fetchedAt: nowSec,
       scanned: all.length,
+      // False only when NOT ONE feed answered. A partial read is still a read.
+      indexUnreachable: reached === 0 && asked > 0,
       rows,
       graduated: rows.filter((r) => r.graduated).length,
       fresh,
