@@ -211,6 +211,19 @@ export interface MerrymenSettings {
    * `scoutBudgetUsdg` IS the risk control for scout capital. Treat it as money
    * you have decided you can lose.
    */
+  /**
+   * Let trencher trade LIVE, not only on paper.
+   *
+   * The rail it replaces was `if (!paperActive()) return []` — and paperActive
+   * is defined as the ABSENCE of an executor, so arming one turned the candidate
+   * feed off entirely. That is a safe default and an odd one to discover: the
+   * strategy silently stopped seeing anything the moment it could act.
+   *
+   * Off by default. Turning it on is the owner saying the memecoin strategy may
+   * spend real money, and it composes with — never replaces — the scout budget,
+   * the per-trade cap and the wall.
+   */
+  trencherLiveEnabled?: boolean;
   scoutEnabled?: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. 0 = off. */
   scoutBudgetUsdg?: number;
@@ -389,6 +402,7 @@ export const SETTINGS_DEFAULTS = {
   // inherits the main budget — the owner has to name a number themselves.
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
+  trencherLiveEnabled: false,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,

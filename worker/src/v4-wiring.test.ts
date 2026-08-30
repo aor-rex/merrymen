@@ -85,3 +85,34 @@ describe("a v4 mark is a weaker kind of evidence, and stays one", () => {
     assert.notEqual(valuationMultiplierFor("v4", ui), ui);
   });
 });
+
+/**
+ * THE LIVE RAIL, MADE EXPLICIT.
+ *
+ * `trenchCandidates` began `if (!paperActive()) return []`, and `paperActive` is
+ * defined as the ABSENCE of an executor (`!active.executor`). So arming a live
+ * executor did not take the strategy live — it turned the candidate feed OFF.
+ * The memecoin strategy stopped seeing anything at the exact moment it became
+ * able to act, silently.
+ */
+describe("trencher goes live only when the owner says so", () => {
+  it("still returns nothing when neither paper nor live is on", () => {
+    assert.match(INDEX, /if \(!paperActive\(\) && !cfg\.trencherLiveEnabled\) return \[\];/);
+  });
+
+  it("is OFF by default — spending real money is opt-in", async () => {
+    const { SETTINGS_DEFAULTS } = await import("../../packages/core/src/index");
+    assert.equal(SETTINGS_DEFAULTS.trencherLiveEnabled, false);
+  });
+
+  it("composes with the other bounds rather than replacing them", () => {
+    // The scout budget is what actually limits a buy into something nobody can
+    // independently value, and a v4-priced coin is exactly that. Enabling live
+    // trencher must not be a way around it.
+    assert.match(INDEX, /q\.source === "curve" \|\| q\.source === "v4"/);
+    assert.ok(
+      !/trencherLiveEnabled[\s\S]{0,200}?scoutAllows/.test(INDEX),
+      "the live flag must not gate or bypass the scout budget",
+    );
+  });
+});

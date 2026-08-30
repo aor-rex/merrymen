@@ -964,7 +964,18 @@ async function main() {
    * steps as any other token. That is the feature, not a limitation.
    */
   async function trenchCandidates(): Promise<Candidate[]> {
-    if (!paperActive()) return [];
+    // THE RAIL, MADE EXPLICIT rather than removed.
+    //
+    // This was `if (!paperActive()) return []`, and `paperActive` is the ABSENCE
+    // of an executor — so arming one turned the candidate feed off entirely.
+    // Safe, and a strange thing to discover: the strategy stopped seeing
+    // anything at the exact moment it became able to act, with nothing logged.
+    //
+    // Now the owner says so. Off by default, and it composes with rather than
+    // replaces every other bound — the scout budget still gates a buy into a
+    // token nobody can independently value, the per-trade cap still holds, and
+    // the wall still refuses any asset the signature does not name.
+    if (!paperActive() && !cfg.trencherLiveEnabled) return [];
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
     for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25, { poolsOnly: true })) {

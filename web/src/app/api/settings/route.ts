@@ -187,6 +187,7 @@ const BOOL_FIELDS = [
   "telegramAgentEnabled",
   "telegramAgentAutoShell",
   "virtualsEnabled",
+  "trencherLiveEnabled",
   "scoutEnabled",
   "discoveryEnabled",
 ] as const;
