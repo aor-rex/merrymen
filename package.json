@@ -37,15 +37,15 @@
     "doctor": "node cli/bin.mjs doctor",
     "status": "node cli/bin.mjs status",
     "build": "cd web && next build",
-  "start:web": "cd web && next start -H 0.0.0.0 -p ${PORT:-3100}",
-  "start:orchestrator": "node --import tsx worker/src/orchestrator.ts",
+    "start:web": "cd web && next start -H 0.0.0.0 -p ${PORT:-3100}",
+    "start:orchestrator": "node --import tsx worker/src/orchestrator.ts",
     "prepare": "node cli/build.mjs",
     "prepublishOnly": "node cli/prepublish.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
     "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\"",
     "test:contracts": "cd contracts && npm test",
-    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web"
+    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

@@ -1,0 +1,42 @@
+# The research browser — a THIRD image, deliberately.
+#
+# The main Dockerfile builds one image that runs either the dashboard or the
+# orchestrator, chosen by MERRYMEN_START. Chromium does not belong in it:
+#
+#   - It adds ~400MB and an apt layer to an image whose other two roles never
+#     open a browser, so every web deploy would carry and pull it for nothing.
+#   - The orchestrator SPAWNS ONE WORKER CHILD PER TENANT. A browser reachable
+#     from inside the worker would become a browser per tenant, which does not
+#     fit on any plan worth paying for.
+#
+# So: one browser, one service, shared over Railway's private network, addressed
+# by RAILWAY_PRIVATE_DOMAIN and never given a public domain.
+#
+# The Playwright base image already carries Chromium and every system library it
+# needs, pinned together — which is the part that is genuinely painful to
+# maintain by hand, and the reason not to start from node:22-slim and apt-get.
+FROM mcr.microsoft.com/playwright:v1.56.0-jammy
+
+WORKDIR /app
+
+# Deps first, for layer caching. The service needs tsx (it runs TypeScript
+# straight from source, exactly as the orchestrator does) and playwright.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
+# Playwright itself is not a dependency of the main app and is deliberately kept
+# out of package.json — the same reasoning as `pg` in the main image: a
+# self-hosted install must not be made to download a browser it will never run.
+RUN npm install --no-save playwright@1.56.0
+
+# The service plus the one package it imports. Not the whole monorepo: this
+# image has no business carrying the worker, the wall, or the signers.
+COPY browser ./browser
+COPY packages ./packages
+COPY tsconfig.json ./tsconfig.json
+
+ENV NODE_ENV=production
+# Railway injects PORT. Bind ::  so the private network can reach it.
+EXPOSE 8080
+
+CMD ["npx", "tsx", "browser/server.ts"]
