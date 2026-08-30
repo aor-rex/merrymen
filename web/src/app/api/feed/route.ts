@@ -6,11 +6,16 @@
 import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
-import { TRADEABLE_SYMBOLS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
+import { SETTINGS_DEFAULTS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
+import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 
-const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];
+// The basket the WORKER actually defaults to when none is configured.
+// TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
+// default holding — so a tenant on defaults was shown 14 symbols while their
+// agent traded three.
+const DEFAULT_BASKET = [...SETTINGS_DEFAULTS.basketSymbols];
 
 export const dynamic = "force-dynamic";
 
@@ -91,18 +96,53 @@ export interface FeedResponse {
   gasUnpricedTrades: number;
 }
 
-/** The configured strategy + basket, straight from settings.json (live). */
-function readIdentitySettings(): { strategy: string; basket: string[]; agentName: string | null } {
+type Identity = { strategy: string; basket: string[]; agentName: string | null };
+
+const IDENTITY_FALLBACK: Identity = { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
+
+/** The three identity fields out of a settings blob, whatever store it came from. */
+function pickIdentity(s: MerrymenSettings): Identity {
+  return {
+    strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
+    basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
+    agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
+  };
+}
+
+/**
+ * The configured strategy, basket and name — from WHERE THIS TENANT'S SETTINGS
+ * ACTUALLY LIVE.
+ *
+ * THE BUG THIS EXISTS TO FIX, because it made a working feature look broken.
+ * Hosted, a tenant's settings are written to the per-tenant sealed store
+ * (`getSettingsStore().put(tenant, …)` in api/settings), and NOTHING ever writes
+ * the web container's own `~/.merrymen/settings.json`. This function used to
+ * read that file unconditionally, so on the hosted deploy the read always threw
+ * and every tenant got the fallback below: name null → the console fell back to
+ * the ledger's "Robin", and strategy/basket were the defaults no matter what
+ * they had configured. An owner could rename their agent, watch the save
+ * succeed, reload, and be asked to name it again — four times over, in the
+ * report that found this. The write was never the problem; nobody read it back.
+ *
+ * Self-hosted the file IS the store, which is why this passed local testing.
+ * The `!tenant` early return is load-bearing: it must not fall through to the
+ * file read, or a signed-out caller would be shown container-global config.
+ */
+async function readIdentitySettings(tenant: `0x${string}` | null): Promise<Identity> {
+  if (isHostedMode()) {
+    if (!tenant) return IDENTITY_FALLBACK;
+    try {
+      return pickIdentity((await getSettingsStore().get(tenant)) ?? {});
+    } catch {
+      return IDENTITY_FALLBACK;
+    }
+  }
   try {
+    // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
     const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
-    const s = JSON.parse(raw) as MerrymenSettings;
-    return {
-      strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
-      basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
-      agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
-    };
+    return pickIdentity(JSON.parse(raw) as MerrymenSettings);
   } catch {
-    return { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
+    return IDENTITY_FALLBACK;
   }
 }
 
@@ -122,13 +162,19 @@ function resolveAgentName(configured: string | null, fromLedger: string): string
 }
 
 /** Name + strategy + basket, with the configured name preferred. */
-function identityOf(fromLedger: string): AgentIdentity {
-  const { agentName, ...rest } = readIdentitySettings();
+async function identityOf(fromLedger: string, tenant: `0x${string}` | null): Promise<AgentIdentity> {
+  const { agentName, ...rest } = await readIdentitySettings(tenant);
   return { name: resolveAgentName(agentName, fromLedger), ...rest };
 }
 
-/** The empty feed — no ledger, no session, or an unreadable db. Never a leak. */
-function emptyFeed(): FeedResponse {
+/**
+ * The empty feed — no ledger, no session, or an unreadable db. Never a leak.
+ *
+ * Takes the tenant because identity resolves per-tenant now: a signed-in owner
+ * whose ledger has no rows yet should still see the name and strategy THEY
+ * configured, not the house defaults.
+ */
+async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedResponse> {
   return {
     source: "none",
     events: [],
@@ -137,7 +183,7 @@ function emptyFeed(): FeedResponse {
     trades: [],
     financials: null,
     // Identity still resolves live from settings + default name.
-    agent: identityOf("Robin"),
+    agent: await identityOf("Robin", tenant),
     netContributionsUsdg: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
@@ -152,7 +198,8 @@ export async function GET(req: Request) {
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
     tenant = tenantOf(req);
-    if (!tenant) return NextResponse.json(emptyFeed());
+    // No session: nothing to scope to, so no per-tenant identity either.
+    if (!tenant) return NextResponse.json(await emptyFeed(null));
   }
 
   // Reads go through the ledger driver: read-only sqlite (self-hosted) or the
@@ -161,7 +208,7 @@ export async function GET(req: Request) {
   // datetime('unixepoch') (timestamps are raw epoch, formatted by fmtEpoch) and
   // no rowid (the tie-break is smart_account, which both backends have).
   return withReadDb(async (db) => {
-    if (!db) return NextResponse.json(emptyFeed());
+    if (!db) return NextResponse.json(await emptyFeed(tenant));
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
     let positions: PositionRow[] = [];
@@ -355,7 +402,7 @@ export async function GET(req: Request) {
       positions,
       trades,
       financials,
-      agent: identityOf(name),
+      agent: await identityOf(name, tenant),
       netContributionsUsdg,
       gasUsdg,
       gasUnpricedTrades,

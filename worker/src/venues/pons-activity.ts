@@ -124,12 +124,37 @@ export function tallyActivity(logs: readonly ActivityLog[]): Map<string, CurveAc
 }
 
 /**
- * Read every curve trade on the chain over a block window, in ONE query.
+ * How many blocks go in one `eth_getLogs`.
  *
- * No address filter, deliberately — that is what makes this affordable. Returns
- * null rather than an empty map when the node refuses, because "nobody traded"
- * and "I could not look" must not be the same answer: the first would silently
- * empty the funnel and make every launch look dead.
+ * THE NODE CAPS A RESPONSE AT 10,000 LOGS, and this query asks for BOTH sides
+ * of every curve trade on the chain. Measured 2026-08-30 over a 9,000-block
+ * window: buys alone 6,024, buys+sells over the cap — the node answers
+ * `-32000 logs matched by query exceeds limit of 10000` and the whole funnel
+ * goes empty. It is not a rate limit and not bad luck: it is deterministic
+ * above a certain level of launchpad activity, so it arrives for good the day
+ * the chain gets busy and never leaves.
+ *
+ * 3,000 gives roughly 3x headroom at that measured rate while keeping the
+ * window a caller asks for. Chunking rather than shrinking the window is what
+ * matters: `ACTIVITY_GATE` counts trades ABSOLUTELY over the window, so halving
+ * the window would silently tighten the gate ~2x and change which launches the
+ * page is even about.
+ */
+export const ACTIVITY_CHUNK_BLOCKS = 3_000n;
+
+/**
+ * Read every curve trade on the chain over a block window.
+ *
+ * No address filter, deliberately — that is what makes this affordable. Split
+ * into sequential sub-ranges so a busy launchpad cannot exceed the node's
+ * 10,000-log response cap; `tallyActivity` merges per curve and dedupes traders
+ * through a Set, so chunked input gives byte-identical output to one query.
+ *
+ * Returns null rather than an empty map when the node refuses, because "nobody
+ * traded" and "I could not look" must not be the same answer: the first would
+ * silently empty the funnel and make every launch look dead. That applies to a
+ * PARTIAL read too — one refused chunk means the tape has a hole in it, and a
+ * hole in the tape is a wrong trade count, not a smaller one.
  */
 export async function readCurveActivity(
   client: PublicClient,
@@ -139,18 +164,26 @@ export async function readCurveActivity(
   try {
     const head = await client.getBlockNumber();
     const from = head > span ? head - span : 0n;
-    const raw = (await client.request({
-      method: "eth_getLogs",
-      params: [
-        {
-          fromBlock: `0x${from.toString(16)}`,
-          toBlock: `0x${head.toString(16)}`,
-          // Both sides in one query. An array of topic0s is an OR at the node.
-          topics: [[PONS_BUY_TOPIC, PONS_SELL_TOPIC]],
-        },
-      ],
-    } as never)) as ActivityLog[];
-    return tallyActivity(raw);
+    const all: ActivityLog[] = [];
+    for (let lo = from; lo <= head; lo += ACTIVITY_CHUNK_BLOCKS) {
+      const hi = lo + ACTIVITY_CHUNK_BLOCKS - 1n > head ? head : lo + ACTIVITY_CHUNK_BLOCKS - 1n;
+      const raw = (await client.request({
+        method: "eth_getLogs",
+        params: [
+          {
+            fromBlock: `0x${lo.toString(16)}`,
+            toBlock: `0x${hi.toString(16)}`,
+            // Both sides in one query. An array of topic0s is an OR at the node.
+            topics: [[PONS_BUY_TOPIC, PONS_SELL_TOPIC]],
+          },
+        ],
+      } as never)) as ActivityLog[];
+      // A chunk at the cap means even 3,000 blocks was too wide — the tally
+      // would be silently short, so say nothing rather than something wrong.
+      if (raw.length >= 10_000) return null;
+      all.push(...raw);
+    }
+    return tallyActivity(all);
   } catch {
     return null;
   }

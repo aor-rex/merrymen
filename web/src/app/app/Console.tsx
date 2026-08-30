@@ -66,6 +66,15 @@ type DiscoveriesPayload = {
   fresh: FreshRow[];
   /** Not one market feed answered. Different from an empty market — see the route. */
   indexUnreachable: boolean;
+  /**
+   * Which of the three chain reads came back.
+   *
+   * Per-PAGE, not per-coin, because that is how they fail: the RPC refuses the
+   * burst and every card loses its symbol, logo and age at the same instant.
+   * Saying it once above the grid is the truth; printing "couldn't read this
+   * coin" on thirty cards would read as thirty broken coins.
+   */
+  chain: { launchpad: boolean; meta: boolean; facts: boolean; clock: boolean };
 };
 
 export default function Console() {
@@ -510,6 +519,15 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                 <>
                   {!disc ? (
                     <div className="empty-note">Reading the launchpad…</div>
+                  ) : disc.chain && !disc.chain.launchpad ? (
+                    // NOT "nothing launched". Pons runs at ~940 launches an
+                    // hour, so an empty list is never the likely explanation —
+                    // and the read that produces these rows fails on its own
+                    // terms (the node caps a log response at 10,000).
+                    <div className="empty-note">
+                      Couldn&rsquo;t read the launchpad just now — so this is what I don&rsquo;t know,
+                      not a quiet hour. It retries on its own.
+                    </div>
                   ) : disc.fresh.length === 0 ? (
                     <div className="empty-note">
                       Nothing launched in the last few minutes has anyone trading it. Pons runs at
@@ -518,6 +536,8 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                     </div>
                   ) : (
                     <div className="cards">
+                      {/* Said ONCE, above the grid — see DiscoveriesPayload.chain. */}
+                      {chainGap(disc) && <div className="readfail">{chainGap(disc)}</div>}
                       {disc.fresh.map((f) => (
                         <FreshCard key={f.token} f={f} reachable={reach.has(f.token.toLowerCase())} />
                       ))}
@@ -638,6 +658,28 @@ function TradeRow({ t }: { t: TradeRecord }) {
 // join lands we label by the humanized kind. Kept as a seam.
 function symbolish(t: TradeRecord): string {
   return t.kind === "vault-deposit" || t.kind === "vault-withdraw" ? "VAULT" : "TRADE";
+}
+
+/**
+ * What this read could NOT see, in one sentence, or "" when it saw everything.
+ *
+ * The three chain reads fail together as a wave — the node refuses the burst —
+ * so every card loses the same fields at the same moment. Naming the gap once
+ * is honest; a blank ticker and an italic "Published nothing about itself" on
+ * thirty cards is not, because that sentence is a claim about the COIN and the
+ * coin never said it.
+ */
+function chainGap(d: DiscoveriesPayload): string {
+  const c = d.chain;
+  if (!c) return ""; // a payload from before this field existed
+  const missing = [
+    !c.facts && "tickers",
+    !c.meta && "logos and links",
+    !c.clock && "ages",
+  ].filter(Boolean) as string[];
+  if (!missing.length) return "";
+  const list = missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} and ${missing[missing.length - 1]}`;
+  return `The chain turned down this read, so ${list} are missing below. The trade counts are real. It retries on its own.`;
 }
 
 /** "just now" / "4m ago", from unix SECONDS. */
@@ -832,7 +874,10 @@ function FreshCard({ f, reachable }: { f: FreshRow; reachable: boolean }) {
         <CoinArt logo={f.logo} symbol={f.symbol} />
         <div className="idc">
           <div className="tick">
-            <b>{f.symbol || "unnamed"}</b>
+            {/* The ADDRESS when the ticker could not be read, never "unnamed" —
+                that is a statement about the coin, and the coin has a name we
+                simply failed to fetch. The address is true and still useful. */}
+            <b>{f.symbol || short(f.token)}</b>
             {f.name && f.name !== f.symbol && <span className="nm">{f.name}</span>}
           </div>
           <div className="meta num">
@@ -855,11 +900,15 @@ function FreshCard({ f, reachable }: { f: FreshRow; reachable: boolean }) {
         </div>
       )}
 
+      {/* Three states, not two. "Published nothing about itself" is a CLAIM,
+          and it may only be made when the metadata read actually succeeded —
+          `bare` is now false when it did not, so an unread coin says nothing at
+          all rather than being accused of silence. */}
       {f.description ? (
         <p className="say">{f.description}</p>
-      ) : (
+      ) : f.bare ? (
         <p className="say none">Published nothing about itself.</p>
-      )}
+      ) : null}
 
       <footer>
         {f.twitter && (

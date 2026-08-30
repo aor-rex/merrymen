@@ -312,12 +312,21 @@ export async function PUT(req: Request) {
     // deliberately rather than imported: this runs in the web tier and the soul
     // module touches the filesystem. If the two ever disagree the worker wins
     // and silently keeps the old name, so the shapes must match exactly.
-    if (v === "" || v === null || v === undefined) {
+    //
+    // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
+    // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
+    // the shared regex admits internal double spaces — so "Little  John" was
+    // kept verbatim here and collapsed to "Little John" by the soul. The two
+    // then never agree, which makes `cfg.agentName !== getName()` true forever:
+    // harmless while the reconcile only ran on re-arm, an identity-file rewrite
+    // every tick once it runs unconditionally. Normalise once, at the door.
+    const norm = typeof v === "string" ? v.trim().replace(/\s+/g, " ") : v;
+    if (norm === "" || norm === null || norm === undefined) {
       setOrClear("agentName", undefined);
-    } else if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(v.trim())) {
+    } else if (typeof norm !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(norm)) {
       errors.push("name: letters and numbers to start, up to 24 characters");
     } else {
-      setOrClear("agentName", v.trim());
+      setOrClear("agentName", norm);
     }
   }
 

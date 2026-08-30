@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   ACTIVITY_GATE,
+  ACTIVITY_CHUNK_BLOCKS,
   MAX_ACTIVITY_BLOCKS,
   PONS_BUY_TOPIC,
   PONS_SELL_TOPIC,
@@ -127,5 +128,69 @@ describe("the window ceiling", () => {
   it("pins the gate at the measured sweet spot", () => {
     assert.equal(ACTIVITY_GATE.minTrades, 25);
     assert.equal(ACTIVITY_GATE.minTraders, 3);
+  });
+});
+
+/**
+ * THE 10,000-LOG CAP IS THE FAILURE THAT ACTUALLY ARRIVED.
+ *
+ * This query asks the node for BOTH sides of every curve trade on the chain
+ * with no address filter, which is what makes it affordable — and what makes it
+ * collide with the node's cap on a response. Measured against mainnet on
+ * 2026-08-30 over the 9,000-block window this module asks for:
+ *
+ *     launches          233 logs   fine
+ *     buys only       6,024 logs   fine
+ *     buys + sells      OVER CAP   -32000 "logs matched by query exceeds limit of 10000"
+ *
+ * The whole funnel then went empty and the page announced that nothing had
+ * launched — on a launchpad doing roughly 940 an hour. It is deterministic
+ * above a level of activity, so it arrives for good the day the chain gets
+ * busy, and the earlier calibration that picked 9,000 was measured on the
+ * buys-only half.
+ *
+ * The window is deliberately NOT shrunk to fix it: `ACTIVITY_GATE` counts trades
+ * absolutely over the window, so halving the window silently tightens the gate
+ * about twofold and changes which launches the page is even about. Chunking
+ * keeps the window and the gate's calibration intact, because `tallyActivity`
+ * merges per curve and dedupes traders through a Set — chunked input gives
+ * byte-identical output to one query.
+ */
+describe("the activity sweep survives a busy launchpad", () => {
+  it("splits the window into chunks well under the node's cap", () => {
+    assert.ok(ACTIVITY_CHUNK_BLOCKS > 0n);
+    assert.ok(
+      ACTIVITY_CHUNK_BLOCKS <= MAX_ACTIVITY_BLOCKS / 2n,
+      "a chunk must be meaningfully smaller than the window, or it is not chunking",
+    );
+    // At the measured rate (~6,024 buy logs per 9,000 blocks, and sells on top)
+    // a 3,000-block chunk sits at roughly a third of the cap.
+    assert.ok(ACTIVITY_CHUNK_BLOCKS <= 3_000n, "measured headroom needs chunks of 3,000 blocks or less");
+  });
+
+  it("keeps the full window — the gate is calibrated against it", () => {
+    // 25 trades and 3 traders is an ABSOLUTE count over the window. Shrinking
+    // the window would tighten the gate without anyone deciding to.
+    assert.equal(MAX_ACTIVITY_BLOCKS, 9_000n);
+    assert.equal(ACTIVITY_GATE.minTrades, 25);
+    assert.equal(ACTIVITY_GATE.minTraders, 3);
+  });
+
+  it("chunked input tallies identically to one query", () => {
+    // The property that makes chunking safe rather than merely smaller.
+    const logs = [
+      log(CURVE_A, PONS_BUY_TOPIC, 1, "0xa"),
+      log(CURVE_A, PONS_BUY_TOPIC, 2, "0xb"),
+      log(CURVE_A, PONS_SELL_TOPIC, 1, "0xc"),
+      log(CURVE_B, PONS_BUY_TOPIC, 1, "0xd"),
+    ];
+    const whole = tallyActivity(logs);
+    const chunked = tallyActivity([...logs.slice(0, 2), ...logs.slice(2)]);
+    assert.deepEqual(
+      [...whole.entries()].map(([k, v]) => [k, v.buys, v.sells, v.traders]),
+      [...chunked.entries()].map(([k, v]) => [k, v.buys, v.sells, v.traders]),
+    );
+    // And a trader seen in two chunks is still ONE trader.
+    assert.equal(whole.get(CURVE_A)!.traders, 2);
   });
 });

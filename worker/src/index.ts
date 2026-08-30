@@ -1323,6 +1323,32 @@ async function main() {
       active &&
       active.grant.smartAccount === grant.smartAccount &&
       active.grant.grantedAt === grant.grantedAt;
+
+    // RECONCILE THE NAME BEFORE THE SHORT-CIRCUIT, or it never happens.
+    //
+    // The reconcile used to sit below this early return, next to the re-arm. A
+    // name is in neither `connectionKey` nor `strategyKey` (settings.ts), so
+    // renaming changes nothing that forces a re-arm — and for an agent that is
+    // already armed, `unchanged` is true on every tick forever. The owner could
+    // save a name, watch the store accept it, and the soul would stay "Robin"
+    // for the life of the process. Settings is the durable SEED and the soul is
+    // the runtime seat, so the seed has to be able to reach the seat while the
+    // agent is running, not only when its grant changes.
+    //
+    // Guarded on a real difference, so the common tick does no work and writes
+    // nothing. Both sides are normalised the same way — the API stores soul-form
+    // now — which is what lets this converge after one write instead of
+    // rewriting the identity file every tick.
+    if (cfg.agentName) {
+      ensureSoul();
+      const want = cfg.agentName.trim().replace(/\s+/g, " ");
+      if (want && want !== getName()) {
+        const named = setName(want);
+        if (!named.ok) console.log(`[soul] refusing the configured name: ${named.reason}`);
+        else await setAgentName(await ensureAgent(grant), named.name);
+      }
+    }
+
     if (unchanged) return true;
 
     const chain = chainForId(grant.chainId);
@@ -1333,20 +1359,10 @@ async function main() {
     const bundlerUrl =
       cfg.bundlerUrl || (cfg.bundlerApiKey ? pimlicoBundlerUrl(grant.chainId, cfg.bundlerApiKey) : undefined);
     const agentId = await ensureAgent(grant);
-    // The soul's name is the source of truth — mirror it onto the roster.
+    // The soul's name is the source of truth — mirror it onto the roster. The
+    // configured name was reconciled into the soul above the short-circuit, so
+    // by here `getName()` is already what the owner asked for.
     ensureSoul();
-    // RECONCILE THE NAME the owner chose into the soul, then mirror as before.
-    //
-    // Settings is the durable SEED and the soul stays the runtime seat. Doing it
-    // this way round means every existing reader — the prompts, Telegram, the
-    // feed — keeps working untouched, while a name set in a browser survives a
-    // redeploy that wipes the container's filesystem. Until this existed, the
-    // only way to name an agent was the Telegram /name command, which is why
-    // every hosted agent is called Robin.
-    if (cfg.agentName && cfg.agentName !== getName()) {
-      const named = setName(cfg.agentName);
-      if (!named.ok) console.log(`[soul] refusing the configured name: ${named.reason}`);
-    }
     await setAgentName(agentId, getName());
 
     // Pimlico/Alchemy bundler URLs embed a chain id — a testnet bundler with a

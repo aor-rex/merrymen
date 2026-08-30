@@ -40,7 +40,10 @@ import {
  * adding the token in /settings and re-signing the grant.
  */
 
-export const revalidate = 120;
+// Dynamic, with an in-process single-flight memo below instead of ISR: this
+// route must be able to REFUSE to cache a degraded render, which a fixed
+// revalidate cannot do.
+export const dynamic = "force-dynamic";
 
 /** The same floor the worker's own screen uses, so the two agree on "worth showing". */
 const LIMITS = { minReserveUsd: 25_000, minVolume24hUsd: 50_000, minBuyers24h: 100 };
@@ -139,7 +142,40 @@ export interface FreshRow {
  * one chain-wide sweep of every curve trade, and one Multicall3 batch for the
  * survivors' metadata.
  */
-async function readFresh(): Promise<FreshRow[]> {
+/**
+ * Which of the three enrichment reads came back.
+ *
+ * These fail as a WAVE, not one coin at a time — the RPC refuses the burst and
+ * all three return nothing together — so the answer belongs to the page, not to
+ * a card. Observed in production on 2026-08-30: 28 rows with real trade counts
+ * and every enriched field blank, served for about two and a half minutes.
+ */
+export interface ChainStatus {
+  /**
+   * The launch scan and the trade sweep — the reads that produce the ROWS.
+   *
+   * Separate from the three below because it fails differently and worse: when
+   * this goes, there are no rows at all, and an empty list renders as "nothing
+   * launched in the last few minutes has anyone trading it" — a confident claim
+   * about a launchpad running at 940 launches an hour. Same mistake as `bare`,
+   * one level up.
+   */
+  launchpad: boolean;
+  /** The launcher's description, logo and socials (pons-meta). */
+  meta: boolean;
+  /** Symbol, name and curve progress (pons-card). */
+  facts: boolean;
+  /** The block clock that turns a block number into an age. */
+  clock: boolean;
+}
+
+/** Space out a burst: the reads are cheap, the RPC's tolerance for concurrency is not. */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function readFresh(): Promise<{ rows: FreshRow[]; chain: ChainStatus }> {
+  // `true` means "read it", so a total failure below reports three honest
+  // falses rather than three optimistic trues.
+  const chain: ChainStatus = { launchpad: false, meta: false, facts: false, clock: false };
   try {
     const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
     const W = MAX_ACTIVITY_BLOCKS;
@@ -150,50 +186,129 @@ async function readFresh(): Promise<FreshRow[]> {
     // A null activity map means the node refused, which is a different fact
     // from a quiet launchpad — showing nothing is right, inventing an empty
     // tape for every launch is not.
-    if (scan.failed || !activity) return [];
+    if (scan.failed || !activity) return { rows: [], chain };
+    chain.launchpad = true;
     const live = scan.launches.filter((l) => isActive(activity.get(l.curve.toLowerCase())));
-    // Three more reads for the whole page, not per coin: the launcher's claims,
-    // the chain's own symbol/name/curve-progress, and one block clock so age
-    // can be derived from a block number without asking per launch.
-    const [meta, facts, clock] = await Promise.all([
-      readTokenMeta(client as never, live.map((l) => l.token)),
-      readCardFacts(client as never, live),
-      readBlockClock(client as never),
-    ]);
-    return live
-      .map((l) => {
-        const a = activity.get(l.curve.toLowerCase())!;
-        const m = meta.get(l.token.toLowerCase());
-        const f = facts.get(l.token.toLowerCase());
-        return {
-          token: l.token,
-          curve: l.curve,
-          trades: a.buys + a.sells,
-          traders: a.traders,
-          description: m?.description ?? "",
-          twitter: m?.twitter ?? "",
-          telegram: m?.telegram ?? "",
-          website: m?.website ?? "",
-          bare: m ? m.bare : true,
-          symbol: f?.symbol ?? "",
-          name: f?.name ?? "",
-          logo: m?.logo ?? "",
-          ageSec: ageSecOf(clock, l.blockNumber),
-          progressBps: f?.progressBps ?? null,
-        };
-      })
-      // By distinct addresses, not trade count: 291 trades from 25 addresses is
-      // a different thing from 223 trades from 176, and only one of them looks
-      // like people.
-      .sort((x, y) => y.traders - x.traders);
+
+    // SEQUENTIAL, NOT Promise.all — and this is the one behavioural change here.
+    // These three used to fire as a burst immediately after two heavy log
+    // sweeps, and the whole burst is what the node refuses: all three come back
+    // empty together while the sweeps that preceded them succeeded. They cost
+    // ~700ms in total, so spacing them is nearly free, and the alternative
+    // (more retries) multiplies the burst that draws the refusal.
+    const meta = await readTokenMeta(client as never, live.map((l) => l.token));
+    chain.meta = meta.size > 0 || live.length === 0;
+    await sleep(120);
+    const facts = await readCardFacts(client as never, live);
+    chain.facts = facts.size > 0 || live.length === 0;
+    await sleep(120);
+    const clock = await readBlockClock(client as never);
+    chain.clock = clock !== null;
+
+    return {
+      chain,
+      rows: live
+        .map((l) => {
+          const a = activity.get(l.curve.toLowerCase())!;
+          const m = meta.get(l.token.toLowerCase());
+          const f = facts.get(l.token.toLowerCase());
+          return {
+            token: l.token,
+            curve: l.curve,
+            trades: a.buys + a.sells,
+            traders: a.traders,
+            description: m?.description ?? "",
+            twitter: m?.twitter ?? "",
+            telegram: m?.telegram ?? "",
+            website: m?.website ?? "",
+            // `bare` means "this launcher published NOTHING", which is a claim
+            // about the coin — so it may only be made when the read succeeded.
+            // It used to be `m ? m.bare : true`, which turned every unread coin
+            // into an accusation: the card said "Published nothing about
+            // itself" and "no socials" about coins that published plenty.
+            // readTokenMeta returns a MAP precisely so a caller can tell "read
+            // and empty" from "not read", and this threw that away.
+            bare: m ? m.bare : false,
+            symbol: f?.symbol ?? "",
+            name: f?.name ?? "",
+            logo: m?.logo ?? "",
+            ageSec: ageSecOf(clock, l.blockNumber),
+            progressBps: f?.progressBps ?? null,
+          };
+        })
+        // By distinct addresses, not trade count: 291 trades from 25 addresses is
+        // a different thing from 223 trades from 176, and only one of them looks
+        // like people.
+        .sort((x, y) => y.traders - x.traders),
+    };
   } catch {
-    return [];
+    return { rows: [], chain };
   }
 }
 
+interface Payload {
+  fetchedAt: number;
+  scanned: number;
+  indexUnreachable: boolean;
+  rows: DiscoveryRow[];
+  graduated: number;
+  fresh: FreshRow[];
+  chain: ChainStatus;
+  degraded: boolean;
+}
+
+/**
+ * One in-flight read at a time, and one result shared by every viewer.
+ *
+ * REPLACES `export const revalidate = 120`, which cached whatever it got —
+ * including a degraded render, which it then served for minutes. This is the
+ * same sharing with a say in what gets kept: a whole read is reused for two
+ * minutes, a degraded one for ten seconds.
+ *
+ * The single-flight part is not optional once the route is dynamic. The console
+ * polls this every 120s PER OPEN TAB; without it, every tab that misses fires
+ * two heavy log sweeps plus three enrichment reads into a keyless RPC — which is
+ * precisely the burst that makes the enrichment fail in the first place.
+ *
+ * A per-process memo is enough while `web` runs one replica (railway.json sets
+ * no replica count). Scale it and each replica keeps its own — still correct,
+ * just N times the upstream traffic.
+ */
+let inFlight: Promise<Payload> | null = null;
+let last: { at: number; payload: Payload } | null = null;
+const WHOLE_MS = 120_000;
+const DEGRADED_MS = 10_000;
+
+function sharedRead(): Promise<Payload> {
+  const ttl = last?.payload.degraded ? DEGRADED_MS : WHOLE_MS;
+  if (last && Date.now() - last.at < ttl) return Promise.resolve(last.payload);
+  if (inFlight) return inFlight;
+  inFlight = build()
+    .then((p) => {
+      last = { at: Date.now(), payload: p };
+      return p;
+    })
+    .finally(() => {
+      inFlight = null;
+    });
+  return inFlight;
+}
+
 export async function GET() {
+  const payload = await sharedRead();
+  return NextResponse.json(payload, {
+    headers: {
+      // Mirrors the memo above for any cache in front of us.
+      "Cache-Control": payload.degraded
+        ? "public, s-maxage=10, stale-while-revalidate=0"
+        : "public, s-maxage=120, stale-while-revalidate=240",
+    },
+  });
+}
+
+async function build(): Promise<Payload> {
   const nowSec = Math.floor(Date.now() / 1000);
-  const fresh = await readFresh();
+  const { rows: fresh, chain } = await readFresh();
   const byToken = new Map<string, GeckoPool>();
   // Every feed refused is a different fact from every feed being empty, and
   // only one of them means the market is quiet. This API is keyless and
@@ -221,20 +336,29 @@ export async function GET() {
   // launchpad is the thing this page exists to surface.
   rows.sort((a, b) => Number(b.graduated) - Number(a.graduated) || (b.change24hPct ?? 0) - (a.change24hPct ?? 0));
 
-  return NextResponse.json(
-    {
-      fetchedAt: nowSec,
-      scanned: all.length,
-      // False only when NOT ONE feed answered. A partial read is still a read.
-      indexUnreachable: reached === 0 && asked > 0,
-      rows,
-      graduated: rows.filter((r) => r.graduated).length,
-      fresh,
-    },
-    {
-      // 120s, not the 30s /api/market uses: this API is keyless and
-      // rate-limited, and every viewer shares one server-side fetch.
-      headers: { "Cache-Control": "public, s-maxage=120, stale-while-revalidate=240" },
-    },
-  );
+  // A render worth keeping is one where every source answered. Anything less
+  // gets a short life, so the next viewer re-asks instead of inheriting it.
+  //
+  // CACHING IS WHAT TURNED A BLINK INTO AN OUTAGE. The enrichment reads fail as
+  // an occasional wave and recover in seconds, but a degraded render used to be
+  // cached like any other: measured in production, one bad render was served
+  // `x-nextjs-cache: HIT` for six consecutive polls — about two and a half
+  // minutes of every card claiming its coin had published nothing. Only the
+  // cache made it last that long. A render worth keeping is one where every
+  // source answered; anything less gets a short life, so the next viewer
+  // re-asks instead of inheriting it.
+  const degraded =
+    !chain.launchpad || !chain.meta || !chain.facts || !chain.clock || (reached === 0 && asked > 0);
+
+  return {
+    fetchedAt: nowSec,
+    scanned: all.length,
+    // False only when NOT ONE feed answered. A partial read is still a read.
+    indexUnreachable: reached === 0 && asked > 0,
+    rows,
+    graduated: rows.filter((r) => r.graduated).length,
+    fresh,
+    chain,
+    degraded,
+  };
 }

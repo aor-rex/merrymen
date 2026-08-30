@@ -271,6 +271,7 @@
 .sc-root .soc { font-family: var(--mono); font-size: 10.5px; color: var(--tx-2); border: 1px solid var(--line-2); border-radius: 5px; padding: 3px 8px; transition: color .16s, border-color .16s; }
 .sc-root a.soc:hover { color: var(--lime); border-color: color-mix(in srgb, var(--lime) 40%, var(--line-2)); }
 .sc-root .soc.mute { color: var(--faint); border-color: transparent; padding-left: 0; }
+.sc-root .readfail { grid-column: 1 / -1; font-size: 12.5px; line-height: 1.5; color: var(--gold); background: color-mix(in srgb, var(--gold) 7%, var(--panel)); border: 1px solid color-mix(in srgb, var(--gold) 26%, var(--line)); border-radius: var(--r-sm); padding: 10px 13px; }
 .sc-root .coins-foot { margin: 0; font-size: 11.5px; line-height: 1.55; color: var(--faint); max-width: 68ch; }
 
 /* ── the mascot ──────────────────────────────────────────────────────────
