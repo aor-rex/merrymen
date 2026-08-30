@@ -67,6 +67,39 @@ You verify; it trades.
 
 ---
 
+## Check it yourself
+
+Two commands. The second reads nothing but the file you hand it — not
+`~/.merrymen`, not the settings, not the machine that produced it — so it is
+checking the record against the **chain**, not against the operator.
+
+```bash
+npm run export -- --agent <address> > ledger.jsonl
+```
+
+```bash
+npm run verify -- ledger.jsonl
+```
+
+`verify` re-fetches every receipt from a public RPC and re-derives what moved
+from the logs, using its own implementation rather than sharing code with the
+writer — so a bug in the writer cannot be confirmed by the reader. It returns
+**INDETERMINATE**, not PASS, when a transaction cannot be refetched: a check it
+could not run is not a check that passed.
+
+Two limits, said out loud rather than discovered:
+
+- **Epoch 1 is not exportable.** The rows before flow tracking existed cannot be
+  reconciled against deposits, so the exportable record begins at the epoch
+  boundary opened by the first arm after that. `export` emits no records for it
+  and says so on stderr, rather than presenting rows it cannot stand behind.
+- **A `Transfer` log is written by the token contract.** The verifier and the
+  writer are independent implementations, but they read the same source, so a
+  lying token would be confirmed by both. The post-buy `balanceOf` check
+  (`worker/src/delivery.ts`) is what makes their agreement mean something.
+
+---
+
 ## The workflow, end to end
 
 1. **Install** it (one line — installs Node too if you need it).
