@@ -49,6 +49,16 @@ export interface MerrymenSettings {
   /** Model id for the selected provider. Blank = the provider's default. Accepts
    * vendor ids with slashes/case (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo). */
   llmProviderModel?: string;
+  /**
+   * The research browser service — private-network URL and shared token.
+   *
+   * HOUSE keys, not tenant settings: this is one shared Chromium reached over
+   * Railway private networking, the same shape as the bundler. A tenant must not
+   * be able to repoint it, because whatever it points at gets fetched by a real
+   * browser sitting inside our network.
+   */
+  browserUrl?: string;
+  browserToken?: string;
   /** Rialto integrator key — enables the full quote→swap leg. */
   rialtoApiKey?: string;
   /** Header name the Rialto API expects the key in (their docs say). */
@@ -333,6 +343,8 @@ export const HOUSE_KEY_FIELDS = [
   "virtualsApiKey",
   "telegramTranscribeKey",
   "telegramTranscribeBase",
+  "browserUrl",
+  "browserToken",
 ] as const;
 
 /**

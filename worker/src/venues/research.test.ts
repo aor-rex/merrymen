@@ -151,3 +151,26 @@ describe("signalsFrom turns launcher-written text into facts", () => {
     assert.ok(!/legit|safe|scam|rug/i.test(line));
   });
 });
+
+/**
+ * THE BROWSER IS HOUSE INFRASTRUCTURE, NOT A TENANT SETTING.
+ *
+ * One shared Chromium on the private network, the same shape as the bundler. A
+ * tenant able to set `browserUrl` could point a real browser sitting inside our
+ * network at anything — and the SSRF guard, which refuses `*.railway.internal`
+ * for the URL being READ, says nothing about where the SERVICE itself lives.
+ */
+describe("browser config cannot be set by a tenant", () => {
+  it("both fields are house keys", async () => {
+    const { HOUSE_KEY_FIELDS, HOSTED_FORBIDDEN_SETTING_FIELDS } = await import(
+      "../../../packages/core/src/index"
+    );
+    for (const f of ["browserUrl", "browserToken"]) {
+      assert.ok((HOUSE_KEY_FIELDS as readonly string[]).includes(f), `${f} must be a house key`);
+      assert.ok(
+        (HOSTED_FORBIDDEN_SETTING_FIELDS as readonly string[]).includes(f),
+        `${f} must be stripped from every hosted settings write`,
+      );
+    }
+  });
+});

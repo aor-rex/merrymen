@@ -72,6 +72,8 @@ export interface ResolvedConfig {
   discoveryIntervalMin: number;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
   trencherLiveEnabled: boolean;
+  browserUrl: string | undefined;
+  browserToken: string | undefined;
   scoutEnabled: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. */
   scoutBudgetUsdg: number;
@@ -283,6 +285,8 @@ export function mergeSettings(
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
+    browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
+    browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
     scoutBudgetUsdg: num(file.scoutBudgetUsdg, env.MERRYMEN_SCOUT_BUDGET_USDG, d.scoutBudgetUsdg, 0, 1_000_000),
     scoutPerTokenUsdg: num(file.scoutPerTokenUsdg, env.MERRYMEN_SCOUT_PER_TOKEN_USDG, d.scoutPerTokenUsdg, 0, 1_000_000),
