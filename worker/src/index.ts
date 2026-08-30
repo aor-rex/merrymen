@@ -59,7 +59,15 @@ import {
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
-import { createAgentExecutor, type AgentExecutor, type ExecutionResult } from "./executor";
+import {
+  createAgentExecutor,
+  UserOpReverted,
+  UserOpUnresolved,
+  type AgentExecutor,
+  type Call,
+  type ExecuteHooks,
+  type ExecutionResult,
+} from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { findOrphanOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
@@ -1839,6 +1847,16 @@ async function main() {
       inFlightSpentUsdg -= reserved.spendUsdg;
       reserved = null;
     };
+    /**
+     * The reservation still held, for the one path that must CONVERT it rather
+     * than drop it. Read through a call on purpose: `reserved` is only ever
+     * assigned inside the two closures above, so at any point in the body
+     * TypeScript's control-flow analysis has narrowed it to its `null`
+     * initializer and `if (reserved)` resolves to `never`. Both other readers
+     * (recordTrade) sit inside closures, where the narrowing resets — this
+     * reader does not.
+     */
+    const heldReservation = () => reserved as { ops: number; spendUsdg: bigint } | null;
     // Every trade this intent writes — approved, rejected, paper, landed, reverted —
     // carries the same decision link, so the ledger is joinable to the reasoning.
     // Writing the row is also the moment a reservation becomes settled fact.
@@ -2171,8 +2189,62 @@ async function main() {
     // Declared OUTSIDE the try so the revert path can still record it — the
     // quote is what makes a failed trade worth anything after the fact.
     let sim: Pick<TradeRow, "sim_quote_out" | "sim_min_out" | "sim_fee_tier" | "sim_gas"> = {};
+    // Whether the pre-broadcast row is actually in the ledger. Declared out here
+    // with sim, and for the same reason: the path that reads it is the catch.
+    let submittedRow = false;
     try {
       let exec: ExecutionResult;
+      /**
+       * Every op goes out through here, so the durable pre-broadcast write
+       * cannot be forgotten at one of the seven call sites.
+       *
+       * WHAT IT FIXES. Nothing was written between sendUserOperation and
+       * recordTrade — a window spanning a receipt wait, a network price call
+       * and a DB round trip — so a SIGTERM from a Railway redeploy in that
+       * window left an op that had LANDED with no ledger row and no record of
+       * its hash. inflight-reconcile sweeps those, but only at the next arm,
+       * and only ones that succeeded.
+       *
+       * The row is written as 'submitted', which is not a new vocabulary word:
+       * the store already defines it as committed-but-unresolved and already
+       * counts it on the live rail, so an op in flight is charged against the
+       * caps from the moment it leaves. The outcome UPDATES this row rather
+       * than inserting beside it (see addTrade), so one operation is one row.
+       *
+       * Deliberately NOT routed through recordTrade: that closure refreshes and
+       * RELEASES the budget reservation, which must happen exactly once, when
+       * the op is done. Releasing it here would drop the charge for the whole
+       * in-flight window — the unsafe direction, and the thing this is for.
+       */
+      const submitHooks: ExecuteHooks = {
+        onSubmitted: async (userOpHash) => {
+          const wrote = await addTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: tradeTarget,
+            sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
+            buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+            amount_usdg: usdgNum(notional),
+            user_op_hash: userOpHash,
+            status: "submitted",
+            decision_id,
+            ...sim,
+          });
+          // A failed write here is not fatal — the op is already sent and the
+          // outcome path still records it. It IS worth saying, because the
+          // protection this hook exists to provide is the thing that just
+          // failed, and the next crash would be unrecoverable in the old way.
+          submittedRow = wrote;
+          if (!wrote) {
+            void addEvent(
+              agentId,
+              "err",
+              `couldn't record ${userOpHash} before broadcast — this op is in flight with no durable row`,
+            );
+          }
+        },
+      };
+      const send = (calls: Call[]) => executor.execute(calls, submitHooks);
       // Fill economics for cost basis. Computed from the pre-trade quote here as
       // a FALLBACK, then replaced with the receipt's real amounts once the op
       // settles (see below). basis_source records which one we ended up with,
@@ -2350,7 +2422,7 @@ async function main() {
           minAmountOut: minOut,
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
-        exec = await executor.execute(calls);
+        exec = await send(calls);
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
             ? "v4 (adapter)"
@@ -2518,7 +2590,7 @@ async function main() {
             args: [router, intent.sellAmountRaw],
           }),
         };
-        exec = await executor.execute([approve, { to: quote.to, value: 0n, data: quote.data }]);
+        exec = await send([approve, { to: quote.to, value: 0n, data: quote.data }]);
       } else if (intent.kind === "swap") {
         // Rialto venue without an API key: approval leg only until onboarding;
         // swap calldata comes from that API. Bundler estimation still simulates.
@@ -2527,7 +2599,7 @@ async function main() {
           functionName: "approve",
           args: [swapRouterFor(cfg), intent.sellAmountRaw],
         });
-        exec = await executor.execute([{ to: intent.sellToken, value: 0n, data }]);
+        exec = await send([{ to: intent.sellToken, value: 0n, data }]);
       } else if (intent.kind === "transfer") {
         // USDG leaving the wall — user-confirmed in chat, amount capped by the
         // grant's on-chain transfer permission AND the per-trade/daily caps
@@ -2537,14 +2609,14 @@ async function main() {
           functionName: "transfer",
           args: [intent.recipient, intent.amountUsdg],
         });
-        exec = await executor.execute([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
+        exec = await send([{ to: CASH.USDG as `0x${string}`, value: 0n, data }]);
       } else if (intent.kind === "vault-deposit") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
           functionName: "deposit",
           args: [intent.amountUsdg, executor.address],
         });
-        exec = await executor.execute([
+        exec = await send([
           {
             to: CASH.USDG as `0x${string}`,
             value: 0n,
@@ -2562,7 +2634,7 @@ async function main() {
           functionName: "withdraw",
           args: [intent.amountUsdg, executor.address, executor.address],
         });
-        exec = await executor.execute([
+        exec = await send([
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
       } else if (intent.kind === "curve-trade") {
@@ -2590,7 +2662,7 @@ async function main() {
         // The minimum is computed from the same quote the caps judged, with the
         // owner's slippage tolerance — the adapter enforces it against the
         // account's own balance, so this number is the whole protection.
-        exec = await executor.execute(
+        exec = await send(
           buildCurveTradeCalls({
             adapter: sealed,
             curve: intent.curve,
@@ -2736,21 +2808,70 @@ async function main() {
         if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[execute] ${intent.kind} failed:`, msg);
+
+      // ── WE DO NOT KNOW ──────────────────────────────────────────────────
+      // The op was submitted and its receipt could not be read. This state had
+      // no word, and its absence was a live correctness bug: a receipt-wait
+      // TIMEOUT does not match /reverted on-chain/, so it fell into the branch
+      // below — told the owner "failed before submit" (false), wrote
+      // status 'reverted' (an assertion about the chain we had not earned), and
+      // REFUNDED the budget, so the day's spend under-counted by exactly that
+      // op's notional. Three wrong answers to a question we could not answer.
+      //
+      // So: keep the reservation (the money may well have moved), leave the
+      // pre-broadcast 'submitted' row exactly as it is, and say so. The row
+      // already carries the hash, which is what makes it recoverable — by the
+      // arm-time reconciler, or by anyone with a block explorer.
+      if (e instanceof UserOpUnresolved) {
+        lastTradeOutcome = { status: "submitted", rejectRule: "receipt-unresolved" };
+        // KEEP THE SPEND COUNTED. `finally` below releases the reservation
+        // unconditionally — it has to, an unreleased op is charged forever — so
+        // "just don't release it" is not available. The charge has to move from
+        // the reservation into a place that survives, and there are exactly two
+        // such places depending on whether the pre-broadcast row landed.
+        if (submittedRow) {
+          // It is in the ledger as 'submitted', which counts on the live rail.
+          // Re-read, THEN release: the same order recordTrade uses, and
+          // load-bearing for the same reason — refreshBudget must see the row
+          // before the reservation is dropped, or the op is missed by both.
+          await refreshBudget(agentId);
+        } else {
+          // The durable write failed too. Book the reservation's own figures
+          // straight into the settled counters: they are the only record of
+          // this op left in the process, and losing them loosens the cap.
+          const held = heldReservation();
+          if (held) {
+            settledSpentUsdg += held.spendUsdg;
+            settledOps += held.ops;
+          }
+        }
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "warn",
+          `${intent.kind} was SUBMITTED and its receipt could not be read (${e.userOpHash}). ` +
+            `This is not a revert — the operation may have landed. It stays counted against today's caps ` +
+            `and will be resolved from the chain. Reason: ${msg.slice(0, 140)}`,
+        );
+        return;
+      }
+
       // Roll back the optimistic reservation — the money didn't move. The
       // 'reverted' row written below goes through recordTrade, which would
       // release it anyway; doing it here keeps the counters honest for the
       // window in between, and releaseBudget is idempotent.
       releaseBudget();
-      const msg = e instanceof Error ? e.message : String(e);
-      // Distinguish a genuine on-chain revert (executor threw "reverted on-chain…")
-      // from a failure BEFORE submission (bundler/RPC/gas error), so the user isn't
-      // told "reverted on-chain" for something that never reached the chain. The
-      // short reason rides on reject_rule (the notifier + dashboard already read it).
-      const onChain = /reverted on-chain/i.test(msg);
+      // A genuine on-chain revert vs a failure BEFORE submission (bundler, RPC,
+      // gas), so the user isn't told "reverted on-chain" for something that
+      // never reached the chain. Typed now, not matched on a message: the
+      // string test was how the timeout above ended up in the wrong branch, and
+      // every future error phrasing would have found the same hole.
+      const onChain = e instanceof UserOpReverted;
       const reason = onChain
         ? msg.replace(/\s*\(0x[0-9a-fA-F]+\)\s*$/, "").slice(0, 90)
         : `couldn't submit: ${msg.replace(/\s+/g, " ").slice(0, 80)}`;
-      console.error(`[execute] ${intent.kind} failed:`, msg);
       await addEvent(agentId, "err", `${intent.kind} ${onChain ? "reverted on-chain" : "failed before submit"}: ${msg.slice(0, 200)}`);
       await recordTrade({
         agent_id: agentId,
@@ -2759,6 +2880,9 @@ async function main() {
         sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
         buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
         amount_usdg: usdgNum(notional),
+        // Resolves the pre-broadcast row in place when there is one — a revert
+        // has a hash; a failure before submit does not, and inserts.
+        ...(onChain ? { user_op_hash: e.userOpHash } : {}),
         status: "reverted",
         reject_rule: reason,
         // KEEP the simulation. This row is the single most informative one in

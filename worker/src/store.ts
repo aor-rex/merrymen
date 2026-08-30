@@ -1091,6 +1091,63 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
     // context) without being part of the tamper-evident record.
     const moved = row.status === "landed" || row.status === "paper";
     const writeRow = async (db: Db) => {
+      // RESOLVE THE PRE-BROADCAST ROW, if there is one.
+      //
+      // executor.execute writes a 'submitted' row the instant the op leaves,
+      // before the receipt wait, so an unclean death cannot lose the hash. The
+      // outcome then arrives HERE, and inserting would leave two rows for one
+      // operation — the second of which counts against the daily cap twice.
+      // So the placeholder is updated in place, and only ever from 'submitted'.
+      //
+      // Scoped to (agent_id, user_op_hash, status='submitted') on purpose: a
+      // hash is unique to an operation, and the status clause means a settled
+      // row can never be rewritten by a late duplicate. No match falls through
+      // to the INSERT below, which is the ordinary path for every row that had
+      // no in-flight phase — rejections, paper fills, submit failures.
+      if (row.user_op_hash) {
+        const res = await db
+          .prepare(
+            `UPDATE trades
+                SET kind = ?, target = ?, sell_token = ?, buy_token = ?, amount_usdg = ?, tx_hash = ?,
+                    status = ?, reject_rule = ?, sim_quote_out = ?, sim_min_out = ?, sim_fee_tier = ?,
+                    sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
+                    realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
+                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?
+              WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
+          )
+          .run(
+            row.kind,
+            row.target,
+            row.sell_token ?? null,
+            row.buy_token ?? null,
+            row.amount_usdg,
+            row.tx_hash ?? null,
+            row.status,
+            row.reject_rule ?? null,
+            row.sim_quote_out ?? null,
+            row.sim_min_out ?? null,
+            row.sim_fee_tier ?? null,
+            row.sim_gas ?? null,
+            row.decision_id ?? null,
+            row.fill_side ?? null,
+            row.fill_qty_raw ?? null,
+            row.fill_price_usd ?? null,
+            row.realized_pnl_usdg ?? null,
+            row.basis_source ?? null,
+            row.order_id ?? null,
+            row.settlement_status ?? null,
+            row.gas_wei ?? null,
+            row.fill_slippage_bps ?? null,
+            row.fill_cash_usdg ?? null,
+            row.gas_usdg ?? null,
+            row.agent_id,
+            row.user_op_hash,
+          );
+        // The epoch is deliberately NOT rewritten: the row belongs to the epoch
+        // it was submitted in, and moving it would make the export's boundary
+        // disagree with the chain's ordering.
+        if (res.changes > 0) return;
+      }
       await db
       .prepare(
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
