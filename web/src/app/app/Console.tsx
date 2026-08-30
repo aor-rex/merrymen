@@ -41,6 +41,13 @@ type DiscoveryRow = {
   ageDays: number | null;
   graduated: boolean;
   onCurve: boolean;
+  /**
+   * What the agent made of this coin, or null for "passed over" / "no model".
+   *
+   * A READING, never a permission. The wall admits only assets sealed into a
+   * signature, so nothing said here can widen what the agent may trade.
+   */
+  verdict: { conviction: number; reason: string } | null;
 };
 type FreshRow = {
   token: string;
@@ -75,6 +82,8 @@ type DiscoveriesPayload = {
    * coin" on thirty cards would read as thirty broken coins.
    */
   chain: { launchpad: boolean; meta: boolean; facts: boolean; clock: boolean };
+  /** Why nothing carries a verdict, when nothing does. null = it chose none. */
+  verdictsWhy: "no-model" | "model-failed" | null;
 };
 
 export default function Console() {
@@ -566,6 +575,13 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                     <div className="empty-note">Nothing clearing the floor right now.</div>
                   ) : (
                     <div className="cards">
+                      {disc.verdictsWhy && (
+                        <div className="readfail">
+                          {disc.verdictsWhy === "no-model"
+                            ? "No model is wired up here, so nothing below has been looked at — these are the market’s numbers, not my opinion."
+                            : "I tried to weigh these and the model turned me down, so no verdicts below. It retries on its own."}
+                        </div>
+                      )}
                       {disc.rows.map((r) => (
                         <MarketCard key={r.token} r={r} reachable={reach.has(r.token.toLowerCase())} />
                       ))}
@@ -973,6 +989,20 @@ function MarketCard({ r, reachable }: { r: DiscoveryRow; reachable: boolean }) {
           {r.onCurve ? "pre-graduation" : compactUsd(r.reserveUsd)}
         </span>
       </div>
+
+      {/* THE AGENT'S OWN LINE, on the coin it is about.
+          Conviction is an ORDERING — "look here first" — never a size and never
+          a permission, so it renders as marks rather than a score out of five
+          that would read like a rating. A coin with no verdict was passed over
+          or never judged; saying nothing is the honest rendering of that. */}
+      {r.verdict && (
+        <div className="verdict">
+          <span className="pips" aria-label={`conviction ${r.verdict.conviction} of 5`}>
+            {"▮".repeat(Math.max(1, Math.min(5, r.verdict.conviction)))}
+          </span>
+          <span className="vsay">{r.verdict.reason}</span>
+        </div>
+      )}
 
       <footer>
         <span className="soc mute">{r.venue}</span>

@@ -17,6 +17,10 @@ import {
   readBlockClock,
   ageSecOf,
 } from "../../../../../worker/src/venues/pons-card";
+import { resolveConfig } from "../../../../../worker/src/settings";
+import { resolveLlm } from "../../../../../worker/src/llm";
+import { createMemecoinScout } from "../../../../../worker/src/strategist/memecoin-scout";
+import { researchCoins, scoutFieldsFor } from "../../../../../worker/src/strategist/coin-research";
 
 /**
  * What is trading on this chain, for the dashboard.
@@ -172,6 +176,63 @@ export interface ChainStatus {
 /** Space out a burst: the reads are cheap, the RPC's tolerance for concurrency is not. */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Rank the screened set with the same scout the worker uses.
+ *
+ * Optionally researches first, when a browser is configured on THIS service —
+ * the signals then reach the model exactly as they do in the worker. Absent a
+ * browser it ranks on numbers alone, which is the worker's behaviour too.
+ *
+ * Never throws: a page that cannot form an opinion still shows the market. And
+ * with no model configured it returns no picks at all rather than a default
+ * opinion — "nothing has been vetted" is the honest answer there, not
+ * "everything looks fine".
+ */
+async function rankForDisplay(
+  kept: readonly GeckoPool[],
+  nowSec: number,
+): Promise<{
+  picks: { pool: GeckoPool; conviction: number; reason: string }[];
+  /**
+   * Why there are no verdicts, when there are none.
+   *
+   * "no-model", "model-failed" and "chose nothing" are three different facts and
+   * only the last is an opinion. The scout fails CLOSED on a provider error —
+   * correctly, since its whole job is to cut a list down — but that makes an
+   * outage indistinguishable from a considered pass, and a page showing no
+   * verdicts would read as "the agent looked and liked nothing" either way.
+   * That is the same silent-failure shape as the coin cards and the market
+   * index, so it gets the same treatment.
+   */
+  why?: "no-model" | "model-failed";
+}> {
+  if (!kept.length) return { picks: [] };
+  let creds;
+  let cfg;
+  try {
+    cfg = resolveConfig();
+    creds = resolveLlm(cfg);
+  } catch {
+    return { picks: [], why: "no-model" };
+  }
+  if (!creds) return { picks: [], why: "no-model" };
+  try {
+
+    let research: ReadonlyMap<string, ReturnType<typeof scoutFieldsFor>> | undefined;
+    if (cfg.browserUrl && cfg.browserToken) {
+      const client = createPublicClient({ transport: http("https://rpc.mainnet.chain.robinhood.com") });
+      const found = await researchCoins(kept, {
+        client: client as never,
+        browser: { baseUrl: cfg.browserUrl, token: cfg.browserToken },
+      });
+      research = new Map([...found].map(([k, r]) => [k, scoutFieldsFor(r)]));
+    }
+    return await createMemecoinScout(creds).rank(kept, nowSec, research);
+  } catch {
+    return { picks: [] };
+  }
+}
+
 async function readFresh(): Promise<{ rows: FreshRow[]; chain: ChainStatus }> {
   // `true` means "read it", so a total failure below reports three honest
   // falses rather than three optimistic trues.
@@ -254,6 +315,14 @@ interface Payload {
   graduated: number;
   fresh: FreshRow[];
   chain: ChainStatus;
+  /**
+   * Why no coin carries a verdict, when none does.
+   *
+   * null is a real opinion — the scout looked and picked nothing, which the
+   * prompt says is often the right answer. A value means it could not look, and
+   * the page must not render that as a considered pass.
+   */
+  verdictsWhy: "no-model" | "model-failed" | null;
   degraded: boolean;
 }
 
@@ -331,7 +400,35 @@ async function build(): Promise<Payload> {
   const all = [...byToken.values()];
   const { kept } = screenPools(all, LIMITS);
 
-  const rows = kept.map((p) => toRow(p, nowSec));
+  // ── THE AGENT'S OWN VERDICT, FORMED HERE ────────────────────────────────
+  //
+  // Server-side for the same reason the screen above is: a worker child has no
+  // DATABASE_URL (the orchestrator strips it), so it writes its ledger to sqlite
+  // in its own container and NOTHING it decides can be read by this service.
+  // A verdict panel fed from `decisions` would be permanently empty on
+  // app.merrymen.dev — the exact failure this route's header was written about.
+  //
+  // So the same model that ranks candidates in the worker ranks them again
+  // here, on the same screened set, and the answer travels with the row. It is
+  // one LLM call per render, shared by every viewer through the memo above.
+  //
+  // This is a READING, not a permission. Nothing here can authorise a trade:
+  // the wall only admits assets sealed into a signature, and the scout is
+  // structurally incapable of naming a token it was not offered.
+  const scoutRes = await rankForDisplay(kept, nowSec);
+  const verdictsWhy = scoutRes.why ?? null;
+  const verdictByToken = new Map<string, { conviction: number; reason: string }>();
+  for (const pick of scoutRes.picks) {
+    verdictByToken.set(pick.pool.tokenAddress.toLowerCase(), {
+      conviction: pick.conviction,
+      reason: pick.reason,
+    });
+  }
+
+  const rows = kept.map((p) => ({
+    ...toRow(p, nowSec),
+    verdict: verdictByToken.get(p.tokenAddress.toLowerCase()) ?? null,
+  }));
   // Graduated first, then by 24h move: a coin that just made it off the
   // launchpad is the thing this page exists to surface.
   rows.sort((a, b) => Number(b.graduated) - Number(a.graduated) || (b.change24hPct ?? 0) - (a.change24hPct ?? 0));
@@ -359,6 +456,10 @@ async function build(): Promise<Payload> {
     graduated: rows.filter((r) => r.graduated).length,
     fresh,
     chain,
+    // Null means the scout looked and picked nothing, which is a real and often
+    // correct answer. A value means it could not look at all — and that must
+    // not read on the page as a considered pass.
+    verdictsWhy,
     degraded,
   };
 }

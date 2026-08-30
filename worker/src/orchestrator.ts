@@ -45,6 +45,8 @@ import { getGrantStore } from "./grant-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
+import { makePgDb, translateSchema } from "./db";
+import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -345,6 +347,48 @@ export async function reconcile(): Promise<void> {
   }
 }
 
+
+/**
+ * Carry every running child's ledger up to the shared database.
+ *
+ * The orchestrator is the only process that can: it holds DATABASE_URL (which
+ * children deliberately do not) and it knows where each child's home is. See
+ * ledger-mirror.ts for why this exists at all — without it the hosted dashboard
+ * shows no tape, no positions and no reasoning, whatever the fleet is doing.
+ *
+ * Best-effort by design. A tenant whose ledger is mid-write or unreadable is a
+ * tenant whose dashboard lags a tick; it is never a reason to stop supervising
+ * the fleet, which is this process's actual job.
+ */
+async function mirrorLedgers(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url || children.size === 0) return;
+  let shared;
+  try {
+    shared = await makePgDb(url);
+    await shared.exec(translateSchema(MIRROR_STATE_DDL));
+  } catch (e) {
+    log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  for (const tenant of [...children.keys()]) {
+    const child = openChildLedger(childHome(tenant));
+    if (!child) continue;
+    try {
+      const r = await mirrorTenant({ tenant, child, shared });
+      const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
+      if (n > 0) {
+        const detail = Object.entries(r.copied)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(", ");
+        log(`ledger mirror: ${tenant} +${n} rows (${detail})`);
+      }
+    } catch (e) {
+      log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
 /** SIGKILL-and-restart any child whose heartbeat has gone stale past the threshold. */
 export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   if (stopping) return;
@@ -410,6 +454,7 @@ export async function runOrchestrator(): Promise<void> {
     } else {
       await reconcile();
       watchdog();
+      await mirrorLedgers();
     }
     await new Promise((r) => setTimeout(r, RECONCILE_MS));
   }

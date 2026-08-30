@@ -99,6 +99,15 @@ export interface ScoutResult {
    * would hide the one symptom worth alerting on.
    */
   ignored: string[];
+  /**
+   * The model could not be reached or refused.
+   *
+   * Failing closed is right — this step exists to CUT a list down, so an
+   * unranked list must not pass through. But closed-because-broken and
+   * closed-because-nothing-was-worth-picking are different facts, and without
+   * this flag a provider outage reads on every surface as a considered pass.
+   */
+  failed?: boolean;
 }
 
 /** Project pools into the model's view. Index is position in `pools`. */
@@ -173,6 +182,17 @@ absence of any effort is itself informative:
   information, NOT as a bad sign — most coins in any pass are not researched.
 
 conviction is 1..5 and is an ordering, not a size: 5 means look here first, not buy more.`;
+
+/**
+ * How many candidates the model is shown at once.
+ *
+ * Not taste: Groq free tier caps qwen3.8-27b at 8,000 tokens a MINUTE, and 31
+ * pretty-printed candidates asked for 11,081 — a 413 on every real-sized list,
+ * which failed closed and read as "nothing was worth picking". Twenty compact
+ * candidates plus this system prompt and the output reservation sit inside that
+ * with room to spare.
+ */
+export const SCOUT_MAX_CANDIDATES = 20;
 
 const RANK_TOOL = {
   name: "rank_candidates",
@@ -272,20 +292,50 @@ export function createMemecoinScout(creds: LlmCreds): MemecoinScout {
     name: `${creds.provider}:${creds.model}`,
     async rank(pools, nowSec, research) {
       if (pools.length === 0) return { picks: [], passed: [], ignored: [] };
-      const candidates = toScoutCandidates(pools, nowSec, research);
+      // TRIM BEFORE ASKING. Measured against Groq's free tier: 31 candidates
+      // pretty-printed asked for 11,081 tokens against an 8,000/minute limit,
+      // so the scout returned a 413 and failed closed on every real-sized list —
+      // which looked exactly like "nothing was worth picking".
+      //
+      // Kept by DISTINCT BUYERS, the metric this file already calls the hardest
+      // to fake. Choosing by liquidity would favour whichever pool someone was
+      // willing to park the most money in, which is the thing being judged.
+      const shown =
+        pools.length > SCOUT_MAX_CANDIDATES
+          ? [...pools].sort((a, b) => (b.buyers24h ?? 0) - (a.buyers24h ?? 0)).slice(0, SCOUT_MAX_CANDIDATES)
+          : pools;
+      const candidates = toScoutCandidates(shown, nowSec, research);
       try {
         const raw = await llmToolCall(creds, {
           system: SYSTEM,
           maxTokens: 1536,
           tool: RANK_TOOL,
-          messages: [{ role: "user", content: `Candidates:\n${JSON.stringify(candidates, null, 1)}` }],
+          // Compact, not pretty-printed. The indentation was costing roughly
+          // half the prompt for nothing a model reads.
+          messages: [
+            {
+              role: "user",
+              content:
+                (shown.length < pools.length
+                  ? `Candidates (the ${shown.length} with the most distinct buyers, of ${pools.length} that passed the screen):\n`
+                  : "Candidates:\n") + JSON.stringify(candidates),
+            },
+          ],
         });
-        return applyVerdicts(pools, raw);
-      } catch {
+        // Map back onto the list the model was ACTUALLY shown. Passing `pools`
+        // here would resolve its indices against a different array and hand
+        // back coins it never saw — the one way this design could widen.
+        return applyVerdicts(shown, raw);
+      } catch (e) {
         // A provider outage must not open the gate. Failing closed here costs a
         // missed opportunity; failing open would let an unranked list through a
         // step whose only job is to cut it down.
-        return { picks: [], passed: [...pools], ignored: [] };
+        //
+        // But SAY SO. Swallowing it made a dead model indistinguishable from a
+        // considered pass, on every surface that reads this — the dashboard
+        // showed "no coin was worth picking" for a week of a 404.
+        console.log(`[scout] could not rank ${pools.length} candidates: ${e instanceof Error ? e.message : String(e)}`);
+        return { picks: [], passed: [...pools], ignored: [], failed: true };
       }
     },
   };
