@@ -64,6 +64,19 @@ export interface MerrymenSettings {
    * is sealed into the grant at signing time, so it only takes effect after a
    * re-sign. The worker executes against the grant-sealed address, never this.
    */
+  /**
+   * What the owner calls their agent.
+   *
+   * Lives HERE rather than on the grant or the agents row for three reasons:
+   * settings are per-tenant and sealed in hosted mode, they survive a redeploy
+   * where a container filesystem does not, and they can be written before a
+   * grant or an agents row exists. The soul file stays the RUNTIME seat -- this
+   * is the durable seed the worker reconciles from at arm time, so every
+   * existing reader keeps working unchanged.
+   *
+   * Deliberately NOT a house key: a tenant must be able to name their own agent.
+   */
+  agentName?: string;
   v4AdapterAddress?: string;
   /**
    * The deployed PonsSelfTrade adapter for this chain, or absent.

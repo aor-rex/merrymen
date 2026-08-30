@@ -306,6 +306,21 @@ export async function PUT(req: Request) {
   }
 
   // ── enums ───────────────────────────────────────────────────────────────
+  if ("agentName" in body) {
+    const v = body.agentName;
+    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), duplicated
+    // deliberately rather than imported: this runs in the web tier and the soul
+    // module touches the filesystem. If the two ever disagree the worker wins
+    // and silently keeps the old name, so the shapes must match exactly.
+    if (v === "" || v === null || v === undefined) {
+      setOrClear("agentName", undefined);
+    } else if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(v.trim())) {
+      errors.push("name: letters and numbers to start, up to 24 characters");
+    } else {
+      setOrClear("agentName", v.trim());
+    }
+  }
+
   if ("strategy" in body) {
     const v = body.strategy;
     if (v === "" || v === null || v === undefined) {

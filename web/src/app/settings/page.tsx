@@ -40,6 +40,23 @@ export default function SettingsPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
+  /**
+   * Is this the hosted service?
+   *
+   * Load-bearing, not cosmetic. In hosted mode the settings API DELETES 26
+   * fields from every PUT and still answers ok -- the whole AI provider block,
+   * every key, the bundler, the RPC overrides. Showing those controls invites
+   * the owner to fill in things that cannot take effect and then tells them it
+   * saved. The house runs them; the page should say so instead of pretending
+   * they are yours to set.
+   */
+  const [hosted, setHosted] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch("/api/auth/session")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setHosted(!!d?.hosted))
+      .catch(() => setHosted(false));
+  }, []);
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
   const [tgControl, setTgControl] = useState<boolean | null>(null);
@@ -356,89 +373,129 @@ export default function SettingsPage() {
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="settings-section mono">essentials</div>
           <div className="grant-fields settings-grid">
+            {/* THE HOUSE RUNS THE BRAIN AND THE BUNDLER ON THE HOSTED SERVICE.
+                Everything between here and the strategy picker is stripped from
+                every hosted PUT by the settings API -- provider, key, model,
+                base URL, bundler, RPC. Rendering them anyway asked the owner to
+                configure a model and then told them it saved. One honest line
+                beats thirty inert controls. */}
+            {hosted === false && (
+              <>
             {/* ── AI provider · bring any key ──────────────────────────── */}
-            <Field
-              label="AI provider · the brain"
-              action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
-              hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} Built-in strategies need no key at all. Blank keeps the saved key.`}
-            >
-              <select value={llmProviderVal} onChange={set("llmProvider")}>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                    {p.holder ? " · 🏹 holders" : ""}
-                    {p.free ? " · free" : ""}
-                    {p.vision ? " · vision" : ""}
-                    {p.needsKey === false ? " · local" : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {providerNeedsKey && (
               <Field
-                label={`${prov.label} API key`}
-                action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
-                hint="Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
+                label="AI provider · the brain"
+                action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
+                hint={`Powers plain-English chat and the AI strategist. ${prov.blurb} Built-in strategies need no key at all. Blank keeps the saved key.`}
+              >
+                <select value={llmProviderVal} onChange={set("llmProvider")}>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                      {p.holder ? " · 🏹 holders" : ""}
+                      {p.free ? " · free" : ""}
+                      {p.vision ? " · vision" : ""}
+                      {p.needsKey === false ? " · local" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {providerNeedsKey && (
+                <Field
+                  label={`${prov.label} API key`}
+                  action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
+                  hint="Paste the key for the provider you picked above. Never leaves your machine. Blank keeps the saved key."
+                >
+                  <input
+                    type="password"
+                    placeholder={secretPlaceholder(providerKeyView)}
+                    value={draft[providerKeyField] ?? ""}
+                    onChange={set(providerKeyField)}
+                  />
+                  {providerKeyView.set && (
+                    <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
+                      clear
+                    </button>
+                  )}
+                </Field>
+              )}
+              {prov.id === "custom" && (
+                <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
+                  <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
+                </Field>
+              )}
+              <Field
+                label="model"
+                hint={`Which model to run. Blank uses the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.${modelsError ? ` Could not list models: ${modelsError}` : ""}`}
+              >
+                {modelsLoading ? (
+                  <span className="field-loading">listing models…</span>
+                ) : availableModels.length > 0 ? (
+                  <select
+                    value={v(providerModelField as keyof SettingsView["values"])}
+                    onChange={set(providerModelField)}
+                  >
+                    <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder={prov.defaultModel || "model id"}
+                    value={v(providerModelField as keyof SettingsView["values"])}
+                    onChange={set(providerModelField)}
+                  />
+                )}
+              </Field>
+  
+              </>
+            )}
+            {hosted === true && (
+              <Field
+                label="brain &amp; bundler"
+                hint="On merrymen.dev these are run for you -- the model that powers chat and the strategist, and the bundler that puts trades on chain. There is nothing to paste and nothing to pay for. Self-host if you want to bring your own."
+              >
+                <div className="settings-subtle mono" style={{ padding: "6px 0" }}>
+                  run by the house
+                </div>
+              </Field>
+            )}
+            {hosted === false && (
+              <>
+            <Field
+                label="Pimlico API key"
+                action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
+                hint="The key needed to trade live on mainnet. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Leave it blank on a testnet wallet: a key can't enable trades there (no venues, balances read 0) and it switches off the paper book. Blank = practice mode: the agent simulates every trade but never signs."
               >
                 <input
                   type="password"
-                  placeholder={secretPlaceholder(providerKeyView)}
-                  value={draft[providerKeyField] ?? ""}
-                  onChange={set(providerKeyField)}
+                  placeholder={secretPlaceholder(view.bundlerApiKey)}
+                  value={draft.bundlerApiKey ?? ""}
+                  onChange={set("bundlerApiKey")}
                 />
-                {providerKeyView.set && (
-                  <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
+                {view.bundlerApiKey.set && (
+                  <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
                     clear
                   </button>
                 )}
               </Field>
+                </>
             )}
-            {prov.id === "custom" && (
-              <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
-                <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
-              </Field>
-            )}
+            {/* The first thing an owner should be able to change, and until now
+                the only way was a Telegram command -- which is why every hosted
+                agent is called Robin. */}
             <Field
-              label="model"
-              hint={`Which model to run. Blank uses the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.${modelsError ? ` Could not list models: ${modelsError}` : ""}`}
-            >
-              {modelsLoading ? (
-                <span className="field-loading">listing models…</span>
-              ) : availableModels.length > 0 ? (
-                <select
-                  value={v(providerModelField as keyof SettingsView["values"])}
-                  onChange={set(providerModelField)}
-                >
-                  <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
-                  {availableModels.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type="text"
-                  placeholder={prov.defaultModel || "model id"}
-                  value={v(providerModelField as keyof SettingsView["values"])}
-                  onChange={set(providerModelField)}
-                />
-              )}
-            </Field>
-            <Field
-              label="Pimlico API key"
-              action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-              hint="The key needed to trade live on mainnet. Tap “Get a free key” → API Keys, paste it here — we build the bundler URL for your wallet's chain automatically. Leave it blank on a testnet wallet: a key can't enable trades there (no venues, balances read 0) and it switches off the paper book. Blank = practice mode: the agent simulates every trade but never signs."
+              label="name your merryman"
+              hint="What you call your agent. It signs its own messages with this, and it is how it refers to itself in chat. Letters, numbers, spaces, up to 24 characters."
             >
               <input
-                type="password"
-                placeholder={secretPlaceholder(view.bundlerApiKey)}
-                value={draft.bundlerApiKey ?? ""}
-                onChange={set("bundlerApiKey")}
+                type="text"
+                maxLength={24}
+                placeholder={view.values.agentName || "Robin"}
+                value={draft.agentName ?? ""}
+                onChange={set("agentName")}
               />
-              {view.bundlerApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
-                  clear
-                </button>
-              )}
             </Field>
             <Field
               label="strategy"

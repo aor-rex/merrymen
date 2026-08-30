@@ -757,7 +757,27 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
     if (q.includes("pause") || q.includes("stop") || q.includes("kill")) {
       return "Giving orders through chat — pause, kill, buy, sell — runs next, each checked against the wall before I move a thing. For now, pause and the kill switch live on the Wallet screen.";
     }
-    return `Heard you. Right now I answer <span class="mono">/status</span>, <span class="mono">/positions</span> and <span class="mono">/pnl</span> from your live ledger — free-form reasoning and wall-checked orders are the next thing I learn.`;
+    return `Heard you — but I answered that from a lookup table, not from thinking. Ask me <span class="mono">/status</span>, <span class="mono">/positions</span> or <span class="mono">/pnl</span> for something exact.`;
+  };
+
+  /**
+   * What to say when the route could not think.
+   *
+   * The route ALREADY reports why — no-llm, llm-error, not signed in — and the
+   * client used to discard it and print a line about free-form reasoning being
+   * "the next thing I learn". That reads as an unbuilt feature. It is a missing
+   * key: /api/chat calls a real model, but it resolves one only from the WEB
+   * service's own environment, and the hosted deploy guide gives the house keys
+   * to the orchestrator. A config gap that looks like a product gap is the
+   * worst kind, because nobody can see there is something to fix.
+   */
+  const brainlessNote = (why: string): string => {
+    if (why === "no-llm") {
+      return "I can think, but I have no brain wired up right now — this deployment has no model key, so I can only answer the exact commands. Whoever runs it needs to set one on the web service.";
+    }
+    if (why === "llm-error") return "I tried to think and the model call failed. Try again in a moment.";
+    if (why === "not signed in") return "Sign in first and I can answer from your own book.";
+    return `I couldn't answer that one (${why}).`;
   };
 
   const submit = async (text?: string) => {
@@ -777,8 +797,14 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: v, state: buildState(), history }),
-      }).then((res) => res.json())) as { reply?: string | null };
+      }).then((res) => res.json())) as { reply?: string | null; why?: string };
       if (r && typeof r.reply === "string" && r.reply.trim()) replyHtml = escapeHtml(r.reply.trim());
+      // SAY WHY IT DID NOT ANSWER. The route already reports `why` -- no-llm,
+      // llm-error, not signed in -- and this used to throw it away and fall
+      // through to a canned line about free-form reasoning being "the next
+      // thing I learn". It reads as a missing FEATURE. It is a missing KEY, and
+      // the difference is a config change nobody could see they had to make.
+      else if (r?.why) replyHtml = escapeHtml(brainlessNote(r.why));
     } catch {
       /* fall through to the deterministic answer */
     }

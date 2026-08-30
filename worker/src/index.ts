@@ -95,7 +95,7 @@ import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
 import { readPoolDepth } from "./venues/depth";
 import { createDepthReader } from "./venues/depth-cache";
-import { ensureSoul, getName } from "./soul";
+import { ensureSoul, getName, setName } from "./soul";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
@@ -1335,6 +1335,18 @@ async function main() {
     const agentId = await ensureAgent(grant);
     // The soul's name is the source of truth — mirror it onto the roster.
     ensureSoul();
+    // RECONCILE THE NAME the owner chose into the soul, then mirror as before.
+    //
+    // Settings is the durable SEED and the soul stays the runtime seat. Doing it
+    // this way round means every existing reader — the prompts, Telegram, the
+    // feed — keeps working untouched, while a name set in a browser survives a
+    // redeploy that wipes the container's filesystem. Until this existed, the
+    // only way to name an agent was the Telegram /name command, which is why
+    // every hosted agent is called Robin.
+    if (cfg.agentName && cfg.agentName !== getName()) {
+      const named = setName(cfg.agentName);
+      if (!named.ok) console.log(`[soul] refusing the configured name: ${named.reason}`);
+    }
     await setAgentName(agentId, getName());
 
     // Pimlico/Alchemy bundler URLs embed a chain id — a testnet bundler with a
