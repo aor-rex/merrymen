@@ -111,6 +111,8 @@ import {
 import { fetchGeckoPools, type ScreenLimits } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
+import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
+import { readBestV4Price, describeV4, V4_GUARD_DEFAULTS, V4_NATIVE } from "./venues/v4-price";
 
 /**
  * What a coin has to clear before the model is even asked about it.
@@ -643,6 +645,10 @@ async function main() {
   // window is 15 minutes, so re-reading three pools every 15 seconds buys
   // nothing and costs a great deal of RPC.
   const poolPrices = createPoolPriceReader();
+  // Learned v4 PoolKeys, backfilled once and then only caught up. Stateful on
+  // purpose: relearning a wide window every tick would be ten getLogs a minute,
+  // and a short window would silently hide any coin that graduated an hour ago.
+  const v4Keys = createV4KeyBook();
   // Liquidity depth, on the same "cache the read, never the verdict" discipline
   // but a longer TTL: a price is what the next trade executes at, depth is the
   // shape behind it, and capital people have parked moves slower than a quote.
@@ -759,9 +765,85 @@ async function main() {
     // is no pool here" — a token refused as too thin or divergent has a pool and
     // failed its guards, and pricing it off a curve instead would be looking for
     // a venue that answers rather than a price that is true.
-    const noPool = feedless.filter(
+    let noPool = feedless.filter(
       (t) => !quotes.has(t.symbol) && refused.some((r) => r.symbol === t.symbol && r.kind === "no-pool"),
     );
+
+    // ── UNISWAP V4 ──────────────────────────────────────────────────────────
+    // Between the v3 pools and the curves, because that is exactly where a
+    // GRADUATED coin falls: it left its bonding curve, so `curveFor` finds
+    // nothing, and it never had a v3 pool. Before this it matched neither
+    // pricer and stayed unpriceable forever — which made `priceable` false and
+    // had trencher refuse every graduated memecoin before forming any view of
+    // it. That was the whole reason the agent could not trade one.
+    //
+    // Keys are LEARNED, not guessed: v4 pools here open with dynamic fees and
+    // non-standard tick spacings, so findV4Pool's four candidate tiers match
+    // nothing (venues/v4-keys.ts has the measurements).
+    if (noPool.length) {
+      const eth = await ethPrice8();
+      const learned = await v4Keys.refresh(mainnetClient());
+      // What each possible other-side asset is worth, so a native-quoted pool
+      // (the majority) can be turned into USD without guessing a scale.
+      const quoteUsd8 = new Map<string, { usd8: bigint; decimals: number }>([
+        [(CASH.USDG as string).toLowerCase(), { usd8: 100_000_000n, decimals: 6 }],
+      ]);
+      // Native and WETH entries only when ETH itself could be priced. Most v4
+      // pools here quote against native ETH, so without this figure most coins
+      // simply go unpriced this pass — which is the right outcome. Defaulting
+      // ETH to anything would rescale every memecoin on the chain by a number
+      // nobody checked, and it would do it silently.
+      if (eth.price8 !== null && eth.price8 > 0n) {
+        quoteUsd8.set(V4_NATIVE, { usd8: eth.price8, decimals: 18 });
+        quoteUsd8.set((CASH.WETH as string).toLowerCase(), { usd8: eth.price8, decimals: 18 });
+      }
+      const pricedV4: string[] = [];
+      for (const t of noPool) {
+        const keys = keysForToken(learned.values(), t.address as `0x${string}`).map((k) => k.key);
+        if (!keys.length) continue;
+        // Decimals decide the SCALE of the price, so an unknown one is not a
+        // detail to default. The registry says it plainly: 18 is a guess that
+        // silently misvalues a 9dp coin — and here it would misvalue it by a
+        // billion, into equity and the drawdown breaker. Skip instead.
+        if (t.decimals === undefined) continue;
+        const r = await readBestV4Price(mainnetClient(), {
+          token: t.address as `0x${string}`,
+          tokenDecimals: t.decimals,
+          keys,
+          quoteUsd8,
+          guard: V4_GUARD_DEFAULTS,
+        });
+        if (!r) continue;
+        if (!r.usable.ok) {
+          // A refusal here is a FACT about the pool, and on this chain usually
+          // the most important one — two thirds of graduated pools charge over
+          // 50% a trade. Record it so the owner is told the token was seen and
+          // turned down, rather than left looking unseen.
+          poolRefusals.set(t.symbol, r.usable.reason);
+          continue;
+        }
+        prices.set(t.symbol, {
+          price8: r.price.price8,
+          stale: false,
+          source: "v4",
+          detail: describeV4(r.price),
+          liquidityUsdg: r.price.liquidityUsdg,
+        });
+        lastLiquidityUsd.set(t.address.toLowerCase(), Number(r.price.liquidityUsdg) / 1e6);
+        pricedV4.push(t.symbol);
+      }
+      // Anything v4 priced is no longer waiting on a curve, and is no longer
+      // refused for having no pool — it has one.
+      if (pricedV4.length) {
+        const done = new Set(pricedV4);
+        noPool = noPool.filter((t) => !done.has(t.symbol));
+        for (const symbol of done) {
+          const i = refused.findIndex((x) => x.symbol === symbol);
+          if (i >= 0) refused.splice(i, 1);
+        }
+      }
+    }
+
     if (noPool.length) {
       // One ETH price for the whole pass, shared with the gas path's 300s cache.
       const eth = await ethPrice8();
@@ -2855,11 +2937,17 @@ async function main() {
     // curve mark is good enough to value a position already held; it is not
     // good enough to authorise a new one, because nothing checked it against an
     // oracle — there is no oracle to check it against.
+    // A v4 mark belongs in the same class as a curve mark, and for the same
+    // reason stated above: v4 moved TWAP into hooks, so a vanilla pool has no
+    // oracle to check the price against. It cleared a depth floor, an LP-fee
+    // ceiling and a round-trip cost check — enough to value a holding, not
+    // enough to authorise a new one on its own. The scout budget stays the
+    // owner's real bound on buying something nobody can independently value.
     lastUnpriceable = new Set(
       watchTokens
         .filter((t) => {
           const q = market.prices.get(t.symbol);
-          return !q || q.source === "curve";
+          return !q || q.source === "curve" || q.source === "v4";
         })
         .map((t) => t.address.toLowerCase()),
     );

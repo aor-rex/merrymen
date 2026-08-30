@@ -83,13 +83,18 @@ export interface PriceQuote {
   stale: boolean;
   /**
    * "broker" = Robinhood get_equity_quotes on the Agentic-account rail.
+   * "v4" = a Uniswap v4 pool. Its own class for the same reason "curve" is:
+   * v4 moved TWAP into hooks, so a vanilla pool has no oracle and the spot-vs-
+   * TWAP divergence check cannot be run. It passed a DEPTH floor, an LP-FEE
+   * ceiling and a round-trip cost check instead — good enough to value a
+   * holding, and still inside the scout budget on the buy side.
    * "curve" = a Pons bonding curve. A DIFFERENT EVIDENTIAL CLASS from "pool":
    * a pool quote passed a depth floor AND a spot-vs-TWAP divergence band, and
    * a curve quote passed neither because a curve has no oracle to diverge
    * from. It is good enough to value something already held; it is not good
    * enough to authorise a new buy, and the scout ceiling still applies to it.
    */
-  source: "chainlink" | "pool" | "broker" | "curve";
+  source: "chainlink" | "pool" | "broker" | "curve" | "v4";
   /** For pool prices: route + depth, so a human can judge the number. */
   detail?: string;
   /**

@@ -135,6 +135,12 @@ export function valuationMultiplierFor(source: PriceQuote["source"], uiMultiplie
     // evidence than a pool quote, and that difference is enforced elsewhere —
     // it stays inside the scout ceiling and out of the high-water mark.
     case "curve":
+    // A Uniswap v4 pool quotes USD per whole ERC-20, exactly as v3 does — the
+    // VENUE changed, the unit did not. Graduated memecoins are plain ERC-20s
+    // with no ERC-8056 multiplier to apply. (That a v4 quote is weaker evidence
+    // than a v3 one — no oracle behind it — is enforced elsewhere, by keeping it
+    // inside the scout ceiling; it is not a question about units.)
+    case "v4":
       return UI_MULTIPLIER_ONE;
     default: {
       const never: never = source;

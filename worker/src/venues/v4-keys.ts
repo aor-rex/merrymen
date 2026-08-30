@@ -156,3 +156,78 @@ export function keysForToken(
 export function quoteSideOf(key: PoolKey, token: `0x${string}`): `0x${string}` {
   return key.currency0.toLowerCase() === token.toLowerCase() ? key.currency1 : key.currency0;
 }
+
+/**
+ * A key book that learns once and then only catches up.
+ *
+ * Relearning a wide window every tick would be absurd — the backfill is ten
+ * chunked `eth_getLogs` and the tick runs every 60 seconds. But a short window
+ * is worse than expensive, it is WRONG: a coin that graduated three hours ago
+ * would simply not be in the map, and "not in the map" is indistinguishable from
+ * "has no pool", which is how a tradeable coin quietly becomes an unpriceable
+ * one.
+ *
+ * So the book backfills once and thereafter reads only from the last block it
+ * saw. It never forgets a key, because a pool does not stop existing.
+ */
+export interface V4KeyBook {
+  /** Catch up to head and return every key known so far. Never throws. */
+  refresh(client: PublicClient): Promise<Map<string, LearnedKey>>;
+  /** What is known right now, without touching the network. */
+  known(): Map<string, LearnedKey>;
+  /** How far the book has read to. 0 = nothing yet. */
+  head(): bigint;
+}
+
+export function createV4KeyBook(opts?: { backfillBlocks?: bigint; minGapBlocks?: bigint }): V4KeyBook {
+  // ~2.5 hours at this chain's ~0.1s blocks. Graduations are frequent enough
+  // that this covers the live launchpad; anything older is picked up by the
+  // discovery layer's own persisted keys (store.poolKeysFor).
+  const backfill = opts?.backfillBlocks ?? 90_000n;
+  // Don't re-read for a handful of blocks. The tick is 60s; the chain makes
+  // ~600 blocks in that time, so this only suppresses genuinely idle passes.
+  const minGap = opts?.minGapBlocks ?? 60n;
+  const book = new Map<string, LearnedKey>();
+  let readTo = 0n;
+
+  return {
+    known: () => book,
+    head: () => readTo,
+    async refresh(client) {
+      try {
+        const head = await client.getBlockNumber();
+        const from = readTo === 0n ? (head > backfill ? head - backfill : 0n) : readTo + 1n;
+        if (readTo !== 0n && head < readTo + minGap) return book;
+        if (from > head) return book;
+        for (let lo = from; lo <= head; lo += KEY_CHUNK_BLOCKS) {
+          const hi = lo + KEY_CHUNK_BLOCKS - 1n > head ? head : lo + KEY_CHUNK_BLOCKS - 1n;
+          const logs = (await client.request({
+            method: "eth_getLogs",
+            params: [
+              {
+                address: UNISWAP.v4PoolManager as `0x${string}`,
+                fromBlock: `0x${lo.toString(16)}`,
+                toBlock: `0x${hi.toString(16)}`,
+                topics: [V4_INITIALIZE_TOPIC],
+              },
+            ],
+          } as never)) as { topics: string[]; data: string; blockNumber: bigint | null }[];
+          // At the cap the answer is short by an unknown amount. Stop and keep
+          // `readTo` where it was, so the next pass retries the same range
+          // rather than skipping past pools it never saw.
+          if (logs.length >= 10_000) return book;
+          for (const l of logs) {
+            const parsed = parseInitializeLog(l);
+            if (parsed) book.set(parsed.id.toLowerCase(), parsed);
+          }
+          readTo = hi;
+        }
+        return book;
+      } catch {
+        // A failed catch-up leaves the book intact and `readTo` where it was.
+        // Stale knowledge is better than none and the next pass resumes.
+        return book;
+      }
+    },
+  };
+}
