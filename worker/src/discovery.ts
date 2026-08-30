@@ -34,6 +34,7 @@ import { readCurveReserves, recentPonsLaunches, type PonsLaunch } from "./venues
 import { screenPools, type GeckoPool, type PoolFeed, type ScreenLimits } from "./venues/geckoterminal";
 import type { MemecoinScout } from "./strategist/memecoin-scout";
 import { curveDepthFraction, curveGraduated, curvePrice, type CurveReserves } from "./venues/pons-price";
+import { scoutFieldsFor, type CoinResearch } from "./strategist/coin-research";
 
 const ERC20 = parseAbi([
   "function symbol() view returns (string)",
@@ -511,6 +512,11 @@ export interface TrendingDeps {
   scout: MemecoinScout;
   limits: ScreenLimits;
   nowSec: number;
+  /**
+   * Look the shortlist up before ranking it. Optional: a deployment with no
+   * browser configured still discovers, it just decides on numbers alone.
+   */
+  research?: (pools: readonly GeckoPool[]) => Promise<ReadonlyMap<string, CoinResearch>>;
 }
 
 /**
@@ -554,9 +560,20 @@ export async function discoverTrending(deps: TrendingDeps): Promise<TrendingResu
   );
   const { kept } = screenPools(fresh, deps.limits);
 
+  // LOOK BEFORE RANKING. The screen decided what is worth looking at; this is
+  // the looking. Its signals go INTO the list the model ranks rather than
+  // beside it, so a site that never names its own contract is something the
+  // model can weigh against the coin's volume — otherwise the browser is
+  // expensive theatre.
+  const researched = deps.research ? await deps.research(kept).catch(() => undefined) : undefined;
+
   // The model NARROWS what the screen admitted. It never widens it, and it
   // never sees an address — see strategist/memecoin-scout.ts.
-  const ranked = await deps.scout.rank(kept, deps.nowSec);
+  const ranked = await deps.scout.rank(
+    kept,
+    deps.nowSec,
+    researched && new Map([...researched].map(([k, r]) => [k, scoutFieldsFor(r)])),
+  );
 
   const picks: TrendingFind[] = [];
   for (const pick of ranked.picks) {

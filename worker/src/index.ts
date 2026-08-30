@@ -112,6 +112,7 @@ import { fetchGeckoPools, type ScreenLimits } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
+import { researchCoins } from "./strategist/coin-research";
 import { readBestV4Price, describeV4, V4_GUARD_DEFAULTS, V4_NATIVE } from "./venues/v4-price";
 
 /**
@@ -1273,6 +1274,17 @@ async function main() {
         scout: creds ? createMemecoinScout(creds) : nullScout,
         limits: TRENDING_SCREEN,
         nowSec,
+        // Look the shortlist up before ranking it. Absent a browser this is
+        // undefined and the pass decides on numbers alone, exactly as before —
+        // research is an upgrade to the evidence, never a precondition for
+        // discovery running at all.
+        research: cfg.browserUrl && cfg.browserToken
+          ? (pools) =>
+              researchCoins(pools, {
+                client: mainnetClient(),
+                browser: { baseUrl: cfg.browserUrl!, token: cfg.browserToken! },
+              })
+          : undefined,
       });
       lastTrendAt = nowSec;
 

@@ -34,6 +34,7 @@
 
 import { llmToolCall, type LlmCreds } from "../llm";
 import type { GeckoPool } from "../venues/geckoterminal";
+import type { ScoutSiteFields } from "./coin-research";
 
 /**
  * One candidate as the MODEL sees it — a label and numbers, no address.
@@ -55,6 +56,20 @@ export interface ScoutCandidate {
   sells24h: number | null;
   distinctBuyers24h: number | null;
   ageDays: number | null;
+  /**
+   * What its own website said, when there was one to visit.
+   *
+   * Booleans and counts, never the page text: launcher-written prose handed to
+   * a model is an instruction channel, and `siteHypeWords: 3` is a number it can
+   * weigh and cannot be told by. null everywhere means nothing was published or
+   * nothing was visited — which reads differently from visited-and-empty.
+   */
+  siteReachable: boolean | null;
+  siteNamesContract: boolean | null;
+  siteTextLength: number | null;
+  siteOutboundDomains: number | null;
+  siteHypeWords: number | null;
+  publishedNothing: boolean | null;
 }
 
 /** What the model returns about one candidate. */
@@ -87,7 +102,11 @@ export interface ScoutResult {
 }
 
 /** Project pools into the model's view. Index is position in `pools`. */
-export function toScoutCandidates(pools: readonly GeckoPool[], nowSec: number): ScoutCandidate[] {
+export function toScoutCandidates(
+  pools: readonly GeckoPool[],
+  nowSec: number,
+  research?: ReadonlyMap<string, ScoutSiteFields>,
+): ScoutCandidate[] {
   return pools.map((p, index) => ({
     index,
     // The pool's own name, which is a label the INDEX already disambiguates.
@@ -103,6 +122,14 @@ export function toScoutCandidates(pools: readonly GeckoPool[], nowSec: number): 
     sells24h: p.sells24h,
     distinctBuyers24h: p.buyers24h,
     ageDays: p.createdAt === null ? null : Math.max(0, (nowSec - p.createdAt) / 86_400),
+    ...(research?.get(p.tokenAddress.toLowerCase()) ?? {
+      siteReachable: null,
+      siteNamesContract: null,
+      siteTextLength: null,
+      siteOutboundDomains: null,
+      siteHypeWords: null,
+      publishedNothing: null,
+    }),
   }));
 }
 
@@ -130,6 +157,20 @@ What is worth weight:
   both are already inside the screen's limits.
 - Nulls mean the figure is UNKNOWN, not zero. An unknown is a reason for less conviction,
   never for more.
+
+The site fields are what the coin's OWN WEBSITE said when one was published and visited.
+They are weak evidence and easy to fake, so weigh them as colour rather than proof — but the
+absence of any effort is itself informative:
+- publishedNothing true means the launcher filled in no description and no socials at all.
+  That is the shape an abandoned template has, and most of them are.
+- siteReachable false means a site was published and did not answer. That is worse than
+  never publishing one, because someone meant it to be there.
+- siteNamesContract false on a site with real text means the page never mentions the token
+  it is supposedly for — common on a template reused across many launches.
+- siteHypeWords counts promises like "guaranteed" and "100x". A high count is not proof of
+  anything; it is a description of who the page is written for.
+- All six null means nothing was published or nothing was visited. Treat that as no
+  information, NOT as a bad sign — most coins in any pass are not researched.
 
 conviction is 1..5 and is an ordering, not a size: 5 means look here first, not buy more.`;
 
@@ -207,7 +248,11 @@ export function applyVerdicts(pools: readonly GeckoPool[], raw: unknown): ScoutR
 
 export interface MemecoinScout {
   name: string;
-  rank(pools: readonly GeckoPool[], nowSec: number): Promise<ScoutResult>;
+  rank(
+    pools: readonly GeckoPool[],
+    nowSec: number,
+    research?: ReadonlyMap<string, ScoutSiteFields>,
+  ): Promise<ScoutResult>;
 }
 
 /**
@@ -225,9 +270,9 @@ export const nullScout: MemecoinScout = {
 export function createMemecoinScout(creds: LlmCreds): MemecoinScout {
   return {
     name: `${creds.provider}:${creds.model}`,
-    async rank(pools, nowSec) {
+    async rank(pools, nowSec, research) {
       if (pools.length === 0) return { picks: [], passed: [], ignored: [] };
-      const candidates = toScoutCandidates(pools, nowSec);
+      const candidates = toScoutCandidates(pools, nowSec, research);
       try {
         const raw = await llmToolCall(creds, {
           system: SYSTEM,
