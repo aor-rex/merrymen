@@ -39,6 +39,7 @@ import {
   STOCK_TOKENS,
   UNISWAP,
   USDG_DECIMALS,
+  WALL_POLICY_CONTRACTS,
   chainForId,
   effectivePerfFeeBps,
   pimlicoBundlerUrl,
@@ -1525,6 +1526,39 @@ async function main() {
     }
 
     const client = createPublicClient({ chain, transport: http(rpc) });
+
+    // ── THE WALL'S OWN CONTRACTS MUST EXIST ──────────────────────────────
+    // Same discipline as the breaker below, applied to the singletons the
+    // GRANT depends on rather than to an optional extra — and applied here
+    // because it was NOT, and an undeployed ZeroDev policy contract sat in
+    // every wall this repo ever built. A policy is an address plus its data;
+    // sealing a pointer into empty space produces a UserOp that will not
+    // validate, reported by nothing, at a cost of one prefund per attempt.
+    //
+    // A warn, not a blocker, and deliberately: arming still lets the owner run
+    // paper, read the tape and use every read-only surface. What it must never
+    // do is let them believe a live trade is one funding away when it is not.
+    // preflight.ts makes the same finding a BLOCKER, which is the right place
+    // for a refusal — it is the command whose whole job is to judge.
+    const missingPolicyContracts: string[] = [];
+    for (const c of WALL_POLICY_CONTRACTS) {
+      const code = await client.getCode({ address: c.address }).catch(() => undefined);
+      // getCode returns `undefined` — not "0x" — for an address with no
+      // contract; viem normalises "0x" away. Both mean absent here, and a
+      // failed READ is indistinguishable from either, so this deliberately
+      // does not try to tell them apart: it says what it could not confirm.
+      if (code === undefined || code === "0x") missingPolicyContracts.push(`${c.name} (${c.address})`);
+    }
+    if (missingPolicyContracts.length > 0) {
+      console.log(`[worker] wall policy contracts missing on chain ${chain.id}: ${missingPolicyContracts.join(", ")}`);
+      await addEvent(
+        agentId,
+        "err",
+        `the wall depends on contracts that have no code on chain ${chain.id}: ${missingPolicyContracts.join(", ")}. ` +
+          `Every UserOp this grant signs will be validated against them, so live trading cannot work until this is resolved. ` +
+          `Paper and every read-only surface are unaffected.`,
+      );
+    }
 
     // The on-chain breaker is only trusted when its address has CODE on the
     // grant chain — otherwise the tick's read silently fails open ("not

@@ -54,17 +54,29 @@ export function WallPanel() {
     <div className="panel wall-panel">
       <div className="section-title">the wall</div>
       <p className="wall-sub">
-        Don&apos;t trust us — verify it. These caps live in your account contract on{" "}
-        <b>{info.chainName}</b> ({info.chainId}); every address below is the chain&apos;s record,
-        not ours.
+        Don&apos;t trust us — verify it. Every address below is the chain&apos;s record on{" "}
+        <b>{info.chainName}</b> ({info.chainId}), not ours. The chips marked{" "}
+        <b>on-chain</b> are enforced by your account contract; the rest are counters merrymen
+        keeps on this machine.
       </p>
 
+      {/*
+        Two of these five were never on-chain, and a third stopped being so on
+        2026-08-30: ops/day rested on ZeroDev's rate-limit policy, whose contract
+        has no code on this chain (eth_getCode, mainnet and testnet both). Listing
+        all five under "these caps live in your account contract" was the strongest
+        claim on the page and it was wrong about the majority of the row.
+
+        The split is marked per chip rather than explained underneath, because a
+        caveat in a following paragraph is not read by someone scanning a row of
+        numbers — which is what this row is for.
+      */}
       <div className="wall-caps mono">
-        <span className="cap">max <b>{info.caps.perTradeUsdg} USDG</b>/trade</span>
-        <span className="cap"><b>{info.caps.dailyUsdg} USDG</b>/day</span>
-        <span className="cap"><b>{info.caps.maxOpsPerDay}</b> ops/day</span>
-        <span className="cap">breaker <b>{info.caps.maxDrawdownPct}%</b></span>
-        <span className="cap">key dies in <b>{daysLeft}d</b></span>
+        <span className="cap">max <b>{info.caps.perTradeUsdg} USDG</b>/trade <i>on-chain</i></span>
+        <span className="cap">key dies in <b>{daysLeft}d</b> <i>on-chain</i></span>
+        <span className="cap"><b>{info.caps.dailyUsdg} USDG</b>/day <i>software</i></span>
+        <span className="cap"><b>{info.caps.maxOpsPerDay}</b> ops/day <i>software</i></span>
+        <span className="cap">breaker <b>{info.caps.maxDrawdownPct}%</b> <i>software</i></span>
       </div>
 
       <div className="wall-addrs mono">
@@ -95,9 +107,12 @@ export function WallPanel() {
           ))}
           <p className="wall-note">
             Each attempt just ran through <code>worker/src/policy.ts</code> — the same deterministic
-            policy the worker applies to every intent, using your grant&apos;s real caps. It mirrors
-            (never replaces) the on-chain wall: the account contract enforces these limits
-            independently, so they hold even if this software were compromised.
+            policy the worker applies to every intent, using your grant&apos;s real caps. So this
+            shows the software agreeing with itself, which is worth something and is not the same
+            as a chain-side proof: the attacker it exists for is the one who skips this code
+            entirely. What the account contract would refuse independently is the per-trade size,
+            the asset and contract allowlists, any attempt to move native ETH, and anything at all
+            after the key expires.
           </p>
         </div>
       )}

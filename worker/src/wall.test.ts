@@ -304,13 +304,23 @@ test("the wall carries exactly the expected permission set — no more, no less"
   for (const p of list) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
 });
 
-test("policies carry a hard expiry and a daily op limit", () => {
+test("the wall carries a hard expiry and a call policy — and NO rate limit", () => {
   const now = 1_800_000_000;
   const { policies, expiresAt } = buildWallPolicies({ caps: CAPS, smartAccount: SELF, now });
   assert.equal(expiresAt, now + CAPS.expiryDays * 86_400);
-  // Expiry, rate limit, call policy — the key dies on schedule even if every
-  // other control fails.
-  assert.equal(policies.length, 3);
+
+  // TWO, not three. This asserted three while the middle one was a pointer into
+  // empty space, and the count passing was part of why nobody looked: a test
+  // can only check that a policy was CONSTRUCTED, never that the contract it
+  // names exists. eth_getCode on 2026-08-30 returned 0 bytes for
+  // RATE_LIMIT_POLICY_CONTRACT on mainnet 4663 AND testnet 46630, while the
+  // timestamp and call policies both carry real bytecode.
+  //
+  // So maxOpsPerDay is enforced by the WORKER only, alongside the daily total
+  // and the drawdown breaker, and the on-chain ceiling is per-trade until
+  // expiry. WALL_POLICY_CONTRACTS + the arm-time probe are what make a future
+  // undeployed singleton a refusal instead of a mystery.
+  assert.equal(policies.length, 2, "expiry + call policy; the rate limit is gone because it was never there");
 });
 
 test("the session key may EXECUTE but may not SIGN (the ERC-1271 hole)", () => {
@@ -666,11 +676,15 @@ test("buildWallPolicies forwards EVERY adapter into the call policy", () => {
 
   const call = (opts: Parameters<typeof buildWallPolicies>[0]) => {
     const { policies } = buildWallPolicies(opts);
-    // The call policy is the third, and its permissions live under policyParams
+    // The call policy is the LAST, and its permissions live under policyParams
     // — the zerodev policy object exposes only getPolicyData/getPolicyInfoInBytes
     // /policyParams, so reading `.permissions` off the top level silently yields
     // an empty list and this test would pass for the wrong reason.
-    const p = policies[2] as unknown as { policyParams?: { permissions?: { target: string }[] } };
+    //
+    // Indexed from the end deliberately. This read `policies[2]` until the
+    // rate-limit policy was removed, and a positional index into a list whose
+    // length is itself under test is a second thing to remember to change.
+    const p = policies[policies.length - 1] as unknown as { policyParams?: { permissions?: { target: string }[] } };
     const perms = p.policyParams?.permissions ?? [];
     assert.ok(perms.length > 0, "the call policy must expose its permissions, or this test proves nothing");
     return perms.map((x) => x.target.toLowerCase());

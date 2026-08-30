@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { homePaths } from "./home";
 import { loadGrantFile } from "./grant";
 import { preflight, rank, verdict, type Check, type PreflightInput } from "./preflight";
-import { CASH, chainForId } from "../../packages/core/src/index";
+import { CASH, WALL_POLICY_CONTRACTS, chainForId } from "../../packages/core/src/index";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -55,6 +55,28 @@ async function usdgBalance(url: string, account: string): Promise<number | null>
 async function ethBalance(url: string, account: string): Promise<bigint | null> {
   try {
     return BigInt((await rpc(url, "eth_getBalance", [account, "latest"])) as string);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which of the wall's own validator contracts are missing on this chain.
+ *
+ * `null` on ANY read failure, deliberately — a partial answer here would be
+ * worse than none: reporting "RateLimitPolicy absent" because the RPC blinked
+ * is the same false accusation delivery.ts refuses to make about a balance.
+ * All-or-nothing, and the caller renders "couldn't check" rather than "fine".
+ */
+async function missingPolicyContracts(url: string): Promise<string[] | null> {
+  try {
+    const missing: string[] = [];
+    for (const c of WALL_POLICY_CONTRACTS) {
+      const code = (await rpc(url, "eth_getCode", [c.address, "latest"])) as string | null;
+      if (typeof code !== "string") return null;
+      if (code === "0x" || code === "") missing.push(`${c.name} (${c.address})`);
+    }
+    return missing;
   } catch {
     return null;
   }
@@ -119,14 +141,23 @@ async function main(): Promise<void> {
     (chainId === 46630 ? settings.rpcTestnet : settings.rpcMainnet) ??
     chain.rpcUrls.default.http[0]!;
 
-  const [usdg, ethWei, bundlerReachable] = await Promise.all([
+  const [usdg, ethWei, bundlerReachable, missingPolicy] = await Promise.all([
     grant ? usdgBalance(rpcUrl, grant.smartAccount) : Promise.resolve(null),
     grant ? ethBalance(rpcUrl, grant.smartAccount) : Promise.resolve(null),
     bundlerAnswers(settings, chainId),
+    missingPolicyContracts(rpcUrl),
   ]);
 
   const checks = rank(
-    preflight({ settings, grant, nowSec: Math.floor(Date.now() / 1000), usdg, ethWei, bundlerReachable }),
+    preflight({
+      settings,
+      grant,
+      nowSec: Math.floor(Date.now() / 1000),
+      usdg,
+      ethWei,
+      bundlerReachable,
+      missingPolicyContracts: missingPolicy,
+    }),
   );
   for (const c of checks) render(c);
 

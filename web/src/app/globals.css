@@ -190,6 +190,22 @@ button { font: inherit; cursor: pointer; }
   padding: 4px 11px;
 }
 .cap b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+/*
+  Which side of the wall a chip is on. Two of the five caps the wall panel
+  shows are worker counters and a third became one when the rate-limit policy
+  turned out to be undeployed on this chain — and a row of numbers under the
+  heading "your account contract" read as though all five were sealed.
+
+  Deliberately quiet: dimmer and smaller than the number it qualifies, because
+  it is a caveat on the figure, not a second figure. `on-chain` is not coloured
+  as a reassurance — the honest reading is that three of these are softer than
+  the page used to imply, not that two are stronger.
+*/
+.cap i {
+  font-style: normal; font-size: 9.5px; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-dimmer, var(--text-dim));
+  opacity: 0.75; margin-left: 5px;
+}
 
 .drawdown { display: flex; flex-direction: column; gap: 4px; }
 .drawdown-label {

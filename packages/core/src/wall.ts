@@ -1,7 +1,7 @@
 import { erc20Abi, parseAbi, type Address } from "viem";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
-import { toRateLimitPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
+import { toTimestampPolicy } from "@zerodev/permissions/policies";
 import { UNISWAP_SWAP_ROUTER_ABI, PERMIT2_ABI, UNIVERSAL_ROUTER_ABI, V4SELFSWAP_ABI, PONS_SELFTRADE_ABI } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
@@ -78,6 +78,34 @@ export function usdgUnits(value: number): bigint {
  * they're re-signed. See the header note about the fleet running a mix.
  */
 export const WALL_POLICY_FLAG = PolicyFlags.NOT_FOR_VALIDATE_SIG;
+
+/**
+ * THE SINGLETONS EVERY GRANT DEPENDS ON, so their absence can be a REFUSAL
+ * rather than a mystery.
+ *
+ * A ZeroDev policy is an address plus its data: `getPolicyInfoInBytes()` is
+ * `concat([policyFlag, policyAddress])`, and the addresses come from
+ * @zerodev/permissions' own constants — defaults for a deployment the library
+ * assumes exists. On Robinhood Chain one of them did not, and nothing here
+ * checked, so the grant sealed a pointer into empty space and the failure
+ * surfaced as a UserOp that would not validate, with no message naming a cause.
+ *
+ * This repo already knows the discipline. index.ts refuses to trust the
+ * drawdown breaker unless its address has CODE on the grant chain, because
+ * otherwise the read "silently fails open while the user believes they're
+ * protected". The wall's own policy contracts had no such check — which is
+ * exactly why an undeployed singleton survived every test in the suite.
+ *
+ * Duplicated as literals ON PURPOSE. Re-exporting the package's constants would
+ * make this list track whatever the library ships next, and the point of a
+ * probe is to assert what THIS code sealed. If a version bump moves an address,
+ * the probe must fail loudly rather than follow it.
+ */
+export const WALL_POLICY_CONTRACTS: readonly { name: string; address: Address }[] = [
+  { name: "TimestampPolicy", address: "0xB9f8f524bE6EcD8C945b1b87f9ae5C192FdCE20F" as Address },
+  { name: "CallPolicy V0_0_4", address: "0x9a52283276A0ec8740DF50bF01B28A80D880eaf2" as Address },
+  { name: "ECDSA signer", address: "0x6A6F069E2a08c2468e7724Ab3250CdBFBA14D4FF" as Address },
+];
 
 /**
  * The only contracts a token approval may ever name as spender.
@@ -668,8 +696,40 @@ export function buildWallPolicies(args: {
   const policies = [
     // Hard expiry — the key dies even if every other control fails.
     toTimestampPolicy({ validAfter: now, validUntil: expiresAt }),
-    // Bounded ops per day, so a runaway loop cannot spam trades.
-    toRateLimitPolicy({ count: args.caps.maxOpsPerDay, interval: 86_400 }),
+    // THE RATE LIMIT POLICY IS GONE, because it was never there.
+    //
+    // `toRateLimitPolicy({count: maxOpsPerDay, interval: 86_400})` used to sit
+    // on this line. Its `policyAddress` defaults to RATE_LIMIT_POLICY_CONTRACT
+    // in @zerodev/permissions — and that address has NO CODE on Robinhood
+    // Chain. Measured 2026-08-30 with eth_getCode against both live RPCs:
+    //
+    //   RateLimitPolicy  0xf63d4139B25c836334edD76641356c6b74C86873   0 bytes on 4663 AND 46630
+    //   TimestampPolicy  0xB9f8f524bE6EcD8C945b1b87f9ae5C192FdCE20F   1,441 bytes
+    //   CallPolicy V4    0x9a52283276A0ec8740DF50bF01B28A80D880eaf2   6,539 bytes
+    //   ECDSA signer     0x6A6F069E2a08c2468e7724Ab3250CdBFBA14D4FF   1,609 bytes
+    //
+    // So every grant this repo could produce installed a policy pointing at an
+    // empty address. Kernel calls `checkUserOpPolicy` expecting a uint256; a
+    // call to a codeless address succeeds with zero returndata. That is not
+    // "ops go unlimited" — it is most likely EVERY UserOp failing validation,
+    // which is consistent with this project never having landed a trade.
+    //
+    // A policy that cannot execute is not a bound. Leaving it in traded a
+    // guarantee we did not have for a failure mode we could not diagnose.
+    //
+    // SAY THE COST OUT LOUD. maxOpsPerDay is now enforced by the WORKER only,
+    // alongside the daily total and the drawdown breaker. The on-chain ceiling
+    // is per-trade × (however many ops fit before expiry) — see the header.
+    //
+    // And it was never the cap it was described as, even where the contract IS
+    // deployed: RateLimitPolicy decrements a LIFETIME counter and returns
+    // packValidationData(startAt); this call never passed `startAt`, so it
+    // defaulted to 0 and imposed no spacing at all. It was maxOpsPerDay ops
+    // TOTAL per grant, with no daily refill — not "48 a day".
+    //
+    // The fix that would restore a real on-chain bound is to deploy the policy
+    // singleton to 4663 ourselves and pass `policyAddress`. That is a contract
+    // deployment and it is deliberately not bundled with this correction.
     toCallPolicy({
       policyVersion: CallPolicyVersion.V0_0_4,
       // EVERY adapter must be forwarded, and the type system will not tell you.

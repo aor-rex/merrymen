@@ -14,7 +14,8 @@
 import { http, createPublicClient, type Chain, type Hex } from "viem";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
-import { deserializePermissionAccount } from "@zerodev/permissions";
+import { deserializeFlaggedPermissionAccount } from "./session-account";
+import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 
 export interface Call {
@@ -120,11 +121,16 @@ export async function createAgentExecutor(opts: {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
 
-  const account = await deserializePermissionAccount(
+  // NOT deserializePermissionAccount. That function silently drops the policy
+  // flag the owner signed over, so the enable data we submit would not match
+  // the enable data they authorised — and the first UserOp of every grant
+  // would fail at plugin-enable. See session-account.ts for the full trace.
+  const account = await deserializeFlaggedPermissionAccount(
     publicClient,
     entryPoint,
     KERNEL_V3_3,
     opts.serializedGrant,
+    WALL_POLICY_FLAG,
   );
 
   const client = createKernelAccountClient({
