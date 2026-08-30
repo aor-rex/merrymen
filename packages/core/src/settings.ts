@@ -29,7 +29,7 @@ export interface MerrymenSettings {
   /** The free/default brain: a Groq key (console.groq.com) powers chat, the
    * strategist, and narration on Groq's fast OpenAI-compatible models. */
   groqApiKey?: string;
-  /** Groq model id (default llama-3.3-70b-versatile). */
+  /** Groq model id (default qwen/qwen3.8-27b). */
   groqModel?: string;
   /** The upgrade: an Anthropic key routes everything through Claude instead
    * (and unlocks screen vision). Takes precedence over Groq when both are set. */
@@ -395,7 +395,10 @@ export const SETTINGS_DEFAULTS = {
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
   gapEnterBudgetUsdg: 75,
-  groqModel: "llama-3.3-70b-versatile",
+  // Groq retired the whole Llama 3.x chat line; llama-3.3-70b-versatile now
+  // answers 404 model_not_found, which is why the chat could not think.
+  // See llm-providers.ts for why this model and not the bigger one.
+  groqModel: "qwen/qwen3.8-27b",
   llmModel: "claude-opus-4-8",
   llmIntervalMin: 30,
   llmMaxActionUsdg: 50,

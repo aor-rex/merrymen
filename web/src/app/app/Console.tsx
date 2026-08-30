@@ -1095,11 +1095,18 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
    * to the orchestrator. A config gap that looks like a product gap is the
    * worst kind, because nobody can see there is something to fix.
    */
-  const brainlessNote = (why: string): string => {
+  const brainlessNote = (why: string, detail?: string): string => {
     if (why === "no-llm") {
       return "I can think, but I have no brain wired up right now — this deployment has no model key, so I can only answer the exact commands. Whoever runs it needs to set one on the web service.";
     }
-    if (why === "llm-error") return "I tried to think and the model call failed. Try again in a moment.";
+    // The provider's OWN words when we have them: a decommissioned model and
+    // a rejected key both used to read as "try again in a moment", which is
+    // advice that never works for either.
+    if (why === "llm-error") {
+      return detail
+        ? `I tried to think and the model turned me down — ${detail}`
+        : "I tried to think and the model call failed. Try again in a moment.";
+    }
     if (why === "not signed in") return "Sign in first and I can answer from your own book.";
     return `I couldn't answer that one (${why}).`;
   };
@@ -1117,14 +1124,15 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
     ]);
     let modelHtml: string | null = null;
     let why: string | null = null;
+    let detail: string | null = null;
     try {
       const r = (await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: v, state: buildState(), history }),
-      }).then((res) => res.json())) as { reply?: string | null; why?: string };
+      }).then((res) => res.json())) as { reply?: string | null; why?: string; detail?: string };
       if (r && typeof r.reply === "string" && r.reply.trim()) modelHtml = escapeHtml(r.reply.trim());
-      else if (r?.why) why = r.why;
+      else if (r?.why) { why = r.why; detail = r.detail ?? null; }
     } catch {
       /* the ledger answer below still works with the route unreachable */
     }
@@ -1138,7 +1146,7 @@ function Chat({ agentName, strategy, ledger }: { agentName: string; strategy: st
     //      print a canned line about free-form reasoning being "the next thing I
     //      learn", which reads as a missing FEATURE. It is a missing KEY, and
     //      that difference is a config change nobody could see they had to make.
-    const finalHtml = modelHtml ?? exactAnswer(v) ?? (why ? escapeHtml(brainlessNote(why)) : shrug());
+    const finalHtml = modelHtml ?? exactAnswer(v) ?? (why ? escapeHtml(brainlessNote(why, detail ?? undefined)) : shrug());
     // Replace the "…" placeholder with the real reply.
     setMsgs((m) => [...m.slice(0, -1), { role: "them", html: finalHtml }]);
     setBusy(false);

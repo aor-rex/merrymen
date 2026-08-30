@@ -26,6 +26,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { llmProviderById, type LlmProviderInfo } from "../../packages/core/src/index";
 import type { ResolvedConfig } from "./settings";
+import { redactSecrets } from "./telegram/agent";
 
 export interface LlmCreds {
   /** Provider id (for logs/telemetry), e.g. "groq" | "openai" | "custom". */
@@ -279,6 +280,32 @@ export async function llmAgentTurn(
 }
 
 /** Plain text completion (narration). Throws on transport error. */
+/**
+ * The provider's OWN reason for refusing, not just the status code.
+ *
+ * This threw `"groq 400"` and dropped the body — and the body is the only part
+ * that says anything actionable. A dead model, a rejected key, a rate limit and
+ * a too-long prompt are four different problems with four different fixes, and
+ * they all arrived as the same four characters. Whoever runs the deployment has
+ * to be able to tell them apart; on the hosted app they cannot read the logs.
+ *
+ * Redacted through the shared value-based scrubber before it goes anywhere,
+ * because this string reaches a browser: a provider that echoed part of a
+ * request back would otherwise put it on screen.
+ */
+async function providerError(creds: LlmCreds, r: Response): Promise<string> {
+  const raw = await r.text().catch(() => "");
+  let detail = "";
+  try {
+    const j = JSON.parse(raw) as { error?: { message?: string; code?: string } };
+    detail = [j.error?.code, j.error?.message].filter(Boolean).join(": ");
+  } catch {
+    detail = raw;
+  }
+  const safe = redactSecrets(detail, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
+  return `${creds.provider} ${r.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+}
+
 export async function llmText(
   creds: LlmCreds,
   opts: { system: string; prompt: string; maxTokens?: number },
@@ -307,7 +334,29 @@ export async function llmText(
     headers: openaiHeaders(creds),
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${creds.provider} ${r.status}`);
-  const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-  return (j.choices?.[0]?.message?.content ?? "").trim();
+  if (!r.ok) throw new Error(await providerError(creds, r));
+  const j = (await r.json()) as {
+    choices?: { finish_reason?: string; message?: { content?: string } }[];
+    usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+  };
+  const choice = j.choices?.[0];
+  const text = (choice?.message?.content ?? "").trim();
+  // AN EMPTY COMPLETION IS A FAILURE, NOT AN ANSWER.
+  //
+  // A reasoning model spends its completion budget on hidden reasoning before
+  // it writes anything, so too small a maxTokens returns HTTP 200 with
+  // `content: ""` and `finish_reason: "length"`. Measured: gpt-oss-120b at
+  // maxTokens 40 produced 38 reasoning tokens and no text at all. Returning ""
+  // here made that indistinguishable from a model with nothing to say — the
+  // caller saw no error, showed its generic fallback, and the real cause (a
+  // budget too small for this model) was invisible.
+  if (!text) {
+    const reasoned = j.usage?.completion_tokens_details?.reasoning_tokens;
+    const why =
+      choice?.finish_reason === "length"
+        ? `ran out of tokens before writing a reply${reasoned ? ` (spent ${reasoned} on reasoning)` : ""} — raise maxTokens or pick a model that does not reason`
+        : `returned an empty reply (finish_reason: ${choice?.finish_reason ?? "unknown"})`;
+    throw new Error(`${creds.provider} ${creds.model} ${why}`);
+  }
+  return text;
 }

@@ -75,8 +75,14 @@ export async function POST(req: Request) {
   try {
     const reply = (await llmText(creds, { system: SYSTEM, prompt, maxTokens: 400 })).trim();
     return NextResponse.json({ reply: reply || null });
-  } catch {
-    // LLM unreachable/rate-limited — degrade to the client's deterministic path.
-    return NextResponse.json({ reply: null, why: "llm-error" });
+  } catch (e) {
+    // LLM unreachable/rate-limited — degrade to the client's deterministic path,
+    // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that
+    // cover a dead model, a rejected key, a rate limit and an over-long prompt:
+    // four problems with four different fixes, indistinguishable to the one
+    // person who can fix any of them. On the hosted app they cannot read the
+    // logs either, so this is their only channel. Already redacted upstream.
+    const detail = e instanceof Error ? e.message : "";
+    return NextResponse.json({ reply: null, why: "llm-error", detail: detail.slice(0, 300) || undefined });
   }
 }

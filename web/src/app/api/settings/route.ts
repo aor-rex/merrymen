@@ -399,7 +399,7 @@ export async function PUT(req: Request) {
     if (v === "" || v === null || v === undefined) setOrClear("groqModel", undefined);
     else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
       setOrClear("groqModel", v.trim());
-    else errors.push("groqModel: must be a model id like llama-3.3-70b-versatile");
+    else errors.push("groqModel: must be a model id like qwen/qwen3.8-27b");
   }
   // AI provider selection — an id from the catalog (or "custom"), blank = legacy auto.
   if ("llmProvider" in body) {
