@@ -72,6 +72,12 @@ export interface PreflightInput {
   ethWei: bigint | null;
   /** null = not probed (no bundler configured at all). */
   bundlerReachable: boolean | null;
+  /**
+   * Names of WALL_POLICY_CONTRACTS entries with no code on the grant chain.
+   * `[]` means all present; `null` means the probe could not run — which says
+   * nothing about the contracts and must never read as "absent".
+   */
+  missingPolicyContracts: string[] | null;
 }
 
 const ok = (id: string, title: string): Check => ({ id, level: "ok", title });
@@ -127,6 +133,46 @@ export function preflight(input: PreflightInput): Check[] {
     });
   } else {
     out.push(ok("chain", `mainnet ${TRADEABLE_CHAIN_ID} — real funds`));
+  }
+
+  // ── the contracts the wall itself is built on ────────────────────────
+  // A ZeroDev policy is an address plus its data, and the addresses are the
+  // library's defaults for a deployment it assumes exists. On this chain one of
+  // them did not: RATE_LIMIT_POLICY_CONTRACT has zero bytes on 4663 AND 46630,
+  // measured 2026-08-30, while the timestamp policy, the call policy and the
+  // ECDSA signer all carry real bytecode. Every grant built before that
+  // discovery sealed a pointer into empty space.
+  //
+  // A BLOCKER, unlike the arm-time warn that mirrors it. The whole job of this
+  // command is to answer "can this thing trade", and the honest answer when the
+  // wall's own validator contracts are absent is no — the failure would
+  // otherwise arrive as a UserOp that will not validate, reported by nothing,
+  // at the price of a prefund per attempt.
+  //
+  // `null` means the probe did not run (no RPC, or the CLI could not reach the
+  // chain). That is NOT the same as absent, and it must not read as one.
+  if (input.missingPolicyContracts === null) {
+    out.push({
+      id: "policy-contracts",
+      level: "warn",
+      title: "couldn't check the contracts the wall is built on",
+      detail:
+        "The signature seals the addresses of the ZeroDev policy contracts it validates against. " +
+        "This run could not read the chain to confirm they are deployed, so it is unverified rather " +
+        "than fine. Re-run when the RPC is reachable.",
+    });
+  } else if (input.missingPolicyContracts.length > 0) {
+    out.push({
+      id: "policy-contracts",
+      level: "blocker",
+      title: `the wall depends on contracts with no code on chain ${g.chainId}`,
+      detail:
+        `${input.missingPolicyContracts.join(", ")} — every UserOp this grant signs is validated ` +
+        "against them, so nothing can land until this is resolved. This is a merrymen bug, not " +
+        "something you configured: report it rather than working around it.",
+    });
+  } else {
+    out.push(ok("policy-contracts", "the wall's validator contracts are deployed"));
   }
 
   const secsLeft = g.expiresAt - input.nowSec;

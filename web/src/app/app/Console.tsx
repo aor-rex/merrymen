@@ -416,11 +416,11 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                 </div>
               </section>
 
-              {/* Where the money sits, and what the chain will let the agent do
-                  with it — two LINES where there used to be three cards and
-                  five more. Nothing was dropped: every figure below appeared on
-                  a card of its own before, which is a lot of furniture for
-                  numbers you read in a second and then stop looking at. */}
+              {/* Where the money sits, and what it is allowed to do with it — the
+                  chain's part and ours stated separately. Two LINES where there used
+                  to be three cards and five more. Nothing was dropped: every figure
+                  below appeared on a card of its own before, which is a lot of
+                  furniture for numbers you read once and stop looking at. */}
               <section className="strip">
                 <div className="bal">
                   <Slice label="Cash" v={split.cash} pct={(split.cash / total) * 100} color="var(--mint)" />
@@ -431,12 +431,24 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                     <path d="M12 2l8 4v6c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z" />
                   </svg>
+                  {/*
+                    "The chain caps it at X a trade and Y a day, halts at Z%" put three
+                    figures behind one subject, and the chain only enforces the first.
+                    The daily total and the drawdown breaker are counters in this
+                    software; so is trades-per-day, since 2026-08-30, when the policy
+                    contract behind it turned out to have no code on this chain.
+
+                    Split into two sentences rather than qualified in one, because a
+                    parenthetical after a list of numbers gets skimmed past — and this
+                    line is the whole security claim for anyone who never opens /grant.
+                  */}
                   <span>
                     The chain caps it at <b>{caps ? usd(caps.perTradeUsdg) : "—"}</b> a trade and{" "}
-                    <b>{caps ? usd(caps.dailyUsdg) : "—"}</b> a day, halts at{" "}
-                    <b>{caps ? `${caps.maxDrawdownPct}%` : "—"}</b> drawdown, and{" "}
                     <b>cannot move your money out</b>
-                    {daysLeft !== null && <> · key dies in <b>{daysLeft}d</b></>}.
+                    {daysLeft !== null && <> · key dies in <b>{daysLeft}d</b></>}. merrymen itself
+                    stops it at <b>{caps ? usd(caps.dailyUsdg) : "—"}</b> a day and{" "}
+                    <b>{caps ? `${caps.maxDrawdownPct}%` : "—"}</b> drawdown — counters kept here,
+                    not on-chain.
                   </span>
                 </p>
               </section>

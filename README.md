@@ -13,11 +13,13 @@
 
 **Trading agents you never have to trust.** merrymen is a self-hosted band of
 agents for Robinhood Chain: your keys never leave your machine, and the caps that
-matter most — **per-trade size, ops per day, which assets, which contracts, and
-when the key dies** — are enforced by your account contract **on-chain**, not by
-promises. (The daily total and the drawdown breaker are enforced by the worker,
-not the chain; the chain-side ceiling is per-trade × ops/day until expiry. Said
-plainly because a project whose pitch is verification cannot round up.) Inside that wall your band works
+matter most — **per-trade size, which assets, which contracts, and when the key
+dies** — are enforced by your account contract **on-chain**, not by promises.
+(The daily total, the drawdown breaker and the trades-per-day count are enforced
+by the worker, not the chain, so the chain-side ceiling is per-trade until the
+key expires. Said plainly because a project whose pitch is verification cannot
+round up — and this list was itself wrong until 2026-08-30, when ops/day turned
+out to rest on a policy contract that is not deployed on this chain.) Inside that wall your band works
 Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — while you name your
 merryman, chat with it and steer it from Telegram (it can even run your PC), and
 watch every trade on a local dashboard.
@@ -192,13 +194,19 @@ gone), and lets you fund it. **Pick your ground:**
   treat the account like a hot wallet — your caps are the seatbelt, start small.
   No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
 
-Per-trade size, ops/day, the asset and contract allowlists, a zero native-ETH
-limit and the key's expiry are enforced **by the account contract on every
-operation**. The daily total and the drawdown breaker live in the worker — they
-tighten what the chain already allows, and a compromised worker could ignore
-them, which is why the chain-side ceiling is the honest number to plan against:
-per-trade × ops/day until expiry. The worker can tighten within the wall but can
-never widen it without a new signed grant.
+Per-trade size, the asset and contract allowlists, a zero native-ETH limit and
+the key's expiry are enforced **by the account contract on every operation**.
+The daily total, the drawdown breaker and the trades-per-day count live in the
+worker — they tighten what the chain already allows, and a compromised worker
+could ignore them, which is why the chain-side ceiling is the honest number to
+plan against: **per-trade size, until the key expires**. The worker can tighten
+within the wall but can never widen it without a new signed grant.
+
+Trades-per-day was on the on-chain list here until 2026-08-30. It rested on
+ZeroDev's rate-limit policy, and `eth_getCode` shows that contract has no code on
+Robinhood Chain — mainnet or testnet — while the timestamp and call policies both
+do. A policy pointing at an empty address is not a bound, so it was removed and
+this sentence corrected rather than left to flatter the design.
 
 > **Going live is one key.** To sign real trades, paste a free [Pimlico](https://dashboard.pimlico.io)
 > API key in `/settings` — merrymen builds the bundler URL for your wallet's chain

@@ -20,6 +20,7 @@ function ready(over: Partial<PreflightInput> = {}): PreflightInput {
     usdg: 500,
     ethWei: 10n ** 16n, // 0.01 ETH
     bundlerReachable: true,
+    missingPolicyContracts: [],
     ...over,
   };
 }

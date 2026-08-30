@@ -1,0 +1,221 @@
+/**
+ * REBUILD THE SESSION ACCOUNT WITH THE POLICY FLAG THE OWNER ACTUALLY SIGNED.
+ *
+ * THE BUG THIS EXISTS FOR. `WALL_POLICY_FLAG` is `NOT_FOR_VALIDATE_SIG`
+ * (`0x0002`), and both signers pass it to `toPermissionValidator`. It is the
+ * only thing standing between a session key and an ERC-1271 signature the
+ * account will honour — a class of spend no CALL policy can constrain, because
+ * it never becomes a UserOp at all.
+ *
+ * It never reached the chain. Traced through @zerodev/permissions 5.6.3:
+ *
+ *   toPermissionValidator.ts:47-67   getEnableData() emits
+ *                                    concat([flag, signerContract, signerData]).
+ *                                    THE OWNER SIGNS OVER THIS.
+ *   toPermissionValidator.ts:131-136 getPluginSerializationParams() returns
+ *                                    {policies, permissionId}. NO FLAG — and
+ *                                    types.ts:66-69 has no field for one.
+ *   deserializePermissionAccount:61  rebuilds toPermissionValidator({...}) with
+ *                                    no flag, so :37 defaults it to
+ *                                    FOR_ALL_VALIDATION (0x0000).
+ *
+ * `permissionId` IS carried, so `getIdentifier()` still matches and the
+ * validator installs under the right id — with the WRONG enable data. The owner
+ * signed a blob beginning `0x0002`; the worker computes and submits one
+ * beginning `0x0000`. Kernel recomputes the EIP-712 digest from the SUBMITTED
+ * enable data and recovers someone who is not the owner.
+ *
+ * So the first UserOperation of every flagged grant fails at plugin-enable —
+ * and only the first, because only the first carries enable data. That is
+ * consistent with this project never having landed a trade, though it is not
+ * proof of it: no UserOp has ever been sent.
+ *
+ * It also makes `wall.ts`'s claim — "The flag travels ON-CHAIN in the
+ * validator's enable data, so the account itself enforces it — this is not a
+ * client-side promise" — wrong about merrymen's own path. It is true of the
+ * signing side and false of the submitting side, which is the half that counts.
+ *
+ * WHY REBUILD FROM THE SERIALIZED PARAMS rather than from the grant's caps.
+ * `buildWallPolicies` could regenerate these policies — `grantedAt` is exactly
+ * the `now` it was called with — but the CALL policy also depends on
+ * `extraTokens`, and a grant stores only their ADDRESSES (`grantTokens`), not
+ * the symbol/decimals a CustomToken carries. Reproducing from caps would be
+ * right most of the time, and "most of the time" is not a property to build a
+ * wall on. The serialized params are what was signed, so replaying them is
+ * exact by construction.
+ *
+ * WHAT MAKES THIS SAFE. Getting the rebuild wrong yields a different permission
+ * id, which is a dead grant — so the id is recomputed WITHOUT being told the
+ * answer and compared against the stored one. A mismatch refuses to arm. That
+ * check is byte-level: `getPermissionId` hashes `[toPolicyId(policies), flag,
+ * toSignerId(signer)]`, so agreement means the policies AND the flag AND the
+ * signer all reproduce what the owner signed. The account address is then
+ * checked independently.
+ *
+ * Every import below is a published entry point (`@zerodev/permissions`,
+ * `/signers`, `@zerodev/sdk`, `@zerodev/sdk/accounts`). Nothing reaches past a
+ * package's `exports` map.
+ */
+
+import { privateKeyToAccount } from "viem/accounts";
+import type { Hex } from "viem";
+import { decodeParamsFromInitCode, toPermissionValidator } from "@zerodev/permissions";
+import { toECDSASigner } from "@zerodev/permissions/signers";
+import { toCallPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
+import { createKernelAccount } from "@zerodev/sdk";
+import { toKernelPluginManager } from "@zerodev/sdk/accounts";
+import { KERNEL_V3_3 } from "@zerodev/sdk/constants";
+
+/**
+ * The serialized blob's shape (serializePermissionAccount.ts:54-63).
+ *
+ * Deliberately loose. This is a foreign format we are replaying, not a type we
+ * own, and a precise interface here would be a second place to keep in sync
+ * with a package that has already surprised us once.
+ */
+interface SerializedParams {
+  permissionParams: { policies?: { policyParams: { type: string } }[]; permissionId?: Hex };
+  action: unknown;
+  validityData: Record<string, unknown>;
+  accountParams: { initCode: Hex; accountAddress: `0x${string}` };
+  enableSignature?: Hex;
+  privateKey?: Hex;
+  eip7702Auth?: unknown;
+  isPreInstalled?: boolean;
+}
+
+/** base64 → the params object. Mirrors utils.ts:4-7 and :38-42 exactly. */
+function decodeParams(serialized: string): SerializedParams {
+  const binString = atob(serialized);
+  const bytes = Uint8Array.from(binString, (m) => m.codePointAt(0) as number);
+  // A PLAIN JSON.parse, with no bigint reviver — matching the package, which
+  // also does none. Numeric policy fields therefore arrive as strings and the
+  // toXPolicy builders coerce them, exactly as they do today. Adding a reviver
+  // here would make our policies differ from the ones the package builds, which
+  // is the one thing this file must not do.
+  return JSON.parse(new TextDecoder().decode(bytes)) as SerializedParams;
+}
+
+/**
+ * One serialized policy → a live Policy. A trimmed `createPolicyFromParams`
+ * (deserializePermissionAccount.ts:100-117), which is not exported.
+ *
+ * Only the two kinds merrymen actually seals. The default THROWS rather than
+ * skipping: a policy we cannot rebuild is a bound we would silently drop, and
+ * dropping a bound is the failure this whole file is about. Anything else — a
+ * gas policy, a sudo policy, the rate-limit policy this repo no longer
+ * installs — means a grant we do not understand, and refusing to arm is the
+ * only honest response to that.
+ */
+async function policyFromParams(policy: { policyParams: { type: string } }) {
+  switch (policy.policyParams.type) {
+    case "call":
+      return toCallPolicy(policy.policyParams as never);
+    case "timestamp":
+      return toTimestampPolicy(policy.policyParams as never);
+    default:
+      throw new Error(
+        `this grant carries a '${policy.policyParams.type}' policy that merrymen cannot rebuild — refusing to arm rather than dropping it`,
+      );
+  }
+}
+
+export class PermissionIdMismatch extends Error {
+  constructor(readonly expected: string, readonly got: string) {
+    super(
+      `rebuilt permission id ${got} does not match the signed id ${expected} — ` +
+        `refusing to arm. The session account could not be reconstructed exactly as it was signed.`,
+    );
+    this.name = "PermissionIdMismatch";
+  }
+}
+
+/**
+ * `deserializePermissionAccount`, plus the flag.
+ *
+ * Signature deliberately mirrors the package's so the two can be read side by
+ * side, with `flag` as the one addition — the whole point of the file.
+ */
+export async function deserializeFlaggedPermissionAccount(
+  client: Parameters<typeof toPermissionValidator>[0],
+  entryPoint: { address: `0x${string}`; version: "0.7" },
+  kernelVersion: typeof KERNEL_V3_3,
+  serialized: string,
+  flag: `0x${string}`,
+) {
+  const params = decodeParams(serialized);
+  if (!params.privateKey) {
+    throw new Error("serialized grant carries no session key — nothing to sign with");
+  }
+
+  const signer = await toECDSASigner({ signer: privateKeyToAccount(params.privateKey) });
+  const policies = await Promise.all((params.permissionParams.policies ?? []).map(policyFromParams));
+
+  // FIRST, WITHOUT THE ANSWER. Passing `permissionId` makes getIdentifier()
+  // return it verbatim (toPermissionValidator.ts:71-73), which would make the
+  // check below tautological — it would compare the stored id with itself and
+  // pass however wrong the rebuild was. So compute it fresh and compare.
+  const probe = await toPermissionValidator(client, {
+    signer,
+    policies,
+    entryPoint,
+    kernelVersion,
+    flag,
+  } as never);
+
+  const signedId = params.permissionParams.permissionId;
+  const rebuiltId = probe.getIdentifier();
+  if (signedId && rebuiltId.toLowerCase() !== signedId.toLowerCase()) {
+    throw new PermissionIdMismatch(signedId, rebuiltId);
+  }
+
+  // Now pass it, matching the package: the id is part of what the account
+  // installs, and the stored one is authoritative even though we just proved
+  // ours equals it.
+  const validator = await toPermissionValidator(client, {
+    signer,
+    policies,
+    entryPoint,
+    kernelVersion,
+    flag,
+    permissionId: signedId,
+  } as never);
+
+  const { index, validatorInitData, useMetaFactory } = decodeParamsFromInitCode(
+    params.accountParams.initCode,
+    kernelVersion,
+  );
+
+  const plugins = await toKernelPluginManager(client as never, {
+    regular: validator,
+    pluginEnableSignature: params.isPreInstalled ? undefined : params.enableSignature,
+    validatorInitData,
+    action: params.action,
+    entryPoint,
+    kernelVersion,
+    isPreInstalled: params.isPreInstalled,
+    ...params.validityData,
+  } as never);
+
+  const account = await createKernelAccount(client as never, {
+    entryPoint,
+    kernelVersion,
+    plugins,
+    index,
+    address: params.accountParams.accountAddress,
+    useMetaFactory,
+    eip7702Auth: params.eip7702Auth,
+  } as never);
+
+  // SECOND, INDEPENDENT CHECK. The id proves the validator; this proves the
+  // account it was installed into. They can fail separately — a correct
+  // validator attached to the wrong address would sign operations for an
+  // account the owner never funded.
+  if (account.address.toLowerCase() !== params.accountParams.accountAddress.toLowerCase()) {
+    throw new Error(
+      `rebuilt account ${account.address} is not the signed account ${params.accountParams.accountAddress} — refusing to arm`,
+    );
+  }
+
+  return account;
+}
