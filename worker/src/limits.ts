@@ -24,7 +24,21 @@ export function limitsFromGrant(
     perTradeUsdg: usdgUnits(grant.caps.perTradeUsdg),
     dailyUsdg: usdgUnits(grant.caps.dailyUsdg),
     allowedTargets: [
-      RIALTO.routerSnapshot as `0x${string}`,
+      // RIALTO IS NOT HERE, and its absence is the fix.
+      //
+      // It used to be listed for every grant, while the wall only ever emits
+      // that permission under `allowRialto` — which no signer sets, so no grant
+      // this repo can produce carries it. That is the mirror LOOSER than the
+      // chain, the one direction this file exists to prevent: the worker
+      // believed it could route through Rialto, built the UserOp, and the chain
+      // refused it. Gas spent to be told no, by a revert that names nothing.
+      //
+      // Deliberately not replaced with a marker check. There is no marker,
+      // because there is no capability to mark; inventing one would be
+      // scaffolding for a route nothing grants. If Rialto is ever enabled it
+      // gets a marker then, the way GRANT_V4_ADAPTER and GRANT_PONS_ADAPTER
+      // did — permission and marker minted together, never one without the
+      // other.
       UNISWAP.swapRouter02 as `0x${string}`,
       MORPHO.steakhouseUsdgVault as `0x${string}`,
       CASH.USDG as `0x${string}`,

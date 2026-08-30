@@ -66,7 +66,6 @@ import {
   usableExtraTokens,
   chainForId,
   robinhoodTestnet,
-  GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
@@ -264,9 +263,13 @@ async function mintGrant(
     // it the worker assumes the legacy three — because a grant signed before the
     // list grew genuinely only has those three in its call policy, and crediting
     // it with more is how a position gets bought and never sold.
-    // GRANT_MULTIHOP is unconditional because buildCallPermissions grants
-    // `exactInput` unconditionally — the two must move together, or the worker
-    // either declines a route it could take or takes one that reverts.
+    // GRANT_MULTIHOP IS NO LONGER MINTED. buildCallPermissions stopped
+    // granting `exactInput` — its packed `path` hides the output token and
+    // cannot be constrained at the pinned policy version, which made it the
+    // loosest door in the wall once exactInputSingle pinned both legs. Marker
+    // and permission move together, so it goes too: the worker reads
+    // grantHasMultihop to decide whether to route via WETH, and a marker
+    // without the permission would send it building calls the chain refuses.
     // NO "transfer" HERE, and that is not an omission. This list carried it
     // unconditionally while buildWallPolicies was called without
     // withdrawalAddresses — so the wall emitted no transfer permission at all
@@ -282,7 +285,6 @@ async function mintGrant(
     // address rides with it because the marker alone is a claim, not evidence.
     grantFeatures: [
       TRADEABLE_V2,
-      GRANT_MULTIHOP,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),

@@ -206,31 +206,18 @@ test("the vault deposit is capped, the withdrawal is not — but BOTH land in ou
   assert.equal(wdArgs[2], null, "owner is unconstrained — it can only be us anyway");
 });
 
-test("a MULTI-HOP swap IS permitted, and its recipient is pinned at the RIGHT word", () => {
-  // `exactInput` (the via-WETH route) is a different selector from
-  // `exactInputSingle`, and the wall used to grant only the latter while the
-  // worker quoted multi-hop routes anyway: they logged "simulated ✓ v3 via
-  // WETH", were submitted, and reverted on-chain — burning gas every tick,
-  // invisible in paper mode because paper never builds calldata.
-  //
-  // Granting it costs nothing beyond what single-hop already grants: the input
-  // is bounded by the USDG approve cap (≤ perTradeUsdg) and the output is
-  // pinned to this account, exactly as asserted below.
-  const [hop] = find(UNISWAP.swapRouter02, "exactInput");
-  assert.ok(hop, "the multi-hop permission exists");
-  const args = hop.args as (null | { condition: number; value: string })[];
+test("MULTI-HOP IS GONE, and the packed path is why it cannot come back", () => {
+  // It used to be granted with `args: [null, null, self]` — recipient pinned at
+  // word 2, both tokens open. That was defensible only while its single-hop
+  // sibling was equally open. Once `exactInputSingle` pinned both token legs,
+  // this became the loosest door in the wall: the output token lives inside a
+  // packed `path`, so the drain the single-hop pin closes was one selector away.
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0, "no multi-hop permission");
 
-  // THREE entries, not seven, and the pin sits at index 2 rather than 3 — THAT
-  // is the trap. ExactInputParams leads with `bytes path`, so the tuple is
-  // DYNAMIC: word 0 is the pointer to the tuple, word 1 the pointer to the
-  // path, and `recipient` lands at word 2. Copying the single-hop mapping would
-  // have constrained `amountIn` and left the recipient free to be anyone.
-  assert.equal(args.length, 3);
-  assert.deepEqual(args[2], { condition: ParamCondition.EQUAL, value: SELF });
-  assert.equal(args[0], null, "word 0 is the tuple pointer");
-  assert.equal(args[1], null, "word 1 is the path pointer");
-
-  // AND PROVE IT against viem's encoder, not against the reasoning above.
+  // AND THE PATH IS UNCONSTRAINABLE — which is why the answer is removal rather
+  // than a tighter rule. Proven against viem's encoder: the output token is not
+  // right-aligned in any word, and its word index MOVES with the hop count, so
+  // no fixed-offset ONE_OF can ever name it.
   const OTHER = "0x00000000000000000000000000000000000000ff" as const;
   const path = `0x${CASH.USDG.slice(2)}000bb8${CASH.WETH.slice(2)}000bb8${OTHER.slice(2)}` as `0x${string}`;
   const calldata = encodeFunctionData({
@@ -240,33 +227,26 @@ test("a MULTI-HOP swap IS permitted, and its recipient is pinned at the RIGHT wo
   });
   const body = `0x${calldata.slice(10)}`;
   const wordAt = (i: number) => `0x${body.slice(2 + i * 64, 2 + (i + 1) * 64)}`;
-  assert.equal(
-    wordAt(2).toLowerCase(),
-    pad(SELF, { size: 32 }).toLowerCase(),
-    "offset 2*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
+  assert.equal(BigInt(wordAt(5)), 66n, "3 hops = 20+3+20+3+20 bytes of path");
+  const tail = OTHER.slice(2).toLowerCase();
+  assert.ok(
+    ![6, 7, 8].some((i) => wordAt(i).toLowerCase().endsWith(tail)),
+    "the output token is not right-aligned in any word — a ONE_OF rule cannot match it",
   );
-  // The neighbours too, so a shift in EITHER direction fails rather than aliases.
-  assert.equal(BigInt(wordAt(3)), 1_000_000n, "word 3 is amountIn");
-  assert.equal(BigInt(wordAt(1)), 128n, "word 1 is the path OFFSET, not a value");
 
-  // The permission and the grant marker must move together, exactly like
-  // allowUniswapV4 and GRANT_V4. Both signers mint this unconditionally now.
-  assert.equal(
-    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2", "multihop"] }),
-    true,
-    "a grant signed today claims it",
-  );
-  assert.equal(
-    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2"] }),
-    false,
-    "one signed before this does not — the worker keeps routing it single-hop",
-  );
+  // Marker and permission move together. A wall that no longer grants the route
+  // must not hand out a marker that tells the worker to build it.
+  assert.equal(grantHasMultihop({ grantFeatures: ["tradeable-v2"] }), false);
 });
 
-test("the routers are narrowed to the two swap entrypoints, and Rialto is absent by default", () => {
+
+test("the router is narrowed to ONE entrypoint, and Rialto is absent by default", () => {
+  // ONE, not two. `exactInput` (multi-hop) was dropped: its packed `path` hides
+  // the output token and cannot be constrained at the pinned policy version,
+  // which made it the loosest door once exactInputSingle pinned both legs.
   assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 1);
-  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 1);
-  assert.equal(find(UNISWAP.swapRouter02).length, 2, "and nothing else on that router");
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0);
+  assert.equal(find(UNISWAP.swapRouter02).length, 1, "and nothing else on that router");
   // The UniversalRouter is absent entirely by default — see the v4 test above.
   // When opted in it is narrowed to `execute` and no further, because there is
   // no further: its arguments are opaque bytes.
@@ -304,13 +284,15 @@ test("owner-added tokens are validated and de-duplicated before becoming policy"
 test("the wall carries exactly the expected permission set — no more, no less", () => {
   const list = perms();
   const stockCount = STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).length;
-  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×2
-  // (exactInputSingle and exactInput) + vault deposit + vault withdraw. No USDG
-  // transfer, no Rialto and no v4 — all three are opt-in. This count dropped
-  // from stockCount + 6 when Permit2 and the UniversalRouter stopped being
-  // granted unconditionally, and rose by one when the multi-hop route was
-  // granted rather than quoted-and-reverted.
-  assert.equal(list.length, stockCount + 5, "an unexpected permission count means something was added or lost");
+  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×1
+  // (exactInputSingle only) + vault deposit + vault withdraw. No USDG transfer,
+  // no Rialto and no v4 — all three are opt-in. The count dropped from
+  // stockCount + 6 when Permit2 and the UniversalRouter stopped being granted
+  // unconditionally, rose to +6 when multi-hop was granted rather than
+  // quoted-and-reverted, and fell to +4 when multi-hop was dropped again —
+  // its packed path could not be constrained, which made it the widest door
+  // left once exactInputSingle pinned both token legs.
+  assert.equal(list.length, stockCount + 4, "an unexpected permission count means something was added or lost");
   // ...and each opt-in adds exactly the entries it should, never more.
   const withXfer = buildCallPermissions(CAPS, SELF, { withdrawalAddresses: [SELF] });
   const withRialto = buildCallPermissions(CAPS, SELF, { allowRialto: true });
@@ -363,7 +345,29 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
   // consecutive words. Index 3 is `recipient`.
   assert.equal(args.length, 7);
   assert.deepEqual(args[3], { condition: ParamCondition.EQUAL, value: SELF });
-  for (const i of [0, 1, 2, 4, 5, 6]) assert.equal(args[i], null, `arg ${i} must stay unconstrained`);
+
+  // BOTH TOKEN LEGS ARE PINNED, and this is the assertion that used to say the
+  // opposite. It read `for (const i of [0, 1, 2, 4, 5, 6]) assert.equal(args[i],
+  // null)` — enshrining the hole: with tokenOut open, a stolen key could
+  // approve a stock (the amount is deliberately uncapped) and swap the entire
+  // balance into a token it had just minted, in ONE UserOp. The recipient pin
+  // was satisfied throughout: the account duly received the worthless token.
+  const legs = [args[0], args[1]] as unknown as { condition: number; value: string[] }[];
+  for (const [i, leg] of legs.entries()) {
+    assert.equal(leg?.condition, ParamCondition.ONE_OF, `token leg ${i} must be an allowlist`);
+    assert.ok(
+      leg.value.map((a) => a.toLowerCase()).includes(CASH.USDG.toLowerCase()),
+      `token leg ${i} must admit USDG`,
+    );
+    assert.ok(
+      !leg.value.map((a) => a.toLowerCase()).includes("0x00000000000000000000000000000000000000ff"),
+      `token leg ${i} must not admit a token nobody named`,
+    );
+  }
+  // The two legs are built from the SAME list the approve permissions use, so
+  // what a key may approve and what it may swap into cannot drift apart.
+  assert.deepEqual(legs[0]!.value, legs[1]!.value, "both legs share one allowlist");
+  for (const i of [2, 4, 5, 6]) assert.equal(args[i], null, `arg ${i} must stay unconstrained`);
 
   // AND PROVE THE OFFSET, against viem's encoder rather than against the
   // reasoning above. If SwapRouter02's struct ever gains a dynamic member or
@@ -388,12 +392,28 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
   });
   // Skip the 4-byte selector, then read word 3 (the policy's offset 3*32).
   const body = `0x${calldata.slice(10)}`;
-  const word3 = `0x${body.slice(2 + 3 * 64, 2 + 4 * 64)}`;
+  const wordAt = (i: number) => `0x${body.slice(2 + i * 64, 2 + (i + 1) * 64)}`;
   assert.equal(
-    word3.toLowerCase(),
+    wordAt(3).toLowerCase(),
     pad(SELF, { size: 32 }).toLowerCase(),
     "offset 3*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
   );
+
+  // AND THE TOKEN LEGS, for the same reason and with more at stake: a ONE_OF
+  // aimed at the wrong word is an allowlist that permits everything while
+  // reading as strict. Words 0 and 1 must be tokenIn and tokenOut.
+  assert.equal(
+    wordAt(0).toLowerCase(),
+    pad(CASH.USDG as `0x${string}`, { size: 32 }).toLowerCase(),
+    "offset 0 must be `tokenIn`",
+  );
+  assert.equal(
+    wordAt(1).toLowerCase(),
+    pad(OTHER, { size: 32 }).toLowerCase(),
+    "offset 1 must be `tokenOut`",
+  );
+  // The neighbour too, so a shift in either direction fails rather than aliases.
+  assert.equal(BigInt(wordAt(2)), 3000n, "word 2 is the fee tier");
 });
 
 test("the V4 ADAPTER opt-in: one permission, both legs pinned to the owner's asset list, at proven offsets", () => {
@@ -679,4 +699,39 @@ test("buildWallPolicies forwards EVERY adapter into the call policy", () => {
     p.target.toLowerCase(),
   );
   assert.deepEqual(both, direct, "buildWallPolicies must mirror buildCallPermissions exactly");
+});
+
+test("the swap's pinned asset set IS the approve set — they cannot drift", () => {
+  // THE INVARIANT BEHIND 1.1. Pinning `tokenIn`/`tokenOut` is only worth
+  // anything if the pinned list is the same list the approves cover. Pin a
+  // narrower set and legitimate sells die on-chain with an opaque revert; pin a
+  // wider one and the pin stops meaning what its comment says.
+  //
+  // wall.ts builds both from the single `adapterAssets` const, in one call, so
+  // they cannot drift by construction — but "by construction" is a claim about
+  // code that a later refactor can quietly break. This asserts the OUTPUT,
+  // which is the only thing the chain sees.
+  const CUSTOM = {
+    address: "0x00000000000000000000000000000000000000dd" as const,
+    symbol: "MEME",
+    decimals: 18,
+  };
+  for (const opts of [{}, { extraTokens: [CUSTOM] }]) {
+    const list = buildCallPermissions(CAPS, SELF, opts) as unknown as Perm[];
+    const approved = new Set(
+      list.filter((p) => p.functionName === "approve").map((p) => p.target.toLowerCase()),
+    );
+    const swap = list.find(
+      (p) => p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase() && p.functionName === "exactInputSingle",
+    )!;
+    const legs = swap.args as unknown as { condition: number; value: string[] }[];
+    for (const i of [0, 1] as const) {
+      const pinned = new Set(legs[i]!.value.map((a) => a.toLowerCase()));
+      assert.deepEqual(
+        [...pinned].sort(),
+        [...approved].sort(),
+        `leg ${i} must be exactly the set of tokens this grant can approve`,
+      );
+    }
+  }
 });

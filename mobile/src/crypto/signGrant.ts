@@ -6,7 +6,6 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import {
-  GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
@@ -196,7 +195,6 @@ export async function signGrant(args: {
       // off-chain mirror looser than the chain. See the note in session.ts.
       grantFeatures: [
         TRADEABLE_V2,
-        GRANT_MULTIHOP,
         ...(allowUniswapV4 ? [GRANT_V4] : []),
         ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
         ...(args.ponsAdapterAddress ? [GRANT_PONS_ADAPTER] : []),

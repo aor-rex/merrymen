@@ -432,40 +432,65 @@ export function buildCallPermissions(
       // offset against viem's own encoder rather than against this reasoning —
       // if SwapRouter02's struct ever changes, that test fails loudly instead
       // of the policy quietly constraining the wrong word.
+      //
+      // BOTH TOKEN LEGS ARE PINNED, and the recipient pin alone was not enough.
+      // With `tokenOut` open, a stolen session key needed two calls and one
+      // UserOp: approve the router for a stock (the amount is deliberately
+      // uncapped — share counts are 18dp and not comparable to a USDG cap),
+      // then `exactInputSingle{tokenIn: STOCK, tokenOut: <token the attacker
+      // minted>, amountIn: the whole balance, amountOutMinimum: 0}`. The
+      // recipient pin is satisfied: the account duly RECEIVES the worthless
+      // token. The stocks left via the pool, so the ops-per-day cap never
+      // bites — one op is enough to convert the entire non-cash book.
+      //
+      // The paragraph below at the v4 adapter already described this attack and
+      // said the adapter's ONE_OF pin closes it; the adapter has never shipped
+      // (allowUniswapV4 is hardcoded false in both signers), so the pin belongs
+      // here, on the route grants actually carry. Same list, same variable as
+      // the approve permissions above — `adapterAssets` — so the set a key may
+      // APPROVE and the set it may SWAP INTO cannot drift apart within a grant.
+      //
+      // Cost: one bytes32 per allowed address per rule, so two legs over the
+      // default 15-address list is ~960 bytes of extra enable-data, paid once
+      // on the first UserOp of each session key.
       target: UNISWAP.swapRouter02 as Address,
       valueLimit: 0n,
       abi: UNISWAP_SWAP_ROUTER_ABI,
       functionName: "exactInputSingle",
-      args: [null, null, null, self, null, null, null],
+      args: [
+        { condition: ParamCondition.ONE_OF, value: adapterAssets },
+        { condition: ParamCondition.ONE_OF, value: adapterAssets },
+        null,
+        self,
+        null,
+        null,
+        null,
+      ],
     },
-    {
-      // MULTI-HOP, same router, same pin — the route through WETH.
-      //
-      // Roughly three quarters of this chain's pools quote against WETH rather
-      // than USDG, so without this most memecoins are unreachable: there is
-      // simply no direct pair to quote. The worker used to build these calls
-      // anyway; they quoted, submitted, and reverted here, at the wall, burning
-      // gas every tick. That is now gated on the GRANT_MULTIHOP marker, which
-      // this permission is what mints.
-      //
-      // THE OFFSET IS DIFFERENT AND THAT IS THE WHOLE TRAP. ExactInputParams
-      // leads with `bytes path`, so unlike its single-hop sibling the tuple is
-      // DYNAMIC: word 0 is the pointer to the tuple, word 1 the pointer to the
-      // path, and `recipient` lands at word 2 rather than word 3. Reasoning it
-      // out is exactly how a policy ends up constraining the wrong word and
-      // looking strict while permitting anything — so wall.test.ts proves this
-      // against viem's encoder instead.
-      //
-      // What it costs: nothing beyond the single-hop case already grants. The
-      // input is still bounded by the USDG approve cap (≤ perTradeUsdg per op),
-      // and the output still has to come back to this account. A longer path
-      // buys a worse price, not somebody else's tokens.
-      target: UNISWAP.swapRouter02 as Address,
-      valueLimit: 0n,
-      abi: UNISWAP_SWAP_ROUTER_ABI,
-      functionName: "exactInput",
-      args: [null, null, self],
-    },
+    // MULTI-HOP (`exactInput`) IS GONE, and it cannot come back in this shape.
+    //
+    // It used to sit here with `args: [null, null, self]` — the recipient
+    // pinned at word 2, everything else open. The comment defending it argued
+    // that a longer path "buys a worse price, not somebody else's tokens",
+    // which was true only while its single-hop sibling was equally open. Now
+    // that `exactInputSingle` pins both token legs, this permission is the
+    // loosest door in the wall: the output token lives inside a packed `path`
+    // and can be anything at all.
+    //
+    // AND THE PATH CANNOT BE CONSTRAINED. `SLICE_EQUAL` is the only condition
+    // in the library aimed at dynamic bytes, and it is unavailable twice over:
+    // it requires CallPolicyVersion V0_0_5 while this wall pins V0_0_4, and
+    // even there it resolves the argument type from the ABI, where
+    // ExactInputParams is a `tuple` and never a `bytes`. A fixed-offset rule
+    // cannot help either — the path is `token(20) ‖ fee(3) ‖ token(20) …`, so
+    // the output token straddles two words and its word index MOVES with the
+    // hop count. There is no word that equals a token address.
+    //
+    // WHAT THIS COSTS, said plainly: roughly three quarters of this chain's
+    // pools quote against WETH, so any token with no direct USDG pair becomes
+    // unreachable. That is a real loss of reach and it is the honest trade —
+    // the alternative is shipping a hole that cannot be closed. The way back is
+    // an adapter with static args (V4SelfSwap is the pattern), not this.
     // ── the V4SelfSwap adapter, when the owner opted in ──────────────────
     //
     // ONE permission, and STRICTER than the v3 routes above it. `swapExactIn`

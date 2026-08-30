@@ -12,9 +12,12 @@
 # merrymen
 
 **Trading agents you never have to trust.** merrymen is a self-hosted band of
-agents for Robinhood Chain: your keys never leave your machine, and every cap
-you set — per-trade, daily, ops/day, drawdown, key expiry — is enforced by your
-account contract **on-chain**, not by promises. Inside that wall your band works
+agents for Robinhood Chain: your keys never leave your machine, and the caps that
+matter most — **per-trade size, ops per day, which assets, which contracts, and
+when the key dies** — are enforced by your account contract **on-chain**, not by
+promises. (The daily total and the drawdown breaker are enforced by the worker,
+not the chain; the chain-side ceiling is per-trade × ops/day until expiry. Said
+plainly because a project whose pitch is verification cannot round up.) Inside that wall your band works
 Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — while you name your
 merryman, chat with it and steer it from Telegram (it can even run your PC), and
 watch every trade on a local dashboard.
@@ -38,12 +41,19 @@ their discretion — the safety story is a terms-of-service. merrymen inverts it
 - **Your machine.** The agent, its memory, and its ledger live in `~/.merrymen`.
   There is no server-side anything.
 - **Your keys.** Minted locally, backed up by you, never transmitted.
-- **The chain enforces the caps.** The session key's limits live in the account
-  contract; even a fully compromised agent cannot spend past the wall.
+- **The chain enforces the caps that bound a loss.** The session key may only
+  call contracts it names, may only move assets you sealed into it, may not send
+  native ETH at all, and dies on schedule — all in the account contract. A
+  compromised agent cannot reach an asset you did not name or a contract you did
+  not approve. It can still make bad trades inside those bounds; no wall fixes
+  judgement.
 - **Verifiable, not claimed.** The dashboard links every address and cap to the
-  block explorer, and its **prove the wall** button fires malicious intents
-  (an oversized trade, a "send everything to 0xevil" transfer, an expired key)
-  through the live policy so you can watch each one bounce.
+  block explorer, and its **prove the wall** button fires malicious intents (an
+  oversized trade, a "send everything to 0xevil" transfer, an expired key)
+  through the policy so you can watch each one bounce. Note what that does and
+  does not show: it exercises the worker's own copy of the rules, so it proves
+  the software agrees with itself. The chain-side proof is a real refused
+  UserOp — see docs/.
 - **The numbers are auditable too, not just the wall.** Every fact that moves
   money is mirrored into a hash-chained journal, so an edited record breaks
   every hash after it and a deleted one leaves a visible gap. `merrymen export`
@@ -149,10 +159,13 @@ gone), and lets you fund it. **Pick your ground:**
   treat the account like a hot wallet — your caps are the seatbelt, start small.
   No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
 
-The caps you set — per-trade, daily, ops/day, drawdown breaker, key expiry — are
-enforced **by the account contract on every operation**, not by promises. The
-worker can tighten within them but can never widen them without a new signed
-grant.
+Per-trade size, ops/day, the asset and contract allowlists, a zero native-ETH
+limit and the key's expiry are enforced **by the account contract on every
+operation**. The daily total and the drawdown breaker live in the worker — they
+tighten what the chain already allows, and a compromised worker could ignore
+them, which is why the chain-side ceiling is the honest number to plan against:
+per-trade × ops/day until expiry. The worker can tighten within the wall but can
+never widen it without a new signed grant.
 
 > **Going live is one key.** To sign real trades, paste a free [Pimlico](https://dashboard.pimlico.io)
 > API key in `/settings` — merrymen builds the bundler URL for your wallet's chain
