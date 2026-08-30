@@ -25,7 +25,8 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-inflight-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addTrade, getOpsToday, getSpentTodayUsdg } = await import("./store");
+const { initStore, addTrade, getOpsToday, getSpentTodayUsdg, listOpHashes, listSubmittedOps } =
+  await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 
@@ -140,5 +141,105 @@ describe("the pre-broadcast row and the outcome are the same row", () => {
     const late = rows(HASH).find((r) => r.status === "reverted")!;
     assert.equal(landed.epoch, late.epoch, "same epoch here because no boundary was opened between them");
     assert.ok(Number.isInteger(landed.epoch));
+  });
+});
+
+/**
+ * THE REGRESSION, ASSERTED AGAINST REAL SQL.
+ *
+ * The pre-broadcast row and the orphan sweep were built a day apart and did not
+ * fit: `listOpHashes` selected every non-null user_op_hash regardless of status,
+ * and `findOrphanOps` skips any hash in that set. So the row the sweep exists to
+ * finish was precisely the one it filtered out.
+ *
+ * This cannot be a unit test — the bug was a missing WHERE clause, and a clause
+ * that is not run is a clause that cannot be wrong.
+ */
+describe("an in-flight row is not mistaken for a settled one", () => {
+  const IN_FLIGHT = "0xaaaa000000000000000000000000000000000000000000000000000000000001";
+  const SETTLED = "0xbbbb000000000000000000000000000000000000000000000000000000000002";
+  const REFUSED = "0xcccc000000000000000000000000000000000000000000000000000000000003";
+
+  it("sets up one row of each status", async () => {
+    await submitted(IN_FLIGHT, 10);
+    await submitted(SETTLED, 20);
+    await addTrade({
+      agent_id: AGENT,
+      kind: "swap",
+      target: "0xrouter000000000000000000000000000000001",
+      amount_usdg: 20,
+      user_op_hash: SETTLED,
+      tx_hash: "0xdone",
+      status: "landed",
+    });
+    await addTrade({
+      agent_id: AGENT,
+      kind: "swap",
+      target: "0xrouter000000000000000000000000000000001",
+      amount_usdg: 30,
+      user_op_hash: REFUSED,
+      status: "reverted",
+      reject_rule: "the chain said no",
+    });
+    assert.equal(rows(IN_FLIGHT)[0]!.status, "submitted");
+    assert.equal(rows(SETTLED)[0]!.status, "landed");
+  });
+
+  it("listOpHashes reports the SETTLED ones, so the sweep can skip them", async () => {
+    const known = await listOpHashes(AGENT);
+    assert.ok(known.has(SETTLED.toLowerCase()), "a landed op is accounted for");
+    // The original reasoning, still right and still load-bearing: a hash
+    // recorded as reverted must not be re-reconciled as landed.
+    assert.ok(known.has(REFUSED.toLowerCase()), "so is a reverted one");
+  });
+
+  it("and NOT the in-flight one — this is the whole bug", async () => {
+    const known = await listOpHashes(AGENT);
+    assert.equal(
+      known.has(IN_FLIGHT.toLowerCase()),
+      false,
+      "a 'submitted' row is a claim that an op left, with no outcome — it is by definition not accounted for",
+    );
+  });
+
+  it("listSubmittedOps returns it, with what the resolver needs to settle it", async () => {
+    const open = await listSubmittedOps(AGENT);
+    const mine = open.find((o) => o.userOpHash === IN_FLIGHT.toLowerCase());
+    assert.ok(mine, "the ledger row IS the recovery record — nothing else holds this hash");
+    assert.equal(mine.kind, "swap");
+    assert.equal(mine.amountUsdg, 10);
+    assert.ok(Number.isInteger(mine.epoch), "the epoch it was submitted in, for the boundary check");
+    assert.ok(mine.createdAt > 0);
+    // Settled rows must not appear here, or the resolver would re-ask the chain
+    // about ops it already has answers for, every pass, forever.
+    assert.equal(open.some((o) => o.userOpHash === SETTLED.toLowerCase()), false);
+    assert.equal(open.some((o) => o.userOpHash === REFUSED.toLowerCase()), false);
+  });
+
+  it("the two sets are disjoint, which is what lets both sweeps run", async () => {
+    const known = await listOpHashes(AGENT);
+    const open = (await listSubmittedOps(AGENT)).map((o) => o.userOpHash);
+    for (const h of open) {
+      assert.equal(known.has(h), false, `${h} cannot be in both, or the sweeps would both act on it`);
+    }
+  });
+
+  it("resolving one moves it from the open set to the known set", async () => {
+    await addTrade({
+      agent_id: AGENT,
+      kind: "swap",
+      target: "0xrouter000000000000000000000000000000001",
+      amount_usdg: 10,
+      user_op_hash: IN_FLIGHT,
+      tx_hash: "0xresolved",
+      status: "landed",
+    });
+    assert.equal(rows(IN_FLIGHT).length, 1, "still one row — resolved in place");
+    assert.ok((await listOpHashes(AGENT)).has(IN_FLIGHT.toLowerCase()));
+    assert.equal(
+      (await listSubmittedOps(AGENT)).some((o) => o.userOpHash === IN_FLIGHT.toLowerCase()),
+      false,
+      "and it stops being re-asked about",
+    );
   });
 });

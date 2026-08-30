@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
-import { addressTopic, findOrphanOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { addressTopic, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import type { ReceiptLog } from "./fills";
 
 const EP_ABI = parseAbi([
@@ -126,5 +126,154 @@ describe("findOrphanOps", () => {
     const chain = fakeChain([opLog(dup, true, tx), opLog(dup, true, tx)], { [tx.toLowerCase()]: [transfer(USDG, ACCOUNT, ROUTER, 1_000000n)] });
     const orphans = await findOrphanOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, knownOpHashes: new Set(), lookbackBlocks: 1000n });
     assert.equal(orphans.length, 1);
+  });
+});
+
+/**
+ * THE SIBLING SWEEP, and the bug that made it necessary.
+ *
+ * cf9b046 started writing a 'submitted' row BEFORE broadcasting, so a crash
+ * between the send and the ledger write could not lose the hash. It also made
+ * findOrphanOps blind to exactly those rows: `listOpHashes` selected every
+ * non-null user_op_hash regardless of status, and findOrphanOps skips any hash
+ * in that set. So the row the sweep exists to finish was the one it filtered
+ * out — invisible forever, never journaled, absent from realized P&L, and still
+ * charging the live rail.
+ *
+ * The store half of the fix is asserted in inflight-row.integration.test.ts,
+ * against real SQL. This is the chain half.
+ */
+describe("resolveSubmittedOps", () => {
+  const chainFor = (logs: RawLog[], receipts: Record<string, ReceiptLog[]> = {}) => {
+    // A chain that honours the topic filter, unlike fakeChain above — the
+    // exact-lookup path is the whole point here, and a fake that ignores
+    // `topics` would let a wrong-hash match pass unnoticed.
+    return {
+      async getBlockNumber() {
+        return 1000n;
+      },
+      async getLogs(a: { topics: (Hex | Hex[] | null)[] }) {
+        const want = a.topics[1];
+        if (!want) return logs;
+        return logs.filter((l) => l.topics[1]?.toLowerCase() === String(want).toLowerCase());
+      },
+      async getReceiptLogs(txHash: Hex) {
+        return receipts[txHash.toLowerCase()] ?? null;
+      },
+    } as ReconcileChain;
+  };
+
+  it("settles a stranded op the chain LANDED, with its notional", async () => {
+    const [op, tx] = [h(0x51), h(0x61)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor([opLog(op, true, tx)], {
+        [tx]: [transfer(USDG, ACCOUNT, ROUTER, 25_000_000n), transfer(STOCK, ROUTER, ACCOUNT, 10n ** 18n)],
+      }),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [op],
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(res.length, 1);
+    assert.equal(res[0]!.success, true);
+    assert.equal(res[0]!.txHash, tx);
+    assert.equal(res[0]!.notionalUsdg6, 25_000_000n);
+    assert.equal(res[0]!.attributed, true);
+  });
+
+  it("settles a stranded op the chain REVERTED — which findOrphanOps would skip", async () => {
+    // The asymmetry that makes this a separate function. An unrecorded revert
+    // is nothing to an orphan sweep: it moved no money and counts toward no
+    // cap. Here the row already EXISTS and is charging the live rail, so the
+    // revert is the thing that releases the charge.
+    const [op, tx] = [h(0x52), h(0x62)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor([opLog(op, false, tx)]),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [op],
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(res.length, 1, "a revert must be REPORTED, not skipped");
+    assert.equal(res[0]!.success, false);
+    assert.equal(res[0]!.notionalUsdg6, 0n, "a reverted op moved nothing");
+
+    // And prove the contrast, so the reason for two functions is on the record.
+    const orphans = await findOrphanOps({
+      chain: chainFor([opLog(op, false, tx)]),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      knownOpHashes: new Set(),
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(orphans.length, 0, "the orphan sweep skips it, correctly, for its own purpose");
+  });
+
+  it("AN OP IT CANNOT FIND IS LEFT ALONE — never written off as reverted", async () => {
+    // The one rule that matters most. Not-found means pending, or older than
+    // the lookback, or an RPC that answered thinly. Guessing 'reverted' would
+    // release a charge for an op that may well have moved money, and the guess
+    // would enter a hash-chained journal where it cannot be quietly corrected.
+    const res = await resolveSubmittedOps({
+      chain: chainFor([opLog(h(0x53), true, h(0x63))]),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [h(0x54)], // a different op entirely
+      lookbackBlocks: 1000n,
+    });
+    assert.deepEqual(res, [], "silence is not a verdict");
+  });
+
+  it("looks each hash up EXACTLY, rather than scanning and filtering", async () => {
+    // topic1 of UserOperationEvent is the indexed userOpHash, and the filter
+    // has always left that slot null because the orphan sweep does not know the
+    // hashes in advance. This one does. Asserted because a regression to a scan
+    // would still pass every test above — it would just cost a window read per
+    // op and match on hashes it was never asked about.
+    const seen: (Hex | Hex[] | null)[][] = [];
+    const chain: ReconcileChain = {
+      async getBlockNumber() {
+        return 1000n;
+      },
+      async getLogs(a) {
+        seen.push(a.topics);
+        return [];
+      },
+      async getReceiptLogs() {
+        return null;
+      },
+    };
+    await resolveSubmittedOps({
+      chain,
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [h(0x55)],
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(String(seen[0]![1]).toLowerCase(), h(0x55), "topic1 must carry the hash");
+  });
+
+  it("asks nothing at all when there is nothing stranded", async () => {
+    // The ordinary case, on a 300s clock, for the life of every healthy run.
+    let calls = 0;
+    const chain: ReconcileChain = {
+      async getBlockNumber() {
+        calls += 1;
+        return 1000n;
+      },
+      async getLogs() {
+        calls += 1;
+        return [];
+      },
+      async getReceiptLogs() {
+        return null;
+      },
+    };
+    assert.deepEqual(
+      await resolveSubmittedOps({ chain, smartAccount: ACCOUNT, usdgToken: USDG, hashes: [], lookbackBlocks: 1000n }),
+      [],
+    );
+    assert.equal(calls, 0, "not even a block-number read");
   });
 });

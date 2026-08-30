@@ -1434,24 +1434,85 @@ export async function getSpentTodayUsdg(agentId: string, rail: BudgetRail = "liv
 }
 
 /**
- * Every UserOperation hash this agent has ANY row for — landed, reverted, or
- * submitted. The in-flight reconciler (inflight-reconcile.ts) uses it to tell an
- * op the chain executed but the ledger never recorded (a process death between
- * submit and the ledger write) from one that is already accounted for. All
- * statuses, not just the spending ones: a hash recorded as reverted must not be
- * re-reconciled as landed. Hashes are lowercased so the set compares cleanly
- * against the chain's (which returns them lowercased).
+ * Every UserOperation hash this agent has a SETTLED row for — landed, reverted
+ * or rejected. The in-flight reconciler uses it to tell an op the chain
+ * executed but the ledger never recorded (a process death between submit and
+ * the ledger write) from one that is already accounted for.
+ *
+ * Settled, NOT all statuses — and the difference is a bug this had for one day.
+ * The doc here used to say "All statuses, not just the spending ones: a hash
+ * recorded as reverted must not be re-reconciled as landed." That reasoning is
+ * still exactly right for landed/reverted/rejected, and it was written before
+ * 'submitted' rows existed. Once executor.ts began writing one BEFORE
+ * broadcasting, this query started hiding in-flight ops from the very sweep
+ * that exists to finish them: findOrphanOps skips any hash in this set, so a
+ * row stranded by a crash became invisible forever — never journaled, never
+ * booked to basis, absent from realized P&L, and still charging the live rail.
+ *
+ * A 'submitted' row is by definition NOT accounted for. It is a claim that an
+ * op left, with no outcome attached. listSubmittedOps returns those.
+ *
+ * Hashes are lowercased so the set compares cleanly against the chain's.
  */
 export async function listOpHashes(agentId: string): Promise<Set<string>> {
   const rows = (await getDb()
     .prepare(
       `SELECT DISTINCT user_op_hash FROM trades
-       WHERE agent_id = ? AND user_op_hash IS NOT NULL`,
+       WHERE agent_id = ? AND user_op_hash IS NOT NULL AND status <> 'submitted'`,
     )
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
   for (const r of rows) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
   return set;
+}
+
+/** One op that left and never came back — the input to the resolver. */
+export interface SubmittedOp {
+  userOpHash: string;
+  kind: string;
+  target: string;
+  amountUsdg: number;
+  /** unixepoch seconds, stamped at INSERT and never rewritten by a resolution. */
+  createdAt: number;
+  epoch: number;
+}
+
+/**
+ * Rows written before broadcast whose outcome never arrived.
+ *
+ * Two ways to get one: the process died between sendUserOperation and the
+ * ledger write, or the receipt could not be read and index.ts deliberately
+ * left the row alone (UserOpUnresolved). Both are 'we do not know', and both
+ * keep charging the live rail — RAIL_STATUSES.live includes 'submitted' — so
+ * leaving them unresolved is safe in the cap direction and useless in every
+ * other: no journal entry, no cost basis, no P&L.
+ *
+ * The only input the resolver has. index.ts records the hash nowhere in
+ * process memory once it gives up, so the ledger row IS the recovery record.
+ */
+export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT user_op_hash, kind, target, amount_usdg, created_at, epoch FROM trades
+       WHERE agent_id = ? AND status = 'submitted' AND user_op_hash IS NOT NULL
+       ORDER BY created_at ASC`,
+    )
+    .all(agentId)) as {
+    user_op_hash: string;
+    kind: string;
+    target: string;
+    amount_usdg: number;
+    created_at: number;
+    epoch: number;
+  }[];
+  return rows.map((r) => ({
+    userOpHash: r.user_op_hash.toLowerCase(),
+    kind: r.kind,
+    target: r.target,
+    amountUsdg: Number(r.amount_usdg),
+    createdAt: Number(r.created_at),
+    epoch: Number(r.epoch),
+  }));
 }
 
 // ── chat turns — the conversation survives a restart ──────────────────────

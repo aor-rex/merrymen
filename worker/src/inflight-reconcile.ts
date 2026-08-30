@@ -100,6 +100,14 @@ async function getLogsAdaptive(
   toBlock: bigint,
   maxSpan: bigint,
   log?: (m: string) => void,
+  /**
+   * Narrow to ONE operation. topic1 of UserOperationEvent is the indexed
+   * userOpHash, and this filter has always left that slot null because the
+   * orphan sweep does not know the hashes in advance. The resolver does, so
+   * passing one here turns the same window scan into an exact lookup — no new
+   * plumbing, and the adaptive halving still covers a provider range limit.
+   */
+  userOpHash?: Hex,
 ): Promise<RawLog[]> {
   const out: RawLog[] = [];
   let cursor = fromBlock;
@@ -111,7 +119,7 @@ async function getLogsAdaptive(
         address: ENTRYPOINT.v07 as `0x${string}`,
         fromBlock: cursor,
         toBlock: end,
-        topics: [USEROP_EVENT_TOPIC, null, addressTopic(sender)],
+        topics: [USEROP_EVENT_TOPIC, userOpHash ?? null, addressTopic(sender)],
       });
       out.push(...logs);
       cursor = end + 1n;
@@ -182,4 +190,102 @@ export async function findOrphanOps(opts: {
     orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed });
   }
   return orphans;
+}
+/** What the chain says about one op we submitted and lost track of. */
+export interface ResolvedOp {
+  userOpHash: string;
+  txHash: string;
+  /** The chain's verdict. A reverted op moved nothing. */
+  success: boolean;
+  /** |USDG leg|, 6dp. 0 when unattributable, and only meaningful on success. */
+  notionalUsdg6: bigint;
+  attributed: boolean;
+}
+
+/**
+ * RESOLVE OPS WE SUBMITTED AND NEVER HEARD BACK ABOUT.
+ *
+ * The sibling of findOrphanOps, and deliberately not the same function. An
+ * ORPHAN is an op the chain executed that the ledger knows nothing about, found
+ * by scanning a window; a STRANDED op is one the ledger already named — we hold
+ * its hash — whose outcome is missing. Those want opposite queries:
+ *
+ *  - findOrphanOps scans a block range and skips `!success`, because a reverted
+ *    op moved nothing and counts toward no cap, so an unrecorded revert changes
+ *    nothing. Here the row EXISTS and is charging the live rail, so a revert is
+ *    exactly as important as a success — it is what releases the charge.
+ *  - findOrphanOps cannot filter by hash (it does not know them in advance).
+ *    This does: topic1 of UserOperationEvent is the indexed userOpHash and
+ *    getLogsAdaptive already leaves that slot null, so passing the hash turns a
+ *    window scan into an exact lookup.
+ *
+ * Reimplemented from the shape of Vex's agent-activity-repair
+ * (github.com/Vex-Foundation/Vex), used with its author's permission, and
+ * keeping the three properties that make theirs safe: it holds no signer, it
+ * NEVER re-broadcasts, and it never terminalizes on ambiguity — an op it cannot
+ * find stays 'submitted' rather than being guessed at. A resolver that guesses
+ * is worse than none, because the guess would enter a hash-chained journal.
+ */
+export async function resolveSubmittedOps(opts: {
+  chain: ReconcileChain;
+  smartAccount: `0x${string}`;
+  usdgToken: string;
+  /** Hashes of 'submitted' rows, lowercased. */
+  hashes: readonly string[];
+  lookbackBlocks: bigint;
+  maxSpan?: bigint;
+  log?: (m: string) => void;
+}): Promise<ResolvedOp[]> {
+  if (opts.hashes.length === 0) return [];
+  const head = await opts.chain.getBlockNumber();
+  const from = head > opts.lookbackBlocks ? head - opts.lookbackBlocks : 0n;
+
+  const out: ResolvedOp[] = [];
+  for (const hash of opts.hashes) {
+    // EXACT LOOKUP, not a scan. topic1 is the indexed userOpHash.
+    const logs = await getLogsAdaptive(
+      opts.chain,
+      opts.smartAccount,
+      from,
+      head,
+      opts.maxSpan ?? 10_000n,
+      opts.log,
+      hash as Hex,
+    );
+    if (logs.length === 0) continue; // not found is NOT "reverted" — leave it be
+
+    let decoded: { success: boolean } | null = null;
+    let txHash = "";
+    for (const raw of logs) {
+      try {
+        const d = decodeEventLog({
+          abi: ENTRYPOINT_ABI,
+          topics: raw.topics as [Hex, ...Hex[]],
+          data: raw.data,
+        });
+        if (String(d.args.userOpHash).toLowerCase() !== hash) continue;
+        decoded = { success: Boolean(d.args.success) };
+        txHash = String(raw.transactionHash).toLowerCase();
+        break;
+      } catch {
+        // not a UserOperationEvent we can read — keep looking
+      }
+    }
+    if (!decoded) continue;
+
+    let notionalUsdg6 = 0n;
+    let attributed = false;
+    if (decoded.success) {
+      const receiptLogs = await opts.chain.getReceiptLogs(txHash as Hex).catch(() => null);
+      if (receiptLogs) {
+        const usdgDelta = netTokenDeltas(receiptLogs, opts.smartAccount).get(opts.usdgToken.toLowerCase()) ?? 0n;
+        if (usdgDelta !== 0n) {
+          notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
+          attributed = true;
+        }
+      }
+    }
+    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed });
+  }
+  return out;
 }

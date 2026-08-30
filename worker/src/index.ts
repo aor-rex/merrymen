@@ -71,7 +71,7 @@ import {
 } from "./executor";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
-import { findOrphanOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -178,6 +178,7 @@ import {
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
   listOpHashes,
+  listSubmittedOps,
   initStore,
   setPaperBook,
   setAgentName,
@@ -411,6 +412,122 @@ async function main() {
   };
 
   /**
+   * Narrow adapter over a live client — raw eth_getLogs (topics-based) and the
+   * receipt logs. The impure edge, kept in one place so the core stays testable
+   * and so the arm sweep and the tick resolver cannot drift into two dialects
+   * of the same three calls.
+   *
+   * eth_getLogs goes through `client.request` rather than viem's typed getLogs
+   * for the reason venues/pons.ts gives: the typed one wants an ABI, and this
+   * filters on raw topics.
+   */
+  const makeReconcileChain = (client: ReturnType<typeof createPublicClient>): ReconcileChain => ({
+    getBlockNumber: () => client.getBlockNumber(),
+    async getLogs(a) {
+      const logs = (await client.request({
+        method: "eth_getLogs",
+        params: [
+          {
+            address: a.address,
+            fromBlock: `0x${a.fromBlock.toString(16)}`,
+            toBlock: `0x${a.toBlock.toString(16)}`,
+            topics: a.topics,
+          },
+        ],
+      } as never)) as RawLog[];
+      return logs;
+    },
+    async getReceiptLogs(txHash) {
+      try {
+        const r = await client.getTransactionReceipt({ hash: txHash });
+        return r.logs as unknown as ReceiptLog[];
+      } catch {
+        return null;
+      }
+    },
+  });
+  /**
+   * SETTLE OPS WE SUBMITTED AND LOST TRACK OF.
+   *
+   * Extracted so it can run on a clock as well as at arm, and it has to. A
+   * stranded row keeps charging the LIVE rail — RAIL_STATUSES.live includes
+   * 'submitted' — which is the safe direction for the cap and an expensive one
+   * to sit in: at a $50 daily cap and $10 a trade, one op the worker lost
+   * track of holds a fifth of the day's allowance until the next re-arm.
+   * Arm-only resolution would mean a receipt we could not read costs the rest
+   * of the session.
+   *
+   * Holds no signer and never re-broadcasts — it only ever ASKS the chain what
+   * happened. An op it cannot find stays 'submitted' rather than being guessed
+   * at, because the guess would enter a hash-chained journal.
+   */
+  const resolveStrandedOps = async (
+    agentId: string,
+    chain: ReconcileChain,
+    smartAccount: `0x${string}`,
+    lookbackBlocks: bigint,
+  ): Promise<void> => {
+    // A 'submitted' row is an op we know left and never heard back about —
+    // a crash between broadcast and the ledger write, or a receipt we could
+    // not read (UserOpUnresolved). It keeps charging the live rail, which is
+    // the safe direction for the cap and useless for everything else: no
+    // journal entry, no cost basis, absent from realized P&L.
+    const stranded = await listSubmittedOps(agentId);
+    if (stranded.length > 0) {
+      const currentEpoch = await getAgentEpoch(agentId);
+      // Rows from a PRIOR epoch are skipped. addTrade journals with the
+      // agent's current epoch while the row keeps its original, so resolving
+      // across a boundary would file the journal entry in one epoch and the
+      // trade in another — and the export's whole job is that those agree.
+      const mine = stranded.filter((r) => r.epoch === currentEpoch);
+      const skipped = stranded.length - mine.length;
+      if (skipped > 0) {
+        console.log(`[reconcile] ${skipped} submitted row(s) from an earlier epoch — left for 'merrymen verify'`);
+      }
+      const resolved = await resolveSubmittedOps({
+        chain,
+        smartAccount,
+        usdgToken: CASH.USDG,
+        hashes: mine.map((r) => r.userOpHash),
+        lookbackBlocks,
+        log: (m) => console.log(`[reconcile] ${m}`),
+      });
+      for (const r of resolved) {
+        const row = mine.find((m) => m.userOpHash === r.userOpHash)!;
+        await addTrade({
+          agent_id: agentId,
+          kind: row.kind as TradeRow["kind"],
+          target: row.target,
+          // The chain's figure when it could be attributed, else the notional
+          // the row was written with. Never zero-by-default: a resolved op
+          // that moved money must not read as free.
+          amount_usdg: r.success && r.attributed ? usdgNum(r.notionalUsdg6) : row.amountUsdg,
+          user_op_hash: r.userOpHash,
+          tx_hash: r.txHash,
+          status: r.success ? "landed" : "reverted",
+          ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
+        });
+        await addEvent(
+          agentId,
+          "warn",
+          r.success
+            ? `resolved an op we lost track of: ${r.userOpHash.slice(0, 10)}… LANDED (${r.txHash.slice(0, 10)}…)` +
+                `${r.attributed ? ` · ${fmt(r.notionalUsdg6)} USDG` : " · notional unattributable"}`
+            : `resolved an op we lost track of: ${r.userOpHash.slice(0, 10)}… was REVERTED by the chain — ` +
+                `it moved nothing, and its spend is released`,
+        );
+      }
+      const unresolved = mine.length - resolved.length;
+      if (unresolved > 0) {
+        // NEVER guessed at. An op the chain has no event for inside the
+        // lookback might still be pending, or older than the window. Both
+        // stay 'submitted' — which keeps the spend counted, the conservative
+        // direction — rather than being written off as reverted.
+        console.log(`[reconcile] ${unresolved} submitted op(s) still unresolved — left counted, not guessed at`);
+      }
+    }
+  };
+  /**
    * In-flight reconciliation, run once at arm BEFORE the budget is seeded.
    *
    * If the process died between an op landing on-chain and its ledger row being
@@ -459,34 +576,13 @@ async function main() {
         lookbackBlocks = MAX_LOOKBACK;
       }
 
-      // Narrow adapter over the live client — raw eth_getLogs (topics-based) and
-      // the receipt logs. Kept here, at the impure edge; the core stays testable.
-      const chain: ReconcileChain = {
-        getBlockNumber: () => client.getBlockNumber(),
-        async getLogs(a) {
-          const logs = (await client.request({
-            method: "eth_getLogs",
-            params: [
-              {
-                address: a.address,
-                fromBlock: `0x${a.fromBlock.toString(16)}`,
-                toBlock: `0x${a.toBlock.toString(16)}`,
-                topics: a.topics,
-              },
-            ],
-          } as never)) as RawLog[];
-          return logs;
-        },
-        async getReceiptLogs(txHash) {
-          try {
-            const r = await client.getTransactionReceipt({ hash: txHash });
-            return r.logs as unknown as ReceiptLog[];
-          } catch {
-            return null;
-          }
-        },
-      };
+      const chain = makeReconcileChain(client);
 
+      // Finish what we started before looking for what we missed: resolving
+      // first means anything settled here is already settled when
+      // listOpHashes is read below, so the two sweeps cannot both act on one
+      // hash. See resolveStrandedOps.
+      await resolveStrandedOps(agentId, chain, smartAccount, lookbackBlocks);
       const known = await listOpHashes(agentId);
       const orphans = await findOrphanOps({
         chain,
@@ -1261,6 +1357,62 @@ async function main() {
    * because the API is rate-limited and shared, and because nothing here is
    * urgent — a coin trending this minute is still trending in ten.
    */
+  /**
+   * The stranded-op resolver, on its own clock.
+   *
+   * At arm is not enough. A receipt we cannot read mid-session leaves a
+   * 'submitted' row charging the LIVE rail for the rest of the arm — at a $50
+   * daily cap and $10 a trade, that is a fifth of the day's allowance held by an
+   * op whose outcome the chain already knows. Re-arming to reclaim it is not a
+   * thing an owner should have to know to do.
+   *
+   * Shape copied from runTrendingDiscovery, including the two properties that
+   * matter: an in-flight guard, because this is fired from every tick (60s by
+   * default) against a slower interval and a slow pass would otherwise overlap
+   * the next; and the clock advanced AFTER the work, never before.
+   *
+   * ON FAILURE THE CLOCK DOES NOT ADVANCE — runPonsDiscovery's rule. A chain read
+   * that throws means we learned nothing, and pretending otherwise would make the
+   * next pass wait a full interval before trying again.
+   *
+   * The lookback uses BLOCKS_PER_SEC rather than re-running the arm sweep's
+   * 2,000-block sampling: the constant is measured for this chain, and a resolver
+   * doing an EXACT per-hash lookup does not need a precise window — only one wide
+   * enough to contain the op.
+   */
+  let lastStrandedAt = 0;
+  let strandedInFlight = false;
+  const STRANDED_INTERVAL_SEC = 300;
+  async function runStrandedResolve(agentId: string): Promise<void> {
+    if (!active?.executor || strandedInFlight) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (lastStrandedAt !== 0 && nowSec - lastStrandedAt < STRANDED_INTERVAL_SEC) return;
+
+    strandedInFlight = true;
+    try {
+      // Cheap pre-check so the ordinary case — nothing stranded, which is every
+      // tick of a healthy run — costs one indexed-ish read and no RPC at all.
+      const stranded = await listSubmittedOps(agentId);
+      if (stranded.length === 0) {
+        lastStrandedAt = nowSec;
+        return;
+      }
+      const WINDOW_SEC = 26 * 3600;
+      await resolveStrandedOps(
+        agentId,
+        makeReconcileChain(active.client),
+        active.grant.smartAccount as `0x${string}`,
+        BigInt(WINDOW_SEC) * BLOCKS_PER_SEC,
+      );
+      lastStrandedAt = nowSec;
+    } catch (e) {
+      // Deliberately NOT advancing the clock — see the header.
+      console.log(`[reconcile] stranded-op pass failed, will retry: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      strandedInFlight = false;
+    }
+  }
+
   let lastTrendAt = 0;
   let trendInFlight = false;
   const TREND_INTERVAL_SEC = 600;
@@ -1922,8 +2074,9 @@ async function main() {
         // direction. So book the spend straight into the settled counters (the
         // reservation's own figures), SKIP the ledger re-read, and release the
         // now-double-counted reservation. The spend stays counted for the rest of
-        // this arm; A5's chain reconciliation writes the missing row on the next
-        // arm. A durable err event, not a swallowed console.error.
+        // this arm; findOrphanOps writes the missing row at the next arm, reading
+        // the EntryPoint's own event rather than trusting this process to have
+        // survived. A durable err event, not a swallowed console.error.
         if (reserved) {
           settledSpentUsdg += reserved.spendUsdg;
           settledOps += reserved.ops;
@@ -2887,7 +3040,8 @@ async function main() {
           "warn",
           `${intent.kind} was SUBMITTED and its receipt could not be read (${e.userOpHash}). ` +
             `This is not a revert — the operation may have landed. It stays counted against today's caps ` +
-            `and will be resolved from the chain. Reason: ${msg.slice(0, 140)}`,
+            `and the resolver will settle it from the chain within ${STRANDED_INTERVAL_SEC / 60} minutes. ` +
+            `Reason: ${msg.slice(0, 140)}`,
         );
         return;
       }
@@ -3482,6 +3636,8 @@ async function main() {
     // cadence is independent of how fast the owner trades. Never awaited into
     // the trading path in a way that could stall it — a data provider having a
     // bad minute must not delay a sell.
+    // Finish what we lost track of before starting anything new.
+    void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
     // The launchpad keeps its own clock and needs no Bitquery credential.
     void runPonsDiscovery(agentId).catch(() => {});
