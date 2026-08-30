@@ -412,7 +412,7 @@ export default function GrantPage() {
     }
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await createAgentWallet({
+      const { local: g, handoff } = await createAgentWallet({
         caps,
         onStatus: setStatus,
         chainId,
@@ -462,7 +462,7 @@ export default function GrantPage() {
     setError(null);
     setStatus("starting…");
     try {
-      const { grant: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
+      const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
         caps,
         onStatus: setStatus,
         chainId,
@@ -533,7 +533,7 @@ export default function GrantPage() {
       // selector showed mainnet silently re-signed on testnet, and any cap the
       // owner had just edited in the form was ignored. What the page shows is
       // what gets signed, or the page is lying.
-      const { grant: g, handoff } = await restoreAgentWallet(grant.demoOwnerPrivateKey, {
+      const { local: g, handoff } = await restoreAgentWallet(grant.demoOwnerPrivateKey, {
         caps,
         onStatus: setStatus,
         chainId,
@@ -991,7 +991,16 @@ export default function GrantPage() {
               <div className="key-row">
                 <span className="rk">owner key</span>
                 <span className="rv" style={{ wordBreak: "break-all" }}>
-                  {reveal ? grant.demoOwnerPrivateKey ?? "(external wallet — no key stored)" : "•".repeat(40)}
+                  {/* The fallback used to read "(external wallet — no key
+                      stored)", which was untrue in the only case that reached
+                      it: the key WAS generated here and IS in this browser, the
+                      screen just had the server-shaped grant that omits it. A
+                      wrong explanation on a backup screen is worse than an
+                      honest admission that something is off. */}
+                  {reveal
+                    ? (grant.demoOwnerPrivateKey ??
+                      "couldn't read your owner key — don't fund this account, and tell us")
+                    : "•".repeat(40)}
                 </span>
               </div>
               <div className="key-actions">

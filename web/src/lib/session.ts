@@ -335,14 +335,19 @@ async function mintGrant(
   // copied aside under its own address, the same safety net archiveCurrentGrant
   // gives the self-hosted file (web/src/app/api/grants/route.ts).
   archivePreviousGrant();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...grant, demoOwnerPrivateKey: ownerPrivateKey }));
+  // The browser copy, which ALWAYS carries the owner key, hosted or not. Kept in
+  // a named local so it can be returned as well as stored -- the UI needs the
+  // copy with the key, and reading it back off localStorage to find that out
+  // was the bug.
+  const localGrant: Grant = { ...grant, demoOwnerPrivateKey: ownerPrivateKey };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(localGrant));
 
   // Hand the grant to the worker. Self-hosted: a localhost file handoff.
   // Hosted: an authenticated POST of the session-key-only grant to the tenant's
   // own store. In hosted mode the browser sends its session cookie so the
   // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
-  return { grant, handoff: await postGrant(grant) };
+  return { grant, local: localGrant, handoff: await postGrant(grant) };
 }
 
 /**
@@ -660,7 +665,26 @@ export interface GrantHandoff {
 
 /** A freshly signed grant plus the outcome of handing it to the server. */
 export interface MintedGrant {
+  /**
+   * The grant AS HANDED TO THE SERVER. Hosted grants omit the owner key from
+   * this object on purpose — the server is never custodian of one.
+   */
   grant: Grant;
+  /**
+   * The browser's OWN copy, which always carries the owner key.
+   *
+   * Separate from `grant` because the two are deliberately different, and
+   * conflating them broke the one screen that exists to show a user their key:
+   * the backup gate read `grant.demoOwnerPrivateKey`, which is undefined for a
+   * hosted grant by design, and rendered "(external wallet — no key stored)"
+   * while asking the reader to confirm they had saved it. The key was in
+   * localStorage the whole time, so a page reload displayed it correctly — but
+   * nobody reloads a page that is telling them to write something down.
+   *
+   * Anything user-facing wants THIS one. Anything that talks to the server
+   * wants `grant`.
+   */
+  local: Grant;
   handoff: GrantHandoff;
 }
 
