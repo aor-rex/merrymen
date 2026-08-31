@@ -586,6 +586,30 @@ export default function GrantPage() {
     setFunding(null);
   }
 
+  /**
+   * Which caps the form now differs from the SIGNED ones, in words.
+   *
+   * The re-sign panel lets caps be edited in place, and an owner who tweaked a
+   * number and scrolled away should not discover the change by reading a
+   * receipt later. Derived from `grant.caps` rather than from a snapshot of the
+   * form, so it stays true no matter how the edit was made — including a preset
+   * click higher up the page.
+   */
+  const capChanges = grant
+    ? (
+        [
+          ["per-trade", caps.perTradeUsdg, grant.caps.perTradeUsdg, "USDG"],
+          ["daily", caps.dailyUsdg, grant.caps.dailyUsdg, "USDG"],
+          ["trades/day", caps.maxOpsPerDay, grant.caps.maxOpsPerDay, ""],
+          ["expiry", caps.expiryDays, grant.caps.expiryDays, "days"],
+          ["breaker", caps.maxDrawdownPct, grant.caps.maxDrawdownPct, "%"],
+        ] as const
+      )
+        .filter(([, now, was]) => now !== was)
+        .map(([label, now, was, unit]) => `${label} ${was}${unit && ` ${unit}`} → ${now}${unit && ` ${unit}`}`)
+    : [];
+  const capsEdited = capChanges.length > 0;
+
   const gasFunded = (funding?.gasWei ?? 0n) > 0n;
   const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
   // Once a grant exists, the truth is what's IN it — not the selector state.
@@ -1255,7 +1279,7 @@ export default function GrantPage() {
                   <b>Stock list</b> —{" "}
                   {grant.grantFeatures?.includes(TRADEABLE_V2)
                     ? "the full tradeable set."
-                    : "the legacy three (QQQ, NVDA, TSLA) only. Renew below to widen it."}
+                    : "the legacy three (QQQ, NVDA, TSLA) only. Re-sign below to widen it."}
                 </li>
                 <li>
                   <b>USDG out</b> — none. No withdrawal address is registered, so the key you are about
@@ -1270,7 +1294,7 @@ export default function GrantPage() {
                       granted, and worth removing. Keys signed before this was changed carry a
                       Permit2 + UniversalRouter pair whose recipient the chain cannot check, because
                       a v4 swap hides it inside opaque calldata. A tampered agent could send your
-                      non-USDG tokens anywhere. <b>Renewing the key</b> re-signs it without the pair
+                      non-USDG tokens anywhere. <b>Re-signing below</b> issues it without the pair
                       — same wallet, same funds, same address, and free.
                     </span>
                   ) : (
@@ -1278,6 +1302,99 @@ export default function GrantPage() {
                   )}
                 </li>
               </ul>
+            </div>
+            {/*
+              RE-SIGN ON PURPOSE, not only when the key is nearly dead.
+
+              The only renewal button lived inside the expiry notice, which
+              returns null unless the key has under three days left. So an owner
+              who wanted to re-sign a HEALTHY key — the exact thing the panel
+              above tells them to do, twice, with the words "renew below" — had
+              no button to press. The routes that did work were: wait for it to
+              nearly expire, add a token it does not cover, or go through a flow
+              labelled "switch to another wallet" and paste the owner key back in.
+
+              That gap has a cost beyond awkwardness. The wall changes: a policy
+              contract turned out to be undeployed on this chain, and every key
+              signed before that fix carries a pointer into empty space. Fixing
+              the wall does nothing for a key already signed — re-signing is the
+              only remedy, and it was the one thing the page would not let you do.
+
+              Caps are editable here on purpose. They are sealed into the
+              signature, so this is the only moment they can change, and offering
+              a re-sign that silently keeps the old numbers would send owners
+              back through the side door for the other half of the job.
+            */}
+            <div className="grant-summary" style={{ marginTop: 14 }}>
+              <b>Re-sign this key.</b> Free, instant, and nothing is sent on-chain — it is a
+              signature, not a transaction. <b>Same wallet, same address, same funds:</b> your
+              balances are held by the account, not by the key, so they do not move.
+              <br />
+              <br />
+              What changes is the key itself. The new one is signed against <b>today&apos;s wall</b>,
+              so its permissions can differ from the old one&apos;s — the list above says what the
+              current key carries, and anything it names as worth removing goes away here. The caps
+              below are sealed into the signature too, so this is the moment to change them; the old
+              key stops working as soon as the new one is armed.
+              {grant.demoOwnerPrivateKey ? (
+                <>
+                  <div className="grant-fields" style={{ marginTop: 12 }}>
+                    <label className="field">
+                      <span className="field-label">most it can spend on one trade</span>
+                      <span className="field-input">
+                        <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
+                        <span className="field-unit">USDG</span>
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field-label">most it can spend in a day</span>
+                      <span className="field-input">
+                        <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
+                        <span className="field-unit">USDG</span>
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field-label">most trades per day</span>
+                      <span className="field-input">
+                        <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
+                        <span className="field-unit">trades</span>
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field-label">auto-expire the agent after</span>
+                      <span className="field-input">
+                        <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
+                        <span className="field-unit">days</span>
+                      </span>
+                    </label>
+                  </div>
+                  {/*
+                    Say what is about to change BEFORE it changes, and only when
+                    something has. A re-sign that quietly moves a cap the owner
+                    edited and forgot is the same class of surprise as one that
+                    quietly keeps it.
+                  */}
+                  {capsEdited && (
+                    <p className="field-lead" style={{ marginTop: 10 }}>
+                      Signing now also changes: {capChanges.join(" · ")}.
+                    </p>
+                  )}
+                  <button
+                    className="grant-btn"
+                    style={{ marginTop: 10, width: "100%" }}
+                    onClick={() => void renewKey()}
+                    disabled={renewing}
+                  >
+                    {renewing ? "re-signing…" : "re-sign this key (free)"}
+                  </button>
+                </>
+              ) : (
+                <p className="field-lead" style={{ marginTop: 12 }}>
+                  This browser does not hold the owner key for {short(grant.smartAccount)}, and
+                  re-signing needs it. Use <b>switch to another wallet</b> below and paste the key
+                  in, or run <code>merrymen recover</code> to sweep the funds somewhere you control.
+                </p>
+              )}
             </div>
 
             <div className="grant-actions">
