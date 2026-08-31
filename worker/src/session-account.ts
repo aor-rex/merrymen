@@ -61,7 +61,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
 import { decodeParamsFromInitCode, toPermissionValidator } from "@zerodev/permissions";
 import { toECDSASigner } from "@zerodev/permissions/signers";
-import { toCallPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
+import { toCallPolicy, toRateLimitPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
 import { createKernelAccount } from "@zerodev/sdk";
 import { toKernelPluginManager } from "@zerodev/sdk/accounts";
 import { KERNEL_V3_3 } from "@zerodev/sdk/constants";
@@ -100,12 +100,29 @@ function decodeParams(serialized: string): SerializedParams {
  * One serialized policy → a live Policy. A trimmed `createPolicyFromParams`
  * (deserializePermissionAccount.ts:100-117), which is not exported.
  *
- * Only the two kinds merrymen actually seals. The default THROWS rather than
- * skipping: a policy we cannot rebuild is a bound we would silently drop, and
- * dropping a bound is the failure this whole file is about. Anything else — a
- * gas policy, a sudo policy, the rate-limit policy this repo no longer
- * installs — means a grant we do not understand, and refusing to arm is the
- * only honest response to that.
+ * EVERY KIND MERRYMEN HAS EVER SEALED, not every kind it seals today. That
+ * distinction took the fleet down.
+ *
+ * The wall stopped installing `rate-limit` when its contract turned out to have
+ * no bytecode on this chain — but a grant is a frozen signature, so every key
+ * signed before that still carries one. This function only knew about the two
+ * kinds the NEW wall emits, so the default threw, and `syncGrant` failed on
+ * every tick for every pre-existing tenant: ten agents in a crash loop, none
+ * able to arm, until this shipped.
+ *
+ * Rebuilding it is not optional and not a compromise. The policies are hashed
+ * into the permission id and concatenated into the enable data the owner
+ * signed; omitting one produces a different id, which the check below would
+ * refuse anyway. To reconstruct what was signed you must reconstruct all of it.
+ *
+ * Doing so does NOT make an old grant able to trade — it still points at an
+ * address with no code, which is why the wall dropped it. What it does is let
+ * that agent arm, show its balances, run in practice mode, and be TOLD to
+ * re-sign, instead of dying silently in a loop its owner cannot see.
+ *
+ * The default still throws, and should: an unknown policy really is a bound we
+ * would be dropping. The lesson is narrower than "never throw" — it is that
+ * removing a policy from the wall means adding it here, in the same change.
  */
 async function policyFromParams(policy: { policyParams: { type: string } }) {
   switch (policy.policyParams.type) {
@@ -113,10 +130,31 @@ async function policyFromParams(policy: { policyParams: { type: string } }) {
       return toCallPolicy(policy.policyParams as never);
     case "timestamp":
       return toTimestampPolicy(policy.policyParams as never);
+    case "rate-limit":
+      // Legacy only. Nothing signs one any more; see wall.ts.
+      return toRateLimitPolicy(policy.policyParams as never);
     default:
       throw new Error(
         `this grant carries a '${policy.policyParams.type}' policy that merrymen cannot rebuild — refusing to arm rather than dropping it`,
       );
+  }
+}
+
+/**
+ * Does this serialized grant carry the dead rate-limit policy?
+ *
+ * Such a grant arms fine and can never land a UserOperation: the policy points
+ * at an address with no bytecode on this chain, so validation has nothing to
+ * call. The owner needs to re-sign, and needs to be told so in words rather
+ * than by watching every trade fail.
+ */
+export function grantHasDeadRateLimit(serialized: string): boolean {
+  try {
+    return (decodeParams(serialized).permissionParams.policies ?? []).some(
+      (p) => p.policyParams.type === "rate-limit",
+    );
+  } catch {
+    return false;
   }
 }
 
