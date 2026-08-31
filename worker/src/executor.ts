@@ -6,9 +6,11 @@
  * Needs a bundler:
  *   MERRYMEN_BUNDLER_URL   e.g. Pimlico/Alchemy bundler RPC for chain 46630/4663
  *
- * The serialized grant embeds the session private key for the TESTNET demo
- * (mirrors web/src/lib/session.ts). Production: Turnkey TEE holds the key and
- * this module signs via its API instead of deserializing a local key.
+ * The serialized grant embeds the session private key, on every deployment —
+ * not just a testnet demo (mirrors web/src/lib/session.ts). A TEE that holds
+ * it instead and signs via an API is the roadmap, not the present tense: this
+ * comment used to claim it already worked that way in production, and nothing
+ * of the sort is shipped.
  */
 
 import { http, createPublicClient, type Chain, type Hex } from "viem";

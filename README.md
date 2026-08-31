@@ -40,9 +40,16 @@ Anyone can ship a trading agent, and platforms will ship their own. A
 first-party agent is **custodial by construction**: their servers, their keys,
 their discretion — the safety story is a terms-of-service. merrymen inverts it:
 
-- **Your machine.** The agent, its memory, and its ledger live in `~/.merrymen`.
-  There is no server-side anything.
-- **Your keys.** Minted locally, backed up by you, never transmitted.
+- **Your machine, if you self-host.** The agent, its memory and its ledger live
+  in `~/.merrymen`, and there is no server-side anything. Hosted at
+  app.merrymen.dev the worker and the ledger are ours — what does not change is
+  the next line.
+- **Your keys, either way.** Minted in your browser, backed up by you, never
+  transmitted. The hosted server refuses to accept an owner key at all and
+  refuses to boot if one is found at rest, so a database dump of ours cannot
+  move your funds. The honest limit: that key sits in plain text in your
+  browser's local storage, so the trust is in this origin rather than in our
+  servers — not nowhere.
 - **The chain enforces the caps that bound a loss.** The session key may only
   call contracts it names, may only move assets you sealed into it, may not send
   native ETH at all, and dies on schedule — all in the account contract. A

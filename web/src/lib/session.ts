@@ -27,10 +27,19 @@
  *     to tell whose account this is, because `owner` is a key minted here and
  *     can never equal the signed-in wallet.
  *
- * TESTNET DEMO CAVEATS (labeled in the UI): both private keys are kept in
- * localStorage so you can inspect and back them up; production owner keys live
- * in a Turnkey TEE and never touch a browser. Whoever holds the owner key
- * controls the funds — the UI forces a backup before funding. Drawdown breaker
+ * WHERE THE KEYS ACTUALLY LIVE, on every deployment including hosted mainnet.
+ *
+ * Both private keys are kept in this browser's localStorage. That is not a
+ * testnet demo caveat — it is the shipped arrangement, and :308 below makes
+ * this key load-bearing for hosted custody and for client-side recovery.
+ * Whoever holds the owner key controls the funds; the UI forces a backup
+ * before funding for exactly that reason.
+ *
+ * This block used to say production owner keys live in a Turnkey TEE and
+ * never touch a browser. No such thing is shipped — no dependency, no code
+ * path, no vendor. README.md is accurate that TEE custody is on the roadmap.
+ * The comment mattered because a TEE is precisely what someone would cite to
+ * argue that server-side custody is already fine here. It is not. Drawdown breaker
  * is worker-enforced until the breaker contract ships (Phase 2).
  */
 

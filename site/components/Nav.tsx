@@ -3,6 +3,7 @@ import { Logo } from "./Logo";
 import { Icon } from "./Icon";
 
 const GITHUB = "https://github.com/millw14/merrymen";
+const HOSTED_APP = "https://app.merrymen.dev";
 const X_URL = "https://x.com/MerrymenAI";
 
 function XMark({ size = 15 }: { size?: number }) {
@@ -38,10 +39,12 @@ export function Nav() {
           <a href={GITHUB} target="_blank" rel="noreferrer" className="nav-ghost">
             GitHub
           </a>
+          {/* Points where the hero's primary button points. Two primaries
+              disagreeing about where to start is worse than either choice. */}
           <span className="mag" data-magnetic>
-            <Link href="/docs" className="btn btn-primary has-box">
-              Get started <span className="box"><Icon name="arrow" size={15} /></span>
-            </Link>
+            <a href={HOSTED_APP} className="btn btn-primary has-box">
+              Start trading <span className="box"><Icon name="arrow" size={15} /></span>
+            </a>
           </span>
         </div>
       </div>
