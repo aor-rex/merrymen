@@ -53,6 +53,7 @@ export interface ResolvedConfig {
   xHandle: string | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
+  autoConvertEnabled: boolean;
   paperTradingEnabled: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
@@ -276,6 +277,7 @@ export function mergeSettings(
     xHandle,
     v4AdapterAddress,
     ponsAdapterAddress,
+    autoConvertEnabled: bool(file.autoConvertEnabled, env.MERRYMEN_AUTO_CONVERT, d.autoConvertEnabled),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,

@@ -123,6 +123,10 @@ export interface MerrymenSettings {
    * contract the signature never covered.
    */
   ponsAdapterAddress?: string;
+  /** Auto-convert surplus ETH to USDG (off by default). When on, the worker
+   * wraps surplus ETH → WETH and swaps via SwapRouter02 exactInputSingle,
+   * leaving a gas reserve. Web-only, tenant-writable. */
+  autoConvertEnabled?: boolean;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as
@@ -574,4 +578,5 @@ export const SETTINGS_DEFAULTS = {
   telegramAgentAutoShell: false,
   telegramAgentMaxSteps: 20,
   virtualsEnabled: false,
+  autoConvertEnabled: false,
 };

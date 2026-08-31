@@ -183,6 +183,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  "autoConvertEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",

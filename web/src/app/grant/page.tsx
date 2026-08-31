@@ -413,6 +413,7 @@ export default function GrantPage() {
   // the wall at signing — which is why it is read here and not at trade time.
   const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
   const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
+  const [autoConvert, setAutoConvert] = useState<boolean>(false);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -453,7 +454,7 @@ export default function GrantPage() {
       .catch(() => setSession(null));
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
+      .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; autoConvertEnabled?: boolean }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
         setCustomTokens(list as CustomToken[]);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
@@ -461,6 +462,7 @@ export default function GrantPage() {
         setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
         const pa = v?.values?.ponsAdapterAddress;
         setPonsAdapter(typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined);
+        setAutoConvert(!!v?.values?.autoConvertEnabled);
       })
       .catch(() => {
         setCustomTokens([]);
@@ -1352,6 +1354,11 @@ export default function GrantPage() {
                   thing worth sending here. <b>Don&apos;t send USDG:</b> merrymen only knows the
                   mainnet token addresses, so testnet USDG reads 0 and is never traded. Practice
                   trades a simulated book instead.
+                </>
+              ) : autoConvert ? (
+                <>
+                  Send <b>ETH</b> to the account address below — we&apos;ll swap surplus to <b>USDG</b> and keep a gas reserve. <b>Real funds</b> — double-check the address and start with a small test amount first.{" "}
+                  <span style={{ opacity: 0.7 }}>Or send USDG directly — both work on the same address.</span>
                 </>
               ) : (
                 <>
