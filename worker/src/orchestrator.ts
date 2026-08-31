@@ -45,9 +45,10 @@ import { getGrantStore } from "./grant-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
-import { makePgDb, translateSchema } from "./db";
+import { makePgDb, translateSchema, type Db } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { applyLedgerSchema } from "./store";
+import { drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -361,6 +362,110 @@ export async function reconcile(): Promise<void> {
  * tenant whose dashboard lags a tick; it is never a reason to stop supervising
  * the fleet, which is this process's actual job.
  */
+/**
+ * CARRY COMMANDS TO CHILDREN, AND THEIR ANSWERS BACK.
+ *
+ * The dashboard writes into the shared database; a child cannot read it,
+ * because CHILD_SECRET_STRIP removes DATABASE_URL on purpose — a child holding
+ * the fleet's connection string is the isolation this file exists to keep. So
+ * the orchestrator, the one process that holds both the shared database and
+ * every child's home, ferries between them. Exactly what writeGrantForChild
+ * and writeSettingsForChild already do for grants and settings.
+ *
+ * The first attempt skipped this and had the child poll the table directly.
+ * It would never have claimed a single command: the row was in Postgres and
+ * the query ran against the child's private sqlite. Caught in review, before
+ * anybody pressed the button and watched nothing happen.
+ *
+ * Best-effort on both legs. A command that does not arrive is a button the
+ * owner presses again; taking the fleet loop down to deliver one is not a
+ * trade worth making.
+ */
+async function ferryCommands2(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url || children.size === 0) return;
+  try {
+    const shared = await makePgDb(url);
+    await ferryCommands(shared);
+  } catch {
+    /* shared db unavailable — the mirror logs that already */
+  }
+}
+
+async function ferryCommands(shared: Db): Promise<void> {
+  for (const tenant of [...children.keys()]) {
+    const home = childHome(tenant);
+    // ── down: unclaimed commands become files ──
+    try {
+      const rows = (await shared
+        .prepare(
+          `SELECT id, kind, created_at FROM agent_commands
+            WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC LIMIT 5`,
+        )
+        .all(tenant)) as { id: string; kind: string; created_at: number }[];
+      for (const r of rows) {
+        writeCommand(home, { id: String(r.id), kind: String(r.kind), at: Number(r.created_at) });
+        // Marked claimed the moment it is DELIVERED, not when it completes.
+        // Otherwise the next pass ferries it again and the child runs it
+        // twice — and this one spends gas.
+        await shared
+          .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
+          .run(Date.now(), r.id);
+        log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
+      }
+    } catch {
+      /* a child that misses a command this pass gets it next pass */
+    }
+    // ── up: results become rows ──
+    try {
+      for (const r of drainCommandResults(home)) {
+        await shared
+          .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?")
+          .run(Date.now(), r.line.slice(0, 500), r.id);
+        log(`command ${r.id.slice(0, 8)} ← ${tenant.slice(0, 8)}: ${r.ok ? "ok" : "failed"}`);
+      }
+    } catch {
+      /* the result file is already gone; the event feed still carries it */
+    }
+  }
+}
+/**
+ * ONE LINE THAT SAYS WHETHER THE FLEET IS ALL RIGHT.
+ *
+ * Nothing aggregated. Per-tenant state existed — a status column, a heartbeat,
+ * an event feed — and every one of them had to be looked up by somebody who
+ * already suspected a problem. So when ten agents stopped arming, the signal
+ * was ten identical stack traces interleaved with normal chatter in a log
+ * nobody tails, and it stayed that way for hours.
+ *
+ * Printed every reconcile, unconditionally, so its ABSENCE is also a signal.
+ * A summary that only appears when something is wrong teaches an operator to
+ * read silence as health, and silence is exactly what a wedged process emits.
+ *
+ * Cheap and best-effort: one grouped count against a table the mirror has just
+ * written, and a failure here must never take the fleet loop down.
+ */
+async function fleetHealth(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  try {
+    const shared = await makePgDb(url);
+    const rows = (await shared
+      .prepare("SELECT status, COUNT(*) AS n FROM agents GROUP BY status")
+      .all()) as { status: string; n: number | string }[];
+    const by = new Map(rows.map((r) => [r.status, Number(r.n)]));
+    const total = [...by.values()].reduce((a, b) => a + b, 0);
+    const broken = by.get("error") ?? 0;
+    const parts = [...by.entries()].map(([k, v]) => `${k} ${v}`).join(", ");
+    // The word BROKEN is in the line only when it is true, so grepping for it
+    // is a working alert with no extra infrastructure.
+    log(`fleet: ${total} agent(s) — ${parts}${broken > 0 ? ` — BROKEN ${broken}` : ""}`);
+  } catch {
+    // A health read that fails is not a fleet that is down. Say nothing rather
+    // than raise a false alarm, and never take the loop with it.
+  }
+}
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -463,6 +568,8 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      await ferryCommands2();
+      await fleetHealth();
     }
     await new Promise((r) => setTimeout(r, RECONCILE_MS));
   }

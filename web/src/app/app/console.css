@@ -440,3 +440,43 @@
   .sc-root .tabbar .navlink .tally { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .sc-root * { animation: none !important; transition: none !important; } }
+
+/*
+  THE STATUS LINE.
+
+  Sits above the equity hero and is the first thing read, so it is set in the
+  SANS face at a size the rest of this screen never uses. The console is
+  otherwise monospace, which reads as data — correct for a ledger, wrong for
+  the sentence that tells somebody whether their money is working.
+
+  The dot carries the state, so tone survives for anyone reading the words
+  through a screen reader in order rather than scanning colour.
+*/
+.statusline {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 14px 16px; margin-bottom: 16px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-2, var(--bg-3));
+}
+.sl-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  margin-top: 7px; flex: 0 0 auto;
+}
+.statusline.good .sl-dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.statusline.waiting .sl-dot { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
+.statusline.stuck .sl-dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+/* A stuck agent gets a tinted ground too — the one state where a glance
+   across the room should be enough. */
+.statusline.stuck { border-color: color-mix(in srgb, var(--red) 45%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.sl-head {
+  font-family: var(--sans); font-size: 15px; line-height: 1.4;
+  color: var(--text); margin: 0; text-wrap: balance;
+}
+.sl-next {
+  font-family: var(--sans); font-size: 13px; line-height: 1.5;
+  color: var(--text-dim); margin: 4px 0 0;
+}
+@media (max-width: 520px) {
+  .sl-head { font-size: 14px; }
+  .sl-next { font-size: 12.5px; }
+}

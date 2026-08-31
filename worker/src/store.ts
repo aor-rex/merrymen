@@ -324,6 +324,32 @@ const SQLITE_ALTERS: string[] = [
     // different process.
     "ALTER TABLE agents ADD COLUMN mode TEXT",
     "ALTER TABLE agents ADD COLUMN beat_at INTEGER",
+    // A ONE-WAY CHANNEL FROM THE DASHBOARD TO THE WORKER.
+    //
+    // The two run in separate processes — separate containers, hosted — and
+    // the worker has no HTTP server and no IPC. Everything the web side has
+    // ever been able to tell it went through a store the orchestrator polls,
+    // so this is that pattern rather than a new transport.
+    //
+    // Deliberately a QUEUE and not a flag. `claimed_at` makes a poller safe:
+    // the drain claims a row before acting on it, so a crash between claim and
+    // completion leaves the row claimed rather than replayed. For a command
+    // that spends gas, at-most-once is the only acceptable semantics — the
+    // same reasoning ledger-mirror.ts writes down for its own cursor.
+    `CREATE TABLE IF NOT EXISTS agent_commands (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      -- MILLISECONDS, supplied by the caller. unixepoch() is seconds, and two
+      -- commands queued in the same second then have no defined order —
+      -- neither backend has a portable tiebreak (sqlite's rowid is not in
+      -- Postgres). A queue whose order depends on the user being slow is not
+      -- a queue.
+      created_at INTEGER NOT NULL,
+      claimed_at INTEGER,
+      done_at INTEGER,
+      result TEXT
+    )`,
     // Measured execution quality: quoted-out vs received-out, in bps, positive
     // when the fill was worse than quoted. The slippage SETTING is one flat 1%
     // constant applied to a $5 trade and a $5,000 one alike; this is the
@@ -1062,6 +1088,94 @@ export async function listFlows(agentId: string, limit = 200): Promise<
   }[];
 }
 
+/** A command the dashboard has asked this agent to run. */
+export interface AgentCommand {
+  id: string;
+  kind: string;
+  createdAt: number;
+}
+
+/**
+ * Enqueue one command. Called by the web process, drained by the worker.
+ *
+ * The id is the caller's, so a double-clicked button is one command rather
+ * than two — the primary key does the deduping rather than a check-then-insert
+ * that could interleave.
+ */
+export async function enqueueCommand(agentId: string, id: string, kind: string): Promise<boolean> {
+  try {
+    await getDb()
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
+      .run(id, agentId, kind, Date.now());
+    return true;
+  } catch {
+    return false; // duplicate id, or an unwritable ledger
+  }
+}
+
+/**
+ * Claim the oldest unclaimed command for this agent, or null.
+ *
+ * CLAIM THEN ACT, never act then mark. The UPDATE ... WHERE claimed_at IS NULL
+ * is the whole concurrency story: two drains racing the same row, one wins,
+ * and a crash after the claim leaves it claimed rather than replayed. A
+ * command that spends gas must be at-most-once, and a poller gives no other
+ * way to get there.
+ */
+export async function claimCommand(agentId: string): Promise<AgentCommand | null> {
+  try {
+    const row = (await getDb()
+      .prepare(
+        `SELECT id, kind, created_at FROM agent_commands
+          WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(agentId)) as { id: string; kind: string; created_at: number } | undefined;
+    if (!row) return null;
+    const claim = await getDb()
+      .prepare("UPDATE agent_commands SET claimed_at = unixepoch() WHERE id = ? AND claimed_at IS NULL")
+      .run(row.id);
+    if (claim.changes === 0) return null; // somebody else took it
+    return { id: row.id, kind: row.kind, createdAt: Number(row.created_at) };
+  } catch {
+    return null;
+  }
+}
+
+/** Record what a claimed command did. Never re-runs it; this is only the tape. */
+export async function finishCommand(id: string, result: string): Promise<void> {
+  try {
+    await getDb()
+      .prepare("UPDATE agent_commands SET done_at = unixepoch(), result = ? WHERE id = ?")
+      .run(result.slice(0, 500), id);
+  } catch {
+    /* the command ran; losing its receipt must not re-run it */
+  }
+}
+
+/** The most recent command for this agent, for the dashboard to poll. */
+export async function latestCommand(
+  agentId: string,
+): Promise<{ id: string; kind: string; createdAt: number; claimedAt: number | null; doneAt: number | null; result: string | null } | null> {
+  try {
+    const r = (await getDb()
+      .prepare(
+        `SELECT id, kind, created_at, claimed_at, done_at, result FROM agent_commands
+          WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(agentId)) as Record<string, unknown> | undefined;
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      kind: String(r.kind),
+      createdAt: Number(r.created_at),
+      claimedAt: r.claimed_at === null || r.claimed_at === undefined ? null : Number(r.claimed_at),
+      doneAt: r.done_at === null || r.done_at === undefined ? null : Number(r.done_at),
+      result: r.result === null || r.result === undefined ? null : String(r.result),
+    };
+  } catch {
+    return null;
+  }
+}
 /**
  * Record what the worker is doing, for surfaces that cannot read its files.
  *
@@ -1107,9 +1221,17 @@ export async function addFeeAccrual(
   }
 }
 
+/**
+ * `error` is the state that was missing, and its absence had a cost.
+ *
+ * An agent that cannot arm — an unrecognised policy in its grant, a corrupt
+ * blob, a permission id that will not reproduce — was indistinguishable from
+ * one that had simply never started. The condition lived in a stack trace on
+ * stdout and nowhere a dashboard, a query or an operator could reach it.
+ */
 export async function setAgentStatus(
   agentId: string,
-  status: "armed" | "active" | "killed" | "expired",
+  status: "armed" | "active" | "killed" | "expired" | "error",
 ): Promise<void> {
   try {
     await getDb().prepare("UPDATE agents SET status = ? WHERE smart_account = ?").run(status, agentId);

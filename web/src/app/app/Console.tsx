@@ -13,6 +13,7 @@
  * next (a real /api/chat).
  */
 import { useEffect, useRef, useState, type ReactElement } from "react";
+import { statusLine, type AgentSnapshot } from "./status-line";
 import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
@@ -257,6 +258,9 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
   const total = Math.max(1, split.cash + split.vault + split.positions);
 
   const daysLeft = grant ? Math.max(0, Math.floor((grant.expiresAt - Date.now() / 1000) / 86400)) : null;
+  const landedToday = (feed?.trades ?? []).filter(
+    (t) => t.status === "landed" && new Date(String(t.created_at).replace(" ", "T") + "Z") >= midnight,
+  ).length;
   const refusedToday = (feed?.trades ?? []).filter(
     (t) => t.status === "rejected" && new Date(String(t.created_at).replace(" ", "T") + "Z") >= midnight,
   ).length;
@@ -376,6 +380,41 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
           {/* ── HOME: the overview — equity, the split, the wall, recent tape ── */}
           {view === "home" && (
             <>
+              {/*
+                THE ANSWER TO THE QUESTION EVERYONE ARRIVES WITH.
+
+                A user with $318 in the account asked, in the group chat,
+                "Will it now start trading" — looking at this very screen. It
+                led with Total equity, then "building today · no deposit on
+                record yet", then a cash/vault/positions split. All true, none
+                of it an answer.
+
+                So the status goes ABOVE the accounting. Both are worth having;
+                this one comes first because it is what somebody who has just
+                sent money is actually asking.
+              */}
+              <StatusBanner
+                s={{
+                  name: agentName,
+                  mode,
+                  testnet,
+                  hasGas: hasGas(status.balances?.ethWei),
+                  cashUsdg: balCash,
+                  positionsUsdg: posSum,
+                  positionCount: (feed?.positions ?? []).filter((x) => (x.value_usdg || 0) > 0).length,
+                  // What the signature actually names, not what settings list —
+                  // a coin outside `reach` cannot be bought at any size.
+                  tradableCount: reach.size,
+                  landedToday,
+                  refusedToday,
+                  daysLeft,
+                  // The newest err the worker recorded. This is what makes a
+                  // stuck agent say so instead of showing a calm dashboard of
+                  // stale numbers — the failure mode that hid a fleet-wide
+                  // outage for hours.
+                  lastError: (feed?.events ?? []).find((e) => e.level === "err")?.message ?? null,
+                }}
+              />
               <section className="hero">
                 <div className="equity">
                   <div className="kick">Total equity</div>
@@ -647,6 +686,26 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
         </Link>
       </nav>
     </div>
+  );
+}
+
+/**
+ * The status, in words, above the numbers.
+ *
+ * Deliberately plain: no chips, no monospace, no abbreviations. Everything
+ * else on this screen is a readout for somebody who already knows what they
+ * are looking at. This is the one line for somebody who does not.
+ */
+function StatusBanner({ s }: { s: AgentSnapshot }) {
+  const line = statusLine(s);
+  return (
+    <section className={`statusline ${line.tone}`}>
+      <span className="sl-dot" aria-hidden="true" />
+      <div>
+        <p className="sl-head">{line.headline}</p>
+        <p className="sl-next">{line.next}</p>
+      </div>
+    </section>
   );
 }
 
