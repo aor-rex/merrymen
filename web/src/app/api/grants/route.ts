@@ -13,6 +13,7 @@ import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient, http, parseAbi } from "viem";
 import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
+import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
@@ -246,7 +247,34 @@ export async function GET(req: Request) {
     workerAliveAt = hb.at;
     mode = hb.mode ?? null;
   } catch {
-    // no heartbeat file — worker never ran
+    // no heartbeat file — worker never ran, or (hosted) it beats somewhere
+    // this process cannot see. Fall through to the ledger.
+  }
+
+  // HOSTED READS THE LEDGER, because the file above is in this service's own
+  // MERRYMEN_HOME and the worker writes into its tenant's — different
+  // directories, different containers. Every hosted tenant reported IDLE
+  // regardless of what their agent was doing, which made the LIVE/PAPER chip
+  // decorative exactly where it matters most.
+  //
+  // The file still wins when present: self-hosted it is the same worker on the
+  // same disk, so it is fresher than a mirror that runs on its own clock.
+  if (workerAliveAt === null) {
+    try {
+      const row = await withReadDb(async (db) =>
+        db
+          ? ((await db
+              .prepare("SELECT mode, beat_at FROM agents WHERE smart_account = ?")
+              .get(grant.smartAccount)) as { mode?: string | null; beat_at?: number | null } | undefined)
+          : undefined,
+      );
+      if (row?.beat_at) {
+        workerAliveAt = Number(row.beat_at);
+        mode = (row.mode as AgentStatus["mode"]) ?? null;
+      }
+    } catch {
+      // an unreadable ledger is an unknown mode, not a claim about one
+    }
   }
 
   // Never echo key material to the browser: the serialized session account, the

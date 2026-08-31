@@ -26,7 +26,7 @@ const SRC = [
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, created_at INTEGER);",
   "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, equity_usdg REAL, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
-  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
 ].join("\n");
 
@@ -42,7 +42,7 @@ const mem = (ddl: string) => {
 const seedChild = () => {
   const raw = new DatabaseSync(":memory:");
   raw.exec(SRC);
-  raw.exec("INSERT INTO agents VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3)");
+  raw.exec("INSERT INTO agents VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99)");
   for (let i = 1; i <= 5; i++) {
     raw.exec(
       `INSERT INTO events (agent_id, level, message, created_at) VALUES ('0xagent','ok','e${i}',${100 + i})`,

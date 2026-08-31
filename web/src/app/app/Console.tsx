@@ -648,8 +648,26 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
 function TradeRow({ t }: { t: TradeRecord }) {
   const rejected = t.status === "rejected" || t.status === "reverted";
   const isVault = t.kind.includes("vault");
-  const cls = rejected ? "no" : isVault ? "vault" : "ok";
-  const ic = rejected ? "✕" : isVault ? "⛬" : "↑";
+  /*
+    A SIMULATED FILL MUST NOT LOOK LIKE A REAL ONE.
+
+    This fork was rejected / vault / everything-else, and `paper` fell into
+    everything-else — so a pretend fill got the same green class, the same ↑
+    and the same dollar figure as money that actually moved. On a screen whose
+    job is to say what happened, that is the one mistake with no upside.
+
+    It mattered more than it looks: hosted tenants could not reach paper mode
+    at all, so nobody hit it — and the moment paper starts working (it does
+    now), an unfunded or testnet agent begins filling this tape with numbers
+    that read as profit.
+
+    The other two tape surfaces already got this right — TradesPanel.tsx:80-84
+    and BandSection.tsx:175 both render a 📜 chip. Same marker, same gold, so
+    the product speaks with one voice about the same fact.
+  */
+  const paper = t.status === "paper";
+  const cls = rejected ? "no" : isVault ? "vault" : paper ? "sim" : "ok";
+  const ic = rejected ? "✕" : isVault ? "⛬" : paper ? "📜" : "↑";
   const kindLabel: Record<string, string> = {
     swap: "traded",
     "vault-deposit": "parked in the vault",
@@ -674,7 +692,10 @@ function TradeRow({ t }: { t: TradeRecord }) {
         </span>
       </span>
       <span className="amt">
+        {/* The figure is real arithmetic on a pretend fill. Label it where the
+            eye lands, not only in the icon. */}
         {rejected ? "—" : usd(t.amount_usdg)}
+        {paper && <span className="sim-tag">sim</span>}
         <br />
         <span className="t">{timeAgo(t.created_at)}</span>
       </span>

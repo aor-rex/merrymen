@@ -168,6 +168,19 @@
 .sc-root .trade.ok .ic { background: color-mix(in srgb, var(--mint) 14%, transparent); color: var(--mint); }
 .sc-root .trade.no .ic { background: color-mix(in srgb, var(--rose) 14%, transparent); color: var(--rose); }
 .sc-root .trade.vault .ic { background: color-mix(in srgb, var(--gold) 13%, transparent); color: var(--gold); }
+/*
+  The fourth state this fork always needed. Gold rather than green, because
+  green on this screen means money moved — see TradeRow's comment. Matches
+  .paper-badge / .paper-chip in globals.css, which the self-hosted panels
+  have used for the same fact since before the console existed.
+*/
+.trade.sim .ic { color: var(--gold); }
+.trade.sim .amt { color: var(--gold); }
+.sim-tag {
+  font-size: 8.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--gold); border: 1px solid color-mix(in srgb, var(--gold) 40%, transparent);
+  border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle;
+}
 .sc-root .trade .sym { font-weight: 600; font-size: 14px; }
 .sc-root .trade .desc { font-size: 12.5px; color: var(--dim); }
 .sc-root .trade .desc .rule { font-family: var(--mono); color: var(--rose); }

@@ -185,6 +185,7 @@ import {
   setPaperBook,
   setAgentName,
   setAgentHwm,
+  setAgentMode,
   setAgentStatus,
   clearTrenchEntry,
   getTrenchEntry,
@@ -283,9 +284,52 @@ async function main() {
   let watchTokens = watchTokensFor(cfg.basketSymbols, cfg.customTokens);
 
   // ── paper trading plumbing ────────────────────────────────────────────
-  // Paper mode = a grant but no signer: fills simulate at live oracle prices.
+  /**
+   * PAPER IS A CAPABILITY, not the absence of a bundler key.
+   *
+   * This used to read `!active.executor && cfg.paperTradingEnabled` — paper as
+   * the accidental consequence of having nothing to sign with. That worked
+   * self-hosted, where a missing key is the normal starting state, and it broke
+   * completely hosted: the orchestrator injects the house bundler key into every
+   * child, so `active.executor` is never null and NO HOSTED TENANT COULD EVER BE
+   * IN PAPER MODE.
+   *
+   * The result was worse than a missing feature. A hosted tenant on testnet got
+   * a LIVE executor building real swaps against router and token addresses that
+   * exist only on mainnet — neither trading nor simulating, while the console
+   * chip read LIVE and the chain card promised "a simulated book at real live
+   * prices".
+   *
+   * So ask what the agent can actually DO. Three ways to be unable to trade for
+   * real, each independently sufficient:
+   *
+   *  1. No signer. Nothing can be submitted.
+   *  2. Not a tradeable chain. Every token and router merrymen knows is a
+   *     mainnet-4663 deployment, so on any other chain a swap has no venue to
+   *     route through — preflight.ts calls this a hard blocker for the same
+   *     reason.
+   *  3. No capital. A swap with nothing to sell is a refusal, not a trade.
+   *
+   * `paperTradingEnabled` KEEPS ITS MEANING and its `true` default: it is
+   * permission to simulate rather than sit idle, not a request to simulate
+   * instead of trading. Reading it as a mode selector would have been a
+   * catastrophe — it defaults to true, so every funded mainnet agent in the
+   * fleet would have quietly stopped trading and started reporting pretend
+   * fills. Capability decides WHETHER we can trade; this flag only decides what
+   * to do when we cannot.
+   *
+   * UNKNOWN IS NOT UNFUNDED. `lastCashUsdg` is null until the first balance read
+   * of the process, and a null must never push a funded live agent into
+   * simulation — an agent that thinks it is trading while writing pretend fills
+   * is the single worst outcome available here, far worse than an idle tick. So
+   * only a READ zero counts.
+   */
   let lastPrices: Map<string, PriceQuote> = new Map();
-  const paperActive = () => !!active && !active.executor && cfg.paperTradingEnabled;
+  const chainCanTrade = () => !!active && active.grant.chainId === TRADEABLE_CHAIN_ID;
+  const readAsBroke = () => lastCashUsdg !== null && lastCashUsdg === 0n;
+  /** Could this agent put a real order on-chain right now? */
+  const canTradeForReal = () => !!active && !!active.executor && chainCanTrade() && !readAsBroke();
+  const paperActive = () => !!active && !canTradeForReal() && cfg.paperTradingEnabled;
   function paperPriceOf(
     token: `0x${string}`,
   ): { priceUsd: number; stale: boolean; source: PriceQuote["source"] } | null {
@@ -3239,17 +3283,28 @@ async function main() {
   }
 
   function heartbeat(blockNumber: bigint) {
+    const at = Math.floor(Date.now() / 1000);
+    const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
     try {
       ensureHome();
-      const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
       writeFileSync(
         homePaths.heartbeat(),
-        JSON.stringify({ at: Math.floor(Date.now() / 1000), block: blockNumber.toString(), mode }),
+        JSON.stringify({ at, block: blockNumber.toString(), mode }),
         "utf8",
       );
     } catch {
       // heartbeat is best-effort telemetry — never let it kill the loop
     }
+    // AND ON A CHANNEL THE DASHBOARD CAN ACTUALLY READ. The file above lives in
+    // this worker's own MERRYMEN_HOME; hosted, that is a different directory in
+    // a different container from the web service, which reads its own — so every
+    // hosted tenant showed IDLE no matter what their agent was doing. `agents` is
+    // already mirrored to the shared database, so the row carries it too.
+    //
+    // Both, not one: the file is what the orchestrator's watchdog reads to decide
+    // a child is wedged, and it must keep beating even when the database is
+    // unreachable — otherwise a database blip gets a healthy worker SIGKILLed.
+    if (active) void setAgentMode(active.agentId, mode, at);
   }
 
   async function tick() {
@@ -3321,7 +3376,20 @@ async function main() {
       // goes to missingPrice, which holds the tick — the same fail-closed rule
       // readPositions uses, and for the same reason: valuing a post-split
       // position at the pre-split multiplier books a drawdown that never happened.
-      const mults = await readMultipliers(client, watchTokens);
+      // ON MAINNET, ALWAYS — even when the grant is on testnet.
+      //
+      // Paper already prices from mainnet (mergePoolPrices reads through
+      // mainnetClient), because the token registry only exists there. The
+      // multiplier was the one input still read on the GRANT chain, so a testnet
+      // grant got live mainnet prices and no multiplier at all — and
+      // paperMultiplierOf returns null for an unread token by design, so the
+      // fill path refused every single simulated trade rather than guess a share
+      // count.
+      //
+      // That is why practice mode looked implemented and produced nothing. Both
+      // halves of a paper fill now come from the same chain, which is the only
+      // arrangement where the arithmetic is about one world.
+      const mults = await readMultipliers(mainnetClient(), watchTokens);
       lastMultipliers = mults.multipliers;
       for (const p of paperPositionsOf(bookRow.shares)) {
         if (p.shares <= 0) continue;
