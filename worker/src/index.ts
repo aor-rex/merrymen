@@ -152,7 +152,14 @@ import { buildCurveTradeCalls } from "./venues/pons-trade";
  * the exact failure this bounds.
  */
 const CURVE_DEADLINE_SEC = 60;
-import { CURVE_GUARD_DEFAULTS } from "./venues/pons-price";
+import {
+  CURVE_GUARD_DEFAULTS,
+  curveGraduated,
+  curveBuyImpactBps,
+  curveBuyOut,
+  curveSellOut,
+  curveMinOut,
+} from "./venues/pons-price";
 import { mainnetClient, readAccountBalances, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
@@ -201,8 +208,9 @@ import {
   setTrenchEntry,
   upgradeTrenchEntry,
   setPositions,
-  type TradeRow,
+  type TradeRow,  knownCurves,
 } from "./store";
+import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 const VAULT_ABI = parseAbi([
@@ -417,7 +425,7 @@ async function main() {
       watchTokens = watchTokensFor(next.basketSymbols, next.customTokens);
       console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
       if (active) {
-        active.limits = limitsFromGrant(active.grant, watchTokens);
+        active.limits = limitsFromGrant(active.grant, watchTokens, (await knownCurves()) ?? undefined);
         await addEvent(active.agentId, "ok", `settings applied — strategy ${strategy.name}, venue ${next.swapVenue}`);
       }
       stratKey = nextStrat;
@@ -2045,7 +2053,10 @@ async function main() {
       // Agentic account exists and tools/list has been read, equity orders can
       // only paper-fill.
       orderExecutor: null,
-      limits: limitsFromGrant(grant, watchTokens),
+      // The provenance set for the curve-trade rule. Read once at arm time,
+      // alongside every other grant-derived bound, so a curve the agent never
+      // saw launch cannot be traded even though the wall cannot pin it.
+      limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,
@@ -2113,6 +2124,25 @@ async function main() {
 
   /** Derive a decision's {action, symbol, size} from a typed intent — no model
    * text, just the structure, so deterministic strategies + chat are attributable. */
+  /**
+   * The token legs of an intent, for the ledger row.
+   *
+   * SEVEN COPIES OF `intent.kind === "swap" ? … : undefined` said the same thing
+   * in seven places, and every one of them was wrong for a curve trade: a landed
+   * curve buy wrote both columns NULL, so the row could not say what was bought.
+   * audit.ts then skips its on-chain cross-check when those columns are absent
+   * and raises no finding, so the trade passes verification vacuously — a
+   * position that exists on chain, at zero recorded cost, verified by nothing.
+   *
+   * One function so the next venue is added in one place rather than seven, and
+   * so a kind that has legs cannot quietly keep failing to name them.
+   */
+  function tokenLegs(intent: TradeIntent): { sell_token?: string; buy_token?: string } {
+    if (intent.kind === "swap") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
+    if (intent.kind === "curve-trade") return { sell_token: intent.assetIn, buy_token: intent.assetOut };
+    return {};
+  }
+
   function describeIntent(intent: TradeIntent): { action: string; symbol?: string; sizeUsdg: number } {
     if (intent.kind === "swap") {
       const buyingStock = intent.buyToken.toLowerCase() !== (CASH.USDG as string).toLowerCase();
@@ -2128,8 +2158,19 @@ async function main() {
     }
     // A curve trade is sized in USDG-equivalent like a swap, not in an
     // amountUsdg field it does not have.
+    //
+    // NAMED, not labelled `curve-trade`. This returned the literal kind as the
+    // action and no symbol at all, and ensureDecision writes that straight into
+    // the decisions table — so every attribution surface (the dashboard, /why,
+    // the scoreboard) would show a nameless action for the trades most in need
+    // of an explanation. Derived from assetOut the way the swap branch does it.
     if (intent.kind === "curve-trade") {
-      return { action: intent.kind, sizeUsdg: usdgNum(intent.notionalUsdg) };
+      const buying = intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase();
+      return {
+        action: buying ? "buy" : "sell",
+        symbol: symbolOfToken(buying ? intent.assetOut : intent.assetIn),
+        sizeUsdg: usdgNum(intent.notionalUsdg),
+      };
     }
     return { action: intent.kind, sizeUsdg: usdgNum(intent.amountUsdg) };
   }
@@ -2552,8 +2593,7 @@ async function main() {
           agent_id: agentId,
           kind: intent.kind,
           target: tradeTarget,
-          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
           status: "rejected",
           reject_rule: "no-executor",
@@ -2636,8 +2676,7 @@ async function main() {
           agent_id: agentId,
           kind: intent.kind,
           target: intent.target,
-          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
           status: "paper",
           sim_quote_out: fill.receipt,
@@ -2671,8 +2710,7 @@ async function main() {
         agent_id: agentId,
         kind: intent.kind,
         target: tradeTarget,
-        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         status: "rejected",
         reject_rule: "no-gas",
@@ -2725,8 +2763,7 @@ async function main() {
             agent_id: agentId,
             kind: intent.kind,
             target: tradeTarget,
-            sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-            buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+            ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             user_op_hash: userOpHash,
             status: "submitted",
@@ -3276,8 +3313,7 @@ async function main() {
         agent_id: agentId,
         kind: intent.kind,
         target: intent.target,
-        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         tx_hash: txHash,
         user_op_hash: exec.userOpHash,
@@ -3344,8 +3380,7 @@ async function main() {
           agent_id: agentId,
           kind: intent.kind,
           target: tradeTarget,
-          sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-          buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+          ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
           status: "rejected",
           reject_rule: e.rule,
@@ -3431,11 +3466,20 @@ async function main() {
       // funded account), and a suppression outliving its reason is
       // indistinguishable from a strategy that simply stopped working.
       if (revertVerdict && !revertVerdict.retryable) {
-        const key = suppressionKey(
-          intent.kind,
-          intent.kind === "swap" ? intent.sellToken : undefined,
-          intent.kind === "swap" ? intent.buyToken : undefined,
-        );
+        // NAME THE TOKENS FOR EVERY KIND THAT HAS THEM.
+        //
+        // This passed tokens only for swaps, so every curve failure collapsed to
+        // the single key `curve-trade:->` and the first non-retryable one
+        // suppressed ALL curve trading for the rest of the arm — one graduated
+        // token taking the whole venue down with it. suppressionKey's own comment
+        // says the scope is the token PAIR precisely so that cannot happen.
+        const [supSell, supBuy] =
+          intent.kind === "swap"
+            ? [intent.sellToken, intent.buyToken]
+            : intent.kind === "curve-trade"
+              ? [intent.assetIn, intent.assetOut]
+              : [undefined, undefined];
+        const key = suppressionKey(intent.kind, supSell, supBuy);
         suppressedIntents.set(key, revertVerdict.rule);
         await addEvent(
           agentId,
@@ -3447,8 +3491,7 @@ async function main() {
         agent_id: agentId,
         kind: intent.kind,
         target: intent.target,
-        sell_token: intent.kind === "swap" ? intent.sellToken : undefined,
-        buy_token: intent.kind === "swap" ? intent.buyToken : undefined,
+        ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
@@ -3592,7 +3635,25 @@ async function main() {
         const px = paperPriceOf(p.token);
         const mul = mults.multipliers.get(p.symbol);
         if (!px || mul === undefined) {
-          missingPrice.push(p.symbol);
+          // UNPRICEABLE BY DESIGN IS NOT A MISSING PRICE, and conflating them
+          // freezes the tick.
+          //
+          // readPositions makes this split on the live path (positions.ts): a
+          // token with no Chainlink feed AT ALL — which is every memecoin, and
+          // every bonding-curve token — is `unpricedByDesign`, a structural gap
+          // that never resolves. `missingPrice` means the holding is known and
+          // the price is temporarily absent, and it HOLDS THE TICK on purpose,
+          // because valuing a book you cannot value is how a drawdown breaker
+          // fires on a number nobody computed.
+          //
+          // The paper path had no such split, so one simulated memecoin holding
+          // stopped the tick forever — equity, the breaker, and the strategy
+          // that would have SOLD it, all waiting on a price that is never
+          // coming. Practice mode is where an owner is meant to find out how
+          // this behaves, so it is the worst place to hang.
+          const known = watchTokens.find((t) => t.symbol === p.symbol);
+          if (known && known.chainlinkFeed === null) unpricedByDesign.push(p.symbol);
+          else missingPrice.push(p.symbol);
           continue;
         }
         // `shares` is split-invariant, so it IS the raw balance in 18dp terms and
@@ -4182,6 +4243,185 @@ async function main() {
     }
   }
 
+  /**
+   * An owner-directed curve buy or sell, from chat.
+   *
+   * THE FIRST PRODUCER OF A curve-trade INTENT IN THIS REPO. Everything below it
+   * — the wall permission, the call builder, the executor arm, the policy rules —
+   * has existed and been unreachable, because nothing constructed the object.
+   *
+   * OWNER-DIRECTED ON PURPOSE, and it sidesteps pre-authorisation rather than
+   * pretending to solve it. The wall pins assetOut ONE_OF the list sealed at
+   * signing, so the token has to be in the GRANT before this can work. That is a
+   * real limit and this function says so in words instead of letting the chain
+   * say it in gas.
+   *
+   * THE PRECONDITION IS grant.grantTokens, NOT /settings. `watchTokens` is
+   * settings-derived and hot-reloads with no signature (see the settings apply
+   * path), while `sellableAssets` comes from the signature. An owner who adds a
+   * token and does not re-sign would otherwise pass every check here and revert
+   * at the wall, having paid for the attempt.
+   */
+  async function submitChatCurveTrade(
+    side: "buy" | "sell",
+    symbol: string,
+    token: `0x${string}`,
+    usdgAmount: number,
+  ): Promise<string> {
+    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+
+    const adapter = grantPonsAdapter(active.grant);
+    if (!adapter) {
+      return (
+        `${symbol} trades on a bonding curve, and this grant does not carry the curve adapter. ` +
+        `Add the adapter address in /settings and re-sign at /grant — the address is sealed into the ` +
+        `signature, so setting it alone changes nothing.`
+      );
+    }
+    if (!active.ponsAdapterLive) {
+      return (
+        `${symbol} trades on a bonding curve, but the adapter this grant sealed has no code on this chain. ` +
+        `That usually means the address came from the other chain or was never deployed. Nothing was sent.`
+      );
+    }
+
+    // The GRANT's reach, checked before anything is quoted or spent.
+    const sellable = new Set((active.limits.sellableAssets ?? []).map((a) => a.toLowerCase()));
+    if (!sellable.has(token.toLowerCase())) {
+      return (
+        `I can't trade ${symbol}: this grant's signature doesn't name it, so the wall would refuse the ` +
+        `trade after paying gas for it. Add ${symbol} in /settings and re-sign at /grant.`
+      );
+    }
+
+    // PAPER MODE IS REFUSED HERE, in words. applyPaperIntent rejects a
+    // curve-trade with the raw string "unsupported paper intent curve-trade",
+    // which surfaces to the owner and reads like a crash rather than a decision.
+    if (paperActive()) {
+      return (
+        `${symbol} trades on a bonding curve, and curve trading is live-only for now — the practice book ` +
+        `can't simulate a curve yet. Nothing was sent.`
+      );
+    }
+
+    const ref = await curveFor(token);
+    if (!ref) return `I don't have a curve on record for ${symbol}, so I can't trade it there.`;
+
+    const client = mainnetClient();
+    const decimalsCache = new Map<string, number>();
+    const quoteDecimals =
+      (await quoteDecimalsOf(client, ref.quoteToken as `0x${string}`, decimalsCache)) ?? null;
+    if (quoteDecimals === null) {
+      return `I can't read the decimals of what ${symbol}'s curve is quoted in, so I can't size a trade safely.`;
+    }
+    const tokenDecimals = watchTokens.find((t) => t.address.toLowerCase() === token.toLowerCase())?.decimals ?? 18;
+
+    const reserves = await readCurveReserves(
+      client,
+      { curve: ref.curve as `0x${string}`, graduationThresholdRaw: ref.graduationThresholdRaw },
+      { quote: quoteDecimals, token: tokenDecimals },
+    );
+    if (!reserves) return `couldn't read ${symbol}'s curve just now — try again in a moment.`;
+    if (curveGraduated(reserves)) {
+      // GRADUATION IS AN EXIT PROBLEM, not just a refusal.
+      //
+      // The position is real and the venue it was bought on is gone. What must
+      // NOT happen here is a quiet fallback to the swap router: 16 of 17 sampled
+      // graduated tokens had no Uniswap v3 pool at any fee tier (pons-price.ts),
+      // so that builds an operation against a pool that does not exist and burns
+      // gas to find out. A graduated token's market is v4.
+      //
+      // So say which door is open. The v4 adapter is a SEPARATE owner opt-in
+      // (wall.ts) — a grant carrying the Pons adapter need not carry it — and the
+      // difference decides whether this is a re-sign or a sweep.
+      const v4 = grantV4Adapter(active.grant);
+      const base = `${symbol} has graduated off its bonding curve, so the curve adapter refuses it by name and its market has moved to a pool. Nothing was sent.`;
+      return v4
+        ? `${base} Its market is on Uniswap v4 now; routing a graduated position through the v4 adapter isn't wired yet, so for now sweep it with your owner key from /grant.`
+        : `${base} Exiting it needs the Uniswap v4 adapter, which this grant doesn't carry — add it in /settings and re-sign at /grant, or sweep the position with your owner key.`;
+    }
+
+    // IMPACT, on the thinnest-liquidity venue on the chain. cfg.maxImpactBps has
+    // never bounded a curve trade because judgeImpact is only called from
+    // swap-only branches; this is the same ceiling, applied where it matters most.
+    const sizeRaw = usdg(usdgAmount);
+    const isBuy = side === "buy";
+
+    // What actually goes in: for a buy, the quote asset; for a sell, the token.
+    let amountInRaw: bigint;
+    let assetIn: `0x${string}`;
+    let assetOut: `0x${string}`;
+    if (isBuy) {
+      assetIn = ref.quoteToken as `0x${string}`;
+      assetOut = token;
+      // USDG-quoted curves are the one hop the agent's cash reaches directly.
+      if (assetIn.toLowerCase() !== (CASH.USDG as string).toLowerCase()) {
+        return (
+          `${symbol}'s curve is quoted in ${assetIn.slice(0, 10)}…, not USDG, so buying it needs a hop ` +
+          `through that asset first. I don't do that in one step yet — nothing was sent.`
+        );
+      }
+      amountInRaw = sizeRaw;
+    } else {
+      assetIn = token;
+      assetOut = ref.quoteToken as `0x${string}`;
+      // SIZED FROM THE CHAIN, not from the valued positions row. A curve token
+      // the price guard refuses is exactly the one with no positions row, and
+      // reading one would answer "you don't hold any X" about a token the owner
+      // demonstrably holds. Unpriceable is a reason to SELL, not to refuse.
+      let held: bigint;
+      try {
+        held = (await client.readContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [active.grant.smartAccount as `0x${string}`],
+        })) as bigint;
+      } catch {
+        return `couldn't read your ${symbol} balance just now — try again in a moment.`;
+      }
+      if (held === 0n) return `you don't hold any ${symbol}.`;
+      amountInRaw = held;
+    }
+
+    const impact = isBuy ? curveBuyImpactBps(reserves, amountInRaw) : null;
+    if (impact !== null && impact > cfg.maxImpactBps) {
+      return (
+        `that would move ${symbol}'s curve by ${(impact / 100).toFixed(1)}%, past your ${(
+          cfg.maxImpactBps / 100
+        ).toFixed(1)}% ceiling. Try a smaller size.`
+      );
+    }
+
+    const quoted = isBuy ? curveBuyOut(reserves, amountInRaw) : curveSellOut(reserves, amountInRaw);
+    if (quoted === null) return `couldn't quote ${symbol} on its curve — the reserves don't support a trade this size.`;
+    const minAmountOutRaw = curveMinOut(quoted, cfg.slippageBps);
+    if (minAmountOutRaw === null || minAmountOutRaw <= 0n) {
+      return `couldn't derive a slippage floor for ${symbol} — refusing rather than signing an unbounded trade.`;
+    }
+
+    const intent: TradeIntent = {
+      kind: "curve-trade",
+      target: adapter,
+      curve: ref.curve as `0x${string}`,
+      assetIn,
+      assetOut,
+      amountInRaw,
+      minAmountOutRaw,
+      // For a buy the USDG leg IS the notional. For a sell it is what the quote
+      // says comes back, which is the number the caps should judge.
+      notionalUsdg: isBuy ? sizeRaw : quoted,
+    };
+
+    await ensureDecision(
+      intent,
+      "chat",
+      `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
+    );
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    return `🏹 submitted ${side} ${symbol} on its curve — watch /trades for the result (it still passes the policy wall).`;
+  }
+
   async function submitChatTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
     // Before the first tick completes, equity is unknown (0n) and the drawdown
@@ -4195,6 +4435,11 @@ async function main() {
       const known = watchTokens.map((t) => t.symbol).join(", ");
       return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`;
     }
+    // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
+    // graduates, so routing it to the swap router would build an operation
+    // against a pool that does not exist. Asked before anything is sized.
+    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount);
+
     const router = swapRouterFor(cfg);
     let intent: TradeIntent;
     if (side === "buy") {
