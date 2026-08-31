@@ -1170,13 +1170,27 @@ export default function GrantPage() {
                   ) : (
                     <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
-                  Renewing is free and instant — same wallet, same funds, fresh key under the same
-                  caps. Nothing is sent on-chain. The new key is signed against{" "}
-                  <b>today&apos;s wall</b>, so its permissions can differ from the old one&apos;s —
-                  the &ldquo;what this key carries&rdquo; panel lists them, and a key still holding
-                  the old Uniswap v4 pair loses it here, which is the point.
-                  <button className="grant-btn" style={{ marginTop: 10, width: "100%" }} onClick={() => void renewKey()} disabled={renewing}>
-                    {renewing ? "renewing…" : "renew the key (free)"}
+                  Re-signing is free and instant — same wallet, same funds, nothing sent
+                  on-chain. The new key is signed against <b>today&apos;s wall</b>, so its
+                  permissions can differ from the old one&apos;s.
+                  {/*
+                    SCROLLS, does not sign. This button used to call renewKey()
+                    directly with `disabled={renewing}` as its only guard — which
+                    became a hole the moment the panel below gained a chain move:
+                    tick "move to real money" down there, scroll up, press this,
+                    and you re-signed onto mainnet with no acknowledgement and no
+                    change diff, under a banner promising "the same caps".
+
+                    Duplicating the guard would work until the next guard is added
+                    to one copy and not the other. One signing control, one set of
+                    conditions, and everything else points at it.
+                  */}
+                  <button
+                    className="grant-btn"
+                    style={{ marginTop: 10, width: "100%" }}
+                    onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                  >
+                    re-sign the key (free) →
                   </button>
                 </div>
               );
@@ -1281,14 +1295,24 @@ export default function GrantPage() {
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
-                    gas landed — run <b>merrymen start</b> and the band rides its <b>paper book</b>:
-                    live prices, simulated fills. testnet has no trading venues, so no real swap can
-                    route here, and the USDG line above stays blank whatever you send.
+                    gas landed —{" "}
+                    {session?.hosted ? (
+                      <>your band is <b>already riding</b></>
+                    ) : (
+                      <>run <b>merrymen start</b> and the band rides</>
+                    )}{" "}
+                    its <b>paper book</b>: live prices, simulated fills. testnet has no trading
+                    venues, so no real swap can route here, and the USDG line above stays blank
+                    whatever you send.
                   </>
                 ) : usdgFunded ? (
                   <>
-                    funded — run <b>merrymen start</b> and your band rides. balances refresh here
-                    every few seconds.
+                    {/* Hosted has nothing to start: the orchestrator spawns a worker
+                        per tenant on its own clock. Telling a hosted owner to run a
+                        CLI they never installed is the first instruction the product
+                        gives them, and it does not apply. */}
+                    funded — {session?.hosted ? <>your band is <b>already riding</b></> : <>run <b>merrymen start</b> and your band rides</>}. balances
+                    refresh here every few seconds.
                   </>
                 ) : (
                   <>
@@ -1391,7 +1415,7 @@ export default function GrantPage() {
               a re-sign that silently keeps the old numbers would send owners
               back through the side door for the other half of the job.
             */}
-            <div className="grant-summary" style={{ marginTop: 14 }}>
+            <div id="resign" className="grant-summary" style={{ marginTop: 14 }}>
               <b>Re-sign this key.</b> Free, instant, and nothing is sent on-chain — it is a
               signature, not a transaction. <b>Same wallet, same address, same funds:</b> your
               balances are held by the account, not by the key, so they do not move.
