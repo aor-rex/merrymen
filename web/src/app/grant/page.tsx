@@ -638,6 +638,17 @@ export default function GrantPage() {
         .map(([label, now, was, unit]) => `${label} ${was}${unit && ` ${unit}`} → ${now}${unit && ` ${unit}`}`)
     : [];
   const capsEdited = capChanges.length > 0;
+  /**
+   * Every difference the re-sign would introduce, chain included.
+   *
+   * The chain move is the biggest change available on this panel and it was the
+   * one the notice did not mention — so it leads.
+   */
+  const allChanges =
+    grant && chainId !== grant.chainId
+      ? [`chain ${grant.chainId === MAINNET ? "mainnet" : "practice"} → ${chainId === MAINNET ? "mainnet" : "practice"}`, ...capChanges]
+      : capChanges;
+  const anyChange = allChanges.length > 0;
 
   const gasFunded = (funding?.gasWei ?? 0n) > 0n;
   const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
@@ -1159,13 +1170,27 @@ export default function GrantPage() {
                   ) : (
                     <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
-                  Renewing is free and instant — same wallet, same funds, fresh key under the same
-                  caps. Nothing is sent on-chain. The new key is signed against{" "}
-                  <b>today&apos;s wall</b>, so its permissions can differ from the old one&apos;s —
-                  the &ldquo;what this key carries&rdquo; panel lists them, and a key still holding
-                  the old Uniswap v4 pair loses it here, which is the point.
-                  <button className="grant-btn" style={{ marginTop: 10, width: "100%" }} onClick={() => void renewKey()} disabled={renewing}>
-                    {renewing ? "renewing…" : "renew the key (free)"}
+                  Re-signing is free and instant — same wallet, same funds, nothing sent
+                  on-chain. The new key is signed against <b>today&apos;s wall</b>, so its
+                  permissions can differ from the old one&apos;s.
+                  {/*
+                    SCROLLS, does not sign. This button used to call renewKey()
+                    directly with `disabled={renewing}` as its only guard — which
+                    became a hole the moment the panel below gained a chain move:
+                    tick "move to real money" down there, scroll up, press this,
+                    and you re-signed onto mainnet with no acknowledgement and no
+                    change diff, under a banner promising "the same caps".
+
+                    Duplicating the guard would work until the next guard is added
+                    to one copy and not the other. One signing control, one set of
+                    conditions, and everything else points at it.
+                  */}
+                  <button
+                    className="grant-btn"
+                    style={{ marginTop: 10, width: "100%" }}
+                    onClick={() => document.getElementById("resign")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                  >
+                    re-sign the key (free) →
                   </button>
                 </div>
               );
@@ -1270,14 +1295,24 @@ export default function GrantPage() {
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
-                    gas landed — run <b>merrymen start</b> and the band rides its <b>paper book</b>:
-                    live prices, simulated fills. testnet has no trading venues, so no real swap can
-                    route here, and the USDG line above stays blank whatever you send.
+                    gas landed —{" "}
+                    {session?.hosted ? (
+                      <>your band is <b>already riding</b></>
+                    ) : (
+                      <>run <b>merrymen start</b> and the band rides</>
+                    )}{" "}
+                    its <b>paper book</b>: live prices, simulated fills. testnet has no trading
+                    venues, so no real swap can route here, and the USDG line above stays blank
+                    whatever you send.
                   </>
                 ) : usdgFunded ? (
                   <>
-                    funded — run <b>merrymen start</b> and your band rides. balances refresh here
-                    every few seconds.
+                    {/* Hosted has nothing to start: the orchestrator spawns a worker
+                        per tenant on its own clock. Telling a hosted owner to run a
+                        CLI they never installed is the first instruction the product
+                        gives them, and it does not apply. */}
+                    funded — {session?.hosted ? <>your band is <b>already riding</b></> : <>run <b>merrymen start</b> and your band rides</>}. balances
+                    refresh here every few seconds.
                   </>
                 ) : (
                   <>
@@ -1285,6 +1320,30 @@ export default function GrantPage() {
                     until it arrives the band stays on its paper book.
                   </>
                 )}
+                {/*
+                  THE WAY OUT OF STEP THREE.
+
+                  The rail across the top promises CHOOSE → BACK UP → FUND → RIDE,
+                  and RIDE was not a place you could get to: funding is an external
+                  action with no completion event, so the wizard just sat on step
+                  three forever. The only exit was "back to the band" at the very
+                  bottom of the page, below the fold, in a row it shares with
+                  "switch to another wallet" and a red "discard & start over" — so
+                  the nearest thing to a next step looked like one of two ways to
+                  throw the wallet away.
+
+                  Shown from the moment GAS lands rather than waiting for capital,
+                  because the agent is already doing something at that point: with
+                  no USDG it runs in practice mode, which is exactly what somebody
+                  who has just funded gas wants to watch.
+                */}
+                <Link
+                  href="/"
+                  className="grant-btn"
+                  style={{ marginTop: 12, width: "100%", textAlign: "center", textDecoration: "none", display: "block" }}
+                >
+                  watch it trade →
+                </Link>
               </div>
             ) : (
               <div className="grant-note">
@@ -1380,7 +1439,7 @@ export default function GrantPage() {
               a re-sign that silently keeps the old numbers would send owners
               back through the side door for the other half of the job.
             */}
-            <div className="grant-summary" style={{ marginTop: 14 }}>
+            <div id="resign" className="grant-summary" style={{ marginTop: 14 }}>
               <b>Re-sign this key.</b> Free, instant, and nothing is sent on-chain — it is a
               signature, not a transaction. <b>Same wallet, same address, same funds:</b> your
               balances are held by the account, not by the key, so they do not move.
@@ -1424,23 +1483,96 @@ export default function GrantPage() {
                     </label>
                   </div>
                   {/*
+                    MOVING A KEY BETWEEN CHAINS, as a first-class action.
+
+                    Testnet cannot trade anything. Every token and router address
+                    merrymen knows is a mainnet-4663 deployment (preflight.ts's
+                    chain guard says so in as many words), so a grant on 46630 is
+                    a rehearsal that can never become a performance. The only way
+                    off it was a control labelled "switch to another wallet",
+                    which is where the chain picker happens to live — a new user
+                    on a faucet asked "how to do leave testnet?" and could not
+                    find it, because nothing on the page is called that.
+
+                    Deliberately NOT a silent default. The mount effect pins the
+                    selector to the loaded grant precisely so a mainnet owner
+                    cannot click renew and land on the sandbox; this keeps that
+                    property by making the move an explicit, acknowledged choice
+                    with its own button, rather than a selector that could drift.
+                  */}
+                  <div className="chain-move" style={{ marginTop: 12 }}>
+                    <label className="ack-row">
+                      <input
+                        type="checkbox"
+                        checked={chainId !== grant.chainId}
+                        onChange={(e) => {
+                          setChainId(e.target.checked ? (grant.chainId === MAINNET ? TESTNET : MAINNET) : grant.chainId);
+                          setMainnetAck(false);
+                        }}
+                      />
+                      <span>
+                        {grant.chainId === MAINNET ? (
+                          <>Move this key to <b>practice (testnet {TESTNET})</b> — it will stop being able to trade.</>
+                        ) : (
+                          <>Move this key to <b>real money (mainnet {MAINNET})</b>. Practice mode cannot trade at all: every token merrymen knows is a mainnet deployment, so a testnet balance reads as zero and every route is refused.</>
+                        )}
+                      </span>
+                    </label>
+                  </div>
+                  {chainId === MAINNET && grant.chainId !== MAINNET && (
+                    <div className="mainnet-warning" style={{ marginTop: 10 }}>
+                      <b>This is real money.</b> Your owner &amp; session keys are stored in plain
+                      text in this browser — anyone with access to it controls the funds. There is
+                      no recovery service and no undo. The caps above are the seatbelt: start small.
+                      <br />
+                      <br />
+                      Your account address does not change, so anything already sitting at{" "}
+                      <span className="mono">{short(grant.smartAccount)}</span> on mainnet stays
+                      there. Practice balances stay behind on testnet, where they were never worth
+                      anything.
+                      <label className="ack-row" style={{ marginTop: 10 }}>
+                        <input
+                          type="checkbox"
+                          checked={mainnetAck}
+                          onChange={(e) => setMainnetAck(e.target.checked)}
+                        />
+                        <span>
+                          I understand — real funds, keys stored locally in plain text, and my caps
+                          are my protection.
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                  {/*
                     Say what is about to change BEFORE it changes, and only when
                     something has. A re-sign that quietly moves a cap the owner
                     edited and forgot is the same class of surprise as one that
                     quietly keeps it.
                   */}
-                  {capsEdited && (
+                  {anyChange && (
                     <p className="field-lead" style={{ marginTop: 10 }}>
-                      Signing now also changes: {capChanges.join(" · ")}.
+                      Signing now also changes: {allChanges.join(" · ")}.
                     </p>
                   )}
+                  {/*
+                    Blocked, not hidden, when a chain move needs its
+                    acknowledgement. A button that vanishes leaves the reader
+                    wondering what they did wrong; a disabled one sits directly
+                    under the checkbox that enables it.
+                  */}
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => void renewKey()}
-                    disabled={renewing}
+                    disabled={renewing || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
                   >
-                    {renewing ? "re-signing…" : "re-sign this key (free)"}
+                    {renewing
+                      ? "re-signing…"
+                      : chainId !== grant.chainId
+                        ? chainId === MAINNET
+                          ? "move to real money & re-sign"
+                          : "move to practice & re-sign"
+                        : "re-sign this key (free)"}
                   </button>
                 </>
               ) : (
