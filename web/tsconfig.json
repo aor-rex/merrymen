@@ -20,6 +20,7 @@
       "@merrymen/policy": ["../worker/src/policy.ts"],
       "@merrymen/recover": ["../worker/src/recover.ts"],
       "@merrymen/grant-store": ["../worker/src/grant-store.ts"],
+      "@merrymen/command-files": ["../worker/src/command-files.ts"],
       "@merrymen/settings-store": ["../worker/src/settings-store.ts"],
       "@merrymen/llm": ["../worker/src/llm.ts"],
       "@merrymen/settings": ["../worker/src/settings.ts"],

@@ -75,6 +75,7 @@ import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { grantHasDeadRateLimit } from "./session-account";
+import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -83,7 +84,7 @@ import { accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { limitsFromGrant } from "./limits";
-import { ensureHome, homePaths } from "./home";
+import { ensureHome, homePaths, merrymenHome } from "./home";
 import { resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
@@ -449,6 +450,8 @@ async function main() {
    * quietly stopped proposing. Cleared at every arm.
    */
   const suppressedIntents = new Map<string, string>();
+  /** The last arm failure reported, so the same one is not re-logged every tick. */
+  let lastArmFailure: string | null = null;
   let inFlightSpentUsdg = 0n;
   let inFlightOps = 0;
   const spentToday = () => settledSpentUsdg + inFlightSpentUsdg;
@@ -1435,6 +1438,98 @@ async function main() {
    * doing an EXACT per-hash lookup does not need a precise window — only one wide
    * enough to contain the op.
    */
+  /**
+   * RUN ONE COMMAND THE DASHBOARD ASKED FOR.
+   *
+   * `merrymen selftest` is a CLI flag, and hosted spawns the worker without it
+   * (orchestrator.ts). So the one probe designed to answer "can this thing
+   * actually transact" was unreachable for every hosted tenant — which is how a
+   * fleet-wide arming failure stayed invisible for hours: the only way to find
+   * out was to read container logs by hand.
+   *
+   * The transport is a claimed queue rather than a flag, because this spends
+   * gas. claimCommand takes the row before anything runs, so a crash mid-probe
+   * leaves it claimed rather than replayed. At-most-once, never at-least-once.
+   *
+   * ONE COMMAND PER TICK, and only when armed. There is no batch drain and no
+   * catch-up: an operator who queued three probes wants three ticks' worth of
+   * evidence, not three UserOps racing the same nonce.
+   */
+  let commandInFlight = false;
+  async function runQueuedCommand(agentId: string): Promise<void> {
+    if (commandInFlight || !active) return;
+    commandInFlight = true;
+    try {
+      // FROM THIS WORKER'S OWN HOME, not from a shared table.
+      //
+      // Children have DATABASE_URL stripped, so a hosted worker's store is its
+      // private sqlite while the dashboard writes shared Postgres — two
+      // different databases, and nothing would ever have been claimed. The
+      // orchestrator ferries commands in as files, exactly as it already does
+      // for grants and settings. See command-files.ts.
+      const cmd = claimCommandFile(merrymenHome());
+      if (!cmd) return;
+      // The unlink above WAS the claim, so from here the command is ours and
+      // will not be replayed — a lost probe is a button pressed again, a
+      // replayed one is gas nobody asked to spend twice.
+      const outcome = cmd.kind === "selftest"
+        ? await runSelftestProbe("dashboard")
+        : { ok: false, line: `unknown command '${cmd.kind}'` };
+      writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
+      await addEvent(agentId, outcome.ok ? "ok" : "err", `selftest: ${outcome.line}`);
+    } catch (e) {
+      console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      commandInFlight = false;
+    }
+  }
+
+  /**
+   * The probe itself, shared by the CLI and the dashboard.
+   *
+   * One policy-legal no-op — approve 0.000001 USDG to the router — through the
+   * whole pipeline: bundler handshake, session-key signature, the account
+   * contract's call policy, EntryPoint prefund, account deployment, receipt,
+   * ledger row. It does NOT prove a swap; the approve is the first call of one,
+   * not the swap itself.
+   *
+   * Reads the LEDGER for its verdict, never the absence of an exception:
+   * processIntent records every failure and returns normally, so `await`
+   * completing carries no information at all. That mistake is why this used to
+   * print PASSED for a UserOp the wall had just refused.
+   */
+  async function runSelftestProbe(source: string): Promise<{ ok: boolean; line: string }> {
+    if (!active) return { ok: false, line: "not armed — nothing to probe" };
+    const a = active as ActiveAgent;
+    if (!a.executor) return { ok: false, line: "no bundler key — nothing can be signed" };
+    if (a.grant.chainId !== TRADEABLE_CHAIN_ID) {
+      return {
+        ok: false,
+        line:
+          `grant is on chain ${a.grant.chainId}; every token and router merrymen knows is a chain ` +
+          `${TRADEABLE_CHAIN_ID} deployment, so an approve here calls an address with no code. ` +
+          `That can prove the grant, the wall and the bundler — never a trade.`,
+      };
+    }
+    const probe = selfTestIntent(cfg);
+    await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
+    // equityKnown: false, not equity 0 — the probe knows nothing about the book
+    // and must not claim a zero.
+    await processIntent(probe, 0n, false);
+    const outcome = lastTradeOutcome;
+    if (!outcome) return { ok: false, line: "FAILED — the probe never reached the ledger at all" };
+    if (outcome.status !== "landed") {
+      return {
+        ok: false,
+        line: `FAILED — the probe was ${outcome.status}${outcome.rejectRule ? `: ${outcome.rejectRule}` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      line: "PASSED — a signed UserOperation reached the chain and the ledger recorded it",
+    };
+  }
+
   let lastStrandedAt = 0;
   let strandedInFlight = false;
   const STRANDED_INTERVAL_SEC = 300;
@@ -1482,7 +1577,25 @@ async function main() {
       // nullScout, which picks NOTHING — this step exists to exclude, and with
       // nothing to do the excluding the honest answer is "nothing has been
       // vetted", not "everything has".
-      const creds = resolveLlm(cfg);
+      //
+      // AND IT ONLY RUNS FOR AN AGENT THAT COULD ACT ON IT.
+      //
+      // `scoutEnabled` defaults to false and `scoutBudgetUsdg` to 0, so by
+      // default a scouted coin can never be bought at any size — quarantine.ts
+      // refuses it. Ranking candidates anyway spent the LLM budget to produce a
+      // list nothing was allowed to use.
+      //
+      // Hosted, that budget is one shared house key across every tenant, and
+      // this ran per tenant every ten minutes. On 2026-08-31 it consumed the
+      // whole 200,000-token daily allowance — 195,881 used — and the first
+      // person to notice was a user whose CHAT stopped working, because the
+      // feature people actually touch was competing with a background
+      // speculation nobody had switched on.
+      //
+      // Discovery itself still runs: candidates are found, screened and
+      // recorded. Only the paid narrowing step waits until the owner has said
+      // they want to trade these at all.
+      const creds = cfg.scoutEnabled ? resolveLlm(cfg) : null;
       const res = await discoverTrending({
         client: mainnetClient(),
         seen: await seenPools(),
@@ -1702,13 +1815,49 @@ async function main() {
 
     let executor: AgentExecutor | null = null;
     if (bundlerUrl) {
-      executor = await createAgentExecutor({
-        chain,
-        serializedGrant: grant.serialized,
-        bundlerUrl,
-        rpcUrl: rpc,
-      });
-      console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
+      // ARMING CAN FAIL, AND THE FAILURE MUST BE VISIBLE.
+      //
+      // This used to throw straight out of syncGrant, out of tick, into
+      // runLoop's `.catch(e => console.error(...))` — a stack trace on stdout
+      // and nothing else. No event, no status, and heartbeat() never ran
+      // because it is called AFTER syncGrant, so even the staleness signal was
+      // absent. Ten hosted agents sat in that loop for hours and the only way
+      // anyone found out was reading container logs by hand.
+      //
+      // A grant that cannot be deserialized is a real and permanent condition
+      // — an unrecognised policy, a corrupt blob, a permission id that does not
+      // reproduce. Retrying it every 60 seconds forever is not recovery, it is
+      // noise. So: record it where the owner will see it, leave the agent
+      // unarmed, and let the tick continue so the heartbeat still beats and the
+      // dashboard can say IDLE rather than going silent.
+      try {
+        executor = await createAgentExecutor({
+          chain,
+          serializedGrant: grant.serialized,
+          bundlerUrl,
+          rpcUrl: rpc,
+        });
+        console.log(`[worker] executor live — smart account ${executor.address} on chain ${chain.id}`);
+        lastArmFailure = null;
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        console.log(`[worker] CANNOT ARM — ${why}`);
+        await setAgentStatus(agentId, "error");
+        // Once per distinct reason, not once per tick. An owner scrolling a
+        // feed of the same sentence 1,400 times learns nothing the first one
+        // did not tell them — and that is the shape of the incident this
+        // repo already carries (1,242 identical rejections, 2026-07-15).
+        if (lastArmFailure !== why) {
+          lastArmFailure = why;
+          await addEvent(
+            agentId,
+            "err",
+            `this agent CANNOT START and is not trading: ${why.slice(0, 300)}`,
+          );
+        }
+        active = null;
+        return false;
+      }
     } else {
       console.log(
         cfg.paperTradingEnabled
@@ -3868,6 +4017,9 @@ async function main() {
     // cadence is independent of how fast the owner trades. Never awaited into
     // the trading path in a way that could stall it — a data provider having a
     // bad minute must not delay a sell.
+    // A dashboard-queued probe, before discovery: it is the thing somebody is
+    // actively waiting on, and it is one operation.
+    if (active) void runQueuedCommand(active.agentId).catch(() => {});
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -3929,37 +4081,15 @@ async function main() {
       );
     }
     console.log("[selftest] sending policy-legal no-op through the full pipeline…");
-    const probe = selfTestIntent(cfg);
-    await ensureDecision(probe, "selftest", "pipeline probe (approve dust) — not a market view");
-    // equityKnown: false, not equity 0. The probe knows nothing about the book
-    // and must not claim a zero — that is the invariant this whole codebase
-    // runs on. It happens to be inert right now because the probe buys USDG and
-    // the breaker exempts exits, but it is a false statement in the state
-    // record and becomes a hard drawdown-breaker rejection the moment the probe
-    // stops being a swap into cash.
-    await processIntent(probe, 0n, false);
-    // READ THE LEDGER, not the absence of an exception. processIntent records
-    // every failure and returns normally, so `await` completing tells you
-    // nothing — this used to print "done" and exit 0 for a UserOp the wall had
-    // just refused. It is onboarding step 4, "prove the shot lands".
-    const outcome = lastTradeOutcome;
-    if (!outcome) {
-      console.error("[selftest] FAILED — the probe never reached the ledger at all.");
+    // THE SAME PROBE THE DASHBOARD RUNS. Two copies of this would drift, and
+    // the copy that drifts is the one nobody runs — which for months was the
+    // hosted one, because there wasn't one.
+    const result = await runSelftestProbe("selftest");
+    if (!result.ok) {
+      console.error(`[selftest] ${result.line}`);
+      console.error("[selftest] Nothing was proved; fix this before funding the account.");
       process.exit(1);
     }
-    if (outcome.status !== "landed") {
-      console.error(
-        `[selftest] FAILED — the probe was ${outcome.status}` +
-          (outcome.rejectRule ? `: ${outcome.rejectRule}` : "") +
-          ". Nothing was proved; fix this before funding the account.",
-      );
-      process.exit(1);
-    }
-    // Say exactly what green means. This proves the approve leg — the first
-    // call of every real swap — reached the chain under the wall. It does NOT
-    // prove `exactInputSingle`: that would need an estimate-only pass through
-    // the bundler, which runs validation without submitting, and that is a
-    // feature on the executor rather than something to imply here.
     console.log(
       `[selftest] PASSED — approve(${swapRouterFor(cfg)}, 0.000001 USDG) landed on-chain. ` +
         "The grant, the wall, the bundler and the ledger all work. The swap call itself is not covered.",

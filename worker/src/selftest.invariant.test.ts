@@ -28,6 +28,21 @@ import { buildCallPermissions } from "../../packages/core/src/wall";
  */
 
 const SRC = readFileSync(fileURLToPath(new URL("index.ts", import.meta.url)), "utf8");
+/*
+  TWO SLICES, because the probe moved out of the CLI block.
+
+  It used to live inline under `if (selftest)`. It is now runSelftestProbe,
+  shared by the CLI and by the dashboard command a hosted deployment queues —
+  hosted spawns the worker without --selftest, so the CLI-only version was
+  unreachable for every hosted tenant, which is how a fleet-wide arming failure
+  stayed invisible for hours.
+*/
+/** What runs, and how its verdict is reached. */
+const PROBE = SRC.slice(
+  SRC.indexOf("  async function runSelftestProbe("),
+  SRC.indexOf("  let lastStrandedAt = 0;"),
+);
+/** The CLI wrapper: exit codes, and the caveats a terminal user is shown. */
 const SELFTEST = SRC.slice(SRC.indexOf("  if (selftest) {"));
 
 test("the probe approves the router this install will actually use", () => {
@@ -62,14 +77,24 @@ test("a grant this repo can sign does NOT carry the Rialto router — which is w
 });
 
 test("selftest fails loudly unless the probe LANDED", () => {
-  assert.match(SELFTEST, /lastTradeOutcome/, "it must read the ledger row, not the absence of an exception");
+  assert.match(PROBE, /lastTradeOutcome/, "it must read the ledger row, not the absence of an exception");
+  // The VERDICT belongs to the probe; the EXIT CODE belongs to the CLI. Split
+  // because the probe is now shared with a dashboard command that has no
+  // process to exit — and a shared probe is the whole point: the copy that
+  // drifts is always the one nobody runs, which for months was the hosted one,
+  // because there wasn't one.
+  assert.match(
+    PROBE,
+    /status !== "landed"[\s\S]{0,400}ok: false/,
+    "anything other than 'landed' must be a failing verdict — a green light for a refused UserOp is worse than no check",
+  );
+  assert.match(PROBE, /!outcome[\s\S]{0,200}ok: false/, "no row at all must also fail");
   assert.match(
     SELFTEST,
-    /status\s*!==\s*"landed"[\s\S]{0,600}process\.exit\(1\)/,
-    "anything other than 'landed' must exit non-zero — a green light for a refused UserOp is worse than no check",
+    /!result\.ok[\s\S]{0,300}process\.exit\(1\)/,
+    "and the CLI must turn a failing verdict into a non-zero exit",
   );
-  assert.match(SELFTEST, /!outcome[\s\S]{0,300}process\.exit\(1\)/, "no row at all must also fail");
-  // And the success line must not overclaim: it proves approve, not the swap.
+  // The success line must not overclaim: it proves approve, not the swap.
   assert.match(SELFTEST, /PASSED/, "sanity: there is still a success path");
   assert.match(
     SELFTEST,
@@ -80,8 +105,8 @@ test("selftest fails loudly unless the probe LANDED", () => {
 
 test("selftest declares the probe's book UNKNOWN rather than zero", () => {
   assert.match(
-    SELFTEST,
-    /processIntent\(probe,\s*0n,\s*false\)/,
+    PROBE,
+    /processIntent\(probe, 0n, false\)/,
     "equityKnown must be false — passing 0n as a known equity is the exact 'unknown as zero' bug this codebase exists to avoid",
   );
 });
@@ -90,6 +115,18 @@ test("selftest warns when the answer cannot mean what it looks like", () => {
   // Both are cases where the run can go green while proving nothing: a testnet
   // grant approves an address with no code, and a Rialto-configured install is
   // about to be refused by a wall that never carried its router.
-  assert.match(SELFTEST, /TRADEABLE_CHAIN_ID/, "a non-mainnet grant must be called out");
+  //
+  // The chain caveat is in the PROBE, so the dashboard gets it too — a hosted
+  // tenant on testnet needs that sentence at least as much as a terminal user.
+  // The Rialto note stays CLI-only: swapVenue 'rialto' is not reachable from
+  // the hosted settings API, which strips the field.
+  assert.match(PROBE, /TRADEABLE_CHAIN_ID/, "a non-mainnet grant must be called out, on both surfaces");
   assert.match(SELFTEST, /swapVenue === "rialto"/, "a Rialto install must be told the wall will refuse");
+});
+
+test("the CLI and the dashboard run the SAME probe", () => {
+  // The hosted gap existed precisely because only one caller had one.
+  assert.match(PROBE, /async function runSelftestProbe/, "the shared probe must exist");
+  assert.match(SELFTEST, /runSelftestProbe\("selftest"\)/, "the CLI must call it");
+  assert.match(SRC, /runSelftestProbe\("dashboard"\)/, "the queued command must call it too");
 });
