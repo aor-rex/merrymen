@@ -1126,8 +1126,16 @@ export async function claimCommand(agentId: string): Promise<AgentCommand | null
   try {
     const row = (await getDb()
       .prepare(
+        // ORDERED BY (time, id), never by time alone. Milliseconds fixed the
+        // one-second collisions, and CI — on a faster machine than mine —
+        // found the next layer: two commands really can land in the SAME
+        // millisecond, and neither backend has a portable insertion-order
+        // tiebreak (sqlite's rowid is not in Postgres). The id is a uuid, so
+        // ties break arbitrarily but CONSISTENTLY, which is all a queue needs
+        // — and it makes claim and latestCommand agree about which one is
+        // which instead of each picking its own.
         `SELECT id, kind, created_at FROM agent_commands
-          WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+          WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 1`,
       )
       .get(agentId)) as { id: string; kind: string; created_at: number } | undefined;
     if (!row) return null;
@@ -1159,8 +1167,9 @@ export async function latestCommand(
   try {
     const r = (await getDb()
       .prepare(
+        // The mirror image of claimCommand's ordering — see there.
         `SELECT id, kind, created_at, claimed_at, done_at, result FROM agent_commands
-          WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1`,
+          WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
       )
       .get(agentId)) as Record<string, unknown> | undefined;
     if (!r) return null;

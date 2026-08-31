@@ -125,7 +125,7 @@ export async function GET(req: Request) {
       return ((await db
         .prepare(
           `SELECT id, kind, created_at, claimed_at, done_at, result FROM agent_commands
-            WHERE agent_id = ? AND kind = 'selftest' ORDER BY created_at DESC LIMIT 1`,
+            WHERE agent_id = ? AND kind = 'selftest' ORDER BY created_at DESC, id DESC LIMIT 1`,
         )
         .get(agent)) ?? null) as Record<string, unknown> | null;
     } catch {

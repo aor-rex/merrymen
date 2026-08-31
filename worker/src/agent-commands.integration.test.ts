@@ -27,9 +27,13 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-cmd-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const { initStore, enqueueCommand, claimCommand, finishCommand, latestCommand } = await import("./store");
+const { homePaths } = await import("./home");
+const { DatabaseSync } = await import("node:sqlite");
 
 const AGENT = "0xagent0000000000000000000000000000000001";
 const OTHER = "0xagent0000000000000000000000000000000002";
+/** Its own agent, so the forced-tie rows cannot disturb the ordering tests above. */
+const TIED = "0xagent0000000000000000000000000000000003";
 
 after(() => {
   try {
@@ -115,5 +119,34 @@ describe("the agent command queue", () => {
     assert.equal(c?.kind, "launch-the-missiles");
     await finishCommand("cmd-6", "unknown command 'launch-the-missiles'");
     assert.match(String((await latestCommand(AGENT))?.result), /unknown command/);
+  });
+  it("commands landing in the SAME MILLISECOND still have one agreed order", async () => {
+    // CI found this on a faster machine than mine: milliseconds fixed the
+    // one-second collisions and did not fix ties. Neither backend has a
+    // portable insertion-order tiebreak — sqlite's rowid is not in Postgres —
+    // so the id breaks it. Arbitrary but CONSISTENT is all a queue needs; what
+    // matters is that claimCommand and latestCommand pick the SAME row rather
+    // than each choosing its own.
+    //
+    // The timestamp is written by hand here. My first attempt fired three
+    // enqueues through Promise.all and assumed they would collide; they did
+    // not — one landed a millisecond earlier and was ordered first, correctly.
+    // A test for tie-breaking has to guarantee the tie, not hope for it.
+    const raw = new DatabaseSync(homePaths.db());
+    const SAME = 1_800_000_000_000;
+    for (const id of ["tie-c", "tie-a", "tie-b"]) {
+      raw
+        .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
+        .run(id, TIED, "selftest", SAME);
+    }
+    const drained: string[] = [];
+    for (;;) {
+      const c = await claimCommand(TIED);
+      if (!c) break;
+      drained.push(c.id);
+    }
+    assert.deepEqual(drained, ["tie-a", "tie-b", "tie-c"], "a total order, not whatever the page returns");
+    // And the two queries agree about which one is newest.
+    assert.equal((await latestCommand(TIED))?.id, "tie-c");
   });
 });
