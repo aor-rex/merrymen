@@ -1320,6 +1320,30 @@ export default function GrantPage() {
                     until it arrives the band stays on its paper book.
                   </>
                 )}
+                {/*
+                  THE WAY OUT OF STEP THREE.
+
+                  The rail across the top promises CHOOSE → BACK UP → FUND → RIDE,
+                  and RIDE was not a place you could get to: funding is an external
+                  action with no completion event, so the wizard just sat on step
+                  three forever. The only exit was "back to the band" at the very
+                  bottom of the page, below the fold, in a row it shares with
+                  "switch to another wallet" and a red "discard & start over" — so
+                  the nearest thing to a next step looked like one of two ways to
+                  throw the wallet away.
+
+                  Shown from the moment GAS lands rather than waiting for capital,
+                  because the agent is already doing something at that point: with
+                  no USDG it runs in practice mode, which is exactly what somebody
+                  who has just funded gas wants to watch.
+                */}
+                <Link
+                  href="/"
+                  className="grant-btn"
+                  style={{ marginTop: 12, width: "100%", textAlign: "center", textDecoration: "none", display: "block" }}
+                >
+                  watch it trade →
+                </Link>
               </div>
             ) : (
               <div className="grant-note">
