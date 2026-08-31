@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createPublicClient, decodeAbiParameters, http } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { PolicyFlags, toPermissionValidator } from "@zerodev/permissions";
 import { toECDSASigner } from "@zerodev/permissions/signers";
-import { toTimestampPolicy } from "@zerodev/permissions/policies";
+import { toRateLimitPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
 import { getEntryPoint } from "@zerodev/sdk/constants";
 import { KERNEL_V3_3 } from "@zerodev/sdk/constants";
 import { robinhoodChain, WALL_POLICY_FLAG } from "../../packages/core/src/index";
@@ -155,4 +156,84 @@ test("WALL_POLICY_FLAG is the flag the worker passes, not merely a constant", as
     false,
     "and must never call the flag-dropping one",
   );
+});
+
+/**
+ * THE OUTAGE THIS FILE CAUSED, pinned so it cannot recur.
+ *
+ * policyFromParams knew only the two policy kinds the NEW wall emits. But a
+ * grant is a frozen signature: every key signed before the rate-limit policy
+ * was dropped still carries one. So the default threw, syncGrant failed on
+ * every tick, and TEN hosted tenants sat in a crash loop unable to arm —
+ * discovered in production logs, not by any test here.
+ *
+ * The lesson is narrow and worth stating exactly: removing a policy from the
+ * wall means ADDING it here, in the same change. This file must understand
+ * every kind merrymen has ever sealed, not every kind it seals today.
+ */
+test("REGRESSION: a legacy rate-limit policy still rebuilds", async () => {
+  const key = generatePrivateKey();
+  const signer = await toECDSASigner({ signer: privateKeyToAccount(key) });
+  const legacy = await toPermissionValidator(client, {
+    signer,
+    policies: [
+      toTimestampPolicy({ validAfter: NOW, validUntil: NOW + 86_400 }),
+      // What every pre-2026-08-30 grant carries.
+      toRateLimitPolicy({ count: 48, interval: 86_400 }),
+    ],
+    entryPoint,
+    kernelVersion: KERNEL_V3_3,
+    flag: WALL_POLICY_FLAG,
+  } as never);
+
+  // The rebuild must reproduce it byte for byte, or the permission id changes
+  // and the account is dead. Omitting the policy is not a lighter failure than
+  // throwing — it is the same failure with a worse error message.
+  const rebuilt = await toPermissionValidator(client, {
+    signer,
+    policies: [
+      toTimestampPolicy({ validAfter: NOW, validUntil: NOW + 86_400 }),
+      toRateLimitPolicy({ count: 48, interval: 86_400 }),
+    ],
+    entryPoint,
+    kernelVersion: KERNEL_V3_3,
+    flag: WALL_POLICY_FLAG,
+  } as never);
+  assert.equal(rebuilt.getIdentifier(), legacy.getIdentifier());
+  assert.equal(await rebuilt.getEnableData(), await legacy.getEnableData());
+
+  // And dropping it really would break the grant — the reason rebuilding is
+  // mandatory rather than a courtesy.
+  const dropped = await toPermissionValidator(client, {
+    signer,
+    policies: [toTimestampPolicy({ validAfter: NOW, validUntil: NOW + 86_400 })],
+    entryPoint,
+    kernelVersion: KERNEL_V3_3,
+    flag: WALL_POLICY_FLAG,
+  } as never);
+  assert.notEqual(dropped.getIdentifier(), legacy.getIdentifier(), "a dropped policy is a different key");
+});
+
+test("every policy kind the wall has EVER emitted is handled", () => {
+  // Read from source rather than exercised, because policyFromParams is not
+  // exported — and the thing that broke was a missing switch case, which a
+  // source assertion catches exactly.
+  const src = readFileSync("worker/src/session-account.ts", "utf8");
+  for (const kind of ["call", "timestamp", "rate-limit"]) {
+    assert.match(src, new RegExp(`case "${kind}":`), `policyFromParams must handle '${kind}'`);
+  }
+  // The default still throws, and should. An unknown policy IS a bound we would
+  // be dropping; the fix was never to stop refusing.
+  assert.match(src, /refusing to arm rather than dropping it/);
+});
+
+test("a stale grant is DETECTED, so its owner is told rather than left guessing", () => {
+  // Rebuilding lets it arm. It still cannot transact — the policy points at an
+  // address with no code — so the owner needs words, not a silent loop of
+  // validation failures.
+  const src = readFileSync("worker/src/session-account.ts", "utf8");
+  assert.match(src, /export function grantHasDeadRateLimit/);
+  const idx = readFileSync("worker/src/index.ts", "utf8");
+  assert.match(idx, /grantHasDeadRateLimit\(grant\.serialized\)/);
+  assert.match(idx, /Re-signing is free/);
 });

@@ -74,6 +74,7 @@ import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } f
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { grantHasDeadRateLimit } from "./session-account";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -1746,6 +1747,27 @@ async function main() {
     // do is let them believe a live trade is one funding away when it is not.
     // preflight.ts makes the same finding a BLOCKER, which is the right place
     // for a refusal — it is the command whose whole job is to judge.
+    // A GRANT SIGNED BEFORE THE WALL DROPPED THE RATE-LIMIT POLICY.
+    //
+    // It arms, it prices, it runs in practice — and it can never land a
+    // UserOperation, because that policy points at an address with no bytecode
+    // on this chain and validation has nothing to call. A signature is frozen,
+    // so no deploy fixes it; only the owner re-signing does.
+    //
+    // Said once per arm, as an err, because the alternative is an owner
+    // watching every trade fail with a validation error that names nothing.
+    if (grantHasDeadRateLimit(grant.serialized)) {
+      console.log(`[worker] grant predates the rate-limit removal — cannot transact until re-signed`);
+      await addEvent(
+        agentId,
+        "err",
+        "this key was signed before a wall fix and CANNOT trade: it carries a rate-limit policy whose " +
+          "contract has no code on this chain, so every operation fails validation. Re-signing is free " +
+          "and instant — open the wallet page and use 're-sign this key'. Your funds are untouched, " +
+          "and practice mode still works meanwhile.",
+      );
+    }
+
     const missingPolicyContracts: string[] = [];
     for (const c of WALL_POLICY_CONTRACTS) {
       const code = await client.getCode({ address: c.address }).catch(() => undefined);
