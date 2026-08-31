@@ -308,6 +308,22 @@ const SQLITE_ALTERS: string[] = [
     "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // The epoch this agent is currently writing into.
     "ALTER TABLE agents ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
+    // WHAT THE WORKER IS ACTUALLY DOING, on a channel the dashboard can read.
+    //
+    // The heartbeat is a JSON file in the worker's own MERRYMEN_HOME, and the
+    // web service reads homePaths.heartbeat() — its OWN home. Self-hosted those
+    // are the same directory and it works. Hosted they are different
+    // directories in different containers, so the dashboard never saw a
+    // heartbeat at all and every tenant read as IDLE regardless of what their
+    // agent was doing.
+    //
+    // `agents` is already mirrored to the shared Postgres (ledger-mirror.ts),
+    // so putting the mode here makes it visible without inventing a second
+    // transport. The file stays: it is what the orchestrator's watchdog reads
+    // to decide a child is wedged, and that is a different question asked by a
+    // different process.
+    "ALTER TABLE agents ADD COLUMN mode TEXT",
+    "ALTER TABLE agents ADD COLUMN beat_at INTEGER",
     // Measured execution quality: quoted-out vs received-out, in bps, positive
     // when the fill was worse than quoted. The slippage SETTING is one flat 1%
     // constant applied to a $5 trade and a $5,000 one alike; this is the
@@ -382,6 +398,30 @@ function initSqlite(): Db {
   return wrapSqlite(db);
 }
 
+/**
+ * Apply the ledger schema and every migration to a Db that is not ours.
+ *
+ * The mirror writes tenant rows into a SHARED Postgres that no `initStore()`
+ * ever touches: children have DATABASE_URL stripped (orchestrator.ts's
+ * CHILD_SECRET_STRIP) so they open sqlite, and the orchestrator only ever
+ * created `mirror_state`. So every column the mirror copies had to already
+ * exist there by some other means, and a migration that landed in the child
+ * schema would silently break the mirror's INSERT — caught, logged once,
+ * invisible.
+ *
+ * Idempotent: CREATE TABLE IF NOT EXISTS, and each ALTER swallowed the way
+ * initSqlite and initPostgres already swallow it.
+ */
+export async function applyLedgerSchema(db: Db): Promise<void> {
+  await db.exec(SQLITE_SCHEMA);
+  for (const ddl of SQLITE_ALTERS) {
+    try {
+      await db.exec(ddl);
+    } catch {
+      // column already exists — the same no-op the two init paths rely on
+    }
+  }
+}
 /** Open the shared Postgres ledger (hosted, multi-tenant): connect, then run the
  *  same schema + migrations through the async driver, which translates each to the
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
@@ -1022,6 +1062,26 @@ export async function listFlows(agentId: string, limit = 200): Promise<
   }[];
 }
 
+/**
+ * Record what the worker is doing, for surfaces that cannot read its files.
+ *
+ * Best-effort by design: a heartbeat that fails to write must never take the
+ * tick down with it. Called every tick, so it is a plain UPDATE on a primary
+ * key — no journal, no epoch, nothing derived from it.
+ */
+export async function setAgentMode(
+  agentId: string,
+  mode: "paper" | "live" | "idle",
+  atSec: number,
+): Promise<void> {
+  try {
+    await getDb()
+      .prepare("UPDATE agents SET mode = ?, beat_at = ? WHERE smart_account = ?")
+      .run(mode, atSec, agentId);
+  } catch {
+    /* a missing heartbeat is a worse thing to crash over than to lose */
+  }
+}
 /** Record one accrual event and roll it into the agent's running total. */
 export async function addFeeAccrual(
   agentId: string,

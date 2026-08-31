@@ -47,6 +47,7 @@ import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { applyLedgerSchema } from "./store";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -366,6 +367,13 @@ async function mirrorLedgers(): Promise<void> {
   let shared;
   try {
     shared = await makePgDb(url);
+    // The full ledger schema, not just the cursor table. Nothing else applies
+    // it to the shared database — children have DATABASE_URL stripped, so their
+    // initStore() opens sqlite — which meant every migration that landed in the
+    // child schema silently broke the mirror's INSERT for that table until
+    // somebody ran the DDL by hand. Idempotent, and it runs on the mirror's own
+    // clock, so a fresh deploy heals itself.
+    await applyLedgerSchema(shared);
     await shared.exec(translateSchema(MIRROR_STATE_DDL));
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);

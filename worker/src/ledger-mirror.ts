@@ -199,23 +199,28 @@ export async function mirrorTenant(args: {
     const agents = (await child
       .prepare(
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
-                granted_at, expires_at, status, created_at FROM agents`,
+                granted_at, expires_at, status, created_at, mode, beat_at FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
-                               caps, granted_at, expires_at, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               caps, granted_at, expires_at, status, created_at, mode, beat_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
-             expires_at = excluded.expires_at`,
+             expires_at = excluded.expires_at, mode = excluded.mode,
+             beat_at = excluded.beat_at`,
         );
         for (const a of agents) {
           await ins.run(
             a.smart_account, a.name, a.owner_address, a.session_key_address, a.chain_id,
             a.caps, a.granted_at, a.expires_at, a.status, a.created_at,
+            // Nullable on purpose: an agent that has never beaten has no mode,
+            // and null is the honest value for that. It renders as IDLE, which
+            // is what it is.
+            a.mode ?? null, a.beat_at ?? null,
           );
         }
       });
