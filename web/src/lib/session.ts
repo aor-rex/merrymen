@@ -74,7 +74,8 @@ import {
   WALL_POLICY_FLAG,
   usableExtraTokens,
   chainForId,
-  robinhoodTestnet,
+  robinhoodChain,
+  
   GRANT_V4,
   GRANT_V4_ADAPTER,
   GRANT_PONS_ADAPTER,
@@ -469,7 +470,13 @@ export function listSavedWallets(): SavedWallet[] {
       out.push({
         smartAccount: g.smartAccount as Address,
         owner: g.owner as Address,
-        chainId: typeof g.chainId === "number" ? g.chainId : robinhoodTestnet.id,
+        // A grant with no readable chainId is a corrupt record, not a testnet
+        // one. Defaulting it to the sandbox meant a mainnet wallet with a
+        // damaged field silently became "practice" — funds on one chain, a UI
+        // describing another. Mainnet is both the product default and the
+        // conservative guess: it makes the page say REAL MONEY about a wallet
+        // that may hold some, rather than the reverse.
+        chainId: typeof g.chainId === "number" ? g.chainId : robinhoodChain.id,
         ownerKey: g.demoOwnerPrivateKey,
         current,
       });
@@ -623,7 +630,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     generatePrivateKey(),
     o.caps,
     o.onStatus,
-    o.chainId ?? robinhoodTestnet.id,
+    o.chainId ?? robinhoodChain.id,
     o.extraTokens ?? [],
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
@@ -651,7 +658,7 @@ export async function restoreAgentWallet(
     ownerPrivateKey,
     o.caps,
     o.onStatus,
-    o.chainId ?? robinhoodTestnet.id,
+    o.chainId ?? robinhoodChain.id,
     o.extraTokens ?? [],
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
@@ -713,7 +720,7 @@ export interface OwnerPreview {
  */
 export async function previewOwnerAccount(
   ownerPrivateKey: `0x${string}`,
-  chainId: number = robinhoodTestnet.id,
+  chainId: number = robinhoodChain.id,
 ): Promise<OwnerPreview> {
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
@@ -739,7 +746,7 @@ export interface Funding {
   usdg: number;
 }
 
-export async function readFunding(smartAccount: Address, chainId: number = robinhoodTestnet.id): Promise<Funding> {
+export async function readFunding(smartAccount: Address, chainId: number = robinhoodChain.id): Promise<Funding> {
   const publicClient = createPublicClient({ chain: chainForId(chainId), transport: http() });
   const [gasWei, usdgUnits] = await Promise.all([
     publicClient.getBalance({ address: smartAccount }).catch(() => 0n),

@@ -159,7 +159,12 @@ export default function Console() {
   const connected = !hosted || !!address; // self-hosted's perimeter is localhost
   const exists = !!status?.exists;
   const funded = hasGas(status?.balances?.ethWei);
-  const chainId = status?.grant?.chainId ?? 46630;
+  // NO GRANT YET MEANS ONBOARDING, and this fallback fired precisely then —
+  // stamping "testnet 46630" into the footer and offering a testnet faucet to
+  // someone who has not chosen a chain at all. The grant page now defaults to
+  // mainnet, so the placeholder has to agree with it or the two screens
+  // contradict each other before the user has done anything.
+  const chainId = status?.grant?.chainId ?? 4663;
 
   // The guided first run — ONE step on screen, derived from real state. Connect
   // and create are hard gates; fund is soft (skippable and remembered). When

@@ -189,13 +189,13 @@ Open `localhost:3100/grant`. There's nothing to connect — merrymen generates a
 fresh account, shows you the owner key to **back up** (lose it and the funds are
 gone), and lets you fund it. **Pick your ground:**
 
-- **testnet · 46630** (default) — the sandbox. Free **gas** from the faucet, and
+- **testnet · 46630** — the sandbox, one click away and no longer the default. Free **gas** from the faucet, and
   the grant, the caps, the policy checks, the live prices and the journal all run
   for real. Two things don't: the token registry is mainnet-only, so **any USDG
   you send to testnet reads as 0 and is never used**, and the trading venues
   aren't deployed there, so swaps simulate and no-route by design. Send gas, not
   capital — paper mode is already trading a simulated book at live prices.
-- **mainnet · 4663** — **real funds.** Real USDG, real Stock Tokens, real
+- **mainnet · 4663** (default) — **real funds.** Real USDG, real Stock Tokens, real
   execution. The page makes you acknowledge it first: keys are generated and
   stored **in plain text on your machine** (TEE custody is on the roadmap), so
   treat the account like a hot wallet — your caps are the seatbelt, start small.
