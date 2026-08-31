@@ -238,8 +238,37 @@ function WalletRow({ w }: { w: SavedWallet }) {
 }
 
 export default function GrantPage() {
-  const [caps, setCaps] = useState<GrantCaps>(DEFAULTS);
-  const [chainId, setChainId] = useState<number>(TESTNET);
+  /*
+    THE SCOUT, not the outlaw. Caps are sealed into the signature BEFORE the
+    account has any money in it, so the default cannot be sized to capital
+    nobody has deposited yet. The outlaw's 50/trade x 48 ops is a four-figure
+    ceiling to hand someone who has not yet seen the thing trade once.
+
+    Raising a cap is a free, instant re-sign from the panel further down, so
+    the cost of starting small is one click later. The cost of starting large
+    is not symmetric.
+  */
+  const [caps, setCaps] = useState<GrantCaps>(PRESETS[0]!.caps);
+  /*
+    MAINNET BY DEFAULT, because the old default produced an agent that could
+    never trade. preflight.ts classifies a non-4663 grant as a hard BLOCKER for
+    a reason that is not a policy choice: every token and router address
+    merrymen knows is a mainnet deployment, so on testnet a balance reads as
+    zero and every route is refused. The most common outcome of the old default
+    was a user who did everything right and got an agent that does nothing —
+    and a new user on a faucet asking "how to do leave testnet?", which is what
+    prompted this.
+
+    This only became safe once paper mode was keyed on capability rather than
+    on a missing bundler key: a new mainnet grant with no funds is now genuinely
+    in practice mode, so "watch it work before risking anything" survives the
+    flip instead of being deleted by it. Do not restore this default without
+    also reverting that.
+
+    Practice stays on the menu, one click away, and the real-money
+    acknowledgement is untouched.
+  */
+  const [chainId, setChainId] = useState<number>(MAINNET);
   const [mainnetAck, setMainnetAck] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -874,7 +903,7 @@ export default function GrantPage() {
                     <div className="restore-confirm">
                       {previewFunding && previewFunding.usdg > 0
                         ? "✓ Funds found — restore it below and your band rides again."
-                        : "This account is empty on this chain. Check the chain selector, or try your other owner key."}
+                        : "This account is empty on this chain. Pick the other chain above, or try your other owner key."}
                     </div>
                   </div>
                 )}
@@ -960,14 +989,20 @@ export default function GrantPage() {
                 the worker — the process a compromise owns. Saying so costs a sentence and is the
                 difference between a promise and a claim.
               */}
-              <b>What the chain itself enforces:</b> the per-trade cap, the number of trades, the
-              expiry, and the fact that value can only land back in your own account. Those the
-              agent cannot exceed no matter what happens to the software. The{" "}
-              <b>daily total</b> and the <b>drawdown breaker</b> are counters kept by merrymen on
-              your own machine, so an agent that had been tampered with could ignore them and still
-              reach <b>{caps.perTradeUsdg * caps.maxOpsPerDay} USDG</b> in a day before the chain
-              stopped it. If that is the number that matters to you, lower the per-trade cap or the
-              trades-per-day — not the daily figure.
+              <b>What the chain itself enforces:</b> the per-trade cap, the expiry, and the fact
+              that value can only land back in your own account. Those the agent cannot exceed no
+              matter what happens to the software. The <b>daily total</b>, the{" "}
+              <b>drawdown breaker</b> and the <b>trades-per-day</b> count are counters kept by
+              merrymen, so a tampered-with agent could ignore all three — which is why the lever
+              that bounds a loss is the <b>per-trade cap</b> and a <b>short expiry</b>, not the
+              daily figure.
+              {/*
+                The second copy of this sentence. Trades-per-day was corrected on the
+                loaded-grant panel, in the README, in WallPanel and in Console — and missed
+                here, in the create flow, which is the one place every single user reads it.
+                It rested on ZeroDev's rate-limit policy, whose contract has no bytecode on
+                Robinhood Chain.
+              */}
             </div>
 
             {mode === "create" ? (
@@ -978,18 +1013,38 @@ export default function GrantPage() {
                     : `Create my agent (${isMainnet ? "real money" : "practice"})`)}
               </button>
             ) : (
-              <button
-                className="grant-btn"
-                onClick={() => void onRestore()}
-                disabled={status !== null || createBlocked || !preview}
-              >
-                {status ??
-                  (createBlocked
-                    ? "acknowledge the real-funds warning above first"
-                    : !preview
-                      ? "check your owner key above first"
-                      : `Restore & arm ${short(preview.smartAccount)}`)}
-              </button>
+              <>
+                {/*
+                  RESTORE RE-SIGNS THE LIMITS ON SCREEN, and the old ones are not
+                  recoverable — they lived in the grant blob this browser lost, not
+                  on the chain. So a disk-wipe recovery silently re-signs whatever
+                  the form happens to hold.
+
+                  The default is the scout preset, so the silent direction is now
+                  NARROWER than most people's previous wall, which is the safe way
+                  round. Saying so is still better than relying on that: someone
+                  restoring a warlord wallet should know their caps just shrank,
+                  and someone who had tighter limits should know to set them again.
+                */}
+                <p className="field-lead" style={{ marginTop: 12 }}>
+                  This signs the limits shown above — <b>{caps.perTradeUsdg} USDG</b> a trade,{" "}
+                  <b>{caps.dailyUsdg}</b> a day, key for <b>{caps.expiryDays} days</b>. Your old
+                  limits lived in the key you lost, so nothing can read them back; set them here
+                  if they mattered. Your funds are untouched either way.
+                </p>
+                <button
+                  className="grant-btn"
+                  onClick={() => void onRestore()}
+                  disabled={status !== null || createBlocked || !preview}
+                >
+                  {status ??
+                    (createBlocked
+                      ? "acknowledge the real-funds warning above first"
+                      : !preview
+                        ? "check your owner key above first"
+                        : `Restore & arm ${short(preview.smartAccount)}`)}
+                </button>
+              </>
             )}
             {error && <div className="grant-error mono">{error}</div>}
 
