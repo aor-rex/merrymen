@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
-import type { Snapshot } from "./types";
+import { takeTick, type Snapshot } from "./types";
+
+/**
+ * steadyBasketTick now returns its reasons alongside its intents. These tests
+ * predate that and are about the intents, so they keep asserting on those.
+ */
+const sbTick = (...a: Parameters<typeof steadyBasketTick>) => takeTick(steadyBasketTick(...a)).intents;
 
 const ROUTER = "0x1111111111111111111111111111111111111111" as const;
 const VAULT = "0x2222222222222222222222222222222222222222" as const;
@@ -57,7 +63,7 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
 
   it("clamps an oversized sweep to the remaining daily budget instead of proposing the lot", () => {
     // 500 USDG cash, 50 floor → wants to sweep 450, but scout allows 50/day.
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg({ buyPerTickUsdg: 20_000_000n }),
       snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: SCOUT_DAILY }),
     );
@@ -68,7 +74,7 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
   });
 
   it("accounts for the buys it proposed in the same tick — they spend the same budget", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg({ buyPerTickUsdg: 20_000_000n }),
       snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 100_000_000n }),
     );
@@ -82,7 +88,7 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
   });
 
   it("proposes NO deposit when the daily budget is already spent — silence beats a guaranteed rejection", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg({ buyPerTickUsdg: 20_000_000n }),
       snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 20_000_000n }),
     );
@@ -91,7 +97,7 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
   });
 
   it("leaves a sweep that already fits completely alone", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg({ buyPerTickUsdg: 20_000_000n }),
       snap({ cashUsdg: 100_000_000n, spendHeadroomUsdg: 500_000_000n }),
     );
@@ -103,11 +109,11 @@ describe("steadyBasketTick — the vault sweep sizes itself to the policy wall",
 
 describe("steadyBasketTick", () => {
   it("emits nothing when the sequencer is down", () => {
-    assert.deepEqual(steadyBasketTick(cfg(), snap({ sequencerUp: false })), []);
+    assert.deepEqual(sbTick(cfg(), snap({ sequencerUp: false })), []);
   });
 
   it("splits the tick budget across legs by weight", () => {
-    const intents = steadyBasketTick(cfg(), snap());
+    const intents = sbTick(cfg(), snap());
     const swaps = intents.filter((i) => i.kind === "swap");
     assert.equal(swaps.length, 2);
     for (const s of swaps) {
@@ -118,7 +124,7 @@ describe("steadyBasketTick", () => {
   });
 
   it("skips paused tokens but still buys the rest", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg(),
       snap({ pausedTokens: new Set([AAPL.toLowerCase()]) }),
     );
@@ -128,20 +134,20 @@ describe("steadyBasketTick", () => {
   });
 
   it("skips legs with a stale price feed", () => {
-    const intents = steadyBasketTick(cfg(), snap({ staleFeeds: new Set(["MSFT"]) }));
+    const intents = sbTick(cfg(), snap({ staleFeeds: new Set(["MSFT"]) }));
     const swaps = intents.filter((i) => i.kind === "swap");
     assert.equal(swaps.length, 1);
     assert.equal(swaps[0]!.kind === "swap" && swaps[0]!.buyToken, AAPL);
   });
 
   it("does not buy when cash is below the tick budget", () => {
-    const intents = steadyBasketTick(cfg(), snap({ cashUsdg: 19_000_000n }));
+    const intents = sbTick(cfg(), snap({ cashUsdg: 19_000_000n }));
     assert.equal(intents.filter((i) => i.kind === "swap").length, 0);
   });
 
   it("sweeps idle cash above the floor into the vault", () => {
     // 100 cash - 20 buys = 80 idle, floor 50 → deposit 30
-    const intents = steadyBasketTick(cfg(), snap());
+    const intents = sbTick(cfg(), snap());
     const deposit = intents.find((i) => i.kind === "vault-deposit");
     assert.ok(deposit);
     assert.equal(deposit.kind === "vault-deposit" && deposit.amountUsdg, 30_000_000n);
@@ -151,13 +157,13 @@ describe("steadyBasketTick", () => {
   });
 
   it("leaves cash alone when at or below the idle floor", () => {
-    const intents = steadyBasketTick(cfg(), snap({ cashUsdg: 70_000_000n }));
+    const intents = sbTick(cfg(), snap({ cashUsdg: 70_000_000n }));
     // 70 - 20 = 50 idle, exactly at floor → no deposit
     assert.equal(intents.find((i) => i.kind === "vault-deposit"), undefined);
   });
 
   it("withdraws from the vault when cash cannot cover a buy", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg(),
       snap({ cashUsdg: 5_000_000n, vaultUsdg: 200_000_000n }),
     );
@@ -169,7 +175,7 @@ describe("steadyBasketTick", () => {
   });
 
   it("withdrawal is capped at the vault balance", () => {
-    const intents = steadyBasketTick(
+    const intents = sbTick(
       cfg(),
       snap({ cashUsdg: 0n, vaultUsdg: 12_000_000n }),
     );
@@ -178,7 +184,7 @@ describe("steadyBasketTick", () => {
   });
 
   it("does not withdraw when the vault is empty", () => {
-    const intents = steadyBasketTick(cfg(), snap({ cashUsdg: 5_000_000n, vaultUsdg: 0n }));
+    const intents = sbTick(cfg(), snap({ cashUsdg: 5_000_000n, vaultUsdg: 0n }));
     assert.deepEqual(intents, []);
   });
 });

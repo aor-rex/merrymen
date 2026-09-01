@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { makeCustomStrategy, resolveStrategyFile, validateIntent } from "./custom";
-import type { Snapshot } from "./types";
+import { takeTick, type Snapshot, type Strategy } from "./types";
+
+/**
+ * A strategy may now return reasons alongside its intents. These tests are about
+ * the intents, so normalise and keep asserting on those.
+ */
+const run = async (s: Strategy, sn: Snapshot) => takeTick(await s.tick(sn)).intents;
 
 const ROUTER = "0x1111111111111111111111111111111111111111";
 const USDG = "0x3333333333333333333333333333333333333333";
@@ -85,7 +91,7 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     );
     const notes: string[] = [];
     const s = makeCustomStrategy("buyer", { dir, onNote: (_l, m) => notes.push(m) });
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
     assert.equal(intents.length, 1); // only the valid one
     assert.equal(intents[0]!.kind, "swap");
     assert.equal(notes.length, 2); // two dropped with reasons
@@ -95,8 +101,8 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     const dir = tempDir();
     const notes: string[] = [];
     const s = makeCustomStrategy("ghost", { dir, onNote: (_l, m) => notes.push(m) });
-    assert.deepEqual(await s.tick(snap()), []);
-    assert.deepEqual(await s.tick(snap()), []); // repeated ticks
+    assert.deepEqual(await run(s, snap()), []);
+    assert.deepEqual(await run(s, snap()), []); // repeated ticks
     assert.equal(notes.length, 1); // the reason is logged once, not spammed
     assert.match(notes[0]!, /no strategy file/);
   });
@@ -106,7 +112,7 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     writeFileSync(path.join(dir, "boom.mjs"), `export default { tick: () => { throw new Error("bug in my bot") } }`);
     const notes: string[] = [];
     const s = makeCustomStrategy("boom", { dir, onNote: (_l, m) => notes.push(m) });
-    assert.deepEqual(await s.tick(snap()), []);
+    assert.deepEqual(await run(s, snap()), []);
     assert.match(notes[0]!, /bug in my bot/);
   });
 
@@ -115,7 +121,7 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     writeFileSync(path.join(dir, "shapeless.mjs"), `export const foo = 42;`);
     const notes: string[] = [];
     const s = makeCustomStrategy("shapeless", { dir, onNote: (_l, m) => notes.push(m) });
-    assert.deepEqual(await s.tick(snap()), []);
+    assert.deepEqual(await run(s, snap()), []);
     assert.match(notes[0]!, /must default-export/);
   });
 
@@ -124,7 +130,7 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     const file = path.join(dir, "evolving.mjs");
     writeFileSync(file, `export default { tick: () => [] }`);
     const s = makeCustomStrategy("evolving", { dir });
-    assert.deepEqual(await s.tick(snap()), []);
+    assert.deepEqual(await run(s, snap()), []);
 
     // Rewrite the file with a real intent and force a different mtime.
     writeFileSync(
@@ -135,7 +141,7 @@ describe("makeCustomStrategy — hot-loaded, crash-isolated", () => {
     const { utimesSync } = await import("node:fs");
     utimesSync(file, future, future);
 
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
     assert.equal(intents.length, 1);
     assert.equal(intents[0]!.kind, "vault-deposit");
   });

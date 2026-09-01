@@ -181,6 +181,10 @@ const SQLITE_SCHEMA = `
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
+    -- A GLOBAL feed reads across every agent, so the composite above cannot serve
+    -- it: its leading column is agent_id, so filtering on time alone has to scan.
+    -- The public thesis page is the first reader that is not scoped to one agent.
+    CREATE INDEX IF NOT EXISTS decisions_time ON decisions (at DESC);
     -- Conversation turns, so the merryman doesn't lose the thread on restart.
     -- Lives in sqlite rather than a json file because the db is already open and
     -- single-writer; a file would need its own read-modify-write and would race
@@ -428,6 +432,28 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE on purpose — an agent that has never beaten has no answer, and
     // null is the honest value for that.
     "ALTER TABLE agents ADD COLUMN sponsor_gas INTEGER",
+    // WHO OWNS this agent, for a public page to credit — the X handle its owner
+    // typed, nothing more.
+    //
+    // DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing may look up an agent,
+    // tenant, grant or permission by this column. It is deliberately not unique
+    // and deliberately not indexed: two agents may claim the same handle and both
+    // render, because nobody has verified either and a unique constraint would
+    // imply somebody had. A handle is also reassignable on X after an account is
+    // deleted, so treating one as an identity is wrong even in principle.
+    //
+    // Lives beside `name` rather than in tenant settings because those are sealed
+    // (settings-store.ts), and a public page must never decrypt a tenant to render
+    // a name.
+    "ALTER TABLE agents ADD COLUMN x_handle TEXT",
+    // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
+    // ALTER above — the base schema runs first, so an index on it there fails with
+    // 'no such column' and takes every trade insert down with it.
+    //
+    // decision_id is the join that turns what an agent thought into what actually
+    // happened, and it had no index at all: every lookup of a decision's outcome
+    // was a full scan of the tape. The public feed does one per row it publishes.
+    "CREATE INDEX IF NOT EXISTS trades_decision ON trades (decision_id)",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.

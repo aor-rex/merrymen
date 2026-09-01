@@ -3,7 +3,13 @@ import { describe, it } from "node:test";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import { makeLlmStrategist } from "./strategy";
 import type { ProposalDriver } from "./driver";
-import type { Snapshot } from "../strategies/types";
+import { takeTick, type Snapshot, type Strategy } from "../strategies/types";
+
+/**
+ * A strategy may now return reasons alongside its intents. These tests are about
+ * the intents, so normalise and keep asserting on those.
+ */
+const run = async (s: Strategy, sn: Snapshot) => takeTick(await s.tick(sn)).intents;
 
 const ROUTER = "0x1111111111111111111111111111111111111111" as const;
 const USDG = "0x3333333333333333333333333333333333333333" as const;
@@ -208,11 +214,11 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
       decisionIntervalMs: 60_000,
       now: () => t,
     });
-    await s.tick(snap());
+    await run(s, snap());
     t = 30_000;
-    await s.tick(snap()); // within the window — no call
+    await run(s, snap()); // within the window — no call
     t = 61_000;
-    await s.tick(snap()); // new window
+    await run(s, snap()); // new window
     assert.equal(driver.calls, 2);
   });
 
@@ -234,7 +240,7 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
       })(),
       onNote: (_l, m) => notes.push(m),
     });
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
     assert.deepEqual(intents, []);
     assert.match(notes[0]!, /driver failed/);
   });
@@ -257,7 +263,7 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
       })(),
       onNote: (_l, m) => notes.push(m),
     });
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
     assert.equal(intents.length, 1);
     assert.equal(intents[0]!.kind === "swap" && intents[0]!.buyToken, AAPL);
     assert.ok(notes.some((n) => /DOGE/.test(n) && /not in the tradable universe/.test(n)));
@@ -280,7 +286,7 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
       model: "llama-3.3-70b",
       onDecision: (d) => { decisions.push(d); },
     });
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
 
     const survivors = decisions.filter((d) => !d.dropped_rule);
     const drops = decisions.filter((d) => d.dropped_rule);
@@ -305,7 +311,7 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
   it("without an onDecision sink, no ids are minted (backtest path stays pure)", async () => {
     const driver = mockDriver({ actions: [{ action: "buy", symbol: "AAPL", sizeUsdg: 20, reason: "x" }] });
     const s = makeLlmStrategist({ driver, universe: universe(), decisionIntervalMs: 0, now: (() => { let t = 0; return () => (t += 1); })() });
-    const intents = await s.tick(snap());
+    const intents = await run(s, snap());
     assert.equal(intents.length, 1);
     assert.equal(intents[0]!.decisionId, undefined);
   });
@@ -318,7 +324,7 @@ describe("makeLlmStrategist — decision windows, not per-tick chatter", () => {
       decisionIntervalMs: 0,
       now: () => 1,
     });
-    assert.deepEqual(await s.tick(snap({ sequencerUp: false })), []);
+    assert.deepEqual(await run(s, snap({ sequencerUp: false })), []);
     assert.equal(driver.calls, 0);
   });
 });

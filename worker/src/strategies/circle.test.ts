@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { evenKeelTick, type EvenKeelConfig } from "./even-keel";
 import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
-import type { Holding, Snapshot } from "./types";
+import { takeTick, type Holding, type Snapshot, type Strategy } from "./types";
+
+/**
+ * A strategy may now return reasons alongside its intents. These tests are about
+ * the intents, so normalise and keep asserting on those.
+ */
+const run = async (s: Strategy, sn: Snapshot) => takeTick(await s.tick(sn)).intents;
 
 const AAPL = "0xaaaa000000000000000000000000000000000000" as const;
 const MSFT = "0xbbbb000000000000000000000000000000000000" as const;
@@ -88,9 +94,9 @@ describe("dip-hunter", () => {
   it("no dip on the first sighting → no trade; then buys the deepest dip", async () => {
     const s = makeDipHunter(cfg);
     // First tick establishes the rolling highs at 100/100 — nothing is down yet.
-    assert.deepEqual(await s.tick(snap()), []);
+    assert.deepEqual(await run(s, snap()), []);
     // AAPL falls 5% below its high; MSFT flat → concentrate the budget on AAPL.
-    const out = await s.tick(
+    const out = await run(s, 
       snap({
         prices: new Map([
           ["AAPL", Q(95)],
@@ -104,6 +110,6 @@ describe("dip-hunter", () => {
 
   it("holds when cash can't cover a buy", async () => {
     const s = makeDipHunter(cfg);
-    assert.deepEqual(await s.tick(snap({ cashUsdg: U(1) })), []);
+    assert.deepEqual(await run(s, snap({ cashUsdg: U(1) })), []);
   });
 });

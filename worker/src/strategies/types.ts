@@ -8,6 +8,7 @@
 import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
 import type { TokenDepth } from "../venues/depth-cache";
+import type { Why } from "./reasons";
 
 /** One current holding, as the strategy sees it. */
 export interface Holding {
@@ -79,8 +80,36 @@ export interface Snapshot {
   depth?: ReadonlyMap<string, TokenDepth>;
 }
 
+/**
+ * What a strategy proposed, and why — the reasons paired positionally with the
+ * intents that carry them.
+ *
+ * PARALLEL ARRAYS rather than a reason on the intent itself, because
+ * `policy.ts` states that free text lives only in the decisions table and never
+ * on a TradeIntent: nothing the wall inspects may take a string that originated
+ * outside it. The strategist already pairs its proposals with its reasoning this
+ * exact way, so this is the existing shape, not a new one.
+ *
+ * `why[i]` may be null — a strategy can propose something it has nothing to say
+ * about, and null is the honest value for that.
+ */
+export interface Tick {
+  intents: TradeIntent[];
+  why: (Why | null)[];
+}
+
 export interface Strategy {
   name: string;
-  /** Async allowed: the LLM strategist awaits a model at decision windows. */
-  tick(snap: Snapshot): TradeIntent[] | Promise<TradeIntent[]>;
+  /**
+   * Async allowed: the LLM strategist awaits a model at decision windows.
+   *
+   * A bare array is still valid and means 'no reasons' — which is what a
+   * tenant's own strategy file returns, and why one can never publish prose.
+   */
+  tick(snap: Snapshot): TradeIntent[] | Tick | Promise<TradeIntent[] | Tick>;
+}
+
+/** Normalise either return shape. The one place that knows about both. */
+export function takeTick(r: TradeIntent[] | Tick): Tick {
+  return Array.isArray(r) ? { intents: r, why: r.map(() => null) } : r;
 }

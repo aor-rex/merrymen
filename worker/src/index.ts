@@ -78,6 +78,8 @@ import { classifyRevert, suppressionKey } from "./revert";
 import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
+import { renderWhy } from "./strategies/reasons";
+import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
@@ -4342,10 +4344,21 @@ async function main() {
     }
     circleBlockedNoted = false;
 
-    for (const intent of await strategy.tick(snap)) {
+    // A strategy may hand back a reason for each intent. It travels to the
+    // decisions table and nowhere else — never onto the TradeIntent, because
+    // policy.ts is explicit that nothing the wall inspects may carry a string
+    // that originated outside it.
+    const { intents: proposed, why: proposedWhy } = takeTick(await strategy.tick(snap));
+    for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
       // deterministic strategies so every trade still links to a decision.
-      await ensureDecision(intent, `strategy:${strategy.name}`);
+      //
+      // AND NOW WITH A REASON. Until this, every deterministic strategy wrote
+      // `reason` NULL — the default one included — so an agent could trade all
+      // day and say nothing about any of it. renderWhy is the only producer of
+      // these strings, which is what makes them safe to publish.
+      const w = proposedWhy[proposedAt];
+      await ensureDecision(intent, `strategy:${strategy.name}`, w ? renderWhy(w) : undefined);
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
