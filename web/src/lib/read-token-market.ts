@@ -29,20 +29,48 @@ export interface TokenMarket {
   /** Decided from the static stock list, so this is never a guess. */
   kind: "stock" | "etf" | "memecoin";
   /**
-   * found  — the index answered, and it knows this token.
-   * absent — the index answered, and it does not.
+   * found  — the index answered, and it described this token.
+   * absent — the index answered, and this token was not in what it returned.
    * unread — the index could not be asked at all.
+   *
+   * "absent" IS DELIBERATELY NARROW. The pools we hold come from page one of
+   * three feeds — roughly the top of the chain, not the index's whole
+   * knowledge — so a token missing from them is not a token the index has
+   * never heard of. Whatever the page says about this case must be a sentence
+   * about those feeds, never about the index.
    */
   read: "found" | "absent" | "unread";
   /** Set only for a stock or ETF. Individual fields may still be null. */
   stock: MarketToken | null;
   /** Set only for a coin the index returned. */
   coin: DiscoveryRow | null;
+  /**
+   * This token's ticker also belongs to a LISTED stock token at another address.
+   *
+   * Both tickers are attacker-chosen: the index's label is a string the pool
+   * carries, and the ledger's symbol comes from the contract's own symbol(),
+   * which anyone deploying a token picks. Theses are matched to a page BY
+   * SYMBOL, so without this flag an agent's real reasoning about NVDA would
+   * print on an impostor's page, attributed to a holder of the impostor. That
+   * is a per-agent attribution resting entirely on a string match, and it is
+   * the one new false claim this page could otherwise manufacture.
+   */
+  symbolClash: boolean;
 }
 
-export async function readTokenMarket(token: string): Promise<TokenMarket> {
+export async function readTokenMarket(
+  token: string,
+  /** The ledger's symbol for this token, when it has one. Used for the clash check. */
+  symbol: string | null = null,
+): Promise<TokenMarket> {
   const addr = token.toLowerCase();
   const listed = STOCK_TOKENS.find((t) => t.address.toLowerCase() === addr);
+
+  // A listed token cannot impersonate itself, so the clash is only ever about
+  // some OTHER address wearing a listed ticker.
+  const symbolClash =
+    !!symbol &&
+    STOCK_TOKENS.some((s) => s.symbol === symbol && s.address.toLowerCase() !== addr);
 
   if (listed) {
     // fetchMarket returns a row for every listed token whether or not the
@@ -52,9 +80,9 @@ export async function readTokenMarket(token: string): Promise<TokenMarket> {
     try {
       const market = await fetchMarket();
       const row = market.tokens.find((t) => t.address.toLowerCase() === addr) ?? null;
-      return { kind: listed.kind, read: row ? "found" : "unread", stock: row, coin: null };
+      return { kind: listed.kind, read: row ? "found" : "unread", stock: row, coin: null, symbolClash };
     } catch {
-      return { kind: listed.kind, read: "unread", stock: null, coin: null };
+      return { kind: listed.kind, read: "unread", stock: null, coin: null, symbolClash };
     }
   }
 
@@ -65,7 +93,7 @@ export async function readTokenMarket(token: string): Promise<TokenMarket> {
     // against those, this would report "no market data" for a coin the index
     // had just described in full.
     const row = await readPoolRow(addr);
-    if (row) return { kind: "memecoin", read: "found", stock: null, coin: row };
+    if (row) return { kind: "memecoin", read: "found", stock: null, coin: row, symbolClash };
 
     // Genuinely not among the pools the index returned. That is only an absence
     // if the index answered at all, which is the distinction this file exists
@@ -76,8 +104,9 @@ export async function readTokenMarket(token: string): Promise<TokenMarket> {
       read: payload.indexUnreachable ? "unread" : "absent",
       stock: null,
       coin: null,
+      symbolClash,
     };
   } catch {
-    return { kind: "memecoin", read: "unread", stock: null, coin: null };
+    return { kind: "memecoin", read: "unread", stock: null, coin: null, symbolClash };
   }
 }

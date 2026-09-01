@@ -22,6 +22,7 @@
  *
  * No session read. Same property as the other public readers.
  */
+import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -44,6 +45,15 @@ export interface TokenHolder {
    * is a price something actually traded at. Null when the fill carried none.
    */
   entryPriceUsd: number | null;
+  /**
+   * How that fill price was obtained, in descending order of evidence:
+   * 'receipt' read off a settled transaction, 'paper' exact but simulated at
+   * the oracle price, 'quote' a pre-trade estimate. Null when unrecorded.
+   *
+   * Travels with the price because a pretend fill must not look like a real
+   * one — the same rule the dashed chip treatment exists for.
+   */
+  basisSource: "receipt" | "paper" | "quote" | null;
 }
 
 export interface TokenRead {
@@ -51,13 +61,33 @@ export interface TokenRead {
   holders: TokenHolder[];
   /** Agents holding it that do NOT publish their book. A count, never a list. */
   privateHolders: number;
+  /**
+   * Whether the fills query answered at all.
+   *
+   * Without it the timeline says "the position is real, the trade that opened
+   * it is older than what the ledger keeps" — a positive claim about ledger
+   * RETENTION manufactured out of a caught exception. A pre-migration ledger
+   * throws, and silence about why is not the same as knowing why.
+   */
+  fillsRead: boolean;
 }
 
 /** Addresses are the URL key here, and they are matched case-insensitively. */
 export const TOKEN_RE = /^0x[0-9a-fA-F]{6,64}$/;
 
-export async function readToken(token: string): Promise<TokenRead> {
-  const empty: TokenRead = { symbol: null, holders: [], privateHolders: 0 };
+/**
+ * Memoised per request, because the page reads this twice — once in
+ * generateMetadata and once in the body — and each call is a full ledger read.
+ */
+export const readToken = cache(async function readToken(
+  token: string,
+): Promise<TokenRead> {
+  const empty: TokenRead = {
+    symbol: null,
+    holders: [],
+    privateHolders: 0,
+    fillsRead: false,
+  };
   if (!TOKEN_RE.test(token)) return empty;
 
   // slug + which tenants opted in, read once.
@@ -130,11 +160,15 @@ export async function readToken(token: string): Promise<TokenRead> {
     //
     // Ordered earliest-first under the cap, so truncation can only drop LATER
     // trades and can never change the first entry this computes.
-    const entry = new Map<string, { at: number; priceUsd: number | null }>();
+    const entry = new Map<
+      string,
+      { at: number; priceUsd: number | null; basis: TokenHolder["basisSource"] }
+    >();
+    let fillsRead = false;
     try {
       const fills = (await db
         .prepare(
-          `SELECT agent_id, created_at, fill_price_usd
+          `SELECT agent_id, created_at, fill_price_usd, basis_source
              FROM trades
             WHERE LOWER(buy_token) = ?
               AND status IN ('landed','paper')
@@ -143,13 +177,18 @@ export async function readToken(token: string): Promise<TokenRead> {
             LIMIT 500`,
         )
         .all(token.toLowerCase())) as Record<string, unknown>[];
+      // Set only once the query has actually returned. Anything after this
+      // point may say why the list is empty; anything before it may not.
+      fillsRead = true;
       for (const fill of fills) {
         const id = String(fill.agent_id);
         if (entry.has(id)) continue; // earliest wins, and it is already here
         const p = fill.fill_price_usd;
+        const b = fill.basis_source;
         entry.set(id, {
           at: Number(fill.created_at),
           priceUsd: p === null || p === undefined ? null : Number(p),
+          basis: b === "receipt" || b === "paper" || b === "quote" ? b : null,
         });
       }
     } catch {
@@ -180,9 +219,10 @@ export async function readToken(token: string): Promise<TokenRead> {
         pnlBps: cost !== null && cost > 0 ? Math.round(((value - cost) / cost) * 10_000) : null,
         enteredAt: first?.at ?? null,
         entryPriceUsd: first?.priceUsd ?? null,
+        basisSource: first?.basis ?? null,
       });
     }
 
-    return { symbol, holders, privateHolders };
+    return { symbol, holders, privateHolders, fillsRead };
   });
-}
+});
