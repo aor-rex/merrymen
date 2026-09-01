@@ -207,8 +207,13 @@ export async function POST(req: Request) {
     //
     // BEST EFFORT ON PURPOSE. The grant is already durably stored and the money
     // path is done; failing the request now would tell the owner their agent was
-    // not created when it was. Without an identity the agent simply has no
-    // public page until a later read backfills it.
+    // not created when it was.
+    //
+    // The backfill for an agent that misses this is in the ORCHESTRATOR, in
+    // writeGrantForChild — not "a later read", which is what this comment used
+    // to claim and which was never built. It could not be a read: the public
+    // routes are cached and unauthenticated, and an anonymous GET that mints
+    // identities is a write nobody asked for.
     try {
       await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`);
     } catch (e) {

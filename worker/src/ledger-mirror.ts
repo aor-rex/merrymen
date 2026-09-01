@@ -150,8 +150,25 @@ export const MIRROR_STATE_DDL = `
 
 export interface MirrorReport {
   tenant: string;
-  /** Rows copied per table this pass. Absent tables were empty or unreadable. */
+  /**
+   * Rows copied per table this pass.
+   *
+   * An append-only table records its ZERO rather than being absent — leaving it
+   * out is what made a stalled cursor look exactly like a quiet table. A
+   * snapshot table is absent only when the tenant has no agent row at all.
+   */
   copied: Record<string, number>;
+  /**
+   * Tables whose cursor was rewound because the child ledger was rebuilt
+   * beneath it — `was` is the watermark that turned out to point at a row
+   * that no longer exists.
+   *
+   * Loud on purpose. A rewind is the mirror recovering from something that
+   * silently cost it every append-only row since the last redeploy, and an
+   * operator should see that it happened rather than infer it from a tape that
+   * quietly starts working again.
+   */
+  restarted?: Record<string, { was: number }>;
   /**
    * Why a table copied nothing, when the reason was an error rather than an
    * empty source.
@@ -203,6 +220,7 @@ export async function mirrorTenant(args: {
   const nowSec = args.nowSec ?? Math.floor(Date.now() / 1000);
   const copied: Record<string, number> = {};
   const failed: Record<string, string> = {};
+  const restarted: Record<string, { was: number }> = {};
 
   // ── append-only tables ────────────────────────────────────────────────────
   for (const { table, cols } of LOG_TABLES) {
@@ -210,12 +228,56 @@ export async function mirrorTenant(args: {
       const mark = (await shared
         .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
         .get(tenant, table)) as { last_id: number } | undefined;
-      const from = mark?.last_id ?? 0;
+      let from = Number(mark?.last_id ?? 0);
+
+      // ── THE CURSOR OUTLIVES THE LEDGER IT POINTS INTO ──────────────────────
+      //
+      // `last_id` is an id in the CHILD's sqlite, and it is stored HERE, in
+      // shared Postgres. Those two do not have the same lifetime. A child home
+      // lives on the orchestrator container's own filesystem and railway.json
+      // declares no volume for it, so a redeploy destroys every child ledger
+      // while mirror_state survives untouched. Every LOG_TABLE is INTEGER
+      // PRIMARY KEY AUTOINCREMENT, so the rebuilt file restarts at id 1 beneath
+      // a watermark that still reads four thousand — after which `id > from`
+      // matches nothing, FOREVER, and the `!rows.length` path below records
+      // neither a count nor a failure, so every pass reports success.
+      //
+      // That is not hypothetical: it is why the entire fleet's trade tape was
+      // empty in production while `positions` and `cost_basis` — snapshots, no
+      // id cursor — arrived normally, and why `decisions`, which is cursored on
+      // a TIMESTAMP with a lookback, kept flowing past the same stalled state.
+      //
+      // THE TEST IS "IS THE ROW WE LAST COPIED STILL THERE", not MAX(id).
+      // Within one incarnation the watermark IS an id we copied, and these
+      // tables are append-only — nothing in this repo deletes from them — so
+      // that row can only be missing because the id space restarted underneath
+      // us. It cannot false-positive, which matters more than completeness
+      // here: this file's exactly-once property rests solely on the watermark
+      // (the INSERT below has no ON CONFLICT), so a spurious rewind would
+      // duplicate the tape, and a trade shown twice is worse than one shown
+      // late. MAX(id) < from would miss the case where the reborn ledger has
+      // grown to exactly the old mark; asking for the row itself does not.
+      if (from > 0) {
+        const still = (await child
+          .prepare(`SELECT 1 AS ok FROM ${table} WHERE id = ?`)
+          .get(from)) as { ok: number } | undefined;
+        if (!still) {
+          restarted[table] = { was: from };
+          from = 0;
+        }
+      }
 
       const rows = (await child
         .prepare(`SELECT id, ${cols.join(", ")} FROM ${table} WHERE id > ? ORDER BY id ASC LIMIT ?`)
         .all(from, batch)) as Record<string, unknown>[];
-      if (!rows.length) continue;
+      if (!rows.length) {
+        // RECORD THE ZERO. Leaving it absent is what made a wedged cursor
+        // indistinguishable from a quiet table for as long as this bug lived:
+        // the orchestrator prints only the keys present, so `trades` simply
+        // vanished from the line rather than reading `trades 0`.
+        copied[table] = 0;
+        continue;
+      }
 
       const highest = Number(rows[rows.length - 1]!.id);
       // One transaction: the rows and the watermark that says they arrived.
@@ -489,5 +551,10 @@ export async function mirrorTenant(args: {
     failed.snapshots = e instanceof Error ? e.message : String(e);
   }
 
-  return { tenant, copied, ...(Object.keys(failed).length ? { failed } : {}) };
+  return {
+    tenant,
+    copied,
+    ...(Object.keys(restarted).length ? { restarted } : {}),
+    ...(Object.keys(failed).length ? { failed } : {}),
+  };
 }
