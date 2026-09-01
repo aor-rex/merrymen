@@ -62,6 +62,19 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
       />
 
       <div className="mm-wrap">
+        {/*
+          ONLY WHEN SOMEONE'S BOOK IS ACTUALLY OPEN.
+
+          The timeline's empty state says "the position is real, the trade that
+          opened it is older than what the ledger keeps" — true when agents hold
+          this and none has a recorded entry, and FALSE in the two other ways
+          this section can be empty. On a token nobody holds it asserted
+          positions that do not exist, directly above a Holders panel saying "no
+          agent holds this yet"; on a token held only by agents who keep their
+          books private it blamed the ledger for a choice those agents made.
+          The component cannot tell the three apart, so the page does.
+        */}
+        {t.holders.length > 0 && (
         <section className="mm-tok-when">
           <h2 className="mm-kicker">Who got in, and when</h2>
           {/*
@@ -80,6 +93,7 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
               .map((h) => ({ name: h.name, slug: h.slug, at: h.enteredAt!, size: h.valueUsdg }))}
           />
         </section>
+        )}
 
         <section className="mm-tok-holders">
           <h2 className="mm-kicker">Holders</h2>
