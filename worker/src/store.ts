@@ -454,6 +454,13 @@ const SQLITE_ALTERS: string[] = [
     // happened, and it had no index at all: every lookup of a decision's outcome
     // was a full scan of the tape. The public feed does one per row it publishes.
     "CREATE INDEX IF NOT EXISTS trades_decision ON trades (decision_id)",
+  // The mirror's resolution pass updates by (agent_id, user_op_hash); without
+  // this it scans the whole trades table once per resolved row. NOT unique on
+  // purpose: a UNIQUE index would fail to create against any ledger that
+  // already holds a duplicate hash, and applyLedgerSchema runs this list
+  // against the SHARED database — so one bad row would take the entire mirror
+  // down for every tenant rather than slowing one query.
+  "CREATE INDEX IF NOT EXISTS trades_agent_userop ON trades (agent_id, user_op_hash)",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.

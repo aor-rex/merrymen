@@ -319,6 +319,107 @@ describe("the ledger mirror", () => {
     assert.equal(await count(shared, "cost_basis"), 0);
   });
 
+  it("A LIVE FILL DOES NOT FREEZE AT 'submitted'", async () => {
+    // The bug: a live trade is written as `submitted` when the UserOp goes out,
+    // then UPDATED IN PLACE when it lands. The log-table watermark is on id, so
+    // the first write was copied and the second never was — the row keeps its
+    // id and the cursor is already past it. Hosted, every successful trade
+    // stayed "sent, waiting on the chain" forever, and since the scoreboard and
+    // the feed both filter status = 'landed', every fill was invisible to them.
+    const child = seedChild();
+    const shared = mem(DEST);
+    const now = Math.floor(Date.now() / 1000);
+    await child
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',42,'0xop1','submitted',2,?)`,
+      )
+      .run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const before = (await shared
+      .prepare("SELECT status FROM trades WHERE user_op_hash = ?")
+      .get("0xop1")) as { status: string };
+    assert.equal(before.status, "submitted", "it arrives unresolved, as it should");
+
+    // It lands at the source, in place, keeping its id.
+    await child
+      .prepare("UPDATE trades SET status = 'landed', tx_hash = ?, gas_usdg = ? WHERE user_op_hash = ?")
+      .run("0xtx1", 0.31, "0xop1");
+    const r = await mirrorTenant({ tenant: "0xten", child, shared });
+
+    const after = (await shared
+      .prepare("SELECT status, tx_hash, gas_usdg FROM trades WHERE user_op_hash = ?")
+      .get("0xop1")) as { status: string; tx_hash: string; gas_usdg: number };
+    assert.equal(after.status, "landed");
+    assert.equal(after.tx_hash, "0xtx1");
+    assert.equal(Number(after.gas_usdg), 0.31);
+    assert.equal(r.copied.trades_resolved, 1);
+  });
+
+  it("the resolution pass is idempotent and never rewrites a settled row", async () => {
+    // `AND status = 'submitted'` on the destination is the entire correctness
+    // argument: it is the same key and guard addTrade uses at the source, so
+    // this pass can only convert a submitted row into its resolution. Drop it
+    // and every pass starts overwriting settled history from a rolling window.
+    const child = seedChild();
+    const shared = mem(DEST);
+    const now = Math.floor(Date.now() / 1000);
+    await child
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',42,'0xop2','submitted',2,?)`,
+      )
+      .run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child
+      .prepare("UPDATE trades SET status = 'landed', tx_hash = ? WHERE user_op_hash = ?")
+      .run("0xtx2", "0xop2");
+
+    const first = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(first.copied.trades_resolved, 1);
+
+    const second = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(second.copied.trades_resolved, undefined, "nothing left to resolve");
+    assert.equal(await count(shared, "trades"), 6, "and nothing was duplicated");
+  });
+
+  it("KEEPS EVERY DECISION — the tape is not a top-500 sample any more", async () => {
+    // decisions used to copy `ORDER BY at DESC LIMIT 500` with no cursor, so a
+    // child that wrote more than a batch between passes lost the overflow
+    // permanently. That was dashboard furniture once. It is now the content
+    // other agents read, and a dropped thesis is a peer input that never
+    // arrives — so completeness is a correctness property, not a nicety.
+    const child = seedChild();
+    const shared = mem(DEST);
+    for (let i = 0; i < 600; i++) {
+      await child
+        .prepare("INSERT INTO decisions VALUES (?, '0xagent','strategist',null,null,null,'PEPE','buy',5,?,null,'{}',?)")
+        .run(`x${i}`, `reason ${i}`, 1000 + i);
+    }
+    // Two passes: the first fills a batch, the second collects the rest.
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "decisions"), 601, "600 seeded plus the fixture's d1");
+  });
+
+  it("the decisions cursor re-reads its own second, so a tie is never skipped", async () => {
+    // `at` is not unique. A cursor resuming exactly at its watermark would drop
+    // every row sharing that second with the last one it copied.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await child
+      .prepare("INSERT INTO decisions VALUES ('t1','0xagent','strategist',null,null,null,'A','buy',1,'first',null,'{}',5000)")
+      .run();
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    // A second decision written in the SAME second, after the cursor moved.
+    await child
+      .prepare("INSERT INTO decisions VALUES ('t2','0xagent','strategist',null,null,null,'B','buy',1,'same second',null,'{}',5000)")
+      .run();
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const got = (await shared.prepare("SELECT COUNT(*) AS n FROM decisions WHERE at = 5000").get()) as { n: number };
+    assert.equal(Number(got.n), 2, "both rows from that second survived");
+  });
+
   it("carries the positions leg of the equity identity", async () => {
     const shared = mem(DEST);
     await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });

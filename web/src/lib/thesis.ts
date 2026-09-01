@@ -85,7 +85,16 @@ export interface PublicThesis {
    * it is ever ranked against a funded one.
    */
   paper: boolean;
-  outcome: "landed" | "reverted" | "refused" | "dropped" | "pending";
+  /**
+   * "view" is a DECISION THE AGENT MADE, not a trade that failed to happen.
+   *
+   * Added because the desk's best feature rendered as its worst: a window where
+   * the agent researched and concluded "stay flat, here is why" writes a
+   * decision with a reason and no action, and every one of them read "no trade
+   * came of it" — a failure sentence for the one case that is not a failure.
+   * The same was true of an explicit hold. A hold is an answer.
+   */
+  outcome: "landed" | "reverted" | "refused" | "dropped" | "pending" | "view";
   outcomeText: string;
   reason: string | null;
   /** How many times this exact thesis was said in the window. */
@@ -227,9 +236,26 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   }
 
   const head = headOf(row);
-  const { outcome, text } = row.dropped_rule && !row.status
-    ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
-    : outcomeOf(row.status, row.reject_rule);
+
+  // DECIDED, versus FAILED TO HAPPEN.
+  //
+  // Resolved here rather than inside outcomeOf, which sees only the status pair
+  // and therefore cannot tell a view from a buy whose trade has not landed yet
+  // — both arrive as status null. The distinguishing facts are action and
+  // symbol, and only this function has them.
+  //
+  // Both guards require a null status. A hold that somehow joined a trade row
+  // is a contradiction worth surfacing rather than hiding, so it falls through
+  // and reports what actually happened.
+  const isView = !row.action && !row.symbol && !row.dropped_rule && !row.status;
+  const isHold = row.action === "hold" && !row.status;
+  const { outcome, text } = isView
+    ? ({ outcome: "view", text: "a view, no trade" } as const)
+    : isHold
+      ? ({ outcome: "view", text: "held — no trade, by choice" } as const)
+      : row.dropped_rule && !row.status
+        ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
+        : outcomeOf(row.status, row.reject_rule);
 
   // A post with neither a head nor a reason says nothing at all.
   if (!head && !reason) return null;
