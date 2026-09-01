@@ -75,6 +75,7 @@ import { createSponsor, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
+import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { grantHasDeadRateLimit } from "./session-account";
@@ -3547,6 +3548,40 @@ async function main() {
         return;
       }
 
+      // THE SPONSOR DECLINING IS NOT THE WALL REFUSING, and until this branch
+      // existed the ledger could not tell them apart. SponsorRefused is thrown
+      // before anything is signed, so it fell through to the generic path and
+      // became `couldn't submit: <ninety characters of free-form text>` — the
+      // exact unbounded-cardinality problem in reject_rule that revert.ts was
+      // written to end. Worse, the Telegram tape renders every rejected row as
+      // "the wall turned back a swap", so the owner's own sealed policy was
+      // blamed for the house failing to pay a fee.
+      //
+      // Handled exactly like GasRefused directly above, and for the same reason:
+      // nothing was signed and nothing was spent, so it is a sibling of a policy
+      // rejection rather than of a revert, and its `rule` is already a literal
+      // from a fixed three-word vocabulary.
+      if (e instanceof SponsorRefused) {
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "warn",
+          `${intent.kind} not sent — the gas sponsor declined it (${e.rule}). This is ours to fix, ` +
+            `not something wrong with your agent or its permissions: ${msg.slice(0, 200)}`,
+        );
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: e.rule,
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof UserOpUnresolved) {
         lastTradeOutcome = { status: "submitted", rejectRule: "receipt-unresolved" };
         // KEEP THE SPEND COUNTED. `finally` below releases the reservation
@@ -4767,6 +4802,13 @@ async function main() {
       // in the notifier, so an account with exactly no ETH — the only balance
       // that guarantees failure — got no alert at all.
       gasWei: lastGasWei,
+      // What a zero balance MEANS. Sponsored, it no longer stops trading — the
+      // alert that says it does would be telling the owner to fix something that
+      // is not broken, and to send an asset they were told they would not need.
+      gasSponsored: gasSponsored(),
+      // And whether that zero was even read. The paper tick hardcodes ethWei to
+      // 0n instead of reading the chain, so on paper this number is fabricated.
+      paper: paperActive(),
     }),
     getChainId: () => active?.grant.chainId ?? null,
     // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an

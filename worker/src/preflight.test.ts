@@ -164,3 +164,49 @@ describe("the symbol lists this depends on", () => {
     }
   });
 });
+
+describe("preflight — when a sponsor pays the gas", () => {
+  it("zero ETH stops being a blocker, because it stops being true", () => {
+    // Unsponsored this is the one condition that guarantees failure. Sponsored,
+    // the account trades perfectly well on an empty ETH balance, and failing the
+    // whole preflight over it would report a working install as broken.
+    const gas = preflight(ready({ ethWei: 0n, sponsored: true })).find((c) => c.id === "gas")!;
+    assert.equal(gas.level, "warn");
+    assert.equal(verdict(preflight(ready({ ethWei: 0n, sponsored: true }))).ready, true);
+  });
+
+  it("still says it, because the way OUT is not sponsored", () => {
+    // Recovery pays its own fee from the balance it is sweeping, so an owner who
+    // never adds any ETH can trade for months and then find they cannot
+    // withdraw. This is the only screen that will ever mention that.
+    const gas = preflight(ready({ ethWei: 0n, sponsored: true })).find((c) => c.id === "gas")!;
+    assert.match(gas.title, /moving money OUT is not/i);
+    assert.match(gas.detail!, /withdraw/i);
+    assert.doesNotMatch(gas.detail!, /there is no paymaster/);
+  });
+
+  it("does NOT excuse having nothing to trade with", () => {
+    // With the fee covered, no USDG is the only real blocker left — and it is
+    // still a blocker.
+    const v = verdict(preflight(ready({ ethWei: 0n, usdg: 0, sponsored: true })));
+    assert.equal(v.ready, false);
+    assert.ok(idsAt(ready({ ethWei: 0n, usdg: 0, sponsored: true }), "blocker").includes("cash"));
+  });
+
+  it("UNSPONSORED is untouched — zero ETH is still a blocker", () => {
+    // The default, and every install that has not opted in.
+    for (const [label, over] of [
+      ["sponsored absent", { ethWei: 0n }],
+      ["sponsored false", { ethWei: 0n, sponsored: false }],
+    ] as const) {
+      const gas = preflight(ready(over)).find((c) => c.id === "gas")!;
+      assert.equal(gas.level, "blocker", label);
+      assert.match(gas.detail!, /there is no paymaster/);
+    }
+  });
+
+  it("an UNREADABLE balance is still a warning, sponsored or not", () => {
+    // Sponsorship says nothing about whether the RPC answered.
+    assert.ok(idsAt(ready({ ethWei: null, sponsored: true }), "warn").includes("gas"));
+  });
+});

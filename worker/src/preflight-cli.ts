@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { homePaths } from "./home";
 import { loadGrantFile } from "./grant";
 import { preflight, rank, verdict, type Check, type PreflightInput } from "./preflight";
+import { resolveConfig } from "./settings";
 import { CASH, WALL_POLICY_CONTRACTS, chainForId } from "../../packages/core/src/index";
 
 const GREEN = "\x1b[32m";
@@ -148,9 +149,18 @@ async function main(): Promise<void> {
     missingPolicyContracts(rpcUrl),
   ]);
 
+  // Resolved through the worker's OWN resolver rather than by re-reading the
+  // settings file here: sponsorship comes from the file OR MERRYMEN_SPONSOR_GAS,
+  // and `settings` above is the raw file only. resolveConfig already merges both
+  // and already tolerates an absent or malformed file, so this borrows a rule
+  // that is correct instead of spelling a third copy of it.
+  const rcfg = resolveConfig();
+  const sponsored = rcfg.sponsorGasEnabled && !!rcfg.bundlerApiKey;
+
   const checks = rank(
     preflight({
       settings,
+      sponsored,
       grant,
       nowSec: Math.floor(Date.now() / 1000),
       usdg,
