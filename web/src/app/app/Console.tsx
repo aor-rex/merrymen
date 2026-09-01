@@ -13,7 +13,7 @@
  * next (a real /api/chat).
  */
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import { statusLine, type AgentSnapshot } from "./status-line";
+import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";

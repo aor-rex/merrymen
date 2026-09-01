@@ -1,14 +1,11 @@
-import type { Metadata } from "next";
-import "./console.css";
-import Console from "./Console";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = {
-  title: "merrymen — the console",
-  description: "Run your merryman: equity, the wall, the decision tape, and talk to the agent — one sleek surface.",
-};
-
-export const dynamic = "force-dynamic";
-
-export default function AppConsolePage() {
-  return <Console />;
+/**
+ * The console became one tab.
+ *
+ * /app is what every existing bookmark and the installed PWA point at, so it
+ * keeps working and lands where the console's content now lives.
+ */
+export default function AppRedirect() {
+  redirect("/you");
 }

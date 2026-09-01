@@ -1,0 +1,194 @@
+/**
+ * Your own agent. Scoped under .mm, enforced by styles/scoped.test.ts.
+ *
+ * Everything here is a FIGURE plus the one sentence that explains it. The
+ * surface this replaces carried roughly eleven hundred words around five
+ * numbers, which is the whole reason it read as complicated.
+ */
+
+/* ── the status sentence ─────────────────────────────────────────────────── */
+
+.mm-status {
+  display: flex;
+  gap: var(--mm-3);
+  align-items: flex-start;
+  margin: var(--mm-4) 0;
+  padding: var(--mm-3) var(--mm-4);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-card);
+  background: var(--mm-surface);
+}
+
+.mm-status .dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--mm-dim);
+}
+
+.mm-status.good .dot {
+  background: var(--mm-up);
+}
+.mm-status.waiting .dot {
+  background: var(--mm-warn);
+}
+.mm-status.stuck .dot {
+  background: var(--mm-down);
+}
+
+.mm-status .head {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--mm-tx);
+}
+
+.mm-status .next {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--mm-dim);
+}
+
+/* ── the hero ────────────────────────────────────────────────────────────── */
+
+.mm-hero {
+  padding: var(--mm-4) 0 var(--mm-5);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-hero-top {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-4);
+  margin-bottom: var(--mm-4);
+}
+
+.mm-hero .big {
+  margin: 2px 0 0;
+  font-size: clamp(30px, 8vw, 42px);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  color: var(--mm-tx);
+}
+
+.mm-hero-pnl {
+  margin-left: auto;
+  font-size: 13.5px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.mm-hero-pnl .up {
+  color: var(--mm-up);
+}
+.mm-hero-pnl .down {
+  color: var(--mm-down);
+}
+.mm-hero-pnl .flat {
+  color: var(--mm-dim);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.mm-hero .mm-spark {
+  width: 100%;
+  height: auto;
+}
+
+.mm-slices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--mm-3);
+  margin: var(--mm-4) 0 0;
+}
+
+.mm-slice {
+  padding: var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface);
+}
+
+.mm-slice dd {
+  margin: var(--mm-1) 0 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--mm-tx);
+}
+
+/* ── the two columns ─────────────────────────────────────────────────────── */
+
+.mm-you-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--mm-6);
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-tape {
+  list-style: none;
+  margin: var(--mm-3) 0 0;
+  padding: 0;
+}
+
+.mm-tape li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--mm-edge);
+  font-size: 12.5px;
+  color: var(--mm-tx-2);
+}
+
+.mm-tape .k {
+  font-weight: 600;
+  color: var(--mm-tx);
+}
+
+.mm-tape .s {
+  font-size: 11px;
+  color: var(--mm-dim);
+}
+
+.mm-tape li.rejected .s,
+.mm-tape li.reverted .s {
+  color: var(--mm-warn);
+}
+
+.mm-tape li.landed .s {
+  color: var(--mm-up);
+}
+
+.mm-tape .w {
+  font-size: 11px;
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+.mm-money {
+  padding: var(--mm-5) 0;
+}
+
+/* ── 860 ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .mm-you-cols {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--mm-5);
+  }
+}
+
+/* The kill switch keeps its own styling from globals — it is a control that
+   must look like itself wherever it appears, and this only gives it room. */
+.mm-kill {
+  margin-top: var(--mm-5);
+  padding-top: var(--mm-4);
+  border-top: 1px solid var(--mm-edge);
+}
