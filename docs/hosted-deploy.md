@@ -74,6 +74,43 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 >
 > `MERRYMEN_SPONSOR_GAS` goes on the **orchestrator only**, and deliberately so. The dashboard does not read it: the worker reports whether it is sponsoring on its heartbeat, and the web service believes that report. Setting it on web would do nothing, and an earlier design where web resolved it for itself could have shown "fees are covered" while the child refused every trade — the two services have separate environments.
 
+## 4b. The research browser (optional, but it is what makes an agent read)
+
+A THIRD service, from the same repo, built from `Dockerfile.browser` — a real
+Chromium in its own image. It is separate on purpose: Chromium adds ~400MB to
+whatever image carries it, and the orchestrator spawns one worker per tenant, so
+a browser inside the worker would be a browser per tenant.
+
+| Var | Value |
+|---|---|
+| `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.browser` |
+| `PORT` | `8080` — pinned so the private address below is stable |
+| `MERRYMEN_BROWSER_TOKEN` | a fresh 32-byte secret, shared with the orchestrator |
+
+> **`railway.json` must NOT pin `dockerfilePath`.** It is shared by every
+> service, and an explicit path there beats the per-service
+> `RAILWAY_DOCKERFILE_PATH` — so the browser service silently builds the main
+> image and comes up running the DASHBOARD. The symptom is a browser service
+> whose logs say `next start`. With no path in `railway.json` the builder
+> defaults to `./Dockerfile`, which is what web and the orchestrator want.
+
+**Give it no public domain.** It is a URL-fetching machine; exposed, it is an
+open proxy anyone could point at `*.railway.internal`. It binds the private
+network and requires the shared token, and the SSRF guard runs on both sides.
+
+Then on the **orchestrator**:
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_BROWSER_URL` | `http://merrymen-browser.railway.internal:8080` |
+| `MERRYMEN_BROWSER_TOKEN` | the same secret |
+| `MERRYMEN_DESK` *(optional)* | `1` — let the strategist research before deciding |
+| `MERRYMEN_DESK_MAX_STEPS` *(with the above)* | model calls per window, default 4 |
+
+> `MERRYMEN_DESK` costs several model calls per decision window instead of one.
+> Raise `MERRYMEN_LLM_INTERVAL_MIN` with it — the scout consumed an entire
+> day's shared token allowance on 2026-08-31 and took user chat down with it.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no
