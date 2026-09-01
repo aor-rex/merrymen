@@ -125,7 +125,11 @@ describe("a degraded read is not cached like a good one", () => {
   it("single-flight, because the route is dynamic and every tab polls it", () => {
     // Without it, N tabs missing together each fire two heavy log sweeps plus
     // three enrichment reads — manufacturing the very burst this fixes.
-    assert.match(ROUTE, /let inFlight: Promise<Payload> \| null/);
+    // The type parameter is deliberately loose. What must hold is that ONE
+    // promise is held at module scope and reused; what that promise resolves to
+    // is free to change, and pinning it meant this failed the first time the
+    // memo started carrying more than the payload.
+    assert.match(ROUTE, /let inFlight: Promise<\w+> \| null/);
     assert.match(ROUTE, /if \(inFlight\) return inFlight;/);
     // Anchored to a real export, not a mention: the comment above the memo
     // explains what it replaced, and matching prose would fail forever.

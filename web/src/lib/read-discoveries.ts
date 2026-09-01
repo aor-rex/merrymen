@@ -371,18 +371,18 @@ export interface Payload {
  * no replica count). Scale it and each replica keeps its own — still correct,
  * just N times the upstream traffic.
  */
-let inFlight: Promise<Payload> | null = null;
-let last: { at: number; payload: Payload } | null = null;
+let inFlight: Promise<Shared> | null = null;
+let last: { at: number; shared: Shared } | null = null;
 const WHOLE_MS = 120_000;
 const DEGRADED_MS = 10_000;
 
-export function sharedRead(): Promise<Payload> {
-  const ttl = last?.payload.degraded ? DEGRADED_MS : WHOLE_MS;
-  if (last && Date.now() - last.at < ttl) return Promise.resolve(last.payload);
+function sharedReadFull(): Promise<Shared> {
+  const ttl = last?.shared.payload.degraded ? DEGRADED_MS : WHOLE_MS;
+  if (last && Date.now() - last.at < ttl) return Promise.resolve(last.shared);
   if (inFlight) return inFlight;
   inFlight = build()
     .then((p) => {
-      last = { at: Date.now(), payload: p };
+      last = { at: Date.now(), shared: p };
       return p;
     })
     .finally(() => {
@@ -391,7 +391,30 @@ export function sharedRead(): Promise<Payload> {
   return inFlight;
 }
 
-async function build(): Promise<Payload> {
+export function sharedRead(): Promise<Payload> {
+  return sharedReadFull().then((s) => s.payload);
+}
+
+/**
+ * What the index said about ONE token, screened or not.
+ *
+ * Shares the memo above, so asking costs nothing beyond the read the page was
+ * making anyway. Returns null when the index returned pools and this token was
+ * not among them — read `indexUnreachable` on the payload before calling that
+ * an absence, because the two are different facts.
+ */
+export async function readPoolRow(token: string): Promise<DiscoveryRow | null> {
+  const { unscreened } = await sharedReadFull();
+  return unscreened.get(token.toLowerCase()) ?? null;
+}
+
+/** A payload, and the wider set only a same-process caller can reach. */
+interface Shared {
+  payload: Payload;
+  unscreened: Map<string, DiscoveryRow>;
+}
+
+async function build(): Promise<Shared> {
   const nowSec = Math.floor(Date.now() / 1000);
   const { rows: fresh, chain } = await readFresh();
   const byToken = new Map<string, GeckoPool>();
@@ -441,10 +464,28 @@ async function build(): Promise<Payload> {
     });
   }
 
-  const rows = kept.map((p) => ({
-    ...toRow(p, nowSec),
-    verdict: verdictByToken.get(p.tokenAddress.toLowerCase()) ?? null,
-  }));
+  // EVERY POOL THE INDEX RETURNED, screened or not, keyed by token.
+  //
+  // `rows` below is the SCREENED set — it exists to fill a discovery panel, so
+  // it drops anything under the display floor. That makes it the wrong thing to
+  // answer "does the index know this token" with: an agent's actual holdings
+  // are mostly small coins, and every one of them is missing from `rows` for a
+  // reason that has nothing to do with the index. Asked that question against
+  // `rows`, a token page would report "no market data" for a coin the index had
+  // just described in full.
+  //
+  // Kept in the memo rather than on the payload: it is several times the size
+  // and no HTTP caller wants it.
+  const unscreened = new Map<string, DiscoveryRow>();
+  for (const p of all) {
+    unscreened.set(p.tokenAddress.toLowerCase(), {
+      ...toRow(p, nowSec),
+      verdict: verdictByToken.get(p.tokenAddress.toLowerCase()) ?? null,
+    });
+  }
+  const rows = kept
+    .map((p) => unscreened.get(p.tokenAddress.toLowerCase()))
+    .filter((r): r is DiscoveryRow => r !== undefined);
   // Graduated first, then by 24h move: a coin that just made it off the
   // launchpad is the thing this page exists to surface.
   rows.sort((a, b) => Number(b.graduated) - Number(a.graduated) || (b.change24hPct ?? 0) - (a.change24hPct ?? 0));
@@ -463,7 +504,7 @@ async function build(): Promise<Payload> {
   const degraded =
     !chain.launchpad || !chain.meta || !chain.facts || !chain.clock || (reached === 0 && asked > 0);
 
-  return {
+  const payload: Payload = {
     fetchedAt: nowSec,
     scanned: all.length,
     // False only when NOT ONE feed answered. A partial read is still a read.
@@ -478,4 +519,5 @@ async function build(): Promise<Payload> {
     verdictsWhy,
     degraded,
   };
+  return { payload, unscreened };
 }
