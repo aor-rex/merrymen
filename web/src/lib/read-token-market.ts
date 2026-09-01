@@ -29,6 +29,15 @@ export interface TokenMarket {
   /** Decided from the static stock list, so this is never a guess. */
   kind: "stock" | "etf" | "memecoin";
   /**
+   * The registry's ticker for a LISTED token, and null for anything else.
+   *
+   * The ledger only knows a symbol for a token some agent holds, so a stock
+   * token nobody has bought rendered as "Token" on a page that could name it
+   * exactly. Not filled for a coin: the index's label is "CHUMP / WETH 1%",
+   * a pool name rather than a ticker, and it is attacker-chosen besides.
+   */
+  symbol: string | null;
+  /**
    * found  — the index answered, and it described this token.
    * absent — the index answered, and this token was not in what it returned.
    * unread — the index could not be asked at all.
@@ -72,6 +81,8 @@ export async function readTokenMarket(
     !!symbol &&
     STOCK_TOKENS.some((s) => s.symbol === symbol && s.address.toLowerCase() !== addr);
 
+  const registrySymbol = listed?.symbol ?? null;
+
   if (listed) {
     // fetchMarket returns a row for every listed token whether or not the
     // chain answered, with nulls where it did not — so the token is always
@@ -80,9 +91,9 @@ export async function readTokenMarket(
     try {
       const market = await fetchMarket();
       const row = market.tokens.find((t) => t.address.toLowerCase() === addr) ?? null;
-      return { kind: listed.kind, read: row ? "found" : "unread", stock: row, coin: null, symbolClash };
+      return { kind: listed.kind, read: row ? "found" : "unread", stock: row, coin: null, symbolClash, symbol: registrySymbol };
     } catch {
-      return { kind: listed.kind, read: "unread", stock: null, coin: null, symbolClash };
+      return { kind: listed.kind, read: "unread", stock: null, coin: null, symbolClash, symbol: registrySymbol };
     }
   }
 
@@ -93,7 +104,7 @@ export async function readTokenMarket(
     // against those, this would report "no market data" for a coin the index
     // had just described in full.
     const row = await readPoolRow(addr);
-    if (row) return { kind: "memecoin", read: "found", stock: null, coin: row, symbolClash };
+    if (row) return { kind: "memecoin", read: "found", stock: null, coin: row, symbolClash, symbol: registrySymbol };
 
     // Genuinely not among the pools the index returned. That is only an absence
     // if the index answered at all, which is the distinction this file exists
@@ -105,8 +116,9 @@ export async function readTokenMarket(
       stock: null,
       coin: null,
       symbolClash,
+      symbol: registrySymbol,
     };
   } catch {
-    return { kind: "memecoin", read: "unread", stock: null, coin: null, symbolClash };
+    return { kind: "memecoin", read: "unread", stock: null, coin: null, symbolClash, symbol: registrySymbol };
   }
 }

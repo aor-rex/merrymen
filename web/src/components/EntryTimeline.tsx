@@ -32,9 +32,33 @@ export interface Entry {
   at: number;
   /** Position value, used only to order overlaps — never drawn as a y value. */
   size: number;
+  /** A simulated fill. Drawn dashed, because a pretend entry is not an entry. */
+  paper?: boolean;
 }
 
-export function EntryTimeline({ entries }: { entries: Entry[] }) {
+export function EntryTimeline({
+  entries,
+  fillsRead = true,
+}: {
+  entries: Entry[];
+  /**
+   * Whether the fills query ANSWERED. Default true so existing callers are
+   * unchanged; the token page passes the real thing.
+   */
+  fillsRead?: boolean;
+}) {
+  // CHECKED FIRST, and that order is the whole point. The sentence below is a
+  // positive claim about ledger RETENTION, and it used to be printed whenever
+  // the list was empty — including when the query had thrown on a ledger
+  // predating the fill columns, where nothing at all is known about why.
+  if (!fillsRead) {
+    return (
+      <p className="mm-note">
+        The ledger did not answer for this token&rsquo;s fills, so there are no entry times below.
+      </p>
+    );
+  }
+
   if (entries.length === 0) {
     return (
       <p className="mm-note">
@@ -63,9 +87,11 @@ export function EntryTimeline({ entries }: { entries: Entry[] }) {
           return (
             <span
               key={`${e.name}:${e.at}:${i}`}
-              className="pin"
+              className={`pin${e.paper ? " unsettled" : ""}`}
               style={{ left: `${x}%`, zIndex: sorted.length - i }}
-              title={`${e.name} — ${new Date(e.at * 1000).toLocaleString()}`}
+              title={`${e.name} — ${new Date(e.at * 1000).toLocaleString()}${
+                e.paper ? " (paper)" : ""
+              }`}
             >
               <AgentAvatar name={e.name} slug={e.slug ?? null} size={26} />
             </span>

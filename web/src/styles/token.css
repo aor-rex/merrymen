@@ -16,7 +16,7 @@
 
 .mm-timeline .track {
   position: relative;
-  height: 46px;
+  height: 72px;
   /* Room for an avatar centred on either end without clipping. */
   margin: 0 13px;
 }
@@ -37,6 +37,11 @@
      rather than one smeared shape. */
   border-radius: var(--mm-r-agent);
   box-shadow: 0 0 0 2px var(--mm-bg);
+}
+
+.mm-timeline .pin.unsettled {
+  outline: 1px dashed var(--mm-edge-2);
+  outline-offset: 2px;
 }
 
 .mm-timeline .axis {
@@ -65,8 +70,7 @@
   border-bottom: 1px solid var(--mm-edge);
 }
 
-.mm-holders li > a,
-.mm-holders li > span {
+.mm-holders li > .row {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) auto auto auto auto;
   align-items: center;
@@ -76,9 +80,56 @@
   transition: background-color var(--mm-fast) var(--mm-ease);
 }
 
-.mm-holders li > a:hover {
+.mm-holders li:hover > .row {
   background: var(--mm-surface-2);
+}
+
+.mm-holders .who:hover {
   color: inherit;
+}
+
+/* THE LINE THE REFERENCE PRODUCT HAS AND EVERY OTHER HOLDERS TABLE LACKS: not
+   just who is in it and for how much, but why they say they are. */
+.mm-holders .said {
+  margin: 0 0 var(--mm-2);
+  padding: 0 var(--mm-2);
+  /* Aligned under the name, not the avatar — it is that agent's speech. */
+  padding-left: calc(28px + var(--mm-3) + var(--mm-2));
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--mm-tx-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Said nothing lately is a fact about the window, and it is quieter than
+   speech. It is NOT the same as having no slug to match on, which renders
+   nothing at all. */
+.mm-holders .said.none {
+  font-style: italic;
+  color: var(--mm-faint);
+}
+
+/* EVERY CELL PINNED TO ITS COLUMN. The paper chip is conditional, so with
+   auto-placement a row without one shifted every figure after it one track to
+   the left — the value, cost and P&L of a live agent did not line up with those
+   of a paper one, in a table whose whole job is comparing them. */
+.mm-holders .who {
+  grid-column: 2;
+}
+.mm-holders .row > .mm-chip {
+  grid-column: 3;
+}
+.mm-holders .val {
+  grid-column: 4;
+}
+.mm-holders .basis {
+  grid-column: 5;
+}
+.mm-holders .chg {
+  grid-column: 6;
 }
 
 .mm-holders .who {
@@ -98,7 +149,14 @@
   color: var(--mm-dim);
 }
 
+/* FIXED WIDTHS AND RIGHT-ALIGNED, because every row is its own grid: an
+   auto-sized track is measured against that row's own content, so "cost
+   $96.50" and "cost $168.00" put their columns in different places and the
+   figures a reader is comparing did not line up. The 1fr name column absorbs
+   the slack, including the paper chip's track when a row has no chip. */
 .mm-holders .val {
+  min-width: 84px;
+  text-align: right;
   font-size: 13px;
   font-weight: 600;
   color: var(--mm-tx-2);
@@ -106,6 +164,8 @@
 }
 
 .mm-holders .basis {
+  min-width: 104px;
+  text-align: right;
   font-size: 11px;
   color: var(--mm-faint);
   white-space: nowrap;
@@ -129,23 +189,32 @@
 }
 
 @media (max-width: 520px) {
-  .mm-holders li > a,
-  .mm-holders li > span {
+  .mm-holders li > .row {
     grid-template-columns: 28px minmax(0, 1fr) auto;
     row-gap: 2px;
+  }
+
+  .mm-holders .said {
+    padding-left: var(--mm-2);
   }
   /* The basis is the first thing to go: it is the least useful figure on a
      phone and the row is better short than complete. */
   .mm-holders .basis {
     display: none;
   }
+  .mm-holders .row > .mm-chip {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
   .mm-holders .val {
     grid-column: 3;
     grid-row: 1;
   }
   .mm-holders .chg {
-    grid-column: 2 / 4;
+    grid-column: 3;
     grid-row: 2;
+    text-align: right;
   }
 }
 

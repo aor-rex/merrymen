@@ -91,7 +91,17 @@ export function Ticker() {
         {tokens.map((t) => {
           const stale = t.priceUpdatedAt !== null && Date.now() / 1000 - t.priceUpdatedAt > 3600;
           return (
-            <Link key={t.address} href={`/t/${t.address}`} className="mm-tick">
+            // NO PREFETCH. Fourteen of these sit in the viewport on every
+            // page of the product, and /t/[token] is now force-dynamic — so
+            // the default would warm fourteen full server renders, each one a
+            // ledger read and a market read, every time anyone looks at
+            // anything.
+            <Link
+              key={t.address}
+              href={`/t/${t.address}`}
+              className="mm-tick"
+              prefetch={false}
+            >
               <span className="k">{t.symbol}</span>
               <b className="mono">{money(t.priceUsd)}</b>
               {t.volume24hUsd !== null && (
