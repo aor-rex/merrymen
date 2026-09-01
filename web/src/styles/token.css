@@ -148,3 +148,176 @@
     grid-row: 2;
   }
 }
+
+/* ── the stat strip, the timeframe grid, the flow bars ────────────────────── */
+
+.mm-tok-facts,
+.mm-tok-flow {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+/* Conditions sit above the figures: a halt is not a number. */
+.mm-tok-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mm-2);
+  margin-bottom: var(--mm-3);
+}
+
+.mm-tok-strip,
+.mm-tok-tf {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--mm-3);
+  margin: 0;
+}
+
+.mm-tok-tf {
+  margin-top: var(--mm-4);
+  padding-top: var(--mm-4);
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-tok-cell dt {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-tok-cell dd {
+  margin: 2px 0 0;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--mm-tx);
+  /* A figure broken over two lines reads as two numbers. */
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A word standing in for a figure — "no feed", "pre-graduation". It is an
+   answer, not a number, so it does not wear the figure's weight. */
+.mm-tok-cell dd .soft {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--mm-dim);
+}
+
+.mm-tok-cell dd .mm-chip {
+  margin-left: var(--mm-2);
+  vertical-align: 1px;
+}
+
+.mm-tok-tf dd.up {
+  color: var(--mm-up);
+}
+.mm-tok-tf dd.down {
+  color: var(--mm-down);
+}
+.mm-tok-tf dd.flat {
+  color: var(--mm-dim);
+}
+
+/* ── the split bars ──────────────────────────────────────────────────────── */
+
+.mm-tok-flowbars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mm-4);
+  margin-top: var(--mm-4);
+}
+
+.mm-tok-bar {
+  display: grid;
+  grid-template-columns: 58px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mm-3);
+}
+
+.mm-tok-bar .lab {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-tok-bar .lo,
+.mm-tok-bar .hi {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mm-tok-bar .lo {
+  color: var(--mm-up);
+}
+.mm-tok-bar .hi {
+  color: var(--mm-down);
+}
+
+/* The track is the page's own surface when nothing traded, which is how a
+   window with no trades reads as empty rather than as an even split. */
+.mm-tok-bar .t {
+  display: flex;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--mm-surface-3);
+}
+
+.mm-tok-bar .t u,
+.mm-tok-bar .t s {
+  display: block;
+  height: 100%;
+  text-decoration: none;
+}
+
+.mm-tok-bar .t u {
+  background: var(--mm-up);
+}
+.mm-tok-bar .t s {
+  background: var(--mm-down);
+}
+
+/* ── the thin-holders callout ────────────────────────────────────────────── */
+
+/* Deliberately NOT --mm-warn: that colour means the wall said no, and nothing
+   else in this product may borrow it. */
+.mm-tok-risk {
+  margin: var(--mm-4) 0 0;
+  padding: var(--mm-3);
+  border: 1px solid var(--mm-edge-2);
+  border-radius: var(--mm-r-chip);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--mm-dim);
+}
+
+@media (max-width: 520px) {
+  /* Four across becomes two, the same collapse the agent stats use. Five cells
+     would leave an orphan on the second row, which is why the strip is four. */
+  .mm-tok-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--mm-4) var(--mm-3);
+  }
+
+  /* The timeframe grid stays four across: the cells are narrow to begin with
+     and the row reads as a sequence. */
+  .mm-tok-tf {
+    gap: var(--mm-2);
+  }
+
+  .mm-tok-tf dt {
+    font-size: 9.5px;
+  }
+
+  .mm-tok-bar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: var(--mm-1);
+  }
+
+  .mm-tok-bar .lab {
+    grid-column: 1 / -1;
+  }
+}

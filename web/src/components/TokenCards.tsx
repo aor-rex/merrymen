@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { compactUsd } from "@/lib/format";
 import type { DiscoveryRow, FreshRow, Payload } from "@/lib/read-discoveries";
 
 /**
@@ -23,14 +24,10 @@ export function shortAge(sec: number | null): string {
   return `${Math.round(sec / 86_400)}d`;
 }
 
-/** $1.2M / $84k / $912 — never more precision than the number deserves. */
-export function compactUsd(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-}
+// Moved to lib/format so the token page's SERVER-rendered stat strip can use
+// it without pulling this client module into its bundle. Re-exported because
+// the name is used across the coins view.
+export { compactUsd };
 
 /**
  * WHICH READS FAILED, said once per page rather than once per card.
