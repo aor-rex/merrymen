@@ -42,6 +42,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
+import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
@@ -168,6 +169,30 @@ function heartbeatAt(tenant: string): number | null {
 async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
   const grant = await getGrantStore().get(tenant);
   if (!grant) return false;
+
+  // BACKFILL THE PUBLIC ID.
+  //
+  // POST /api/grants mints one on SIGNATURE, and nothing re-signs — so every
+  // agent granted before the identity store existed has no row, and its posts
+  // render unlinked for ever. ensure() is idempotent and never changes an
+  // existing slug, so this is a no-op after the first pass.
+  //
+  // HERE AND NOT ELSEWHERE. The grant is already in hand, so this costs no
+  // extra read of a store that decrypts. Every tenant passes through here on
+  // spawn, so one deploy covers the fleet. It cannot live in a CHILD:
+  // CHILD_SECRET_STRIP removes DATABASE_URL and getIdentityStore() picks its
+  // backend on exactly that variable, so a child would silently write a file
+  // the web tier never reads. And it must not live in the public read path —
+  // those routes are cached and unauthenticated, and an anonymous GET that
+  // mints identities is a write nobody asked for.
+  //
+  // Best effort: an identity hiccup must never stop a tenant being armed.
+  try {
+    await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`);
+  } catch (e) {
+    log(`${tenant}: could not mint a public id — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true });
   // grant.json holds the SESSION key (the store already refused any owner key),
@@ -497,6 +522,16 @@ async function mirrorLedgers(): Promise<void> {
       // stall is permanent and silent. So the failures print unconditionally,
       // for the same reason fleetHealth prints unconditionally: an operator who
       // learns to read silence as health cannot see a wedged mirror.
+      // A REWIND MEANS ROWS WERE LOST BEFORE IT. Printed separately from the
+      // counts because it is not routine: it says this tenant's child ledger
+      // was rebuilt under a watermark that outlived it, and everything the
+      // append-only tables held before that point is gone with the old file.
+      if (r.restarted) {
+        const what = Object.entries(r.restarted)
+          .map(([k, v]) => `${k} (was ${v.was})`)
+          .join(", ");
+        log(`ledger mirror: ${tenant} CURSOR REWOUND — the child ledger was rebuilt beneath it: ${what}`);
+      }
       if (r.failed) {
         const why = Object.entries(r.failed)
           .map(([k, v]) => `${k}: ${v}`)

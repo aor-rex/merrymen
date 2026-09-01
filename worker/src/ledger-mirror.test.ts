@@ -129,7 +129,10 @@ describe("the ledger mirror", () => {
     const shared = mem(DEST);
     await mirrorTenant({ tenant: "0xten", child, shared });
     const second = await mirrorTenant({ tenant: "0xten", child, shared });
-    assert.equal(second.copied.events, undefined, "nothing new to copy");
+    // Zero, not absent. An absent count is indistinguishable from a table
+    // nobody looked at, which is exactly how a stalled cursor hid in
+    // production for as long as it did.
+    assert.equal(second.copied.events, 0, "nothing new to copy, and it says so");
     assert.equal(await count(shared, "events"), 5, "events must not double");
     assert.equal(await count(shared, "trades"), 5, "trades must not double");
   });
@@ -189,7 +192,12 @@ describe("the ledger mirror", () => {
     raw.exec("INSERT INTO events (agent_id, level, message, created_at) VALUES ('0xa','ok','only',1)");
     const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(raw), shared: mem(DEST) });
     assert.equal(r.copied.events, 1);
+    // A table that does not EXIST is a failure, not an empty one — the SELECT
+    // throws — so it has no count and is named in `failed` instead. That
+    // distinction is the point: "could not read" and "nothing to read" must
+    // never render the same, here or anywhere else in this codebase.
     assert.equal(r.copied.trades, undefined);
+    assert.ok(r.failed?.trades, "an unreadable table is reported as failed");
   });
 
   it("CARRIES THE FLOW TERM — without it a deposit reads as a gain", async () => {
@@ -418,6 +426,58 @@ describe("the ledger mirror", () => {
     await mirrorTenant({ tenant: "0xten", child, shared });
     const got = (await shared.prepare("SELECT COUNT(*) AS n FROM decisions WHERE at = 5000").get()) as { n: number };
     assert.equal(Number(got.n), 2, "both rows from that second survived");
+  });
+
+  it("RECOVERS WHEN THE CHILD LEDGER IS REBUILT BENEATH THE WATERMARK", async () => {
+    // The bug this pins cost the entire fleet its trade tape, indefinitely, and
+    // reported success the whole time.
+    //
+    // mirror_state lives in shared Postgres; `last_id` is an id in the CHILD's
+    // sqlite. Those two do not have the same lifetime — a child home sits on the
+    // orchestrator container's own filesystem with no volume behind it, so a
+    // redeploy destroys the ledger and AUTOINCREMENT restarts at 1 under a
+    // watermark that still reads five. `id > from` then matches nothing for
+    // ever, and the empty path recorded neither a count nor a failure.
+    //
+    // Nothing in this suite could have caught it: all the other cases reuse one
+    // seedChild(), so the source is never reborn.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "trades"), 5, "the first incarnation arrived");
+
+    // The redeploy: a brand-new ledger, ids restarting at 1.
+    const rebornRaw = new DatabaseSync(":memory:");
+    rebornRaw.exec(SRC);
+    for (let i = 1; i <= 2; i++) {
+      rebornRaw.exec(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',${i},'paper',1,${900 + i})`,
+      );
+    }
+    const reborn = wrapSqlite(rebornRaw);
+
+    const r = await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    assert.equal(r.copied.trades, 2, "rows written after the rebuild must arrive");
+    assert.equal(r.restarted?.trades?.was, 5, "and the rewind is reported, not silent");
+    assert.equal(await count(shared, "trades"), 7);
+
+    // And still exactly-once against the NEW ledger.
+    const again = await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    assert.equal(again.copied.trades, 0, "no second delivery");
+    assert.equal(await count(shared, "trades"), 7);
+  });
+
+  it("does NOT rewind while the ledger is merely idle", async () => {
+    // The rewind must be impossible to trigger within one incarnation: this
+    // file's exactly-once property rests solely on the watermark, so a spurious
+    // rewind duplicates the tape — and a trade shown twice is worse than one
+    // shown late.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const second = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(second.restarted, undefined, "an idle pass is not a rebuild");
+    assert.equal(await count(shared, "trades"), 5, "and nothing was copied twice");
   });
 
   it("carries the positions leg of the equity identity", async () => {
