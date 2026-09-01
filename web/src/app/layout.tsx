@@ -1,6 +1,15 @@
 import type { Metadata, Viewport } from "next";
 import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
-import "./globals.css";
+/**
+ * The design system, and ONLY the design system.
+ *
+ * This used to import globals.css, which meant 1,324 lines of the old shell —
+ * its palette, its fixed background photo, its element-scoped rules — applied
+ * to every route in the product whether or not the route wanted them. The two
+ * pages that still want them import them directly now; see styles/legacy.css.
+ */
+import "@/styles/tokens.css";
+import "@/styles/base.css";
 import { RegisterSW } from "@/components/RegisterSW";
 
 // The merrymen.dev typefaces — used on the setup/settings screens (.setup-look)

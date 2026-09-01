@@ -33,7 +33,12 @@ import {
   type SavedWallet,
 } from "@/lib/session";
 import { canStart } from "@/lib/can-start";
-import "../app/console.css";
+// QUARANTINED, not fixed. This page moves real money, holds owner private keys
+// and is 1,750 lines of signature and recovery logic — the last place to
+// restyle during a redesign. It keeps the sheets it was written against, and
+// they no longer reach anything else.
+import "@/styles/legacy.css";
+import "@/styles/legacy-console.css";
 import "./grant.css";
 
 const DEFAULTS: GrantCaps = {

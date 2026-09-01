@@ -82,7 +82,10 @@ test("nothing in web/ still falls back to testnet when a chain is unknown", () =
   // These fired precisely during onboarding — before a chain had been chosen —
   // so the console stamped "testnet 46630" into its footer and offered a faucet
   // to someone the grant page was about to put on mainnet.
-  for (const f of ["web/src/lib/session.ts", "web/src/app/app/Console.tsx"]) {
+  //
+  // The console was replaced by /you; the property belongs to whatever renders
+  // an agent's chain, not to the file that used to.
+  for (const f of ["web/src/lib/session.ts", "web/src/app/you/YouClient.tsx"]) {
     const src = readFileSync(f, "utf8");
     assert.equal(/robinhoodTestnet\.id/.test(src), false, `${f} still defaults to testnet`);
     assert.equal(/\?\?\s*46630/.test(src), false, `${f} still falls back to 46630`);

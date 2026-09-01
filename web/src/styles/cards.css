@@ -1,0 +1,294 @@
+/**
+ * Token cards. Scoped under .mm, enforced by styles/scoped.test.ts.
+ */
+
+.mm-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--mm-3);
+  padding: var(--mm-4) 0;
+}
+
+.mm-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mm-3);
+  padding: var(--mm-4);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-card);
+  background: var(--mm-surface);
+}
+
+.mm-card.skel {
+  min-height: 168px;
+  background: var(--mm-surface-2);
+  border-style: dashed;
+}
+
+.mm-card > header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mm-3);
+}
+
+/* TOKEN = CIRCLE. An agent avatar is a squircle, and that difference is the
+   only thing telling the two apart at 24px with no label. */
+.mm .mm-art {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: var(--mm-r-token);
+  object-fit: cover;
+  background: var(--mm-surface-3);
+}
+
+.mm .mm-art.fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mm-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--mm-dim);
+}
+
+.mm-card .idc {
+  min-width: 0;
+  flex: 1;
+}
+
+.mm-card .tick {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--mm-2);
+}
+
+.mm-card .tick b {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--mm-tx);
+}
+
+.mm-card .tick .nm {
+  font-size: 12px;
+  color: var(--mm-dim);
+}
+
+.mm-card .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mm-2);
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--mm-faint);
+}
+
+.mm-card .chg {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mm-card .chg.up {
+  color: var(--mm-up);
+}
+.mm-card .chg.down {
+  color: var(--mm-down);
+}
+
+/* ── the curve progress bar ──────────────────────────────────────────────── */
+
+.mm-grad {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+}
+
+.mm-grad .gbar {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--mm-surface-3);
+  overflow: hidden;
+}
+
+.mm-grad .gbar i {
+  display: block;
+  height: 100%;
+  background: var(--mm-wire);
+}
+
+.mm-grad .glab {
+  font-size: 10.5px;
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+/* ── what it says about itself ───────────────────────────────────────────── */
+
+.mm-card .say {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--mm-tx-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mm-card .say.none {
+  color: var(--mm-faint);
+  font-style: italic;
+}
+
+/* ── figures ─────────────────────────────────────────────────────────────── */
+
+.mm-figs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--mm-2);
+  font-size: 12.5px;
+  color: var(--mm-tx-2);
+}
+
+.mm-figs span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mm-figs i {
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+/* ── the agent's verdict ─────────────────────────────────────────────────── */
+
+.mm-verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mm-2);
+  padding: var(--mm-2) var(--mm-3);
+  border-radius: var(--mm-r-chip);
+  border-left: 2px solid var(--mm-wire);
+  background: var(--mm-surface-2);
+}
+
+/* Marks, never a score out of five — conviction is an ORDERING, not a rating. */
+.mm-verdict .pips {
+  font-family: var(--mm-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--mm-wire);
+  white-space: nowrap;
+}
+
+.mm-verdict .vsay {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--mm-tx-2);
+}
+
+/* ── footer ──────────────────────────────────────────────────────────────── */
+
+.mm-card > footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--mm-2);
+  margin-top: auto;
+  padding-top: var(--mm-1);
+}
+
+.mm-card .soc {
+  font-family: var(--mm-mono);
+  font-size: 11px;
+  color: var(--mm-dim);
+}
+
+.mm-card a.soc:hover {
+  color: var(--mm-wire);
+}
+
+.mm-card .soc.mute {
+  color: var(--mm-faint);
+}
+
+.mm-card .soc.go {
+  margin-left: auto;
+  color: var(--mm-wire);
+  font-weight: 600;
+}
+
+.mm-badge {
+  font-family: var(--mm-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  border-radius: var(--mm-r-chip);
+  white-space: nowrap;
+}
+
+.mm-badge.in {
+  color: var(--mm-up);
+  border: 1px solid color-mix(in srgb, var(--mm-up) 30%, transparent);
+}
+
+.mm-badge.out {
+  color: var(--mm-dim);
+  border: 1px solid var(--mm-edge-2);
+}
+
+/* ── the one degraded-read banner ────────────────────────────────────────── */
+
+.mm-readfail {
+  margin: var(--mm-4) 0 0;
+  padding: var(--mm-3);
+  border: 1px solid color-mix(in srgb, var(--mm-warn) 30%, transparent);
+  border-radius: var(--mm-r-chip);
+  background: color-mix(in srgb, var(--mm-warn) 7%, transparent);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--mm-warn);
+}
+
+/* ── the segmented control ───────────────────────────────────────────────── */
+
+.mm-seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface-2);
+}
+
+.mm-seg button {
+  min-block-size: 30px;
+  padding: 0 var(--mm-3);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mm-dim);
+  transition:
+    background-color var(--mm-fast) var(--mm-ease),
+    color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-seg button.on {
+  background: var(--mm-surface-3);
+  color: var(--mm-tx);
+}
+
+@media (max-width: 520px) {
+  .mm-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

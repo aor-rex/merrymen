@@ -79,6 +79,16 @@ export interface DiscoveryRow {
   graduated: boolean;
   /** Still on its bonding curve — treat `reserveUsd` with suspicion. */
   onCurve: boolean;
+  /**
+   * The scout's own line on this coin, when it had one.
+   *
+   * Declared here because the builder has always ATTACHED it while the type
+   * never admitted it — so every consumer had to re-declare this interface
+   * locally, which is exactly how the console ended up with a private copy of
+   * it. Null is a real answer: the scout looked and passed. `verdictsWhy` on
+   * the payload says whether it could look at all.
+   */
+  verdict?: { conviction: number; reason: string } | null;
 }
 
 function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
@@ -307,7 +317,7 @@ async function readFresh(): Promise<{ rows: FreshRow[]; chain: ChainStatus }> {
   }
 }
 
-interface Payload {
+export interface Payload {
   fetchedAt: number;
   scanned: number;
   indexUnreachable: boolean;

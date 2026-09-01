@@ -192,3 +192,51 @@
   padding-top: var(--mm-4);
   border-top: 1px solid var(--mm-edge);
 }
+
+/* ── the kill switch ─────────────────────────────────────────────────────── */
+/*
+ * Restyled here rather than importing globals.css into this page. Pulling that
+ * sheet in for two classes would also drag the old palette and its fixed
+ * background photo onto a scrolling surface, which is most of what this
+ * redesign removed. The component itself is untouched — it moves money and its
+ * two-step arm/confirm is not something to rewrite for a colour.
+ */
+.mm .killall {
+  width: 100%;
+  min-block-size: 44px;
+  padding: 12px 0;
+  border-radius: var(--mm-r-chip);
+  border: 1px solid color-mix(in srgb, var(--mm-down) 45%, transparent);
+  background: color-mix(in srgb, var(--mm-down) 14%, transparent);
+  color: var(--mm-down);
+  font-family: var(--mm-sans);
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: background-color var(--mm-fast) var(--mm-ease);
+}
+
+.mm .killall:hover {
+  background: color-mix(in srgb, var(--mm-down) 24%, transparent);
+}
+
+/* Armed reads as loud without an animation loop: this is a destructive control
+   and it should look like one, but a pulse running forever on a page somebody
+   left open is a cost with no reader. */
+.mm .killall.armed {
+  background: var(--mm-down);
+  border-color: var(--mm-down);
+  color: #0b0f10;
+}
+
+.mm .killall:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mm .killall-note {
+  margin: var(--mm-2) 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--mm-faint);
+}

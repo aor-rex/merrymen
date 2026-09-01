@@ -23,6 +23,20 @@ import path from "node:path";
 
 const DIR = path.join(process.cwd(), "web", "src", "styles");
 
+/**
+ * The two sheets that are deliberately NOT scoped.
+ *
+ * They are the old system, quarantined by IMPORT SITE rather than by prefix:
+ * only /grant and /settings pull them in, and those two pages want exactly the
+ * unscoped element rules the rest of the product is being moved off. Holding
+ * them to the .mm rule would mean rewriting 1,500 lines of stylesheet that
+ * serve a wallet wizard nobody should be restyling during a redesign.
+ *
+ * They live in this directory so that everything with a stylesheet is in one
+ * place and their quarantine is visible, not so that they are covered here.
+ */
+const QUARANTINED = new Set(["legacy.css", "legacy-console.css"]);
+
 /** Selectors that may legitimately sit unscoped at the top level. */
 const ALLOWED_BARE = new Set([":root", "html", "body", "*", "from", "to"]);
 
@@ -112,10 +126,39 @@ function parts(selectorList: string): string[] {
 }
 
 describe("the new stylesheets are scoped, provably", () => {
-  const files = readdirSync(DIR).filter((f) => f.endsWith(".css"));
+  const files = readdirSync(DIR).filter((f) => f.endsWith(".css") && !QUARANTINED.has(f));
 
   it("there are stylesheets to check", () => {
     assert.ok(files.length > 0, "no .css under web/src/styles");
+  });
+
+  it("the quarantined sheets are only reachable from the two pages that want them", () => {
+    // The exclusion above is only safe while nothing else imports them. If a
+    // third page picks one up, the old palette and its fixed background photo
+    // are back on a surface that was moved off them deliberately.
+    const web = path.join(process.cwd(), "web", "src");
+    const importers: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          walk(p);
+        } else if (/\.tsx?$/.test(e.name)) {
+          const src = readFileSync(p, "utf8");
+          // An IMPORT, not a mention. layout.tsx's comment explains why it no
+          // longer imports these, and a looser pattern counted that as a
+          // violation of the rule the comment describes.
+          if (/import\s+["']@\/styles\/legacy(-console)?\.css["']/.test(src)) {
+            importers.push(path.relative(web, p));
+          }
+        }
+      }
+    };
+    walk(web);
+    assert.deepEqual(
+      importers.map((p) => p.split(path.sep).join("/")).sort(),
+      ["app/grant/page.tsx", "app/settings/page.tsx"],
+    );
   });
 
   for (const file of files) {

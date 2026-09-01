@@ -73,8 +73,14 @@ export function YouClient() {
 
   useEffect(() => {
     let alive = true;
+    // GATE THE POLL, NEVER THE FIRST LOAD. Skipping the initial fetch when the
+    // document is hidden leaves the skeleton on screen forever — a tab opened
+    // in the background, or restored by a session manager, never resolves and
+    // there is no second chance because the interval is gated too.
+    let first = true;
     const load = async () => {
-      if (document.visibilityState !== "visible") return;
+      if (!first && document.visibilityState !== "visible") return;
+      first = false;
       try {
         const [f, g, s] = await Promise.all([
           fetch("/api/feed").then((r) => r.json()),
