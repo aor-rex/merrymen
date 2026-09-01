@@ -80,6 +80,7 @@ import {
   type AgentExecutor,
   type Call,
   type ExecuteHooks,
+  type ExecuteOptions,
   type ExecutionResult,
 } from "./executor";
 import { createSponsor, type Sponsor } from "./paymaster";
@@ -1500,12 +1501,13 @@ async function main() {
   const autoConvertExecute = async (
     executor: AgentExecutor,
     calls: Call[],
+    options?: ExecuteOptions,
   ): Promise<ExecutionResult> => {
     const execution = executor.execute(calls, {
       onSubmitted: async (userOpHash) => {
         console.log(`[auto-convert] submitted: ${userOpHash}`);
       },
-    });
+    }, options);
     const tracked = execution
       .then(() => undefined, () => undefined)
       .finally(() => {
@@ -1530,6 +1532,9 @@ async function main() {
   // One re-sign notice per arm, not per tick — a warn event every minute is
   // noise, and the event log is the owner's record.
   let autoConvertSignNoteShown = false;
+  // One deployment-funding notice per arm, not per tick — same reasoning as
+  // the re-sign notice above.
+  let autoConvertDeployNoteShown = false;
   // For a short window after a BALANCE change (a deposit), skip-path decisions
   // are logged so a silent non-convert is diagnosable instead of invisible.
   // Ticking the timestamp on every tick would spam, so it is only refreshed
@@ -5712,6 +5717,7 @@ async function main() {
           );
         }
       } else {
+      autoConvertAttempt: {
       try {
         console.log(`[auto-convert] fetching gas price`);
         const gasPrice = await mainnetClient().getGasPrice().catch(() => 0n);
@@ -5734,19 +5740,52 @@ async function main() {
         // floor below is only the fallback if the probe cannot run.
         let deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
         if (!deployed && active.executor) {
+          // The deployment op is a FIXED one-time cost, independent of deposit
+          // size. If the balance cannot prefund it, do not attempt — the
+          // bundler would refuse (AA21) and the event would read like a bug.
+          // Say exactly what to do instead. Verified live: a 0.00449 ETH
+          // balance sat just under the ~6.2M-gas requirement at 0.71 gwei.
+          const deployFloor = gasPrice * 9_500_000n; // bounded deploy op ≈ 7.8M raw × 1.2 headroom
+          if (gasSponsored()) {
+            // Sponsored: the paymaster covers the deployment gas, so the
+            // account's own balance is irrelevant here — AA21 never fires.
+            console.log(`[auto-convert] account undeployed — deployment is gas-sponsored, deploying at any balance`);
+          } else if (gasPrice > 0n && lastGasWei < deployFloor) {
+            if (!autoConvertDeployNoteShown) {
+              autoConvertDeployNoteShown = true;
+              await addEvent(
+                agentId,
+                "warn",
+                `auto-convert is waiting — the account needs a one-time setup fee of about ${formatUnits(deployFloor, 18)} ETH to go live (it has ${formatUnits(lastGasWei, 18)}). Top up the smart account by about ${formatUnits(deployFloor - lastGasWei, 18)} more ETH; the setup runs once, and every deposit after that converts normally.`,
+              );
+            }
+            console.log(`[auto-convert] NOT deploying: balance ${formatUnits(lastGasWei, 18)} ETH is below the one-time setup cost ${formatUnits(deployFloor, 18)} ETH — waiting for a top-up`);
+            lastAutoConvertAt = Date.now(); // re-check hourly, not every tick
+            break autoConvertAttempt; // skip this tick's convert; nothing was attempted
+          }
           console.log(`[auto-convert] account undeployed — sending a dust approve first to deploy it`);
           try {
-            await autoConvertExecute(active.executor, [
-              {
-                to: CASH.USDG as `0x${string}`,
-                value: 0n,
-                data: encodeFunctionData({
-                  abi: erc20Abi,
-                  functionName: "approve",
-                  args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
-                }),
-              },
-            ]);
+            await autoConvertExecute(
+              active.executor,
+              [
+                {
+                  to: CASH.USDG as `0x${string}`,
+                  value: 0n,
+                  data: encodeFunctionData({
+                    abi: erc20Abi,
+                    functionName: "approve",
+                    args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
+                  }),
+                },
+              ],
+              // Deployment is a FIXED factory computation, not a swap: the
+              // estimate does not jitter, so 1.2x headroom is enough and the
+              // swap-tuned 3M ceiling would refuse the honest number (measured
+              // 15.5M bounded at 2x). The EntryPoint prefunds the BOUNDED
+              // limits, so light headroom is also what keeps AA21 reachable —
+              // 2x inflation alone pushed the prefund past a 0.010 ETH balance.
+              { bounds: { headroomBps: 12_000, disagreementBps: 40_000, absoluteMax: 20_000_000n } },
+            );
             deployed =
               ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
             console.log(`[auto-convert] account deployed=${deployed} — proceeding with the convert`);
@@ -5758,14 +5797,19 @@ async function main() {
           }
         }
         // Prefund sizing, ON TOP OF the swap's msg.value — both leave the
-        // account in the SAME operation, at the executor's 2x headroom:
-        // deployed = verification + call + preVerification ≈ 2M gas;
-        // undeployed fallback (probe failed/unavailable) ≈ 5M gas.
-        const opFloor = gasPrice * (deployed ? 2_000_000n : 5_000_000n);
+        // account in the SAME operation, at the executor's 2x headroom.
+        // SPONSORED: gas leaves the paymaster's deposit, not the account, so
+        // the account only needs to cover the msg.value itself — the floor is
+        // a small drift margin, not a UserOp cost. UNSPONSORED: the account
+        // self-pays — deployed ≈ 2M gas; undeployed fallback (the probe
+        // could not run) ≈ 5M gas.
+        const opFloor = gasSponsored()
+          ? gasPrice * 100_000n
+          : gasPrice * (deployed ? 2_000_000n : 5_000_000n);
         const reserve = pctReserve > opFloor ? pctReserve : opFloor;
         const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
         console.log(
-          `[auto-convert] economics: gasPrice=${gasPrice} reserve=${reserve} ` +
+          `[auto-convert] economics: sponsored=${gasSponsored()} gasPrice=${gasPrice} reserve=${reserve} ` +
             `balance=${lastGasWei} surplus=${surplusEth}`,
         );
         if (surplusEth > 0n && active.executor) {
@@ -5840,6 +5884,7 @@ async function main() {
           "warn",
           `auto-convert skipped — ${err instanceof Error ? err.message : String(err)}. If this says the wall refused, re-sign at /grant: keys signed before the ETH→USDG permission was added cannot convert.`,
         ).catch(() => {});
+      }
       }
       }
     } else if (cfg.autoConvertEnabled && autoConvertDebugUntil > Date.now()) {
