@@ -1493,6 +1493,40 @@ async function main() {
   // returns. Keep this guard set until that underlying promise settles so a
   // later tick cannot submit a second operation with the same account nonce.
   let autoConvertInFlight: Promise<unknown> | null = null;
+  // Bounded execution shared by the convert and its pre-deploy probe. The
+  // timeout only bounds THIS tick's wait — the underlying promise keeps the
+  // in-flight guard set until it settles, so a slow receipt can never be
+  // followed by a second submission carrying the same account nonce.
+  const autoConvertExecute = async (
+    executor: AgentExecutor,
+    calls: Call[],
+  ): Promise<ExecutionResult> => {
+    const execution = executor.execute(calls, {
+      onSubmitted: async (userOpHash) => {
+        console.log(`[auto-convert] submitted: ${userOpHash}`);
+      },
+    });
+    const tracked = execution
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (autoConvertInFlight === tracked) autoConvertInFlight = null;
+      });
+    autoConvertInFlight = tracked;
+    return Promise.race([
+      execution,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `UserOperation execution timed out after ${AUTO_CONVERT_EXECUTION_TIMEOUT_MS / 1000}s; it remains in flight and will not be retried`,
+              ),
+            ),
+          AUTO_CONVERT_EXECUTION_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+  };
   // One re-sign notice per arm, not per tick — a warn event every minute is
   // noise, and the event log is the owner's record.
   let autoConvertSignNoteShown = false;
@@ -5690,17 +5724,44 @@ async function main() {
         // 1% setting on a small balance can never strand the agent either way.
         const pct = BigInt(Math.min(Math.max(Math.round(cfg.autoConvertReservePct), 1), 50));
         const pctReserve = (lastGasWei * pct) / 100n;
-        // The prefund the EntryPoint checks is the gas cost ON TOP OF the swap's
-        // msg.value — both leave the account in the SAME operation. Prefund =
-        // (verification×3 + call + preVerification) × maxFee, all at the
-        // executor's 2x headroom. A deployed account needs ~1.2M gas; an
-        // UNDEPLOYED first op adds Kernel deployment AND counts verification
-        // ×3: ~2.5M gas. Sizing the floor below this is how AA21 "didn't pay
-        // prefund" kept recurring — the old floors (400k, then 1M) left less
-        // gas budget than the simulation required, so the bundler refused to
-        // quote at all.
-        const deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
-        const opFloor = gasPrice * (deployed ? 1_200_000n : 2_500_000n);
+        // A first operation from an UNDEPLOYED account pays Kernel deployment
+        // AND has its verification gas counted ×3 by the EntryPoint — a
+        // compound cost that left every convert attempt short of prefund
+        // (AA21 "didn't pay prefund") no matter how the floor was tuned.
+        // So DEPLOY FIRST with a policy-legal dust op — approve 0.000001 USDG
+        // to the router, the same no-op the selftest uses — and then run the
+        // convert as a normal deployed-account operation. The undeployed
+        // floor below is only the fallback if the probe cannot run.
+        let deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
+        if (!deployed && active.executor) {
+          console.log(`[auto-convert] account undeployed — sending a dust approve first to deploy it`);
+          try {
+            await autoConvertExecute(active.executor, [
+              {
+                to: CASH.USDG as `0x${string}`,
+                value: 0n,
+                data: encodeFunctionData({
+                  abi: erc20Abi,
+                  functionName: "approve",
+                  args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
+                }),
+              },
+            ]);
+            deployed =
+              ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
+            console.log(`[auto-convert] account deployed=${deployed} — proceeding with the convert`);
+          } catch (probeErr) {
+            // One attempt per cooldown window: a failing deploy retried every
+            // tick would spam the event log with the same refusal.
+            lastAutoConvertAt = Date.now();
+            throw probeErr;
+          }
+        }
+        // Prefund sizing, ON TOP OF the swap's msg.value — both leave the
+        // account in the SAME operation, at the executor's 2x headroom:
+        // deployed = verification + call + preVerification ≈ 2M gas;
+        // undeployed fallback (probe failed/unavailable) ≈ 5M gas.
+        const opFloor = gasPrice * (deployed ? 2_000_000n : 5_000_000n);
         const reserve = pctReserve > opFloor ? pctReserve : opFloor;
         const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
         console.log(
@@ -5732,33 +5793,13 @@ async function main() {
               console.log(
                 `[auto-convert] submitting: amountIn=${surplusEth} expectedOut=${expect6} minOut=${minOut}`,
               );
-              const execution = active.executor.execute(
-                [
-                  buildConvertCall({
-                    surplusEth,
-                    fee: price.fee,
-                    minAmountOut: minOut,
-                    recipient: active.executor.address as `0x${string}`,
-                  }),
-                ],
-                {
-                  onSubmitted: async (userOpHash) => {
-                    console.log(`[auto-convert] submitted: ${userOpHash}`);
-                  },
-                },
-              );
-              const trackedExecution = execution.then(() => undefined, () => undefined).finally(() => {
-                if (autoConvertInFlight === trackedExecution) autoConvertInFlight = null;
-              });
-              autoConvertInFlight = trackedExecution;
-              const exec = await Promise.race([
-                execution,
-                new Promise<never>((_, reject) =>
-                  setTimeout(
-                    () => reject(new Error(`UserOperation execution timed out after ${AUTO_CONVERT_EXECUTION_TIMEOUT_MS / 1000}s; it remains in flight and will not be retried`)),
-                    AUTO_CONVERT_EXECUTION_TIMEOUT_MS,
-                  ),
-                ),
+              const exec = await autoConvertExecute(active.executor!, [
+                buildConvertCall({
+                  surplusEth,
+                  fee: price.fee,
+                  minAmountOut: minOut,
+                  recipient: active.executor.address as `0x${string}`,
+                }),
               ]);
               lastAutoConvertAt = Date.now();
               console.log(`[auto-convert] ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}) · op ${exec.userOpHash}`);
