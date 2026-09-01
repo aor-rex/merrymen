@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { FreshCard, MarketCard, chainGap } from "@/components/TokenCards";
-import type { Payload } from "@/app/api/discoveries/route";
+import type { Payload } from "@/lib/read-discoveries";
 
 /**
  * What is launching, and what is trading.

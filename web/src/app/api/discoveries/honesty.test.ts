@@ -19,7 +19,18 @@ import { describe, it } from "node:test";
  * ask" was rendered as "nothing there", which is why it is now a test.
  */
 
-const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+// THE READ AND ITS HTTP WRAPPER, SCANNED TOGETHER.
+//
+// Most of this was one file. The read moved to lib/read-discoveries so a server
+// component could share its single-flight memo instead of fetching this process
+// over the network, which left the cache-control behaviour here and everything
+// else there. The properties below are about the discoveries read AS A WHOLE,
+// so the whole is what they read — splitting them across two constants would
+// mean deciding, per assertion, which half is allowed to satisfy it, and the
+// first one filed under the wrong half would pass by accident forever.
+const ROUTE =
+  readFileSync(new URL("../../../lib/read-discoveries.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./route.ts", import.meta.url), "utf8");
 /**
  * The coins view moved out of the console onto its own page. These assertions
  * follow it: the properties belong to the CARDS and to the ORDER the page

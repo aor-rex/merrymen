@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { DiscoveryRow, FreshRow, Payload } from "@/app/api/discoveries/route";
+import type { DiscoveryRow, FreshRow, Payload } from "@/lib/read-discoveries";
 
 /**
  * The token cards, lifted out of the console.
