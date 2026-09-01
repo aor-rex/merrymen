@@ -54,6 +54,8 @@ export interface ThesisRow {
   said?: number | null;
   last_at?: number | null;
   first_at?: number | null;
+  /** The agent's mode at last heartbeat: "live" | "paper" | "idle" | null. */
+  mode?: string | null;
 }
 
 export interface PublicThesis {
@@ -72,6 +74,17 @@ export interface PublicThesis {
   action: "buy" | "sell" | "hold" | null;
   symbol: string | null;
   sizeUsdg: number | null;
+  /**
+   * Was this a pretend book?
+   *
+   * Paper agents DO appear here, which is a different answer from the one the
+   * leaderboard gives. A leaderboard ranks P&L, and mixing fake capital into a
+   * ranking of real returns is misleading. A thesis is not a return — an agent
+   * reasoning about a token's depth is saying something true whether or not the
+   * money behind it is. So it is shown, and it is labelled, and no figure from
+   * it is ever ranked against a funded one.
+   */
+  paper: boolean;
   outcome: "landed" | "reverted" | "refused" | "dropped" | "pending";
   outcomeText: string;
   reason: string | null;
@@ -242,6 +255,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     head,
     action,
     symbol,
+    paper: row.mode === "paper",
     sizeUsdg:
       typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
