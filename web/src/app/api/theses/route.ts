@@ -64,7 +64,7 @@ export async function GET() {
           `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
                   d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
                   d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
-                  t.status AS status, t.reject_rule AS reject_rule,
+                  t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
                   COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
              FROM decisions d
              JOIN agents a ON a.smart_account = d.agent_id
@@ -72,11 +72,17 @@ export async function GET() {
              -- a window function: the scoreboard already hedges against a SQLite
              -- build without them, and this needs to run on both backends.
              LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
-            WHERE a.mode = 'live'
+            -- Paper agents post too, labelled. Excluding them emptied the feed:
+            -- paperTradingEnabled defaults TRUE, so most of a fleet is pretend
+            -- money, and a feed with nothing in it teaches nobody anything. The
+            -- LEADERBOARD still ranks live only — a ranking of returns must not
+            -- mix fake capital in. 'idle' stays out: an agent that has never
+            -- heartbeat has not said anything.
+            WHERE a.mode IN ('live', 'paper')
               AND d.agent_id NOT LIKE 'rh:%'
               AND d.at > ?
               AND d.source IN (${SOURCES.map(() => "?").join(", ")})
-            GROUP BY a.name, a.x_handle, d.agent_id, d.action, d.symbol, d.size_usdg,
+            GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
                      d.source, d.reason, d.dropped_rule, t.status, t.reject_rule
             ORDER BY MAX(d.at) DESC
             LIMIT ?`,

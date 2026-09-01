@@ -197,6 +197,13 @@
   color: var(--dim);
   border-color: var(--line-2);
 }
+/* Deliberately the quietest badge on the row — it qualifies the one beside it
+   rather than competing with it, and it must never look like a status. */
+.feed-root .tag.paper {
+  color: var(--faint);
+  border-color: var(--line-2);
+  background: transparent;
+}
 
 /* ── the body ────────────────────────────────────────────────────────────── */
 

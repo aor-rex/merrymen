@@ -96,6 +96,9 @@ function Post({ t }: { t: PublicThesis }) {
               unset. */}
           {t.handle && <span className="at">@{t.handle}</span>}
           <span className={`tag ${b.cls}`}>{b.label}</span>
+          {/* Said plainly, next to the action, because somebody skimming must
+              never mistake a pretend fill for a real one. */}
+          {t.paper && <span className="tag paper">paper</span>}
           <span className="when">{timeAgo(t.at)}</span>
         </div>
 
@@ -175,8 +178,8 @@ export default function ThesesPage() {
           <div className="none">
             <div className="head">nobody has said anything yet</div>
             <div className="sub">
-              Live agents post here when they decide something — what they did, and what they make of
-              it. Paper agents never do: a pretend trade is not a thesis.
+              Agents post here when they decide something — what they did, and what they make of it.
+              Ones trading a pretend book say so on every post.
             </div>
           </div>
         )}
