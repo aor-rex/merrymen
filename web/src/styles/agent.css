@@ -1,0 +1,196 @@
+/**
+ * The agent profile. Scoped under .mm, enforced by styles/scoped.test.ts.
+ *
+ * Reads causally top to bottom: who it is, how it has done, what it holds, what
+ * it said. The wire graph lands between the header and the holdings when it
+ * exists — who an agent listens to belongs above what it owns, because it is
+ * the cause and the holdings are the effect.
+ */
+
+.mm-profile {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-profile-top {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-4);
+}
+
+.mm-profile-who {
+  min-width: 0;
+}
+
+.mm-profile-who h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--mm-tx);
+}
+
+.mm-profile-who p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--mm-dim);
+}
+
+/* ── the four figures ────────────────────────────────────────────────────── */
+
+.mm-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--mm-3);
+  margin: var(--mm-5) 0 0;
+}
+
+.mm-stat {
+  padding: var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface);
+}
+
+.mm-stat dd {
+  margin: var(--mm-1) 0 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mm-tx);
+}
+
+.mm-stat dd.up {
+  color: var(--mm-up);
+}
+.mm-stat dd.down {
+  color: var(--mm-down);
+}
+/* "unranked" is a word and must not be sized like a figure. */
+.mm-stat dd.flat {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--mm-dim);
+}
+
+.mm-stat p {
+  margin: var(--mm-1) 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--mm-faint);
+}
+
+.mm-profile-curve {
+  margin-top: var(--mm-5);
+}
+
+.mm-profile-curve .mm-spark {
+  width: 100%;
+  height: auto;
+}
+
+/* ── holdings ────────────────────────────────────────────────────────────── */
+
+.mm-holdings,
+.mm-agent-feed {
+  padding: var(--mm-5) 0;
+}
+
+.mm-agent-feed {
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-note {
+  margin: var(--mm-2) 0 0;
+  max-width: 58ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--mm-dim);
+}
+
+.mm-holdlist {
+  list-style: none;
+  margin: var(--mm-3) 0 0;
+  padding: 0;
+}
+
+.mm-holdlist li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--mm-3);
+  padding: var(--mm-2) 0;
+  border-bottom: 1px solid var(--mm-edge);
+  font-size: 13px;
+}
+
+.mm-holdlist .sym-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mm-2);
+  min-width: 0;
+}
+
+.mm-holdlist .sym {
+  font-weight: 600;
+  color: var(--mm-tx);
+}
+
+.mm-holdlist a.sym:hover {
+  color: var(--mm-wire);
+}
+
+.mm-holdlist .val {
+  color: var(--mm-tx-2);
+  font-weight: 600;
+}
+
+.mm-holdlist .basis {
+  font-size: 11.5px;
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+.mm-holdlist .chg {
+  min-width: 62px;
+  text-align: right;
+  font-weight: 700;
+}
+
+.mm-holdlist .chg.up {
+  color: var(--mm-up);
+}
+.mm-holdlist .chg.down {
+  color: var(--mm-down);
+}
+.mm-holdlist .chg.flat {
+  color: var(--mm-dim);
+}
+
+/* ── 520 ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  .mm-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .mm-profile-who h2 {
+    font-size: 19px;
+  }
+  .mm-holdlist li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  /* The basis moves under the symbol rather than competing with the figure. */
+  .mm-holdlist .sym-cell {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .mm-holdlist .basis {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .mm-holdlist .chg {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
