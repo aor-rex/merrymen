@@ -20,7 +20,13 @@ import { describe, it } from "node:test";
  */
 
 const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
-const CONSOLE = readFileSync(new URL("../../app/Console.tsx", import.meta.url), "utf8");
+/**
+ * The coins view moved out of the console onto its own page. These assertions
+ * follow it: the properties belong to the CARDS and to the ORDER the page
+ * checks its empty states in, not to the file that happened to hold them.
+ */
+const CARDS = readFileSync(new URL("../../../components/TokenCards.tsx", import.meta.url), "utf8");
+const PAGE = readFileSync(new URL("../../tokens/TokensClient.tsx", import.meta.url), "utf8");
 
 describe("an unread coin is not accused of silence", () => {
   it("`bare` defaults to FALSE when the metadata read failed", () => {
@@ -36,14 +42,14 @@ describe("an unread coin is not accused of silence", () => {
   it("the card only says 'published nothing' when the read actually succeeded", () => {
     // Three states, not two: has a description / read and genuinely empty /
     // never read. The middle one is the only one that earns the sentence.
-    assert.match(CONSOLE, /f\.description \?[\s\S]{0,200}?:\s*f\.bare \?/);
+    assert.match(CARDS, /f\.description \?[\s\S]{0,200}?:\s*f\.bare \?/);
   });
 
   it("a missing ticker renders the ADDRESS, not the word 'unnamed'", () => {
     // "unnamed" is a statement about the coin. The coin has a name; we failed
     // to fetch it. The address is true and still useful.
-    assert.ok(!/f\.symbol \|\| "unnamed"/.test(CONSOLE));
-    assert.match(CONSOLE, /f\.symbol \|\| short\(f\.token\)/);
+    assert.ok(!/f\.symbol \|\| "unnamed"/.test(CARDS));
+    assert.match(CARDS, /f\.symbol \|\| short\(f\.token\)/);
   });
 });
 
@@ -65,14 +71,18 @@ describe("a wave failure is reported once, not per coin", () => {
   });
 
   it("the console renders the gap once, above the grid", () => {
-    assert.match(CONSOLE, /function chainGap/);
-    assert.match(CONSOLE, /chainGap\(disc\) && <div className="readfail">/);
+    assert.match(CARDS, /function chainGap/);
+    // Computed ONCE at the top of the page and rendered above the grid, never
+    // per card — the three on-chain reads fail as a wave, so thirty copies of
+    // "unknown" would read as thirty broken coins instead of one bad read.
+    assert.match(PAGE, /const gap = disc \? chainGap\(disc\) : "";/);
+    assert.match(PAGE, /\{gap && <div className="mm-readfail">/);
   });
 
   it("chainGap tolerates a payload from before the field existed", () => {
     // A cached response mid-deploy has no `chain`, and reading `.meta` off
     // undefined would blank the whole page over a missing banner.
-    assert.match(CONSOLE, /if \(!c\) return "";/);
+    assert.match(CARDS, /if \(!c\) return "";/);
   });
 });
 
@@ -134,10 +144,10 @@ describe("a launchpad that could not be read is not reported as quiet", () => {
     assert.match(ROUTE, /chain\.launchpad = true;/);
   });
 
-  it("the console distinguishes unreadable from quiet, and checks the flag first", () => {
-    const unreadable = CONSOLE.indexOf("!disc.chain.launchpad");
-    const quiet = CONSOLE.indexOf("Nothing launched in the last few minutes");
-    assert.ok(unreadable > 0, "the console must handle an unreadable launchpad");
+  it("the page distinguishes unreadable from quiet, and checks the flag first", () => {
+    const unreadable = PAGE.indexOf("!disc.chain.launchpad");
+    const quiet = PAGE.indexOf("Nothing launched in the last few minutes");
+    assert.ok(unreadable > 0, "the page must handle an unreadable launchpad");
     assert.ok(unreadable < quiet, "the unreadable case must be checked BEFORE the empty-list case");
   });
 });

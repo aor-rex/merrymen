@@ -114,6 +114,24 @@ const LOG_TABLES = [
 ] as const;
 
 /**
+ * How far the decisions cursor opens behind itself, in seconds. `at` is not
+ * unique, so a cursor that resumed exactly at its own watermark would drop
+ * every row sharing that second with the last one it copied.
+ */
+const DECISION_LOOKBACK_SEC = 300;
+
+/**
+ * How far back a trade's resolution is still worth chasing.
+ *
+ * A UserOp that has not resolved in six hours is not late, it is stranded, and
+ * that is inflight-reconcile.ts's problem rather than the mirror's.
+ */
+const RESYNC_WINDOW_SEC = 6 * 3600;
+
+/** Rows examined per resync pass. Bounded so a long outage cannot stall a tick. */
+const RESYNC_LIMIT = 200;
+
+/**
  * Where each tenant's copy has got to.
  *
  * Lives in the destination rather than on disk so it commits with the rows it
@@ -134,6 +152,21 @@ export interface MirrorReport {
   tenant: string;
   /** Rows copied per table this pass. Absent tables were empty or unreadable. */
   copied: Record<string, number>;
+  /**
+   * Why a table copied nothing, when the reason was an error rather than an
+   * empty source.
+   *
+   * A failing table is INVISIBLE without this. The catches below deliberately
+   * continue — one table's failure is one table's lag, not a reason to abandon
+   * the rest — and the watermark deliberately does not move, so the next pass
+   * retries. Both are right. The consequence is that a single column mismatch
+   * between a child's sqlite and shared Postgres stalls that table FOREVER
+   * while every pass reports success, because a stalled table and an idle one
+   * produce byte-identical output. That is not a hypothetical: it is
+   * indistinguishable from the fleet simply having nothing to say, which is
+   * exactly how it went unnoticed.
+   */
+  failed?: Record<string, string>;
   /** Set when the child's ledger could not be opened at all. */
   skipped?: string;
 }
@@ -169,6 +202,7 @@ export async function mirrorTenant(args: {
   const batch = args.batch ?? MIRROR_BATCH;
   const nowSec = args.nowSec ?? Math.floor(Date.now() / 1000);
   const copied: Record<string, number> = {};
+  const failed: Record<string, string> = {};
 
   // ── append-only tables ────────────────────────────────────────────────────
   for (const { table, cols } of LOG_TABLES) {
@@ -199,25 +233,108 @@ export async function mirrorTenant(args: {
           .run(tenant, table, highest, nowSec);
       });
       copied[table] = rows.length;
-    } catch {
+    } catch (e) {
       // One table failing is one table's worth of lag, not a reason to abandon
       // the others — and the watermark did not move, so the next pass retries.
+      // Recorded rather than swallowed: see MirrorReport.failed.
+      failed[table] = e instanceof Error ? e.message : String(e);
       continue;
     }
   }
 
-  // ── decisions: append-only, but already globally unique ───────────────────
-  // The id is a uuid, so the destination key is safe to reuse and ON CONFLICT
-  // is enough. No watermark: the reasoning tape is small and the conflict is
-  // cheaper than the bookkeeping.
+  // ── trades that resolved AFTER they were copied ───────────────────────────
+  //
+  // A live trade is written twice at the source: once as `submitted` the moment
+  // the UserOp goes out, then UPDATED IN PLACE when it lands or reverts. The
+  // watermark above is on `id`, so the first write is copied and the second is
+  // never seen — the row keeps its original id and the cursor is already past
+  // it. Every live fill therefore froze at "sent, waiting on the chain" in the
+  // shared database, permanently.
+  //
+  // That is not a display bug. The scoreboard and the feed both filter
+  // `status = 'landed'`, so hosted, EVERY successful trade was invisible to
+  // them: landed count, volume and gas all read zero for an agent that had been
+  // trading all week.
+  //
+  // Keyed on user_op_hash with `AND status = 'submitted'` on the destination.
+  // That guard is the whole correctness argument — it is the same key and the
+  // same condition addTrade uses at the source, so this pass can only ever
+  // convert a submitted row into its resolution, never rewrite a settled one.
+  // It also makes the pass idempotent for free: once a row is resolved the
+  // UPDATE matches nothing, so re-reading the same window costs one bounded
+  // SELECT and N no-op updates.
   try {
+    const resolved = (await child
+      .prepare(
+        `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
+                fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
+                gas_wei, sponsored_gas_wei, gas_usdg, fill_cash_usdg
+           FROM trades
+          WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
+          ORDER BY id DESC LIMIT ?`,
+      )
+      .all(nowSec - RESYNC_WINDOW_SEC, RESYNC_LIMIT)) as Record<string, unknown>[];
+    if (resolved.length) {
+      let n = 0;
+      await shared.tx(async (db) => {
+        const upd = db.prepare(
+          `UPDATE trades SET tx_hash = ?, status = ?, reject_rule = ?, decision_id = ?,
+                             fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
+                             realized_pnl_usdg = ?, basis_source = ?, gas_wei = ?,
+                             sponsored_gas_wei = ?, gas_usdg = ?, fill_cash_usdg = ?
+            WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
+        );
+        for (const r of resolved) {
+          const res = await upd.run(
+            r.tx_hash ?? null, r.status, r.reject_rule ?? null, r.decision_id ?? null,
+            r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
+            r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
+            r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.fill_cash_usdg ?? null,
+            r.agent_id, r.user_op_hash,
+          );
+          // RunResult.changes is part of the Db contract — node:sqlite reports
+          // it directly and the Postgres driver maps rowCount — so this counts
+          // rows that ACTUALLY moved, not rows attempted. On a settled fleet
+          // every update matches nothing and the pass reports no work, which is
+          // the honest answer.
+          n += res.changes;
+        }
+      });
+      // Only when something actually moved — otherwise every pass would report
+      // work on a fleet that has nothing left to resolve.
+      if (n > 0) copied.trades_resolved = n;
+    }
+  } catch (e) {
+    failed.trades_resolved = e instanceof Error ? e.message : String(e);
+  }
+
+  // ── decisions: append-only, globally unique, and now watermarked ──────────
+  //
+  // The id is a uuid, so the destination key is safe to reuse and ON CONFLICT
+  // is enough on its own. What it is NOT enough for is completeness: this used
+  // to read `ORDER BY at DESC LIMIT 500` with no cursor, so a child that wrote
+  // more than a batch between two passes lost the overflow PERMANENTLY. That
+  // was tolerable while a decision was only dashboard furniture. It stopped
+  // being tolerable when theses became the thing other agents read — a dropped
+  // decision is now a peer input that silently never arrives.
+  //
+  // Watermarked on `at` rather than on an id, because the id is a uuid and has
+  // no order. `at` is not unique, so the cursor opens 300s BEHIND itself: ties
+  // and a little clock skew are re-read rather than skipped, and ON CONFLICT
+  // makes the overlap free. Ascending, so a batch cap truncates the NEWEST rows
+  // (which the next pass collects) instead of the oldest (which it never would).
+  try {
+    const dmark = (await shared
+      .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+      .get(tenant, "decisions")) as { last_id: number } | undefined;
+    const since = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
     const rows = (await child
       .prepare(
         `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
                 reason, dropped_rule, signals_json, at
-         FROM decisions ORDER BY at DESC LIMIT ?`,
+         FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
       )
-      .all(batch)) as Record<string, unknown>[];
+      .all(since, batch)) as Record<string, unknown>[];
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
@@ -233,11 +350,22 @@ export async function mirrorTenant(args: {
             r.dropped_rule ?? null, r.signals_json ?? null, r.at,
           );
         }
+        // Same transaction as the rows, for the same reason the log tables do
+        // it: a crash between the two re-reads a window that is already there,
+        // which ON CONFLICT absorbs, but a watermark that moved without its
+        // rows would skip them forever.
+        const highest = Number(rows[rows.length - 1]!.at);
+        await db
+          .prepare(
+            `INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at`,
+          )
+          .run(tenant, "decisions", highest, nowSec);
       });
       copied.decisions = rows.length;
     }
-  } catch {
-    /* as above */
+  } catch (e) {
+    failed.decisions = e instanceof Error ? e.message : String(e);
   }
 
   // ── snapshot tables: upsert by their own key ──────────────────────────────
@@ -357,9 +485,9 @@ export async function mirrorTenant(args: {
       });
       copied.cost_basis = basis.length;
     }
-  } catch {
-    /* as above */
+  } catch (e) {
+    failed.snapshots = e instanceof Error ? e.message : String(e);
   }
 
-  return { tenant, copied };
+  return { tenant, copied, ...(Object.keys(failed).length ? { failed } : {}) };
 }

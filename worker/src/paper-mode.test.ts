@@ -1,97 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { TRADEABLE_CHAIN_ID } from "./preflight";
 
 /**
- * PAPER IS A CAPABILITY, and the predicate that decides it is one line in a
- * 4,000-line closure with no seam. So this models the rule and pins the source
- * against it — the model is worthless without the second half, because a model
- * that has drifted from the code it describes is just a second opinion.
+ * THE RULE MOVED. See `exec-mode.test.ts`.
  *
- * The bug being pinned: paper used to be `!executor && paperTradingEnabled`,
- * i.e. the accidental consequence of having nothing to sign with. Hosted always
- * injects the house bundler key, so no hosted tenant could ever be in paper —
- * a testnet tenant got a LIVE executor building swaps against mainnet-only
- * addresses, which is neither trading nor simulating.
+ * This file used to model paperActive() in local code and pin index.ts against
+ * the model with four regexes. The model is now a real function — `execModeOf`
+ * in exec-mode.ts — so the tests call it directly instead of describing it, and
+ * the source pins moved with them.
+ *
+ * That relocation is not tidying. The old pins matched the four lines that
+ * DEFINED the rule, and all four kept matching while the execution fork asked a
+ * different question entirely (`!executor`) a few thousand lines below. The
+ * definition was pinned; the use was not; the fleet ran for months labelled
+ * paper, valued paper and executed live. `exec-mode.test.ts` pins the CALL
+ * SITES, which is the half that was missing.
+ *
+ * What stays here is the one paper-mode fact that is not about the predicate:
+ * where a simulated fill gets its numbers.
  */
-
-/** The rule as index.ts implements it. */
-function paperActive(a: {
-  armed: boolean;
-  executor: boolean;
-  chainId: number;
-  cashUsdg: bigint | null;
-  paperTradingEnabled: boolean;
-}) {
-  const chainCanTrade = a.armed && a.chainId === TRADEABLE_CHAIN_ID;
-  const readAsBroke = a.cashUsdg !== null && a.cashUsdg === 0n;
-  const canTradeForReal = a.armed && a.executor && chainCanTrade && !readAsBroke;
-  return a.armed && !canTradeForReal && a.paperTradingEnabled;
-}
-
-const base = {
-  armed: true,
-  executor: true,
-  chainId: TRADEABLE_CHAIN_ID,
-  cashUsdg: 100_000_000n,
-  paperTradingEnabled: true,
-};
-
-test("THE REGRESSION THAT MATTERED: a funded mainnet agent trades for real", () => {
-  // paperTradingEnabled defaults to TRUE. Reading it as a mode selector rather
-  // than as permission would have put every funded agent in the fleet into
-  // simulation while its owner believed it was trading — the single worst
-  // outcome available here, and an easy mistake to make while fixing the other
-  // direction.
-  assert.equal(paperActive(base), false);
-});
-
-test("a testnet grant is paper, whatever the bundler key says", () => {
-  // The case that could not previously happen hosted. Every token and router
-  // merrymen knows is a mainnet deployment, so there is no venue to route
-  // through — preflight calls the same fact a hard blocker.
-  assert.equal(paperActive({ ...base, chainId: 46630 }), true);
-  assert.equal(paperActive({ ...base, chainId: 46630, executor: true }), true, "an executor does not make a dead chain tradeable");
-});
-
-test("no signer is still paper — the original case, unbroken", () => {
-  assert.equal(paperActive({ ...base, executor: false }), true);
-});
-
-test("an account read as empty is paper, because a swap needs something to sell", () => {
-  assert.equal(paperActive({ ...base, cashUsdg: 0n }), true);
-});
-
-test("UNKNOWN IS NOT UNFUNDED", () => {
-  // lastCashUsdg is null until the first balance read of the process. If null
-  // counted as broke, every worker would spend its first tick simulating — and
-  // worse, a funded agent whose balance read failed would quietly start writing
-  // pretend fills. Only a READ zero counts.
-  assert.equal(paperActive({ ...base, cashUsdg: null }), false);
-});
-
-test("paperTradingEnabled is permission to simulate, not a request to", () => {
-  // Turning it off does not force a broken agent to trade; it makes it idle.
-  assert.equal(paperActive({ ...base, chainId: 46630, paperTradingEnabled: false }), false);
-  assert.equal(paperActive({ ...base, executor: false, paperTradingEnabled: false }), false);
-  // And it never overrides a working agent in either direction.
-  assert.equal(paperActive({ ...base, paperTradingEnabled: false }), false);
-});
-
-test("nothing is paper when nothing is armed", () => {
-  assert.equal(paperActive({ ...base, armed: false }), false);
-  assert.equal(paperActive({ ...base, armed: false, executor: false }), false);
-});
-
-test("the model above matches the source it claims to describe", () => {
-  // Without this the tests are a second opinion, not a check.
-  const src = readFileSync("worker/src/index.ts", "utf8");
-  assert.match(src, /const chainCanTrade = \(\) =>[^;]*TRADEABLE_CHAIN_ID/);
-  assert.match(src, /const readAsBroke = \(\) => lastCashUsdg !== null && lastCashUsdg === 0n;/);
-  assert.match(src, /const canTradeForReal = \(\)[^;]*!!active\.executor && chainCanTrade\(\) && !readAsBroke\(\)/);
-  assert.match(src, /const paperActive = \(\) => !!active && !canTradeForReal\(\) && cfg\.paperTradingEnabled;/);
-});
 
 test("paper prices AND multipliers both come from mainnet", () => {
   // They disagreed: prices read through mainnetClient, multipliers through the

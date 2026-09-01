@@ -1,0 +1,115 @@
+/**
+ * THE ONE TOKEN SET.
+ *
+ * Every name is prefixed --mm-, and that prefix is the whole migration
+ * strategy: globals.css defines --bg, --border, --green, --radius on :root and
+ * console.css defines a DIFFERENT palette (--line, --panel, --lime, --mint) on
+ * .sc-root. Zero of those collide with --mm-*, so this file can be live on the
+ * same page as either of them while /grant and /settings are still being served
+ * by the old sheets. Nothing has to be retired before anything else can ship.
+ *
+ * WHY THE GREEN GROUND GOES. The product ran on #0d1512 with mint as the gain
+ * colour, so green was doing two jobs at once — the background family AND the
+ * semantic for "up". A green "bought" chip on a green-black card has almost no
+ * separation, which is most of why the old UI reads muddy rather than sleek.
+ * The ground is now a cool graphite that keeps a whisper of the original teal
+ * cast, and green is freed to mean exactly one thing.
+ *
+ * And --lime (#b6e226, decorative) sat next to --mint (#3ad884, semantic). At
+ * chip size those are both just "green", so the palette had two greens and one
+ * meaning. Lime is retired.
+ *
+ * THE RULE: colour means something, or it is not on screen. The page is
+ * achromatic; the only saturated pixels are semantics — up, down, warn — and
+ * the wire.
+ *
+ * SINGLE THEME, DELIBERATELY. This is a dark trading surface and it commits to
+ * that, so there is no prefers-color-scheme block. Everything is painted
+ * explicitly, including the body background, so nothing borrows a ground from
+ * the host.
+ */
+
+:root {
+  /* ── ground ──────────────────────────────────────────────────────────── */
+  --mm-bg: #0b0f10; /* the page */
+  --mm-surface: #12181a; /* cards, sticky header */
+  --mm-surface-2: #182022; /* hover, raised, segmented track */
+  --mm-surface-3: #202a2c; /* inputs, avatar wells */
+  --mm-edge: #223033; /* hairline */
+  --mm-edge-2: #2e3e42; /* hairline, emphasised */
+
+  /* ── text ────────────────────────────────────────────────────────────── */
+  --mm-tx: #e8efec; /* 16.1:1 on --mm-bg */
+  --mm-tx-2: #b4c2bd; /* body secondary, 10.4:1 */
+  --mm-dim: #93a29d; /* labels, 7.5:1 */
+  --mm-faint: #66756f; /* timestamps ONLY — never load-bearing, 4.2:1 */
+
+  /* ── semantics: the only saturated colours ───────────────────────────── */
+  --mm-up: #34d399; /* bought · gain */
+  --mm-down: #fb7185; /* sold · loss */
+  --mm-warn: #fbbf24; /* paper · pending · stale · a refused rule */
+
+  /* ── the wire ────────────────────────────────────────────────────────── */
+  /* Brand, links, focus, active nav, and the follow graph. Used for nothing
+     else, ever. A wire is the product's one novel idea, so it gets the one
+     novel colour — and blue-cyan is unmistakably not --mm-up at chip size,
+     which matters because both appear on the same avatar. */
+  --mm-wire: #5cc8ff;
+  --mm-wire-dim: #2e7fa8;
+
+  /* ── shape: two radii with meaning, not one radius everywhere ────────── */
+  --mm-r-card: 16px; /* a surface you can tap through to a page */
+  --mm-r-chip: 6px; /* a label you cannot tap through */
+  /* AGENT = SQUIRCLE, TOKEN = CIRCLE. Not decoration: the token page shows both
+     in one table and one timeline, and shape alone says which kind of thing you
+     are looking at, at 24px, with no label. */
+  --mm-r-agent: 10px;
+  --mm-r-token: 999px;
+
+  /* ── space: a 4px scale ──────────────────────────────────────────────── */
+  --mm-1: 4px;
+  --mm-2: 8px;
+  --mm-3: 12px;
+  --mm-4: 16px;
+  --mm-5: 20px;
+  --mm-6: 24px;
+  --mm-8: 32px;
+  --mm-10: 40px;
+
+  /* ── type ────────────────────────────────────────────────────────────── */
+  /* Hanken Grotesk and JetBrains Mono are already loaded by the root layout via
+     next/font. Keeping them costs nothing and avoids the two faces every
+     generated UI reaches for. */
+  --mm-sans: var(--font-hanken), "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --mm-mono: var(--font-jbmono), ui-monospace, "JetBrains Mono", Menlo, monospace;
+
+  /* ── chrome ──────────────────────────────────────────────────────────── */
+  --mm-nav-h: 56px;
+  --mm-header-h: 52px;
+  --mm-col: 640px; /* the reading column */
+  --mm-rail: 232px;
+  --mm-context: 320px;
+
+  /* ── motion ──────────────────────────────────────────────────────────── */
+  /* One curve, one duration. A feed that animates on every 30s refresh is
+     unreadable, so transitions are for interaction only. */
+  --mm-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --mm-fast: 140ms;
+}
+
+/*
+ * THREE BREAKPOINTS. NAMED. THAT IS ALL.
+ *
+ * There were five unrelated sets — globals at 980/760/640/420, console at
+ * 940/860/720/540/520, grant at 720, feed at 480 — and the 720/760 disagreement
+ * produced a 40px band where the shell collapsed but the page around it did
+ * not. These are declared here as documentation; CSS custom properties cannot
+ * be used in media queries, so the literals below are repeated in each sheet
+ * and MUST match:
+ *
+ *    520px   phone -> large phone   (card metrics loosen)
+ *    860px   THE collapse point     (bottom tab bar <-> left rail)
+ *   1180px   desktop                (the context column appears)
+ *
+ * Do not add a fourth without deleting one.
+ */

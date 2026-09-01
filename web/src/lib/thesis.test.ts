@@ -56,6 +56,80 @@ describe("what may be published", () => {
   });
 });
 
+describe("the public id", () => {
+  it("publishes a well-formed slug", () => {
+    const t = publishableThesis(ok({ slug: "a7k3m9qz2n4vb8xd" }))!;
+    assert.equal(t.slug, "a7k3m9qz2n4vb8xd");
+  });
+
+  it("A MISSING SLUG COSTS THE LINK, NOT THE POST", () => {
+    // An agent granted before the identity store existed, or one whose
+    // best-effort mint failed, still has things to say. Dropping the thesis
+    // would trade a real loss for an imaginary one — a slug is not a
+    // disclosure risk the way a reason is.
+    assert.equal(publishableThesis(ok())!.slug, null);
+    assert.equal(publishableThesis(ok({ slug: "not a slug" }))!.slug, null);
+    // 16 characters, but 'i' is not in the alphabet — Crockford drops i/l/o/u
+    // so a slug cannot be misread into a different agent.
+    assert.equal(publishableThesis(ok({ slug: "iiiiiiiiiiiiiiii" }))!.slug, null);
+    assert.match(publishableThesis(ok({ slug: "not a slug" }))!.reason!, /the schedule says buy/);
+  });
+
+  it("is never an address, and the backstop covers it anyway", () => {
+    // It cannot be — base32 has no 0x prefix — which is exactly why the check
+    // is worth having: the guarantee stops depending on the encoding staying
+    // as designed.
+    const t = publishableThesis(ok({ slug: "0x1111111111111111111111111111111111111111" }));
+    assert.equal(t, null);
+  });
+});
+
+describe("a decision is not a failed trade", () => {
+  /**
+   * The desk's proudest feature rendered as its worst. A window where the agent
+   * researched and concluded "stay flat, and here is why" writes a decision
+   * with a reason and no action — desk.test.ts calls this "A HOLD WITH A VIEW
+   * is a real answer" — and every one of them published the sentence "no trade
+   * came of it", which is the same sentence a refused buy gets.
+   */
+  it("a thesis-only row is a view, not a pending trade", () => {
+    const t = publishableThesis(
+      ok({
+        source: "strategist",
+        action: null,
+        symbol: null,
+        size_usdg: null,
+        status: null,
+        reason: "Everything I can price is shut for the weekend. Nothing worth doing.",
+      }),
+    )!;
+    assert.equal(t.outcome, "view");
+    assert.notEqual(t.outcome, "pending");
+    assert.doesNotMatch(t.outcomeText, /no trade came of it/);
+  });
+
+  it("an explicit hold is a view too", () => {
+    const t = publishableThesis(ok({ source: "strategist", action: "hold", status: null, size_usdg: 0 }))!;
+    assert.equal(t.outcome, "view");
+    assert.match(t.outcomeText, /by choice/);
+  });
+
+  it("A BUY THAT HAS NOT LANDED IS STILL PENDING", () => {
+    // The guard that stops the fix over-reaching. An actionable proposal whose
+    // trade row does not exist yet is genuinely unresolved, and calling that a
+    // view would claim the agent chose an outcome it is still waiting on.
+    const t = publishableThesis(ok({ status: null }))!;
+    assert.equal(t.outcome, "pending");
+    assert.match(t.outcomeText, /no trade came of it/);
+  });
+
+  it("a hold that somehow joined a trade reports what happened", () => {
+    // A contradiction worth surfacing rather than hiding behind "by choice".
+    const t = publishableThesis(ok({ action: "hold", status: "landed" }))!;
+    assert.equal(t.outcome, "landed");
+  });
+});
+
 describe("what may NOT be published", () => {
   it("NEVER a chat-sourced reason — it carries a counterparty address by template", () => {
     // worker/src/index.ts writes this string unconditionally on every chat

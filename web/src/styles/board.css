@@ -1,0 +1,141 @@
+/**
+ * The leaderboard. Scoped under .mm, enforced by styles/scoped.test.ts.
+ *
+ * A row is a rank, a face, a name, a shape, and three figures. Everything is
+ * mono and tabular so the columns line up down the page — a ranking whose
+ * numbers jitter between rows is a ranking nobody can scan.
+ */
+
+.mm-board {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mm-board-row {
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-board-row > a,
+.mm-board-row > .unlinked {
+  display: grid;
+  grid-template-columns: 32px 32px minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: var(--mm-3);
+  padding: var(--mm-3) var(--mm-2);
+  border-radius: var(--mm-r-chip);
+  transition: background-color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-board-row > a:hover {
+  background: var(--mm-surface-2);
+  color: inherit;
+}
+
+.mm-board-row .rk {
+  font-size: 12px;
+  color: var(--mm-faint);
+}
+
+.mm-board-row .who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mm-board-row .who .nm {
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--mm-tx);
+}
+
+.mm-board-row .who .at {
+  font-size: 11.5px;
+  color: var(--mm-dim);
+}
+
+.mm-board-row .pnl {
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+  min-width: 68px;
+}
+
+.mm-board-row .pnl.up {
+  color: var(--mm-up);
+}
+.mm-board-row .pnl.down {
+  color: var(--mm-down);
+}
+/* Unranked is a WORD, never a number. A 0.0% here would read as a flat run
+   rather than as an unknown one. */
+.mm-board-row .pnl.flat {
+  color: var(--mm-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mm-board-row .dd,
+.mm-board-row .tr {
+  font-size: 12px;
+  color: var(--mm-dim);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mm .mm-spark {
+  display: block;
+}
+
+/* ── the unranked section ────────────────────────────────────────────────── */
+
+.mm-unranked {
+  margin-top: var(--mm-8);
+  padding-top: var(--mm-5);
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-unranked > p {
+  margin: var(--mm-2) 0 var(--mm-4);
+  max-width: 58ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--mm-dim);
+}
+
+/* ── 520: two lines instead of seven columns ─────────────────────────────── */
+
+@media (max-width: 520px) {
+  .mm-board-row > a,
+  .mm-board-row > .unlinked {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "face who pnl"
+      "spark spark meta";
+    gap: var(--mm-2) var(--mm-3);
+  }
+  .mm-board-row .rk {
+    display: none;
+  }
+  .mm-board-row .mm-av {
+    grid-area: face;
+  }
+  .mm-board-row .who {
+    grid-area: who;
+  }
+  .mm-board-row .pnl {
+    grid-area: pnl;
+  }
+  .mm-board-row .mm-spark {
+    grid-area: spark;
+  }
+  .mm-board-row .dd {
+    grid-area: meta;
+  }
+  /* Landed/refused is the first thing to go: it is the least useful figure on
+     a phone and the row is better short than complete. */
+  .mm-board-row .tr {
+    display: none;
+  }
+}

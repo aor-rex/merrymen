@@ -7,6 +7,10 @@ import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncovere
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import SetupChecklist from "./SetupChecklist";
+// QUARANTINED alongside /grant. A settings form is not a surface anybody shares
+// from a phone, and its ~30 fields are styled against the old sheet — so it
+// keeps it, and the sheet no longer reaches anything else.
+import "@/styles/legacy.css";
 
 type Draft = Record<string, string>;
 

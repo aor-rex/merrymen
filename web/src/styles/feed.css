@@ -1,0 +1,267 @@
+/**
+ * The feed, and the card it is made of.
+ *
+ * Every selector is scoped under .mm — enforced by styles/scoped.test.ts, not
+ * merely claimed in this comment, because the sheet this replaces made exactly
+ * that claim in exactly this position and was wrong about thirty of its rules.
+ */
+
+/* ── the avatar ──────────────────────────────────────────────────────────── */
+
+.mm .mm-av {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: var(--mm-r-agent); /* SQUIRCLE — a token logo is a circle */
+  font-family: var(--mm-sans);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0b0f10; /* on a light gradient, always */
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14);
+  user-select: none;
+}
+
+/* THE WIRE RING. This agent feeds your agent's thinking. It appears wherever
+   this agent appears, which is what lets you see your own network by scrolling
+   rather than by opening a settings page. */
+.mm .mm-av.wired {
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.14),
+    0 0 0 2px var(--mm-bg),
+    0 0 0 4px var(--mm-wire);
+}
+
+/* ── the card ────────────────────────────────────────────────────────────── */
+
+.mm-feed {
+  display: flex;
+  flex-direction: column;
+}
+
+.mm-post {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: var(--mm-3);
+  padding: var(--mm-4) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+/* A thesis is about the book rather than a position, and the bar says so
+   without spending a word on it. */
+.mm-post.is-thesis {
+  border-left: 2px solid var(--mm-wire);
+  padding-left: var(--mm-3);
+  margin-left: -14px;
+}
+
+.mm-post-face {
+  display: block;
+  line-height: 0;
+}
+
+.mm-post-body {
+  min-width: 0; /* never `1fr` alone — a long token name would set the width */
+}
+
+.mm-post-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-2);
+  margin-bottom: var(--mm-2);
+}
+
+.mm-who {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.mm-who .nm {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--mm-tx);
+}
+
+.mm-who .at {
+  font-size: 12px;
+  color: var(--mm-dim);
+}
+
+.mm-when {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+/* ── the reasoning: the largest text on the card ─────────────────────────── */
+
+.mm-say {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.55;
+  letter-spacing: -0.004em;
+  color: var(--mm-tx);
+}
+
+/* ── the trade: subordinate, 36px, mono ──────────────────────────────────── */
+
+.mm-trade {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-3);
+  min-height: 36px;
+  margin-top: var(--mm-3);
+  padding: 0 var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface-2);
+  font-size: 13.5px;
+}
+
+/* A TICKER IS ONE WORD. base.css sets overflow-wrap: anywhere so an
+   owner-typed name cannot set the page width, but applied here it split
+   "TSLA" across two lines inside a 36px strip. Identifiers and figures opt
+   out; the prose above them does not. */
+.mm-trade .sym,
+.mm-trade .amt {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.mm-trade .sym {
+  font-weight: 600;
+  color: var(--mm-tx);
+}
+
+.mm-trade .amt {
+  font-weight: 600;
+  color: var(--mm-tx-2);
+}
+
+.mm-trade .out {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--mm-dim);
+  text-align: right;
+}
+
+/* A PRETEND FILL MUST NOT LOOK LIKE A REAL ONE. Dashed, never a filled ground:
+   the same distinction the old trade row was fixed once to make. */
+.mm-trade.sim {
+  border-style: dashed;
+}
+
+/* THIS DID NOT HAPPEN. A red chip would say "loss"; hatching says "no trade
+   occurred", which is a different fact and the one that is true. */
+.mm-trade.turned {
+  border-color: color-mix(in srgb, var(--mm-warn) 34%, transparent);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent,
+    transparent 5px,
+    color-mix(in srgb, var(--mm-warn) 7%, transparent) 5px,
+    color-mix(in srgb, var(--mm-warn) 7%, transparent) 10px
+  );
+}
+
+.mm-trade.turned .amt {
+  text-decoration: line-through;
+  color: var(--mm-dim);
+}
+
+.mm-trade.turned .out {
+  color: var(--mm-warn);
+}
+
+.mm-said {
+  margin: var(--mm-2) 0 0;
+  font-size: 11px;
+  color: var(--mm-faint);
+}
+
+/* ── empty and error ─────────────────────────────────────────────────────── */
+
+.mm-empty {
+  padding: var(--mm-10) 0;
+  text-align: center;
+}
+
+.mm-empty h2 {
+  margin: 0 0 var(--mm-2);
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--mm-tx-2);
+}
+
+.mm-empty p {
+  margin: 0 auto;
+  max-width: 42ch;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--mm-dim);
+}
+
+/* ── skeleton ────────────────────────────────────────────────────────────── */
+
+.mm-skel {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: var(--mm-3);
+  padding: var(--mm-4) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-skel i {
+  display: block;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+.mm-skel .face {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--mm-r-agent);
+}
+
+.mm-skel .l {
+  height: 16px;
+  margin-bottom: 8px;
+}
+
+/* ── 520: large phone ────────────────────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  .mm-post,
+  .mm-skel {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+    padding: 14px 0;
+  }
+  .mm-post.is-thesis {
+    margin-left: -12px;
+    padding-left: 10px;
+  }
+  .mm-say {
+    font-size: 15.5px;
+  }
+  /* The timestamp gets its own line rather than squeezing the name. */
+  .mm-when {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+  /* The outcome takes its own line rather than squeezing the figure it
+     describes — a phone has no room for three columns of mono. */
+  .mm-trade {
+    padding: 8px var(--mm-3);
+  }
+  .mm-trade .out {
+    margin-left: 0;
+    flex-basis: 100%;
+    text-align: left;
+  }
+}
