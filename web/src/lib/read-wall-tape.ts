@@ -54,7 +54,17 @@ export interface WallTape {
   cells: WallCell[];
   /** Index-aligned labels. The last is always the catch-all. */
   lanes: string[];
+  /**
+   * The WHOLE window, counted — not the drawn sample.
+   *
+   * These are what the page prints, and `cells` is only what the canvas can
+   * hold. Deriving them from the capped rows published "400 turned back in the
+   * last day" on a day that had more than four hundred, which is a truncation
+   * wearing the clothes of a measurement.
+   */
   counts: { intents: number; turned: number; through: number; flight: number };
+  /** True when the day held more than the band can draw. */
+  capped: boolean;
   from: number;
   to: number;
   /** Stable identity for the render, so an effect does not restart on every poll. */
@@ -66,6 +76,7 @@ const EMPTY: WallTape = {
   cells: [],
   lanes: [],
   counts: { intents: 0, turned: 0, through: 0, flight: 0 },
+  capped: false,
   from: 0,
   to: 0,
   key: "0:0",
@@ -106,6 +117,32 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
     }
     args.push(CAP);
 
+    // THE COUNT IS OF THE WINDOW, THE SAMPLE IS FOR THE CANVAS. One extra
+    // aggregate over the same predicate, served by trades_time.
+    let total = { turned: 0, through: 0, flight: 0 };
+    try {
+      const c = (await db
+        .prepare(
+          `SELECT
+             SUM(CASE WHEN t.status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS turned,
+             SUM(CASE WHEN t.status IN ('landed','paper') THEN 1 ELSE 0 END) AS through,
+             SUM(CASE WHEN t.status = 'submitted' THEN 1 ELSE 0 END) AS flight
+           FROM trades t
+           JOIN agents a ON a.smart_account = t.agent_id
+          WHERE ${where.join(" AND ")}`,
+        )
+        .get(...args.slice(0, args.length - 1))) as
+        | { turned: number | null; through: number | null; flight: number | null }
+        | undefined;
+      total = {
+        turned: Number(c?.turned ?? 0),
+        through: Number(c?.through ?? 0),
+        flight: Number(c?.flight ?? 0),
+      };
+    } catch {
+      /* older ledger — the drawn sample stands in below */
+    }
+
     let rows: { at: number; status: string | null; rule: string | null }[] = [];
     try {
       rows = (await db
@@ -123,6 +160,7 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
       // that; it is never a 500 and never a claim that nothing happened.
       return { ...EMPTY, source: "sqlite", from, to };
     }
+    const capped = rows.length >= CAP;
 
     // ── lanes ──────────────────────────────────────────────────────────────
     // The vocabulary comes from the publication policy, not from a second
@@ -165,11 +203,20 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
       counts[fate] += 1;
     }
 
+    // The counted window wins wherever it is available; the sampled tally is
+    // the fallback for a ledger too old to answer the aggregate.
+    const summed = total.turned + total.through + total.flight;
+    const published =
+      summed > 0
+        ? { intents: summed, turned: total.turned, through: total.through, flight: total.flight }
+        : counts;
+
     return {
       source: "sqlite",
       cells,
       lanes,
-      counts,
+      counts: published,
+      capped,
       from,
       to,
       key: `${cells.length}:${to}`,
