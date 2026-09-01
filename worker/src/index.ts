@@ -5650,7 +5650,16 @@ async function main() {
     // Deliberately NOT routed through the strategy budget reservation: this is
     // funding, not trading. Its bounds are the toggle, the hourly cooldown, the
     // reserve/floor arithmetic below, and the wall's sealed valueLimit.
-    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && Date.now() - lastAutoConvertAt >= AUTO_CONVERT_COOLDOWN_MS) {
+    const autoConvertReady = Date.now() - lastAutoConvertAt >= AUTO_CONVERT_COOLDOWN_MS;
+    if (cfg.autoConvertEnabled || autoConvertDebugUntil > Date.now()) {
+      console.log(
+        `[auto-convert] state: enabled=${cfg.autoConvertEnabled} active=${!!active} ` +
+          `chain=${chainCanTrade()} paper=${paperActive()} executor=${!!active?.executor} ` +
+          `gasRead=${lastGasWei !== null} grant=${!!active && grantHasNativeSwap(active.grant)} ` +
+          `cooldownReady=${autoConvertReady}`,
+      );
+    }
+    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && autoConvertReady) {
       // The marker is minted BY the wall that can do this. A grant signed
       // before nativeSwapValueLimitWei existed would only fail at the chain —
       // say so once, clearly, instead of burning gas reading a revert.
@@ -5730,6 +5739,8 @@ async function main() {
           } else if (autoConvertDebugUntil > Date.now()) {
             console.log(`[auto-convert] NOT converting: no WETH→USDG on-chain price for ${formatUnits(surplusEth, 18)} ETH`);
           }
+        } else if (autoConvertDebugUntil > Date.now() && !active.executor) {
+          console.log(`[auto-convert] NOT converting: no live executor`);
         } else if (autoConvertDebugUntil > Date.now() && active.executor) {
           console.log(`[auto-convert] NOT converting: surplus ${formatUnits(surplusEth, 18)} ETH is not above the gas reserve`);
         }
@@ -5745,6 +5756,11 @@ async function main() {
         ).catch(() => {});
       }
       }
+    } else if (cfg.autoConvertEnabled && autoConvertDebugUntil > Date.now()) {
+      console.log(
+        `[auto-convert] NOT converting: gate failed (active=${!!active}, chain=${chainCanTrade()}, ` +
+          `paper=${paperActive()}, gasRead=${lastGasWei !== null}, cooldownReady=${autoConvertReady})`,
+      );
     }
     // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
     notifierHandle?.publishPrices(market.prices);
