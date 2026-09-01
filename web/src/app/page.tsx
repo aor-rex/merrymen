@@ -4,10 +4,13 @@ import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { Feed } from "@/components/Feed";
 import { readTheses } from "@/lib/read-theses";
+import { readWallTape } from "@/lib/read-wall-tape";
+import { WallBand } from "@/components/WallBand";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
 import "@/styles/shell.css";
 import "@/styles/feed.css";
+import "@/styles/wall.css";
 
 /**
  * THE FRONT DOOR.
@@ -31,12 +34,32 @@ export const metadata: Metadata = {
 };
 
 export default async function FeedPage() {
-  const read = await readTheses();
+  const [read, tape] = await Promise.all([readTheses(), readWallTape()]);
+  const turned = tape.counts.turned;
+
   return (
     <AppShell>
       <LiveRefresh />
       <PageHeader title="Feed" />
+
+      {/* THE BAND SITS ABOVE THE READING COLUMN, in flow, full-bleed. It is
+          never behind a word of the feed — see wall.css. */}
+      <WallBand tape={tape} />
+
       <div className="mm-wrap">
+        {tape.cells.length > 0 && (
+          <div className="mm-wall-read">
+            <span className="mm-wall-fig">{turned.toLocaleString("en-US")}</span>
+            <span className="mm-wall-said">
+              <b>turned back in the last day</b>
+              <span>
+                Every intent above flew at the permission wall each agent signed. {turned} stopped;{" "}
+                {tape.counts.through} got through. The caps are the owner&rsquo;s, and nothing can
+                be moved outside them.
+              </span>
+            </span>
+          </div>
+        )}
         <Feed read={read} />
       </div>
     </AppShell>

@@ -82,7 +82,7 @@ function Row({ a, rank }: { a: LeaderRow; rank: number | null }) {
   const inner = (
     <>
       <span className="rk mono">{rank === null ? "—" : `#${rank}`}</span>
-      <AgentAvatar name={a.name} size={32} />
+      <AgentAvatar name={a.name} slug={a.slug} size={32} />
       <span className="who">
         <span className="nm">{a.name}</span>
         {a.handle && <span className="at mono">@{a.handle}</span>}

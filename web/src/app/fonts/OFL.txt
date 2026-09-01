@@ -1,0 +1,14 @@
+Geist Pixel is part of the Geist typeface family by Vercel, licensed under the
+SIL Open Font License, Version 1.1.
+
+The woff2 files in this directory were fetched from Google Fonts
+(fonts.gstatic.com/s/geistpixel) and are redistributed here under that licence,
+which permits bundling and redistribution provided this notice travels with
+them and the font is not sold on its own.
+
+Full licence text: https://openfontlicense.org
+Source: https://github.com/vercel/geist-font
+
+Self-hosted rather than linked because next/font's Google manifest does not yet
+carry Geist Pixel, and a display face on the first paint should not depend on a
+third-party request.

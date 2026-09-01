@@ -136,6 +136,24 @@
   background: color-mix(in srgb, var(--mm-wire) 12%, transparent);
   border-color: color-mix(in srgb, var(--mm-wire) 26%, transparent);
 }
+/*
+ * THIS DID NOT FULLY HAPPEN.
+ *
+ * A second axis, orthogonal to the first: a chip's COLOUR says what kind of
+ * thing it was, its EDGE says whether it actually occurred. The badge
+ * vocabulary spends three of its five kinds on things that are provisional or
+ * non-events and had no way to draw the difference — hue separation has already
+ * failed at 10px.
+ *
+ * It is also what frees --mm-warn to mean exactly one thing, which is the
+ * precondition for spending a masthead on it. And it is not a new invention
+ * here: .mm-trade.sim was already dashed, with the comment "A PRETEND FILL MUST
+ * NOT LOOK LIKE A REAL ONE". This finishes a convention that was half-made.
+ */
+.mm-chip.unsettled {
+  border-style: dashed;
+}
+
 /* Outline only, no fill: the quietest thing that is still a label. */
 .mm-chip.quiet {
   color: var(--mm-dim);

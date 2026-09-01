@@ -461,6 +461,11 @@ const SQLITE_ALTERS: string[] = [
   // against the SHARED database — so one bad row would take the entire mirror
   // down for every tenant rather than slowing one query.
   "CREATE INDEX IF NOT EXISTS trades_agent_userop ON trades (agent_id, user_op_hash)",
+  // A FLEET-WIDE TIME FILTER CANNOT USE trades_agent_time, which leads on
+  // agent_id — the wall band scans every tenant's last 24 hours, so without
+  // this it seq-scans and sorts the whole table on every revalidation. Exactly
+  // the reason decisions_time exists a few lines up.
+  "CREATE INDEX IF NOT EXISTS trades_time ON trades (created_at DESC)",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.

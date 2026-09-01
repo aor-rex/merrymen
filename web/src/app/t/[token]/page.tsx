@@ -77,7 +77,7 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
           <EntryTimeline
             entries={t.holders
               .filter((h) => h.enteredAt !== null)
-              .map((h) => ({ name: h.name, at: h.enteredAt!, size: h.valueUsdg }))}
+              .map((h) => ({ name: h.name, slug: h.slug, at: h.enteredAt!, size: h.valueUsdg }))}
           />
         </section>
 
@@ -96,7 +96,7 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
                 {t.holders.map((h) => {
                   const row = (
                     <>
-                      <AgentAvatar name={h.name} size={28} />
+                      <AgentAvatar name={h.name} slug={h.slug} size={28} />
                       <span className="who">
                         <span className="nm">{h.name}</span>
                         {h.handle && <span className="at mono">@{h.handle}</span>}

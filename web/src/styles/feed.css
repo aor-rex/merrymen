@@ -17,7 +17,7 @@
   font-family: var(--mm-sans);
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: #0b0f10; /* on a light gradient, always */
+  color: #000000; /* on a light gradient, always */
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14);
   user-select: none;
 }
@@ -44,7 +44,10 @@
   grid-template-columns: 40px minmax(0, 1fr);
   gap: var(--mm-3);
   padding: var(--mm-4) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  /* THE SEAM IS EMPHASISED, the internal rules are not. On pure black a
+     --mm-edge hairline is a rumour, and a card with no fill has nothing else
+     telling one agent's reasoning from the next's. */
+  border-bottom: 1px solid var(--mm-edge-2);
 }
 
 /* A thesis is about the book rather than a position, and the bar says so
@@ -99,9 +102,16 @@
 
 /* ── the reasoning: the largest text on the card ─────────────────────────── */
 
+/*
+ * THE MEASURE, computed rather than guessed. .mm-wrap is 640px less 32px of
+ * padding, and .mm-post spends 40px on the avatar plus a 12px gap — so the
+ * prose column is 556px, not 608. At Geist's ~0.51em average advance, 16px put
+ * about 68 characters on a line, which is over measure for a product whose
+ * whole job is reading paragraphs. 18px puts 61.
+ */
 .mm-say {
   margin: 0;
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1.55;
   letter-spacing: -0.004em;
   color: var(--mm-tx);
@@ -193,7 +203,7 @@
 
 .mm-empty h2 {
   margin: 0 0 var(--mm-2);
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 650;
   color: var(--mm-tx-2);
 }
@@ -201,7 +211,7 @@
 .mm-empty p {
   margin: 0 auto;
   max-width: 42ch;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.6;
   color: var(--mm-dim);
 }
@@ -213,7 +223,7 @@
   grid-template-columns: 40px minmax(0, 1fr);
   gap: var(--mm-3);
   padding: var(--mm-4) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  border-bottom: 1px solid var(--mm-edge-2);
 }
 
 .mm-skel i {
@@ -247,7 +257,7 @@
     padding-left: 10px;
   }
   .mm-say {
-    font-size: 15.5px;
+    font-size: 17px;
   }
   /* The timestamp gets its own line rather than squeezing the name. */
   .mm-when {
@@ -264,4 +274,36 @@
     flex-basis: 100%;
     text-align: left;
   }
+}
+
+/* ── the generated face ──────────────────────────────────────────────────── */
+/*
+ * Painted OVER the seeded gradient, never instead of it. The gradient is the
+ * floor: if the generated robot is slow, blocked or gone, what is underneath is
+ * still an agent's face rather than a broken image.
+ */
+.mm .mm-av {
+  position: relative;
+  overflow: hidden;
+}
+
+.mm .mm-av-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* The robots arrive in full colour on a page whose rule is that colour means
+     something, so they are pulled back — but only part of the way. Grayscale
+     plus a luminosity blend cancelled them against the gradient entirely: the
+     faces loaded at 160px and rendered as nothing.
+     
+     An avatar is IDENTITY, which is the one job colour is allowed to do here
+     besides semantics, and the seeded hue behind still shows around the robot's
+     transparent margin — so each agent gets a face AND a halo, and stays
+     distinguishable at 28px. */
+  filter: saturate(0.7) contrast(1.05) brightness(1.02);
+  /* Sits on the seeded gradient rather than replacing it, so the fallback is
+     never a flash of nothing while the face is in flight. */
+  background: transparent;
 }

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 /**
  * The design system, and ONLY the design system.
  *
@@ -14,13 +15,53 @@ import { RegisterSW } from "@/components/RegisterSW";
 
 // The merrymen.dev typefaces — used on the setup/settings screens (.setup-look)
 // so onboarding feels like the website; the trading terminal keeps its own fonts.
+/**
+ * THE PRODUCT'S FACES.
+ *
+ * Geist is Vercel's family, OFL-1.1 — sans and mono come through next/font, and
+ * GEIST PIXEL is self-hosted from web/src/app/fonts because it is new enough
+ * that next/font's manifest does not carry it yet. The woff2 is 17kB; a pixel
+ * face has very few outlines.
+ *
+ * Geist Pixel is the DISPLAY face and nothing else. It has no small sizes worth
+ * having — the whole point of it is the square grid it is drawn on, which
+ * disappears below about 24px and turns into mush.
+ */
+const geist = Geist({ subsets: ["latin"], variable: "--font-geist", display: "swap" });
+const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono", display: "swap" });
+const geistPixel = localFont({
+  src: [
+    { path: "./fonts/GeistPixel-latin.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/GeistPixel-latin-ext.woff2", weight: "400", style: "normal" },
+  ],
+  variable: "--font-geist-pixel",
+  display: "swap",
+  // Arial is a poor stand-in for a pixel face, so hold the fallback tight
+  // rather than letting a wildly different metric flash and reflow the hero.
+  adjustFontFallback: false,
+});
+
+/**
+ * THE LEGACY FACES, kept alive for /grant and /settings only.
+ *
+ * legacy.css and legacy-console.css resolve --font-hanken and --font-jbmono, and
+ * those two pages are deliberately not being restyled. `preload: false` because
+ * no other route uses them: without it every visitor to the feed pays a
+ * preload for two faces that never render.
+ */
 const hanken = Hanken_Grotesk({
   subsets: ["latin"],
   variable: "--font-hanken",
   weight: ["400", "500", "600", "700", "800"],
   display: "swap",
+  preload: false,
 });
-const jbmono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jbmono", display: "swap" });
+const jbmono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jbmono",
+  display: "swap",
+  preload: false,
+});
 
 // WHAT A PASTED LINK SAYS THIS IS.
 //
@@ -74,7 +115,7 @@ export const viewport: Viewport = {
   // Matches --mm-bg. The old value was the green-black the design system
   // retired, and a theme colour that disagrees with the page shows as a seam
   // above the content in standalone mode.
-  themeColor: "#0b0f10",
+  themeColor: "#000000",
   // `viewport-fit=cover` lets the layout reach under the notch; the CSS then
   // pays that back with safe-area padding, which is why both halves are needed.
   viewportFit: "cover",
@@ -84,7 +125,10 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${hanken.variable} ${jbmono.variable}`}>
+    <html
+      lang="en"
+      className={`${geist.variable} ${geistMono.variable} ${geistPixel.variable} ${hanken.variable} ${jbmono.variable}`}
+    >
       <body>
         {children}
         <RegisterSW />

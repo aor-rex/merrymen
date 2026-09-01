@@ -18,6 +18,8 @@ import { AgentAvatar } from "@/components/AgentAvatar";
  */
 export interface Entry {
   name: string;
+  /** The public id, so the pin wears the same face as everywhere else. */
+  slug?: string | null;
   /** Unix seconds. */
   at: number;
   /** Position value, used only to order overlaps — never drawn as a y value. */
@@ -57,7 +59,7 @@ export function EntryTimeline({ entries }: { entries: Entry[] }) {
               style={{ left: `${x}%`, zIndex: sorted.length - i }}
               title={`${e.name} — ${new Date(e.at * 1000).toLocaleString()}`}
             >
-              <AgentAvatar name={e.name} size={26} />
+              <AgentAvatar name={e.name} slug={e.slug ?? null} size={26} />
             </span>
           );
         })}
