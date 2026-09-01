@@ -433,9 +433,60 @@ export async function readExecutionPoolPrice(
   client: PublicClient,
   args: { token: `0x${string}`; tokenDecimals: number; cash: `0x${string}`; cashDecimals: number },
 ): Promise<PoolPrice | null> {
-  const price = await readPoolPrice(client, args);
-  if (!price || price.spot8 <= 0n || price.spot18 <= 0n) return null;
-  return price.price8 > 0n ? price : { ...price, price8: price.spot8, price18: price.spot18 };
+  const best = await bestCashPool(client, { token: args.token, cash: args.cash });
+  if (!best) return null;
+  try {
+    const [token0, slot0, liquidity] = await Promise.all([
+      client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "token0" }) as Promise<`0x${string}`>,
+      client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "slot0" }) as Promise<
+        readonly [bigint, number, number, number, number, number, boolean]
+      >,
+      client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "liquidity" }).catch(() => 0n) as Promise<bigint>,
+    ]);
+    const tokenIsToken0 = token0.toLowerCase() === args.token.toLowerCase();
+    const shape = { tokenIsToken0, tokenDecimals: args.tokenDecimals, cashDecimals: args.cashDecimals };
+    const spot8 = sqrtPriceX96ToPrice({ sqrtPriceX96: slot0[0], ...shape, decimals: 8 });
+    const spot18 = sqrtPriceX96ToPrice({ sqrtPriceX96: slot0[0], ...shape, decimals: 18 });
+    if (spot8 <= 0n || spot18 <= 0n) return null;
+
+    // A live TWAP is preferable, but it is not required to execute a newly
+    // initialized pool. The execution caller applies slippage to this quote.
+    let price8 = 0n;
+    let price18 = 0n;
+    try {
+      const [tickCumulatives] = (await client.readContract({
+        address: best.pool,
+        abi: POOL_ABI,
+        functionName: "observe",
+        args: [[DEFAULT_TWAP_WINDOW_SEC, 0]],
+      })) as readonly [readonly bigint[], readonly bigint[]];
+      const tick = meanTick(tickCumulatives, DEFAULT_TWAP_WINDOW_SEC);
+      if (tick !== null) {
+        price8 = tickToPrice({ tick, ...shape, decimals: 8 });
+        price18 = tickToPrice({ tick, ...shape, decimals: 18 });
+      }
+    } catch {
+      // Fresh pools may not have enough observations for a TWAP.
+    }
+    return {
+      pool: best.pool,
+      fee: best.fee,
+      price8: price8 > 0n ? price8 : spot8,
+      spot8,
+      price18: price18 > 0n ? price18 : spot18,
+      spot18,
+      liquidityCashRaw: cashDepthFromLiquidity({
+        liquidity,
+        sqrtPriceX96: slot0[0],
+        cashIsToken0: !tokenIsToken0,
+      }),
+      cashDecimals: args.cashDecimals,
+      twapWindowSec: DEFAULT_TWAP_WINDOW_SEC,
+      divergenceBps: price18 > 0n ? divergenceBps(spot18, price18) : 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Raw cash units at `cashDecimals` → USD at 6dp, given USD per whole cash unit.
