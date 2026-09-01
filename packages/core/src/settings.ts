@@ -244,6 +244,21 @@ export interface MerrymenSettings {
   sponsorGasEnabled?: boolean;
   /** Pimlico sponsorship policy id (`sp_…`), which is where the real spend limits live. */
   sponsorshipPolicyId?: string;
+  /**
+   * Read deposits and withdrawals from USDG Transfer logs instead of inferring
+   * them from balance changes.
+   *
+   * Inference can only see two cases — the first funded observation, and a cash
+   * change with no ledger row in between — so a top-up that lands in the same
+   * tick as a fill is folded into performance. Reading the logs makes every
+   * flow exact and gives it a transaction hash.
+   *
+   * OFF by default despite being strictly more accurate, because it changes how
+   * CONTRIBUTIONS are counted and contributions are what P&L is measured
+   * against. It earns its way on one agent against the live chain before the
+   * fleet, exactly like sponsorship.
+   */
+  depositScanEnabled?: boolean;
   scoutEnabled?: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. 0 = off. */
   scoutBudgetUsdg?: number;
@@ -469,6 +484,9 @@ export const SETTINGS_DEFAULTS = {
   trencherLiveEnabled: false,
   // Off by default like every other switch that spends money.
   sponsorGasEnabled: false,
+  // Off by default because it changes how contributions are counted, and a
+  // change to contributions is a change to every P&L figure derived from them.
+  depositScanEnabled: false,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,

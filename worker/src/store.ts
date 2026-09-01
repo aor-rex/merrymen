@@ -10,6 +10,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+// The one definition of a flow's identity. Imported rather than restated so
+// the reader and the writer cannot disagree about what makes a flow unique.
+import { flowKey } from "./deposit-log";
 
 let driver: Db | null = null;
 
@@ -404,6 +407,12 @@ const SQLITE_ALTERS: string[] = [
     // without it no depth figure for the curve is real. It never changes for a
     // given curve, so one write beats an eth_call per token per tick.
     "ALTER TABLE discovered_pools ADD COLUMN graduation_threshold TEXT",
+    // WHICH transfer, within a transaction. A deposit is identified by
+    // (tx_hash, log_index) and NOT by the transaction alone: one transaction can
+    // carry several USDG transfers, and keying on the hash would silently drop
+    // all but the first. NULL for every flow that is not read from a chain log —
+    // an inferred flow has no log to index.
+    "ALTER TABLE flows ADD COLUMN log_index INTEGER",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -912,6 +921,8 @@ export interface FlowRow {
   source: FlowSource;
   txHash?: string;
   blockNumber?: number;
+  /** Position within the block. Set only for 'chain-log' — see the migration. */
+  logIndex?: number;
 }
 
 /** Record money crossing the account boundary, and mirror it into the journal. */
@@ -927,14 +938,15 @@ export async function addFlow(flow: FlowRow): Promise<void> {
         amountUsdg: amount,
         blockNumber: flow.blockNumber ?? null,
         direction: flow.direction,
+        logIndex: flow.logIndex ?? null,
         source: flow.source,
         txHash: flow.txHash ?? null,
       },
       async (db: Db) => {
         await db
           .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             flow.agentId,
@@ -942,6 +954,7 @@ export async function addFlow(flow: FlowRow): Promise<void> {
             amount,
             flow.txHash ?? null,
             flow.blockNumber ?? null,
+            flow.logIndex ?? null,
             flow.source,
             epoch,
           );
@@ -972,6 +985,64 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
     .get(agentId) as { n: number; net: number } | undefined;
   if (!row || row.n === 0) return null;
   return row.net;
+}
+
+/**
+ * The highest block a chain-read flow has been recorded from, or null when
+ * none has. This IS the deposit scanner's watermark — it lives in the rows it
+ * describes rather than in a table of its own, so it cannot disagree with them.
+ */
+export async function lastChainLogBlock(agentId: string): Promise<number | null> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT MAX(block_number) AS b FROM flows
+        WHERE agent_id = ? AND source = 'chain-log' AND block_number IS NOT NULL`,
+    )
+    .get(agentId)) as { b: number | null } | undefined;
+  return row?.b === null || row?.b === undefined ? null : Number(row.b);
+}
+
+/**
+ * Flow keys already recorded from block `fromBlock` onward.
+ *
+ * The scan re-reads its last block every pass — a block can carry several
+ * transfers and a crash between two of them would otherwise strand the rest —
+ * so this set is what stops the re-read being booked twice.
+ */
+export async function knownFlowKeys(agentId: string, fromBlock: number): Promise<Set<string>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT tx_hash, log_index FROM flows
+        WHERE agent_id = ? AND tx_hash IS NOT NULL AND log_index IS NOT NULL
+          AND block_number >= ?`,
+    )
+    .all(agentId, fromBlock)) as { tx_hash: string; log_index: number }[];
+  const out = new Set<string>();
+  for (const r of rows) out.add(flowKey(r.tx_hash, Number(r.log_index)));
+  return out;
+}
+
+/**
+ * Transaction hashes the ledger already explains as trades.
+ *
+ * A swap moves USDG, and its Transfer log is a FILL rather than a deposit —
+ * booking fills as capital would inflate contributions by the account's whole
+ * turnover and drive reported P&L steadily negative. Vault moves are covered
+ * too: they are trade rows carrying transaction hashes.
+ *
+ * `trades` has no block number to filter on, so this is bounded by recency
+ * instead. The bound is enormous relative to a scan window — a window is
+ * minutes of blocks and this is thousands of fills — so the only thing it
+ * really prevents is an unbounded read on a long-lived agent.
+ */
+export async function recentTradeTxHashes(agentId: string, limit = 2000): Promise<Set<string>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT tx_hash FROM trades WHERE agent_id = ? AND tx_hash IS NOT NULL
+        ORDER BY id DESC LIMIT ?`,
+    )
+    .all(agentId, limit)) as { tx_hash: string }[];
+  return new Set(rows.map((r) => r.tx_hash.toLowerCase()));
 }
 
 /**

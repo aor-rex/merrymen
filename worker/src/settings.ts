@@ -75,6 +75,8 @@ export interface ResolvedConfig {
   trencherLiveEnabled: boolean;
   sponsorGasEnabled: boolean;
   sponsorshipPolicyId?: string;
+  /** Read flows from USDG Transfer logs rather than inferring them. */
+  depositScanEnabled: boolean;
   browserUrl: string | undefined;
   browserToken: string | undefined;
   scoutEnabled: boolean;
@@ -290,6 +292,7 @@ export function mergeSettings(
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
     sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
     sponsorshipPolicyId: str(file.sponsorshipPolicyId, env.MERRYMEN_SPONSORSHIP_POLICY_ID),
+    depositScanEnabled: bool(file.depositScanEnabled, env.MERRYMEN_DEPOSIT_SCAN, d.depositScanEnabled),
     browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
     browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),

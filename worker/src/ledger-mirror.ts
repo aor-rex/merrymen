@@ -103,7 +103,7 @@ const LOG_TABLES = [
   // cannot back. Every hosted agent showed a dash, forever, by design.
   {
     table: "flows",
-    cols: ["agent_id", "direction", "amount_usdg", "tx_hash", "block_number", "source", "epoch", "at"],
+    cols: ["agent_id", "direction", "amount_usdg", "tx_hash", "block_number", "log_index", "source", "epoch", "at"],
   },
   // What the house actually accrued, per agent. Read straight off `agents` by
   // the scoreboard, but the per-accrual history is what makes a fee auditable.

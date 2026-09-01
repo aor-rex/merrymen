@@ -76,6 +76,7 @@ import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } f
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey } from "./revert";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
@@ -179,6 +180,9 @@ import {
   type BudgetRail,
   addFlow,
   adjustAgentHwm,
+  knownFlowKeys,
+  lastChainLogBlock,
+  recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
   hasEpochOneHistory,
@@ -726,12 +730,32 @@ async function main() {
    * logs makes this exact and gives every flow a tx hash; until then an inferred
    * flow says so in its `source`, and an audit can drop it on sight.
    */
+  /**
+   * How far back a restarted scan is willing to reach. At ~10 blocks/sec this is
+   * a little over five hours. A gap WIDER than this is not scanned and not
+   * pretended about: the scan reopens at the head and inference books the net
+   * boundary movement, which is what it is for.
+   */
+  const DEPOSIT_LOOKBACK_BLOCKS = 200_000n;
+
   const reconcileFlows = async (
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
+    /** Present when flows can be READ instead of inferred. See scanChainFlows. */
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}` },
   ): Promise<void> => {
-    const record = async (deltaUsdg: bigint, why: string) => {
+    const record = async (
+      deltaUsdg: bigint,
+      why: string,
+      /**
+       * Set when the flow was READ off the chain rather than inferred from a
+       * balance change. It switches the row's `source`, which is the column that
+       * exists so the two can never be mistaken for each other: an inferred flow
+       * is an opinion an audit may drop on sight, a chain-log flow is a receipt.
+       */
+      evidence?: { txHash: string; blockNumber: number; logIndex: number },
+    ) => {
       if (deltaUsdg === 0n) return;
       const inbound = deltaUsdg > 0n;
       const amount = inbound ? deltaUsdg : -deltaUsdg;
@@ -739,7 +763,10 @@ async function main() {
         agentId,
         direction: inbound ? "in" : "out",
         amountUsdg: usdgNum(amount),
-        source: "inferred",
+        source: evidence ? "chain-log" : "inferred",
+        txHash: evidence?.txHash,
+        blockNumber: evidence?.blockNumber,
+        logIndex: evidence?.logIndex,
       });
       await adjustAgentHwm(agentId, usdgNum(deltaUsdg));
       highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
@@ -751,7 +778,87 @@ async function main() {
       );
     };
 
-    if (lastCashUsdg === null) {
+    /**
+     * Book every USDG movement the chain actually recorded, and report whether
+     * this pass covered the window since the last one.
+     *
+     * Returning TRUE makes the scan authoritative and switches inference off
+     * for this tick. Returning FALSE is the honest answer whenever the window
+     * is not fully covered — no watermark yet, a gap wider than the lookback, or
+     * an RPC that would not answer — and inference stays in charge for it.
+     *
+     * The flows go through the same `record` as an inferred one, so a chain-read
+     * deposit moves the high-water mark exactly like any other capital. Booking
+     * the flow without moving the peak would leave the next tick treating the
+     * deposit as profit and charging a fee on the owner's own money, which is
+     * the original bug with a transaction hash attached to it.
+     */
+    const scanChainFlows = async (s: {
+      chain: ReconcileChain;
+      smartAccount: `0x${string}`;
+    }): Promise<boolean> => {
+      let head: bigint;
+      let from: bigint;
+      let flows: Awaited<ReturnType<typeof findTransferFlows>>;
+      try {
+        head = await s.chain.getBlockNumber();
+        if (chainScanCursor === null) {
+          const mark = await lastChainLogBlock(agentId);
+          if (mark === null) {
+            // Never scanned. Open at the head rather than re-litigating the
+            // account's whole history transfer by transfer — everything before
+            // this point belongs to the single `inferred` opening-balance row.
+            chainScanCursor = head;
+            return false;
+          }
+          const at = resumeFrom(mark, head, DEPOSIT_LOOKBACK_BLOCKS);
+          if (at > BigInt(mark)) {
+            // resumeFrom clamped, so the gap since the last scan is wider than
+            // we will reach back. Say so by returning false: inference books the
+            // net boundary movement it is designed for, and the exact scan
+            // restarts from here rather than silently skipping the difference.
+            chainScanCursor = head;
+            return false;
+          }
+          chainScanCursor = at;
+        }
+        from = chainScanCursor;
+        flows = await findTransferFlows({
+          chain: s.chain,
+          smartAccount: s.smartAccount,
+          usdgToken: CASH.USDG as `0x${string}`,
+          fromBlock: from,
+          toBlock: head,
+          knownKeys: await knownFlowKeys(agentId, Number(from)),
+          tradeTxHashes: await recentTradeTxHashes(agentId),
+          log: (m) => console.log(`[flows] ${m}`),
+        });
+      } catch (e) {
+        // An RPC that will not answer is not evidence of no deposits. Leave the
+        // cursor where it is so the same window is retried, and let inference
+        // cover this tick.
+        console.log(`[flows] chain scan skipped (${e instanceof Error ? e.message : String(e)})`);
+        return false;
+      }
+
+      for (const fl of flows) {
+        await record(
+          fl.direction === "in" ? fl.amountUsdg6 : -fl.amountUsdg6,
+          `${fl.txHash.slice(0, 10)}…`,
+          { txHash: fl.txHash, blockNumber: fl.blockNumber, logIndex: fl.logIndex },
+        );
+      }
+      // Advanced only after a clean pass, so a failure re-reads rather than skips.
+      chainScanCursor = head;
+      return true;
+    };
+
+    // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
+    // truth about money crossing the boundary, and inference must not book the
+    // same movement a second time from the balance change it already explains.
+    const covered = scan ? await scanChainFlows(scan) : false;
+
+    if (!covered && lastCashUsdg === null) {
       // Nothing observed in THIS process yet. Two very different situations,
       // and conflating them was a real bug:
       //
@@ -776,7 +883,7 @@ async function main() {
           await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
         }
       }
-    } else if (ledgerWrites === ledgerWritesAtSnapshot) {
+    } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");
     }
 
@@ -789,6 +896,14 @@ async function main() {
   // moved and NOTHING was written to the ledger in between, the money came from
   // outside. Deliberately narrow — see reconcileFlows.
   let lastCashUsdg: bigint | null = null;
+  /**
+   * The block the deposit scan has read up to, for this process.
+   *
+   * Process-local on purpose: on restart it is null, and the scan re-derives a
+   * starting point from the flows already recorded — which is the only source
+   * that cannot disagree with the rows it describes.
+   */
+  let chainScanCursor: bigint | null = null;
   let ledgerWrites = 0;
   let ledgerWritesAtSnapshot = 0;
   /** The last row recordTrade wrote — see the comment there for why this exists. */
@@ -3967,7 +4082,18 @@ async function main() {
       // zero. It fixed the FIRST deposit and no other: every later top-up was
       // booked as profit and charged a fee — 150 USDG of fees on zero trades,
       // for an owner who funded 154.87 and then added 1,000 and 500.
-      await reconcileFlows(agentId, balances.cashUsdg, equityUsdg);
+      // Reading the USDG Transfer logs makes each of those flows exact and gives
+      // it a transaction hash, instead of a balance change nobody can point at.
+      // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
+      // figure is measured against those.
+      await reconcileFlows(
+        agentId,
+        balances.cashUsdg,
+        equityUsdg,
+        cfg.depositScanEnabled
+          ? { chain: makeReconcileChain(client), smartAccount: grant.smartAccount as `0x${string}` }
+          : undefined,
+      );
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, effFeeBps);

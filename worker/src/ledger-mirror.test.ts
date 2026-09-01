@@ -25,7 +25,7 @@ const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, fill_cash_usdg REAL, epoch INTEGER DEFAULT 1, created_at INTEGER);",
   "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
-  "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, source TEXT, epoch INTEGER DEFAULT 1, at INTEGER);",
+  "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0);",
@@ -73,8 +73,8 @@ const seedChild = () => {
   // A deposit and a withdrawal. Without these the shared ledger has no flow
   // term at all, contributions read as UNKNOWN, and P&L is null forever.
   raw.exec(
-    "INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch, at)" +
-      " VALUES ('0xagent','in',80.0,'0xdeadbeef',555,'chain-log',2,110)",
+    "INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, at)" +
+      " VALUES ('0xagent','in',80.0,'0xdeadbeef',555,4,'chain-log',2,110)",
   );
   raw.exec(
     "INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch, at)" +
@@ -214,10 +214,13 @@ describe("the ledger mirror", () => {
 
     // The tx hash is what makes a flow evidence rather than an inference.
     const dep = (await shared
-      .prepare("SELECT tx_hash, block_number, source FROM flows WHERE direction = 'in'")
-      .get()) as { tx_hash: string; block_number: number; source: string };
+      .prepare("SELECT tx_hash, block_number, log_index, source FROM flows WHERE direction = 'in'")
+      .get()) as { tx_hash: string; block_number: number; log_index: number; source: string };
     assert.equal(dep.tx_hash, "0xdeadbeef");
     assert.equal(Number(dep.block_number), 555);
+    // Without the index a re-read of the final block cannot tell this transfer
+    // from another in the same transaction.
+    assert.equal(Number(dep.log_index), 4);
     assert.equal(dep.source, "chain-log");
   });
 
