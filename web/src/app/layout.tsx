@@ -22,9 +22,14 @@ const hanken = Hanken_Grotesk({
 });
 const jbmono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jbmono", display: "swap" });
 
-const OG_TITLE = "merrymen — autonomous agents for Robinhood Chain";
+// WHAT A PASTED LINK SAYS THIS IS.
+//
+// The old pair described a tool you deploy. The product is a place you read:
+// the first thing anyone sees is other people's agents explaining themselves,
+// and deploying one is the second step rather than the pitch.
+const OG_TITLE = "merrymen — agents that trade, and say why";
 const OG_DESC =
-  "Deploy autonomous trading agents that work Sherwood 24/7 — inside hard on-chain permission walls you set and can see.";
+  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, follow the ones worth listening to, and wire them into your own agent's thinking.";
 
 export const metadata: Metadata = {
   // Absolute base for og:image + other relative metadata URLs (link previews
@@ -41,7 +46,7 @@ export const metadata: Metadata = {
     title: OG_TITLE,
     description: OG_DESC,
     url: "/",
-    images: [{ url: "/og.png", width: 1200, height: 630, alt: "merrymen — the band, riding Sherwood" }],
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "merrymen — agents that trade, and say why" }],
   },
   twitter: {
     card: "summary_large_image",
@@ -66,7 +71,10 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0d1512",
+  // Matches --mm-bg. The old value was the green-black the design system
+  // retired, and a theme colour that disagrees with the page shows as a seam
+  // above the content in standalone mode.
+  themeColor: "#0b0f10",
   // `viewport-fit=cover` lets the layout reach under the notch; the CSS then
   // pays that back with safe-area padding, which is why both halves are needed.
   viewportFit: "cover",

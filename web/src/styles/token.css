@@ -1,0 +1,150 @@
+/**
+ * The token page. Scoped under .mm, enforced by styles/scoped.test.ts.
+ */
+
+.mm-tok-when,
+.mm-tok-holders {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+/* ── the entry timeline ──────────────────────────────────────────────────── */
+
+.mm-timeline {
+  margin-top: var(--mm-4);
+}
+
+.mm-timeline .track {
+  position: relative;
+  height: 46px;
+  /* Room for an avatar centred on either end without clipping. */
+  margin: 0 13px;
+}
+
+.mm-timeline .line {
+  position: absolute;
+  inset: 50% 0 auto 0;
+  height: 1px;
+  background: var(--mm-edge-2);
+}
+
+.mm-timeline .pin {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  line-height: 0;
+  /* A ring in the page ground so overlapping pins read as separate faces
+     rather than one smeared shape. */
+  border-radius: var(--mm-r-agent);
+  box-shadow: 0 0 0 2px var(--mm-bg);
+}
+
+.mm-timeline .axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--mm-2);
+  font-size: 10.5px;
+  color: var(--mm-faint);
+}
+
+/* Says what the axis IS. Without it a reader supplies "price" for free. */
+.mm-timeline .axis .mid {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── holders ─────────────────────────────────────────────────────────────── */
+
+.mm-holders {
+  list-style: none;
+  margin: var(--mm-3) 0 var(--mm-3);
+  padding: 0;
+}
+
+.mm-holders li {
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-holders li > a,
+.mm-holders li > span {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: var(--mm-3);
+  padding: var(--mm-2) var(--mm-2);
+  border-radius: var(--mm-r-chip);
+  transition: background-color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-holders li > a:hover {
+  background: var(--mm-surface-2);
+  color: inherit;
+}
+
+.mm-holders .who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mm-holders .who .nm {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--mm-tx);
+}
+
+.mm-holders .who .at {
+  font-size: 11px;
+  color: var(--mm-dim);
+}
+
+.mm-holders .val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mm-tx-2);
+  white-space: nowrap;
+}
+
+.mm-holders .basis {
+  font-size: 11px;
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+.mm-holders .chg {
+  min-width: 60px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mm-holders .chg.up {
+  color: var(--mm-up);
+}
+.mm-holders .chg.down {
+  color: var(--mm-down);
+}
+.mm-holders .chg.flat {
+  color: var(--mm-dim);
+}
+
+@media (max-width: 520px) {
+  .mm-holders li > a,
+  .mm-holders li > span {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  /* The basis is the first thing to go: it is the least useful figure on a
+     phone and the row is better short than complete. */
+  .mm-holders .basis {
+    display: none;
+  }
+  .mm-holders .val {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  .mm-holders .chg {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+}
