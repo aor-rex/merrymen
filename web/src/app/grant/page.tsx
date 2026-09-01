@@ -8,6 +8,7 @@ import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import {
   explorerFor,
+  grantHasNativeSwap,
   grantHasV4,
   isValidCustomToken,
   robinhoodChain,
@@ -1571,6 +1572,18 @@ export default function GrantPage() {
                   to sign carries no transfer permission at all; moving money out is the owner
                   key&apos;s job (<code>merrymen recover</code>). Wallets signed before this changed keep
                   the free-form transfer permission they were signed with.
+                </li>
+                <li>
+                  <b>ETH → USDG convert</b> —{" "}
+                  {grantHasNativeSwap(grant) ? (
+                    "granted. With auto-convert on in settings, surplus ETH converts to USDG automatically — a percent of the balance stays as gas. Money only ever lands in your own account."
+                  ) : (
+                    <>
+                      not granted. Keys signed before this was added cannot run auto-convert — the
+                      wall refuses the swap. <b>Re-sign below</b> to carry it (free, funds untouched);
+                      until then, send USDG directly or convert manually via <code>merrymen recover</code>.
+                    </>
+                  )}
                 </li>
                 <li>
                   <b>Uniswap v4</b> —{" "}

@@ -50,6 +50,7 @@ import {
   pimlicoPaymasterUrl,
   robinhoodTestnet,
   grantHasMultihop,
+  grantHasNativeSwap,
   // Aliased: `grantHasTransfer` is also the name of the dep this file passes
   // to the Telegram executor, and the two must not shadow each other.
   grantHasTransfer as grantCarriesTransfer,
@@ -69,6 +70,7 @@ import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
 import { SHADOW_SOURCES, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
+import { buildConvertCall } from "./venues/convert";
 import {
   NotRecorded,
   createAgentExecutor,
@@ -140,12 +142,13 @@ import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
-import { bestCashPool } from "./venues/pool-price";
+import { bestCashPool, readPoolPrice } from "./venues/pool-price";
 import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName, setName } from "./soul";
+import { readsAsBroke } from "./reads-as-broke";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
@@ -413,6 +416,16 @@ async function main() {
    * simulation — an agent that thinks it is trading while writing pretend fills
    * is the single worst outcome available here, far worse than an idle tick. So
    * only a READ zero counts.
+   *
+   * GAS IS NOT BROKE, either — and this mattered the day auto-convert landed.
+   * A cash read of 0 with a real ETH balance is not an unfunded agent; it is a
+   * funded agent whose capital arrived as native ETH and is waiting to be
+   * converted. Flipping that agent to paper did two bad things at once: it
+   * minted 1,000 pretend USDG on screen next to a real balance, and it
+   * deadlock-blocked the auto-convert that would have produced real cash —
+   * the convert refuses to run in paper mode, so "no cash → paper → no
+   * convert → still no cash" looped forever. Broke means NO cash AND NO gas.
+   * See readsAsBroke for the pure form and its tests.
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   /**
@@ -433,6 +446,10 @@ async function main() {
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
+  // Kept for the auto-convert gate below (rebased onto the exec-mode refactor):
+  // the convert needs the grant on the tradeable chain even when paper trading
+  // would otherwise be the active rail.
+  const chainCanTrade = () => !!active && active.grant.chainId === TRADEABLE_CHAIN_ID;
   /**
    * Is somebody else paying the gas?
    *
@@ -1465,6 +1482,22 @@ async function main() {
   let lastTierId = holderTier.id;
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   let lastSequencerUp = true;
+  // Auto-convert rate limit: at most one convert op per hour. Three bounds in
+  // total govern the flow — this cooldown, the toggle itself, and the surplus
+  // arithmetic in the tick (reserve + dynamic gas floor). The wall adds the
+  // fourth: a sealed per-op valueLimit no setting can lift.
+  const AUTO_CONVERT_COOLDOWN_MS = 3_600_000;
+  let lastAutoConvertAt = 0;
+  // One re-sign notice per arm, not per tick — a warn event every minute is
+  // noise, and the event log is the owner's record.
+  let autoConvertSignNoteShown = false;
+  // For a short window after a BALANCE change (a deposit), skip-path decisions
+  // are logged so a silent non-convert is diagnosable instead of invisible.
+  // Ticking the timestamp on every tick would spam, so it is only refreshed
+  // when the ETH or cash balance differs from what we last saw.
+  const AUTO_CONVERT_DEBUG_MS = 180_000;
+  let autoConvertDebugUntil = 0;
+  let autoConvertDebugBalance = "";
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
   let notedUnpriced = false;
@@ -5601,6 +5634,120 @@ async function main() {
     // Same rule the cash balance already follows: unknown is not zero, so leave
     // it null and let the pre-flight decline to judge.
     if (!paper) lastGasWei = balances.ethWei;
+    // Open the auto-convert diagnostic window on a balance change (the moment
+    // a deposit lands) so any silent skip is explained rather than a mystery.
+    const balKey = `${balances.ethWei}:${balances.cashUsdg}`;
+    if (balKey !== autoConvertDebugBalance) {
+      autoConvertDebugBalance = balKey;
+      autoConvertDebugUntil = Date.now() + AUTO_CONVERT_DEBUG_MS;
+    }
+    // Auto-convert: NATIVE ETH → USDG in ONE SwapRouter02 exactInputSingle call
+    // with msg.value attached — the router wraps internally, so no separate
+    // WETH.deposit() and no approve (venues/convert.ts). The wall's router rule
+    // carries the WETH tokenIn pin and the wall's ONLY non-zero valueLimit; a
+    // grant signed before that change must be re-signed for this to fire.
+    //
+    // Deliberately NOT routed through the strategy budget reservation: this is
+    // funding, not trading. Its bounds are the toggle, the hourly cooldown, the
+    // reserve/floor arithmetic below, and the wall's sealed valueLimit.
+    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && Date.now() - lastAutoConvertAt >= AUTO_CONVERT_COOLDOWN_MS) {
+      // The marker is minted BY the wall that can do this. A grant signed
+      // before nativeSwapValueLimitWei existed would only fail at the chain —
+      // say so once, clearly, instead of burning gas reading a revert.
+      if (!grantHasNativeSwap(active.grant)) {
+        if (!autoConvertSignNoteShown) {
+          autoConvertSignNoteShown = true;
+          await addEvent(
+            agentId,
+            "warn",
+            "auto-convert is on but this key was signed before the ETH→USDG permission existed — re-sign at /grant to use it. Until then, send USDG directly.",
+          );
+        }
+      } else {
+      try {
+        const gasPrice = await mainnetClient().getGasPrice().catch(() => 0n);
+        // The owner's split, as a percent of the balance — but the floor beneath
+        // it is NOT configurable: enough for one operating swap's gas at the
+        // live price. This chain's gas is dimes-and-up-per-dollar thin, so the
+        // floor is a REAL single-swap UserOp (~400k gas), deliberately nothing
+        // like recover.ts's 900k×2 SWEEP budget — applying that to the reserve
+        // ate the whole of a small deposit and silently blocked its convert. A
+        // 1% setting on a small balance can never strand the agent either way.
+        const pct = BigInt(Math.min(Math.max(Math.round(cfg.autoConvertReservePct), 1), 50));
+        const pctReserve = (lastGasWei * pct) / 100n;
+        const opFloor = gasPrice * 400_000n; // one swap UserOp, entrypoint + call — not a sweep
+        const reserve = pctReserve > opFloor ? pctReserve : opFloor;
+        const cash6 = balances.cashUsdg; // bigint 6dp
+        const idleFloor = BigInt(Math.round((cfg.idleFloorUsdg ?? 50) * 1e6));
+        const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
+        if (surplusEth > 0n && cash6 < idleFloor && active.executor) {
+          // Expected USDG out, derived from the ON-CHAIN pool price (TWAP, the
+          // same manipulation-resistant number readPoolPrice uses to value the
+          // whole book). The Uniswap QuoterV2 reverts on this pair on this
+          // chain, so the quoter path (bestRoute) is unusable here — but the
+          // pool itself is real and liquid (verified live), so we size minOut
+          // off the TWAP with slippage, which is exactly the guard a quoter
+          // would provide. The actual swap still goes through SwapRouter02.
+          const price = await readPoolPrice(active.client, {
+            token: CASH.WETH as `0x${string}`,
+            tokenDecimals: 18, // native ETH / WETH raw units
+            cash: CASH.USDG as `0x${string}`,
+            cashDecimals: USDG_DECIMALS,
+          });
+          if (price && price.price8 > 0n) {
+            // price8 is USDG-per-whole-WETH at 8dp; surplusEth is raw wei (18dp).
+            // USDG out (6dp) = price8/1e8 × surplusEth/1e18 × 1e6 = price8×wei/1e20.
+            const expect6 = (price.price8 * surplusEth) / 1_000_000_000_000_000_000_00n; // ÷1e20
+            const minOut = minOutWithSlippage(expect6, cfg.slippageBps);
+            if (expect6 > 0n && minOut > 0n) {
+              const exec = await active.executor.execute([
+                buildConvertCall({
+                  surplusEth,
+                  fee: price.fee,
+                  minAmountOut: minOut,
+                  recipient: active.executor.address as `0x${string}`,
+                }),
+              ]);
+              lastAutoConvertAt = Date.now();
+              console.log(`[auto-convert] ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}) · op ${exec.userOpHash}`);
+              await addEvent(
+                agentId,
+                "ok",
+                `auto-convert ✓ ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}, fee ${price.fee / 10_000}%) — gas reserve kept`,
+              );
+              await addTrade({
+                agent_id: agentId,
+                kind: "swap",
+                target: CASH.WETH,
+                sell_token: "ETH",
+                buy_token: CASH.USDG,
+                amount_usdg: usdgNum(expect6),
+                status: "landed",
+                user_op_hash: exec.userOpHash,
+                tx_hash: exec.txHash,
+              });
+            } else if (autoConvertDebugUntil > Date.now()) {
+              console.log(`[auto-convert] NOT converting: ${formatUnits(surplusEth, 18)} ETH prices to ${expect6} USDG — below a meaningful minOut`);
+            }
+          } else if (autoConvertDebugUntil > Date.now()) {
+            console.log(`[auto-convert] NOT converting: no WETH→USDG on-chain price for ${formatUnits(surplusEth, 18)} ETH`);
+          }
+        } else if (autoConvertDebugUntil > Date.now() && active.executor) {
+          console.log(`[auto-convert] NOT converting: surplus ${formatUnits(surplusEth, 18)} ETH, cash ${fmt(cash6)} ≥ floor ${cfg.idleFloorUsdg ?? 50}`);
+        }
+      } catch (err) {
+        // Never into the tick's own path: a failed convert (no quote, wall
+        // refusal, bundler error, re-sign needed) must not stall trading.
+        // The cooldown is NOT set on failure — retry next hour, or sooner if
+        // the balances line up again.
+        await addEvent(
+          agentId,
+          "warn",
+          `auto-convert skipped — ${err instanceof Error ? err.message : String(err)}. If this says the wall refused, re-sign at /grant: keys signed before the ETH→USDG permission was added cannot convert.`,
+        ).catch(() => {});
+      }
+      }
+    }
     // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
     notifierHandle?.publishPrices(market.prices);
 

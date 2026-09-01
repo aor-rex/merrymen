@@ -566,6 +566,20 @@ export default function SettingsPage() {
                 Send ETH — we&apos;ll swap surplus to USDG and keep a gas reserve. Off by default. Also accepts USDG directly on the same address.
               </span>
             </label>
+            <Field
+              label="gas reserve"
+              hint="Percent of the ETH balance kept as gas; the rest converts to USDG. The bot always keeps at least one trade's worth of gas, even at 1%. Maximum one conversion per hour."
+            >
+              <input
+                type="number"
+                min={1}
+                max={50}
+                placeholder={String(d.autoConvertReservePct)}
+                value={v("autoConvertReservePct")}
+                onChange={set("autoConvertReservePct")}
+              />
+              <span className="field-unit">%</span>
+            </Field>
           </div>
 
           <div className="mm-subtle mono">basket · equal-weighted</div>

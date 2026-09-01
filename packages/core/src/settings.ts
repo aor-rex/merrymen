@@ -127,6 +127,10 @@ export interface MerrymenSettings {
    * wraps surplus ETH → WETH and swaps via SwapRouter02 exactInputSingle,
    * leaving a gas reserve. Web-only, tenant-writable. */
   autoConvertEnabled?: boolean;
+  /** Auto-convert gas reserve, as a percent of the ETH balance (1–50). The
+   * worker keeps at least one operation's worth of gas regardless of this
+   * number — the percent is the owner's split, the floor is the code's. */
+  autoConvertReservePct?: number;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as
@@ -579,4 +583,5 @@ export const SETTINGS_DEFAULTS = {
   telegramAgentMaxSteps: 20,
   virtualsEnabled: false,
   autoConvertEnabled: false,
+  autoConvertReservePct: 10,
 };

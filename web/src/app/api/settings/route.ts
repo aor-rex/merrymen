@@ -164,6 +164,11 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
   paperStartUsdg: [1, 10_000_000],
+  // Auto-convert gas reserve, percent of the ETH balance. Clamped to the same
+  // 1–50 the worker enforces — a duplicate enforcement point for one rule, on
+  // purpose: the web PUT and the worker resolver disagreeing would mean the
+  // stored value and the acting value diverge silently.
+  autoConvertReservePct: [1, 50],
   llmIntervalMin: [1, 1_440],
   llmMaxActionUsdg: [1, 100_000],
   telegramMaxActionUsdg: [1, 100_000],
