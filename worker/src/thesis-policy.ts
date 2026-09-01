@@ -70,10 +70,26 @@ export interface ThesisRow {
   first_at?: number | null;
   /** The agent's mode at last heartbeat: "live" | "paper" | "idle" | null. */
   mode?: string | null;
+  /**
+   * The agent's public id, decorated onto the row by the caller.
+   *
+   * NOT selected from the ledger — the identity store is not the ledger, and
+   * there is no cross-database join to make. The route reads the store once and
+   * maps account -> slug over the rows it already has.
+   */
+  slug?: string | null;
 }
 
 export interface PublicThesis {
   name: string;
+  /**
+   * What a link points at, and what a follow targets. Null when this agent has
+   * no identity yet — a grant minted before the store existed, or one whose
+   * best-effort mint failed — in which case the post renders with no link
+   * rather than not rendering at all. A missing link is a smaller loss than a
+   * missing thesis.
+   */
+  slug: string | null;
   /** null when unset. Never "" and never "@unknown" — absent renders as nothing. */
   handle: string | null;
   /** "buy AAPL 16.66 USDG", or "" when the decision names nothing. */
@@ -165,6 +181,17 @@ const REASON_MAX = 220;
  * "buy 50 USDG exceeds available cash", which would publish a bound on the
  * agent's cash.
  */
+/**
+ * The public id's shape, duplicated from identity-store's SLUG_RE on purpose.
+ *
+ * This module has NO IMPORTS — that is what let it move out of web/src/lib and
+ * be read by the orchestrator as well as the browser — and importing a store
+ * that reaches for node:fs and pg would end that immediately. A 16-character
+ * base32 alphabet is not going to drift, and identity-store's own tests pin the
+ * generator against exactly this shape.
+ */
+const SLUG_SHAPE = /^[0-9a-hjkmnp-tv-z]{16}$/;
+
 export function classifyDrop(dropped: string): string {
   const tail = dropped.includes(": ") ? dropped.slice(dropped.indexOf(": ") + 2) : dropped;
   if (/not in the tradable universe/i.test(tail)) return "it named something outside what it may trade";
@@ -281,7 +308,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // the handle, which are user-typed. A strategy reason cannot contain an
   // address by construction; this exists so the guarantee does not depend on
   // that staying true.
-  for (const s of [name, handle, head, reason, text, row.symbol ?? null]) {
+  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null]) {
     if (s && ADDRESSY.test(s)) return null;
   }
 
@@ -289,8 +316,15 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     row.action === "buy" || row.action === "sell" || row.action === "hold" ? row.action : null;
   const symbol = (row.symbol ?? "").trim() || null;
 
+  // Shape-checked rather than trusted. A malformed slug renders as null — the
+  // post loses its link and keeps its words — because a slug is not a
+  // disclosure risk the way a reason is, so dropping the whole post over one
+  // would trade a real loss for an imaginary one.
+  const slug = typeof row.slug === "string" && SLUG_SHAPE.test(row.slug) ? row.slug : null;
+
   return {
     name,
+    slug,
     handle,
     head,
     action,

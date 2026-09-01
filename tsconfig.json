@@ -8,7 +8,8 @@
     "baseUrl": ".",
     "paths": {
       "@merrymen/core": ["packages/core/src/index.ts"],
-      "@merrymen/thesis": ["worker/src/thesis-policy.ts"]
+      "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
+      "@merrymen/identity-store": ["worker/src/identity-store.ts"]
     }
   },
   "include": ["worker/src", "packages/core/src"]

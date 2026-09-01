@@ -56,6 +56,34 @@ describe("what may be published", () => {
   });
 });
 
+describe("the public id", () => {
+  it("publishes a well-formed slug", () => {
+    const t = publishableThesis(ok({ slug: "a7k3m9qz2n4vb8xd" }))!;
+    assert.equal(t.slug, "a7k3m9qz2n4vb8xd");
+  });
+
+  it("A MISSING SLUG COSTS THE LINK, NOT THE POST", () => {
+    // An agent granted before the identity store existed, or one whose
+    // best-effort mint failed, still has things to say. Dropping the thesis
+    // would trade a real loss for an imaginary one — a slug is not a
+    // disclosure risk the way a reason is.
+    assert.equal(publishableThesis(ok())!.slug, null);
+    assert.equal(publishableThesis(ok({ slug: "not a slug" }))!.slug, null);
+    // 16 characters, but 'i' is not in the alphabet — Crockford drops i/l/o/u
+    // so a slug cannot be misread into a different agent.
+    assert.equal(publishableThesis(ok({ slug: "iiiiiiiiiiiiiiii" }))!.slug, null);
+    assert.match(publishableThesis(ok({ slug: "not a slug" }))!.reason!, /the schedule says buy/);
+  });
+
+  it("is never an address, and the backstop covers it anyway", () => {
+    // It cannot be — base32 has no 0x prefix — which is exactly why the check
+    // is worth having: the guarantee stops depending on the encoding staying
+    // as designed.
+    const t = publishableThesis(ok({ slug: "0x1111111111111111111111111111111111111111" }));
+    assert.equal(t, null);
+  });
+});
+
 describe("a decision is not a failed trade", () => {
   /**
    * The desk's proudest feature rendered as its worst. A window where the agent

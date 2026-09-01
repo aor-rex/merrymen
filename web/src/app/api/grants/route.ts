@@ -15,6 +15,7 @@ import { CASH, MORPHO, carriesOwnerKey, chainForId, isHostedMode, type StoredGra
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
+import { getIdentityStore } from "@merrymen/identity-store";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
 const DATA_DIR = merrymenHome();
@@ -193,6 +194,25 @@ export async function POST(req: Request) {
       await getGrantStore().put(tenant, grant);
     } catch (e) {
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
+    }
+
+    // MINT THE PUBLIC ID HERE, and only here.
+    //
+    // This is the one place in the codebase where an authenticated tenant and a
+    // DERIVATION-VERIFIED smart account exist together — the counterfactual
+    // address was re-derived and checked a few lines above, so neither value is
+    // taken on trust. The identity is keyed on the tenant, so a re-grant appends
+    // the new account and leaves the slug (and every link and follow edge
+    // pointing at it) exactly where it was.
+    //
+    // BEST EFFORT ON PURPOSE. The grant is already durably stored and the money
+    // path is done; failing the request now would tell the owner their agent was
+    // not created when it was. Without an identity the agent simply has no
+    // public page until a later read backfills it.
+    try {
+      await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`);
+    } catch (e) {
+      console.error("[grants] could not mint a public id:", e instanceof Error ? e.message : e);
     }
     return NextResponse.json({ ok: true });
   }

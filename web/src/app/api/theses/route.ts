@@ -34,6 +34,7 @@
 import { NextResponse } from "next/server";
 import { withReadDb } from "@/lib/ledger";
 import { PUBLISHABLE_STRATEGIES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
+import { getIdentityStore } from "@merrymen/identity-store";
 
 /** Cacheable because the answer does not depend on who is asking. */
 export const revalidate = 30;
@@ -94,8 +95,32 @@ export async function GET() {
       return NextResponse.json({ source: "sqlite", theses: [] } satisfies ThesesResponse);
     }
 
+    // ── decorate with the public id ───────────────────────────────────────
+    //
+    // Read from the identity store, not joined in SQL: the store is not the
+    // ledger, and hosted they are the same Postgres only by coincidence — the
+    // file backend makes that join impossible and the code must work on both.
+    //
+    // One read for the whole page, mapped account -> slug. The identity is
+    // keyed on the TENANT and carries every smart account that tenant has held,
+    // so a re-granted agent's older rows still resolve to the same slug and its
+    // history does not split into two strangers at the re-grant.
+    //
+    // Failure is silent and total: no slugs, so no links, and every post still
+    // renders its words. This route has no session and must keep having none —
+    // that absence is what makes revalidate = 30 honest — and a store read adds
+    // nothing per-caller, so the cache stays correct.
+    const bySlug = new Map<string, string>();
+    try {
+      for (const id of await getIdentityStore().all()) {
+        for (const acct of id.accounts) bySlug.set(acct.toLowerCase(), id.slug);
+      }
+    } catch {
+      /* no links this pass */
+    }
+
     const theses = rows
-      .map(publishableThesis)
+      .map((r) => publishableThesis({ ...r, slug: bySlug.get(String(r.agent_id).toLowerCase()) ?? null }))
       .filter((t): t is PublicThesis => t !== null)
       .slice(0, SHOW);
 
