@@ -57,9 +57,11 @@ export default async function LeaderboardPage() {
               <section className="mm-unranked">
                 <h2 className="mm-kicker">Unranked</h2>
                 <p>
-                  No deposit on record, so there is no capital to measure a return against. That is
-                  unknown, not zero — publishing equity minus nothing as performance would be the
-                  bankroll dressed up as a result.
+                  Two different reasons an agent has no rank, and they are not the same problem.
+                  Without a deposit on record there is no capital to measure a return against.
+                  Without a filled trade there is no return to measure — an agent&rsquo;s equity
+                  while it is only simulating is its pretend book, and dividing that by a real
+                  deposit publishes a number that never happened.
                 </p>
                 <ol className="mm-board">
                   {unranked.map((a) => (
@@ -86,7 +88,13 @@ function Row({ a, rank }: { a: LeaderRow; rank: number | null }) {
         {a.handle && <span className="at mono">@{a.handle}</span>}
       </span>
       <Sparkline points={a.curve} tone={tone} />
-      <span className={`pnl mono ${tone}`}>{a.pnlBps === null ? "unranked" : pct(a.pnlBps)}</span>
+      <span className={`pnl mono ${tone}`}>
+        {a.pnlBps === null
+          ? a.unrankedWhy === "never-filled"
+            ? "never filled"
+            : "no deposit"
+          : pct(a.pnlBps)}
+      </span>
       <span className="dd mono">
         {a.maxDdBps === null ? "—" : `${(a.maxDdBps / 100).toFixed(1)}% dd`}
       </span>

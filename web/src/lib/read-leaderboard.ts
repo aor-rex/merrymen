@@ -29,10 +29,19 @@
  */
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
+import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 
 export interface LeaderRow {
   /** The public id. Null means no identity yet, and the row renders unlinked. */
   slug: string | null;
+  /**
+   * Why this agent has no rank, when it has none.
+   *
+   * The page must not guess: "no deposit on record" and "has never filled a
+   * trade" are different facts about an agent, and only one of them is fixed by
+   * depositing.
+   */
+  unrankedWhy: UnrankedWhy | null;
   name: string;
   handle: string | null;
   /** Return over capital contributed, in basis points. Null = unknown. */
@@ -52,6 +61,7 @@ export interface LeaderboardRead {
 
 /** Points in the sparkline. Enough to show a shape, few enough to inline. */
 const CURVE_POINTS = 40;
+
 
 export async function readLeaderboard(): Promise<LeaderboardRead> {
   return withReadDb(async (db): Promise<LeaderboardRead> => {
@@ -146,17 +156,13 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
           /* older ledger */
         }
 
-        // A return needs both a numerator and a denominator we can back. Either
-        // missing means unknown, and unknown is published as unknown.
-        const pnlBps =
-          contributed !== null && contributed > 0 && latest !== null
-            ? Math.round(((latest - contributed - gasUsdg) / contributed) * 10_000)
-            : null;
+        const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed });
 
         const maxDdBps = drawdownBps(curve);
 
         return {
           slug: slugFor.get(account.toLowerCase()) ?? null,
+          unrankedWhy,
           name: String(r.name ?? "Agent"),
           handle: (r.x_handle ?? "").trim() || null,
           pnlBps,
