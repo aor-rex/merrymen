@@ -106,6 +106,16 @@ function network(testnet: boolean): string {
   return testnet ? "the practice chain" : "Robinhood Chain";
 }
 
+/**
+ * The pre-sponsorship gas refusal, as worker/src/index.ts writes it.
+ *
+ * Matched on text because that is what the feed carries — events have a level
+ * and a message, not a code. Anchored on the two fragments that message has
+ * always had; a rewording that escaped this would restore the old behaviour
+ * (an error shown), which is the safe direction to fail in.
+ */
+const GAS_REFUSAL = /no ETH in the account|USDG alone cannot pay gas/i;
+
 export function statusLine(a: AgentSnapshot): StatusLine {
   const name = a.name || "Your agent";
   const net = network(a.testnet);
@@ -116,7 +126,25 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   // every other sentence would be a lie of omission — and it is the case that
   // went unnoticed for hours across ten accounts, because nothing on any screen
   // said it.
-  if (a.lastError) {
+  // ONE EXCEPTION, and only one: the refusal that SPONSORSHIP ITSELF RESOLVES.
+  //
+  // Before a sponsor is turned on, a gasless agent writes
+  // "no ETH in the account — every operation fails…" on every tick it tries to
+  // trade. Turn sponsorship on and the worker stops writing it — but it never
+  // stops READING: the feed returns the last 40 events with no age filter, and a
+  // now-sponsored account that is quiet writes nothing to push them out. So the
+  // newest `err` stays that message forever, this branch sits above every gas
+  // branch, and the dashboard tells a perfectly healthy sponsored agent's owner
+  // that it has stopped and cannot start again — permanently, and while it
+  // trades. Every sponsored sentence below would be unreachable.
+  //
+  // Narrow deliberately. It suppresses ONE message class, and only when a
+  // sponsor is paying — which is exactly the condition that makes that message
+  // false. Every other error, and every error at all when unsponsored, still
+  // outranks everything: this branch exists because a fleet-wide outage went
+  // unnoticed for hours, and nothing here may weaken that.
+  const staleGasError = !!a.gasSponsored && GAS_REFUSAL.test(a.lastError ?? "");
+  if (a.lastError && !staleGasError) {
     return {
       headline: `${name} has stopped and can't start again on its own.`,
       next: firstSentence(a.lastError),
@@ -165,7 +193,12 @@ export function statusLine(a: AgentSnapshot): StatusLine {
         }
       : {
           headline: `${name} is ready and its fees are covered — it just needs something to trade with.`,
-          next: `Send USDG to the account address, on ${net}. You do not need ETH for it to trade.`,
+          // The sibling arm above carries the withdrawal caveat and this one did
+          // not, so the owner LEAST likely to know it was the one not told. Same
+          // scope, same sentence: sponsorship covers trading, not the way out.
+          next:
+            `Send USDG to the account address, on ${net}. It does not need ETH to trade — only to ` +
+            "move money back out to your own wallet later.",
           tone: "waiting",
         };
   }

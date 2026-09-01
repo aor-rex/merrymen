@@ -28,7 +28,7 @@ const SRC = [
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
-  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
 ].join("\n");
 
@@ -52,9 +52,9 @@ const seedChild = () => {
   // failure this fixture has to be able to see.
   raw.exec(
     `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
-                         granted_at, expires_at, status, created_at, mode, beat_at,
+                         granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas,
                          epoch, hwm_usdg, accrued_fee_usdg)
-     VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99,2,150.5,7.25)`,
+     VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99,1,2,150.5,7.25)`,
   );
   for (let i = 1; i <= 5; i++) {
     raw.exec(
@@ -222,6 +222,20 @@ describe("the ledger mirror", () => {
     // from another in the same transaction.
     assert.equal(Number(dep.log_index), 4);
     assert.equal(dep.source, "chain-log");
+  });
+
+  it("carries who pays the gas, which only the worker knows", async () => {
+    // The dashboard cannot resolve this for itself: sponsorship is worker config
+    // and hosted the web service is a different container with a different
+    // environment. A web-side guess reads false on a fleet whose deploy docs say
+    // the web service needs no bundler key — telling every sponsored owner to go
+    // send ETH they do not need. Same class of bug as `mode`, same fix.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT sponsor_gas FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { sponsor_gas: number | null };
+    assert.equal(Number(a.sponsor_gas), 1);
   });
 
   it("carries the agent's epoch, high-water mark and accrued fee", async () => {

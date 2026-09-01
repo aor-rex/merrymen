@@ -3682,11 +3682,16 @@ async function main() {
   function heartbeat(blockNumber: bigint) {
     const at = Math.floor(Date.now() / 1000);
     const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
+    // WHO PAYS, reported rather than guessed. Only this process resolves it
+    // (sponsorGasEnabled AND a bundler key), and hosted the dashboard runs in a
+    // different container with a different environment — so anything it worked
+    // out for itself could disagree with what the executor actually does.
+    const sponsorGas = gasSponsored();
     try {
       ensureHome();
       writeFileSync(
         homePaths.heartbeat(),
-        JSON.stringify({ at, block: blockNumber.toString(), mode }),
+        JSON.stringify({ at, block: blockNumber.toString(), mode, sponsorGas }),
         "utf8",
       );
     } catch {
@@ -3701,7 +3706,7 @@ async function main() {
     // Both, not one: the file is what the orchestrator's watchdog reads to decide
     // a child is wedged, and it must keep beating even when the database is
     // unreachable — otherwise a database blip gets a healthy worker SIGKILLed.
-    if (active) void setAgentMode(active.agentId, mode, at);
+    if (active) void setAgentMode(active.agentId, mode, at, sponsorGas);
   }
 
   async function tick() {

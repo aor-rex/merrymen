@@ -413,6 +413,21 @@ const SQLITE_ALTERS: string[] = [
     // all but the first. NULL for every flow that is not read from a chain log —
     // an inferred flow has no log to index.
     "ALTER TABLE flows ADD COLUMN log_index INTEGER",
+    // WHO PAYS this agent's trading gas, as the WORKER resolved it.
+    //
+    // The dashboard cannot work this out for itself. Sponsorship is a worker
+    // config (sponsorGasEnabled AND a bundler key), and hosted the web service is
+    // a different container with a different environment — the deploy docs even
+    // say the web service needs no bundler key, so a web-side answer would read
+    // false on a correctly configured fleet and tell every sponsored owner to go
+    // send ETH. Worse, the two could disagree in the other direction and promise
+    // covered fees while the child refused every trade.
+    //
+    // This is the same fix, on the same row, as `mode` and `beat_at`: report the
+    // child's own resolved answer rather than letting another process guess it.
+    // NULLABLE on purpose — an agent that has never beaten has no answer, and
+    // null is the honest value for that.
+    "ALTER TABLE agents ADD COLUMN sponsor_gas INTEGER",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -1273,11 +1288,18 @@ export async function setAgentMode(
   agentId: string,
   mode: "paper" | "live" | "idle",
   atSec: number,
+  /**
+   * Whether a sponsor is paying this agent's TRADING gas, as this worker
+   * resolved it. Travels with the heartbeat because it is the same kind of fact
+   * — something only the child knows — and the dashboard has no other way to
+   * learn it. Withdrawal is never sponsored, whatever this says.
+   */
+  sponsorGas: boolean,
 ): Promise<void> {
   try {
     await getDb()
-      .prepare("UPDATE agents SET mode = ?, beat_at = ? WHERE smart_account = ?")
-      .run(mode, atSec, agentId);
+      .prepare("UPDATE agents SET mode = ?, beat_at = ?, sponsor_gas = ? WHERE smart_account = ?")
+      .run(mode, atSec, sponsorGas ? 1 : 0, agentId);
   } catch {
     /* a missing heartbeat is a worse thing to crash over than to lose */
   }

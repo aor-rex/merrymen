@@ -237,3 +237,69 @@ test("every branch says what happens next — a status with no next step is a su
     assert.match(l.headline, /\.$/, "a full sentence, ending in a full stop");
   }
 });
+
+/**
+ * THE STALE REFUSAL THAT OUTLIVES ITS CAUSE.
+ *
+ * Before sponsorship, a gasless agent writes "no ETH in the account — every
+ * operation fails…" on every tick it tries to trade. Turn sponsorship on and the
+ * worker stops WRITING it, but nothing stops the dashboard READING it: the feed
+ * returns the last 40 events with no age filter, and a now-sponsored account
+ * that is quiet writes nothing to push them out.
+ *
+ * Since the error branch sits above every gas branch, the result is a healthy
+ * sponsored agent whose owner is told, permanently and while it trades, that it
+ * has stopped and cannot start again — and every sponsored sentence below is
+ * unreachable.
+ */
+const GASLESS_REFUSAL =
+  "no ETH in the account — every operation fails before it reaches the chain. " +
+  "Send ETH to 0xabc on chain 4663; USDG alone cannot pay gas.";
+
+test("a sponsored agent is not held hostage by the refusal sponsorship resolved", () => {
+  const l = statusLine({
+    ...base,
+    hasGas: false,
+    gasSponsored: true,
+    cashUsdg: 318,
+    lastError: GASLESS_REFUSAL,
+  });
+  assert.doesNotMatch(l.headline, /has stopped/, "the message is about a condition that no longer exists");
+  assert.match(l.headline, /fees are covered/);
+  assert.equal(l.tone, "good");
+});
+
+test("suppression is NARROW — any other error still outranks everything", () => {
+  // This branch exists because a fleet-wide outage went unnoticed for hours.
+  // Only the one message class sponsorship actually resolves may be dropped.
+  const l = statusLine({
+    ...base,
+    hasGas: false,
+    gasSponsored: true,
+    cashUsdg: 318,
+    lastError: "the bundler rejected the operation and will not say why.",
+  });
+  assert.match(l.headline, /has stopped/);
+  assert.equal(l.tone, "stuck");
+});
+
+test("UNSPONSORED, the same refusal still stops everything", () => {
+  // The default path, and the one almost every deployment is on. It must not
+  // move: here the message is true and the owner needs to see it.
+  const l = statusLine({ ...base, hasGas: false, cashUsdg: 318, lastError: GASLESS_REFUSAL });
+  assert.match(l.headline, /has stopped/);
+  assert.equal(l.tone, "stuck");
+});
+
+test("both sponsored arms carry the withdrawal caveat", () => {
+  // Sponsorship covers TRADING. The recovery path pays its own way out of the
+  // balance it is sweeping, so an owner told they need no ETH at all could trade
+  // happily and then find they cannot get their money out. The arm shown to
+  // someone with no capital yet is the one shown to the newest owner, and it was
+  // the arm that did not say so.
+  const withCash = statusLine({ ...base, hasGas: false, gasSponsored: true, cashUsdg: 318 });
+  const noCash = statusLine({ ...base, hasGas: false, gasSponsored: true, cashUsdg: 0 });
+  for (const l of [withCash, noCash]) {
+    assert.match(l.next, /move money back out|moving money back out/i, `missing caveat: ${l.next}`);
+  }
+});

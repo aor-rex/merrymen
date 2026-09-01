@@ -261,7 +261,7 @@ export async function mirrorTenant(args: {
         // unmirrored high-water mark and accrued fee did not render as unknown —
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
-                granted_at, expires_at, status, created_at, mode, beat_at,
+                granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas,
                 epoch, hwm_usdg, accrued_fee_usdg FROM agents`,
       )
       .all()) as Record<string, unknown>[];
@@ -270,12 +270,13 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               epoch, hwm_usdg, accrued_fee_usdg)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               sponsor_gas, epoch, hwm_usdg, accrued_fee_usdg)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
-             beat_at = excluded.beat_at, epoch = excluded.epoch,
+             beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
+             epoch = excluded.epoch,
              hwm_usdg = excluded.hwm_usdg,
              accrued_fee_usdg = excluded.accrued_fee_usdg`,
         );
@@ -287,6 +288,9 @@ export async function mirrorTenant(args: {
             // and null is the honest value for that. It renders as IDLE, which
             // is what it is.
             a.mode ?? null, a.beat_at ?? null,
+            // Null until the first heartbeat, and null is the honest answer: an
+            // agent that has never run has not told us who pays.
+            a.sponsor_gas ?? null,
             // These three have NOT NULL DEFAULTs at the source, so a null here
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.

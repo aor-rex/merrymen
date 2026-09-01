@@ -17,6 +17,7 @@ import { statusLine, type AgentSnapshot } from "./status-line";
 import Link from "next/link";
 import type { FeedResponse, TradeRecord } from "@/app/api/feed/route";
 import type { AgentStatus } from "@/app/api/grants/route";
+import { canStart, hasGas } from "@/lib/can-start";
 import Onboarding, { type OnboardStep } from "./Onboarding";
 import { LogoMark } from "@/components/Logo";
 import { mascotMood } from "@/lib/mascot";
@@ -146,7 +147,10 @@ export default function Console() {
   // Once the account actually holds gas, remember it — so reaching camp is
   // one-way and a later read blip can't drag them back to the fund step.
   useEffect(() => {
-    if (loaded && !onboarded && hasGas(status?.balances?.ethWei)) markOnboarded();
+    // canStart, not hasGas: a SPONSORED account pays no gas of its own, so an
+    // owner holding only USDG can trade and must not be held here. Unsponsored
+    // this is the identical expression it always was.
+    if (loaded && !onboarded && canStart(status ?? undefined)) markOnboarded();
   }, [loaded, onboarded, status]);
 
   if (!loaded) {
@@ -161,7 +165,7 @@ export default function Console() {
   const address = session?.address ?? null;
   const connected = !hosted || !!address; // self-hosted's perimeter is localhost
   const exists = !!status?.exists;
-  const funded = hasGas(status?.balances?.ethWei);
+  const funded = canStart(status ?? undefined);
   // NO GRANT YET MEANS ONBOARDING, and this fallback fired precisely then —
   // stamping "testnet 46630" into the footer and offering a testnet faucet to
   // someone who has not chosen a chain at all. The grant page now defaults to
@@ -196,16 +200,9 @@ export default function Console() {
   return <Loaded feed={feed} status={status!} />;
 }
 
-/** True when the agent's smart account holds any gas — the thing that actually
- *  gates trading. ethWei is a wei string; unreadable or zero reads as unfunded. */
-function hasGas(wei?: string): boolean {
-  if (!wei) return false;
-  try {
-    return BigInt(wei) > 0n;
-  } catch {
-    return Number(wei) > 0;
-  }
-}
+// `hasGas` and `canStart` now live in @/lib/can-start — the settings checklist
+// asks the same question and had its own copy, so the console could admit an
+// owner the checklist went on reporting as unfinished.
 
 function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStatus }) {
   // One focus at a time. The rail used to be dead links over a wall of panels;
@@ -401,6 +398,8 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
                   mode,
                   testnet,
                   hasGas: hasGas(status.balances?.ethWei),
+                  // Reported by the worker; the dashboard cannot resolve it.
+                  gasSponsored: status.gasSponsored ?? undefined,
                   cashUsdg: balCash,
                   positionsUsdg: posSum,
                   positionCount: (feed?.positions ?? []).filter((x) => (x.value_usdg || 0) > 0).length,
