@@ -5691,13 +5691,16 @@ async function main() {
         const pct = BigInt(Math.min(Math.max(Math.round(cfg.autoConvertReservePct), 1), 50));
         const pctReserve = (lastGasWei * pct) / 100n;
         // The prefund the EntryPoint checks is the gas cost ON TOP OF the swap's
-        // msg.value — both leave the account in the SAME operation. An undeployed
-        // account's first op additionally pays Kernel deployment + permission
-        // validator init (~1M gas all-in at 2x headroom); a deployed one needs
-        // ~600k. Understating this is how AA21 "didn't pay prefund" happened:
-        // the old 400k floor left less gas budget than the simulation required.
+        // msg.value — both leave the account in the SAME operation. Prefund =
+        // (verification×3 + call + preVerification) × maxFee, all at the
+        // executor's 2x headroom. A deployed account needs ~1.2M gas; an
+        // UNDEPLOYED first op adds Kernel deployment AND counts verification
+        // ×3: ~2.5M gas. Sizing the floor below this is how AA21 "didn't pay
+        // prefund" kept recurring — the old floors (400k, then 1M) left less
+        // gas budget than the simulation required, so the bundler refused to
+        // quote at all.
         const deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
-        const opFloor = gasPrice * (deployed ? 600_000n : 1_000_000n);
+        const opFloor = gasPrice * (deployed ? 1_200_000n : 2_500_000n);
         const reserve = pctReserve > opFloor ? pctReserve : opFloor;
         const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
         console.log(
