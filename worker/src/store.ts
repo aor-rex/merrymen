@@ -1712,6 +1712,24 @@ export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): P
 }
 
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
+/**
+ * The owner's X handle on the agent's roster row, so a public page can credit
+ * them without decrypting a tenant's sealed settings.
+ *
+ * Deliberately not unique and deliberately not indexed — see the column comment.
+ * Two agents may claim the same handle and both render, because nobody has
+ * verified either and a constraint would imply somebody had.
+ */
+export async function setAgentXHandle(agentId: string, handle: string | null): Promise<void> {
+  try {
+    await getDb()
+      .prepare(`UPDATE agents SET x_handle = ? WHERE smart_account = ?`)
+      .run(handle, agentId);
+  } catch {
+    /* a missing handle is cosmetic — never worth failing an arm over */
+  }
+}
+
 export async function setAgentName(agentId: string, name: string): Promise<void> {
   try {
     await getDb().prepare(`UPDATE agents SET name = ? WHERE smart_account = ?`).run(name, agentId);

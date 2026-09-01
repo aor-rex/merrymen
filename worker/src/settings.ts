@@ -50,6 +50,7 @@ export interface ResolvedConfig {
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
   agentName: string | undefined;
+  xHandle: string | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
@@ -208,6 +209,7 @@ export function mergeSettings(
     rawBreaker && /^0x[0-9a-fA-F]{40}$/.test(rawBreaker) ? (rawBreaker as `0x${string}`) : undefined;
 
   const agentName = str(file.agentName, env.MERRYMEN_AGENT_NAME);
+  const xHandle = str(file.xHandle, env.MERRYMEN_X_HANDLE);
 
   const rawAdapter = str(file.v4AdapterAddress, env.MERRYMEN_V4_ADAPTER_ADDRESS);
   const v4AdapterAddress =
@@ -265,6 +267,7 @@ export function mergeSettings(
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
     agentName,
+    xHandle,
     v4AdapterAddress,
     ponsAdapterAddress,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),

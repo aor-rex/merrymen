@@ -87,6 +87,15 @@ export interface MerrymenSettings {
    * Deliberately NOT a house key: a tenant must be able to name their own agent.
    */
   agentName?: string;
+  /**
+   * The owner's X handle, for a public page to credit them.
+   *
+   * DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing looks up an agent,
+   * tenant or permission by this. It is unverified — we store what the owner
+   * typed and nothing checks that they own it — so it renders disclaimed and
+   * never as a link.
+   */
+  xHandle?: string;
   v4AdapterAddress?: string;
   /**
    * The deployed PonsSelfTrade adapter for this chain, or absent.

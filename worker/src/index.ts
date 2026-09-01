@@ -202,6 +202,7 @@ import {
   initStore,
   setPaperBook,
   setAgentName,
+  setAgentXHandle,
   setAgentHwm,
   setAgentMode,
   setAgentStatus,
@@ -1972,6 +1973,10 @@ async function main() {
     // by here `getName()` is already what the owner asked for.
     ensureSoul();
     await setAgentName(agentId, getName());
+    // No soul and no reconcile for the handle: unlike the name it has no
+    // in-character meaning and nothing at runtime reads it, so there is no second
+    // place for it to be true in a different version. Straight from settings.
+    await setAgentXHandle(agentId, cfg.xHandle ?? null);
 
     // Pimlico/Alchemy bundler URLs embed a chain id — a testnet bundler with a
     // mainnet grant (or vice versa) fails every op with opaque errors. Advisory
