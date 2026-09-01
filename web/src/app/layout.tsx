@@ -115,7 +115,7 @@ export const viewport: Viewport = {
   // Matches --mm-bg. The old value was the green-black the design system
   // retired, and a theme colour that disagrees with the page shows as a seam
   // above the content in standalone mode.
-  themeColor: "#0b0f10",
+  themeColor: "#000000",
   // `viewport-fit=cover` lets the layout reach under the notch; the CSS then
   // pays that back with safe-area padding, which is why both halves are needed.
   viewportFit: "cover",

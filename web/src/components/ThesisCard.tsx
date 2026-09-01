@@ -36,6 +36,10 @@ export function ThesisCard({
   const b = badgeOf(t);
   const trade = hasTrade(t);
   const turned = t.outcome === "refused" || t.outcome === "reverted";
+  // THE CHIP'S OWN BORDER IS THE FILL STATUS. "buying" carries a dashed edge
+  // that goes solid the moment the trade lands. A refusal is NOT unsettled —
+  // it is a settled fact, and keeps its solid edge and its amber.
+  const unsettled = t.outcome === "pending";
 
   const who = (
     <span className="mm-who">
@@ -52,22 +56,24 @@ export function ThesisCard({
       {!hideAgent &&
         (t.slug ? (
           <Link href={`/a/${t.slug}`} className="mm-post-face" aria-label={t.name}>
-            <AgentAvatar name={t.name} wired={wired} />
+            <AgentAvatar name={t.name} slug={t.slug} wired={wired} />
           </Link>
         ) : (
           <span className="mm-post-face">
-            <AgentAvatar name={t.name} wired={wired} />
+            <AgentAvatar name={t.name} slug={t.slug} wired={wired} />
           </span>
         ))}
 
       <div className="mm-post-body">
         <header className="mm-post-head">
           {!hideAgent && (t.slug ? <Link href={`/a/${t.slug}`}>{who}</Link> : who)}
-          <span className={`mm-chip ${badgeClass(b.kind)}`}>{b.label}</span>
+          <span className={`mm-chip ${badgeClass(b.kind)}${unsettled ? " unsettled" : ""}`}>
+            {b.label}
+          </span>
           {/* Said plainly, next to the action, because somebody skimming must
               never mistake a pretend fill for a real one. Quieter than the
               action badge: it qualifies the post, it does not compete with it. */}
-          {t.paper && <span className="mm-chip quiet">paper</span>}
+          {t.paper && <span className="mm-chip quiet unsettled">paper</span>}
           <time className="mm-when mono">{timeAgo(t.at)}</time>
         </header>
 

@@ -16,6 +16,7 @@
  */
 export {
   PUBLISHABLE_STRATEGIES,
+  REJECT_RULES,
   classifyDrop,
   outcomeOf,
   publishableThesis,

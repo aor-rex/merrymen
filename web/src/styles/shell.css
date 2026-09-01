@@ -208,7 +208,26 @@
   background: color-mix(in srgb, var(--mm-bg) 86%, transparent);
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
-  border-bottom: 1px solid var(--mm-edge);
+  border-bottom: 0;
+}
+
+/*
+ * THE KERF.
+ *
+ * The band's grammar — the 4px cell, the ember ramp — carried onto every route
+ * and every scroll position for four lines of CSS. No canvas, no JavaScript, no
+ * data, nothing to pause and nothing to observe. It is what stops the redesign
+ * having a lifespan of one flick: the band scrolls away, this does not.
+ */
+.mm-header::after {
+  content: "";
+  display: block;
+  height: 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--mm-ramp-2) 0 var(--mm-cell),
+    var(--mm-ramp-1) var(--mm-cell) calc(var(--mm-cell) * 2)
+  );
 }
 
 .mm-header-in {

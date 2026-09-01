@@ -9,6 +9,8 @@ import { Sparkline } from "@/components/Sparkline";
 import { Feed } from "@/components/Feed";
 import { readAgent } from "@/lib/read-agent";
 import { readTheses } from "@/lib/read-theses";
+import { readWallTape } from "@/lib/read-wall-tape";
+import { WallBand } from "@/components/WallBand";
 import { SLUG_RE } from "@merrymen/identity-store";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
@@ -16,6 +18,7 @@ import "@/styles/shell.css";
 import "@/styles/feed.css";
 import "@/styles/board.css";
 import "@/styles/agent.css";
+import "@/styles/wall.css";
 
 export const revalidate = 30;
 
@@ -58,7 +61,10 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
   const a = await readAgent(key);
   if (!a) notFound();
 
-  const feed = await readTheses({ agentSlug: key, limit: 40 });
+  const [feed, tape] = await Promise.all([
+    readTheses({ agentSlug: key, limit: 40 }),
+    readWallTape({ agentSlug: key }),
+  ]);
   const tone = a.pnlBps === null ? "flat" : a.pnlBps >= 0 ? "up" : "down";
 
   return (
@@ -66,10 +72,28 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
       <LiveRefresh />
       <PageHeader title={a.name} sub={a.handle ? `@${a.handle}` : undefined} />
 
+      {/* STILL, not animated. This is the page a pasted link resolves to, and a
+          visitor who arrived to read one agent should meet a picture, not a
+          performance. It is also where "1,225 refused and 0 filled" stops being
+          a statistic: a solid amber pile against the wall and a completely
+          black right-hand third. */}
+      <WallBand tape={tape} still size="agent" />
+
       <div className="mm-wrap">
+        {tape.cells.length > 0 && (
+          <div className="mm-wall-read">
+            <span className="mm-wall-fig sm">{tape.counts.turned.toLocaleString("en-US")}</span>
+            <span className="mm-wall-said">
+              <b>turned back in the last day</b>
+              <span>
+                against this agent&rsquo;s own signed caps. {tape.counts.through} got through.
+              </span>
+            </span>
+          </div>
+        )}
         <section className="mm-profile">
           <div className="mm-profile-top">
-            <AgentAvatar name={a.name} size={56} />
+            <AgentAvatar name={a.name} slug={a.slug} size={56} />
             <div className="mm-profile-who">
               <h2>{a.name}</h2>
               <p className="mono">

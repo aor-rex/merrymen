@@ -203,6 +203,42 @@ export function classifyDrop(dropped: string): string {
   return "it talked itself out of it";
 }
 
+/**
+ * WHAT THE WALL SAID, in words a stranger can read.
+ *
+ * Module scope rather than a local, so the ONE list of rules this product
+ * recognises has one home. `reject_rule` is NOT a closed vocabulary — some
+ * paths write free-form text into it — which is exactly why anything absent
+ * here gets the generic sentence rather than being echoed onto a public page.
+ */
+const R: Readonly<Record<string, string>> = Object.freeze({
+  "per-trade-cap": "past the per-trade cap",
+  "daily-cap": "past today's spending cap",
+  "ops-cap": "past today's number of trades",
+  "drawdown-breaker": "the drawdown breaker was tripped",
+  "asset-allowlist": "that asset is not in its signed permissions",
+  "target-allowlist": "that venue is not in its signed permissions",
+  "transfer-recipient-allowlist": "that recipient is not in its signed permissions",
+  "no-gas": "the account had no gas",
+  "no-route": "no route to trade it",
+  "no-quote": "no price could be quoted",
+  "no-liquidity": "not enough liquidity to fill",
+  slippage: "the price moved too far between quote and fill",
+  "insufficient-balance": "it did not hold what it tried to spend",
+  "curve-graduated": "that launch had already graduated",
+  "curve-provenance": "the launch could not be verified",
+});
+
+/**
+ * The rule slugs this product recognises, for a reader that needs to GROUP by
+ * them rather than render them.
+ *
+ * Exported so the wall band's lanes are not a second hand-rolled copy of a
+ * publication policy. A rule outside this set is not a new lane, it is the
+ * catch-all — the same refusal `outcomeOf` makes one line below.
+ */
+export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
+
 /** What the wall said, from the slug alone — the detail is never selected. */
 export function outcomeOf(
   status: string | null | undefined,
@@ -217,23 +253,6 @@ export function outcomeOf(
   // `reject_rule` is NOT a closed vocabulary — some paths write free-form text
   // into it — so anything unrecognised gets the generic sentence rather than
   // being echoed onto a public page.
-  const R: Readonly<Record<string, string>> = Object.freeze({
-    "per-trade-cap": "past the per-trade cap",
-    "daily-cap": "past today's spending cap",
-    "ops-cap": "past today's number of trades",
-    "drawdown-breaker": "the drawdown breaker was tripped",
-    "asset-allowlist": "that asset is not in its signed permissions",
-    "target-allowlist": "that venue is not in its signed permissions",
-    "transfer-recipient-allowlist": "that recipient is not in its signed permissions",
-    "no-gas": "the account had no gas",
-    "no-route": "no route to trade it",
-    "no-quote": "no price could be quoted",
-    "no-liquidity": "not enough liquidity to fill",
-    slippage: "the price moved too far between quote and fill",
-    "insufficient-balance": "it did not hold what it tried to spend",
-    "curve-graduated": "that launch had already graduated",
-    "curve-provenance": "the launch could not be verified",
-  });
   const known = rejectRule ? R[rejectRule] : undefined;
   return { outcome: "refused", text: known ?? "the wall turned it back" };
 }

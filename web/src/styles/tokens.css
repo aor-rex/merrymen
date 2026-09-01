@@ -19,6 +19,13 @@
  * chip size those are both just "green", so the palette had two greens and one
  * meaning. Lime is retired.
  *
+ * WHY THE GRAPHITE WENT. The same fault one level up. #0b0f10 was the ground
+ * AND the darkest step of every ramp drawn on it, so nothing on this page could
+ * burn. On #000000 the amber has somewhere to go. And --mm-warn gave up three
+ * of its four jobs — paper, pending, stale — to the dashed convention in
+ * base.css, because a colour that means four things means none of them. It now
+ * means one: THE WALL SAID NO.
+ *
  * THE RULE: colour means something, or it is not on screen. The page is
  * achromatic; the only saturated pixels are semantics — up, down, warn — and
  * the wire.
@@ -30,39 +37,62 @@
  */
 
 :root {
-  /* ── ground ──────────────────────────────────────────────────────────── */
-  --mm-bg: #0b0f10; /* the page */
-  --mm-surface: #12181a; /* cards, sticky header */
-  --mm-surface-2: #182022; /* hover, raised, segmented track */
-  --mm-surface-3: #202a2c; /* inputs, avatar wells */
-  --mm-edge: #223033; /* hairline */
-  --mm-edge-2: #2e3e42; /* hairline, emphasised */
+  /* ── ground: TOTAL BLACK ──────────────────────────────────────────────
+     #0b0f10 was a good graphite and it is also the reason this page has
+     never had anywhere for a hot colour to burn. A dithered ramp on
+     graphite has nowhere to go; on absolute black it has everywhere.     */
+  --mm-bg: #000000;          /* the page */
+  --mm-surface: #0b0d0e;     /* cards, sticky header — a card is its edge, not its fill */
+  --mm-surface-2: #121517;   /* hover, raised, segmented track, the trade strip */
+  --mm-surface-3: #1a1e20;   /* inputs, avatar wells */
+  --mm-edge: #232729;        /* hairline — internal rules */
+  --mm-edge-2: #333a3d;      /* hairline, emphasised — the card seam */
 
-  /* ── text ────────────────────────────────────────────────────────────── */
-  --mm-tx: #e8efec; /* 16.1:1 on --mm-bg */
-  --mm-tx-2: #b4c2bd; /* body secondary, 10.4:1 */
-  --mm-dim: #93a29d; /* labels, 7.5:1 */
-  --mm-faint: #66756f; /* timestamps ONLY — never load-bearing, 4.2:1 */
+  /* ── text: WARM off-white, never #FFF ─────────────────────────────────
+     On true black a pure white is a razor, and this is a reading product.
+     Warm also keeps the text from going blue against the amber ramp.     */
+  --mm-tx: #e9e6e1;          /* 16.9:1 */
+  --mm-tx-2: #b3afa9;        /* body secondary, 9.6:1 */
+  --mm-dim: #918d86;         /* labels, 6.4:1 */
+  --mm-faint: #757068;       /* timestamps ONLY — never load-bearing, 4.3:1 */
 
-  /* ── semantics: the only saturated colours ───────────────────────────── */
-  --mm-up: #34d399; /* bought · gain */
-  --mm-down: #fb7185; /* sold · loss */
-  --mm-warn: #fbbf24; /* paper · pending · stale · a refused rule */
+  /* ── semantics: unchanged values, one narrowed meaning ─────────────────
+     --mm-up and --mm-down are the feed's primary scan cue — buy vs sell is
+     a sub-200ms judgement down a column of near-identical cards — and they
+     do not move.
 
-  /* ── the wire ────────────────────────────────────────────────────────── */
-  /* Brand, links, focus, active nav, and the follow graph. Used for nothing
-     else, ever. A wire is the product's one novel idea, so it gets the one
-     novel colour — and blue-cyan is unmistakably not --mm-up at chip size,
-     which matters because both appear on the same avatar. */
+     --mm-warn is PROMOTED to the hot accent and NARROWED to one meaning:
+     THE WALL SAID NO. It no longer carries paper, pending or stale; those
+     moved to the dashed convention in base.css, which costs no colour. That
+     is what makes it safe to spend a masthead on it — a colour that means
+     four things means none of them.                                       */
+  --mm-up: #34d399;          /* bought · gain */
+  --mm-down: #fb7185;        /* sold · loss */
+  --mm-warn: #fbbf24;        /* THE ONE HOT ACCENT · refused · turned back */
+
+  /* ── the wire ─────────────────────────────────────────────────────────
+     Unchanged, and it gains by subtraction: now the only cool colour on a
+     page that is otherwise black, white and amber.                        */
   --mm-wire: #5cc8ff;
   --mm-wire-dim: #2e7fa8;
 
-  /* ── shape: two radii with meaning, not one radius everywhere ────────── */
-  --mm-r-card: 16px; /* a surface you can tap through to a page */
-  --mm-r-chip: 6px; /* a label you cannot tap through */
-  /* AGENT = SQUIRCLE, TOKEN = CIRCLE. Not decoration: the token page shows both
-     in one table and one timeline, and shape alone says which kind of thing you
-     are looking at, at 24px, with no label. */
+  /* ── the band ramp: six stops, quantised, CANVAS ONLY ──────────────────
+     Never a UI colour. --mm-thru is the ramp's top stop and the absence of
+     the wall: a white pixel on this site means exactly one thing — an
+     intent got through — so it may not appear anywhere in the interface.  */
+  --mm-ramp-0: #000000;
+  --mm-ramp-1: #3a1600;
+  --mm-ramp-2: #7a2e00;
+  --mm-ramp-3: #c77a0b;
+  --mm-ramp-4: #fbbf24;
+  --mm-thru: #ffffff;
+
+  /* ── shape ────────────────────────────────────────────────────────────
+     AGENT = SQUIRCLE, TOKEN = CIRCLE is the only thing telling the two
+     apart at 24px with no label. The band has no radius at all — a pixel
+     grid does not round.                                                  */
+  --mm-r-card: 16px;
+  --mm-r-chip: 6px;
   --mm-r-agent: 10px;
   --mm-r-token: 999px;
 
@@ -76,18 +106,15 @@
   --mm-8: 32px;
   --mm-10: 40px;
 
-  /* ── type ────────────────────────────────────────────────────────────── */
-  /*
-   * GEIST, all three cuts.
-   *
-   * --mm-display is GEIST PIXEL, and it is display ONLY. It is drawn on a
-   * square pixel grid, and below roughly 24px that grid stops being legible and
-   * the face turns to mush — so it belongs on headlines and numbers big enough
-   * to read as objects, never on body copy, never on a label, never in a table.
-   *
-   * Hanken and JetBrains Mono have not gone away; they now resolve only inside
-   * legacy.css, for /grant and /settings.
-   */
+  /* THE CELL. The canvas's cell, the kerf's rhythm and the space scale's
+     unit are the same 4px. Changing this changes the picture. */
+  --mm-cell: 4px;
+
+  /* ── type ─────────────────────────────────────────────────────────────
+     --mm-display is GEIST PIXEL and it is display ONLY: below roughly 24px
+     the square grid stops being legible and the face turns to mush. It
+     appears in exactly two places in the product, and both are
+     system-generated integers.                                            */
   --mm-display: var(--font-geist-pixel), var(--font-geist), ui-monospace, monospace;
   --mm-sans: var(--font-geist), system-ui, -apple-system, "Segoe UI", sans-serif;
   --mm-mono: var(--font-geist-mono), ui-monospace, "Geist Mono", Menlo, monospace;
@@ -95,16 +122,18 @@
   /* ── chrome ──────────────────────────────────────────────────────────── */
   --mm-nav-h: 56px;
   --mm-header-h: 52px;
-  --mm-col: 640px; /* the reading column */
+  --mm-col: 640px;
   --mm-rail: 232px;
   --mm-context: 320px;
+  --mm-band-h: 168px;        /* the band on /, >=860 */
+  --mm-band-h-sm: 132px;     /* the band on /, <860 */
+  --mm-band-h-agent: 96px;   /* the still band on /a/<slug> */
 
   /* ── motion ──────────────────────────────────────────────────────────── */
-  /* One curve, one duration. A feed that animates on every 30s refresh is
-     unreadable, so transitions are for interaction only. */
   --mm-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --mm-fast: 140ms;
 }
+
 
 /*
  * THREE BREAKPOINTS. NAMED. THAT IS ALL.

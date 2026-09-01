@@ -1,0 +1,125 @@
+/**
+ * The wall band. Scoped under .mm, enforced by styles/scoped.test.ts.
+ *
+ * A fixed-height figure in NORMAL FLOW, above the reading column. Never fixed,
+ * never sticky, never full-viewport, never behind text, never parallaxed,
+ * never scroll-linked. It scrolls away and does not come back — which is the
+ * whole difference between this and the full-viewport canvas that was deleted
+ * from this codebase for running forever behind the one thing people came to
+ * read.
+ */
+
+.mm-wall {
+  margin: 0;
+  background: var(--mm-bg);
+  border-bottom: 1px solid var(--mm-edge);
+  /* Off-screen, the browser may skip laying this out entirely — and the
+     intrinsic size stops that skipping from collapsing the scrollbar. */
+  content-visibility: auto;
+  contain-intrinsic-size: 100% var(--mm-band-h);
+}
+
+.mm-wall-canvas {
+  display: block;
+  width: 100%;
+  height: var(--mm-band-h);
+  /* THE UPSCALE. The buffer is one pixel per 4px cell; this is what turns it
+     into the chunky grid rather than a blurred smear. */
+  image-rendering: pixelated;
+}
+
+.mm-wall-cap {
+  padding: var(--mm-3) var(--mm-4);
+  font-size: 13px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--mm-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── what the band is saying, underneath it ──────────────────────────────── */
+
+.mm-wall-read {
+  display: flex;
+  align-items: baseline;
+  gap: var(--mm-4);
+  padding: var(--mm-5) 0 var(--mm-4);
+  border-bottom: 1px solid var(--mm-edge-2);
+}
+
+/*
+ * THE ONE PIXEL FIGURE ON THE PAGE.
+ *
+ * Geist Pixel appears in exactly two places in the whole product, and both are
+ * system-generated integers. Never on prose, never on an owner-typed name,
+ * never below 24px — the square grid stops being legible and the face turns to
+ * mush.
+ */
+.mm-wall-fig {
+  /* Never allowed to wrap: it is one integer, and a pixel face broken across
+     two lines reads as two numbers. */
+  flex: none;
+  white-space: nowrap;
+  font-family: var(--mm-display);
+  font-size: 72px;
+  line-height: 0.92;
+  letter-spacing: -0.01em;
+  color: var(--mm-warn);
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-wall-said {
+  min-width: 0;
+}
+
+.mm-wall-said b {
+  display: block;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--mm-tx);
+}
+
+.mm-wall-said span {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mm-dim);
+}
+
+/* ── the still band on an agent's page ───────────────────────────────────── */
+
+.mm-wall[data-size="agent"] {
+  contain-intrinsic-size: 100% var(--mm-band-h-agent);
+}
+
+.mm-wall[data-size="agent"] .mm-wall-canvas {
+  height: var(--mm-band-h-agent);
+}
+
+.mm-wall-fig.sm {
+  font-size: 32px;
+}
+
+/* ── 860 ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .mm-wall {
+    contain-intrinsic-size: 100% var(--mm-band-h-sm);
+  }
+  .mm-wall-canvas {
+    height: var(--mm-band-h-sm);
+  }
+  .mm-wall-fig {
+    font-size: 48px;
+  }
+}
+
+@media (max-width: 520px) {
+  .mm-wall-fig.sm {
+    font-size: 24px;
+  }
+  .mm-wall-read {
+    gap: var(--mm-3);
+  }
+}
