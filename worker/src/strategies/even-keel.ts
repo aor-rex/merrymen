@@ -9,7 +9,8 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot } from "./types";
+import type { Snapshot, Tick } from "./types";
+import type { Why } from "./reasons";
 
 export interface EvenKeelLeg {
   symbol: string;
@@ -30,13 +31,13 @@ export interface EvenKeelConfig {
 
 const clamp = (v: bigint, hi: bigint) => (v > hi ? hi : v);
 
-export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): TradeIntent[] {
-  if (!snap.sequencerUp) return [];
+export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
+  if (!snap.sequencerUp) return { intents: [], why: [] };
 
   const tradable = cfg.legs.filter(
     (l) => !snap.pausedTokens.has(l.token.toLowerCase()) && !snap.staleFeeds.has(l.symbol),
   );
-  if (tradable.length === 0) return [];
+  if (tradable.length === 0) return { intents: [], why: [] };
 
   const valueOf = (symbol: string) => snap.holdings.get(symbol)?.valueUsdg ?? 0n;
   const invested = tradable.reduce((sum, l) => sum + valueOf(l.symbol), 0n);
@@ -44,22 +45,31 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): TradeIntent[]
   // Cold start: nothing invested yet → lay down an equal-weight entry from cash.
   if (invested === 0n) {
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
-    if (budget <= 0n) return [];
+    if (budget <= 0n) return { intents: [], why: [] };
     const per = budget / BigInt(tradable.length);
-    if (per <= 0n) return [];
-    return tradable.map((l) => ({
-      kind: "swap",
-      target: cfg.swapRouter,
-      sellToken: cfg.usdg,
-      buyToken: l.token,
-      sellAmountRaw: clamp(per, cfg.maxTradeUsdg),
-      notionalUsdg: clamp(per, cfg.maxTradeUsdg),
-    }));
+    if (per <= 0n) return { intents: [], why: [] };
+    const each = clamp(per, cfg.maxTradeUsdg);
+    return {
+      intents: tradable.map((l) => ({
+        kind: "swap",
+        target: cfg.swapRouter,
+        sellToken: cfg.usdg,
+        buyToken: l.token,
+        sellAmountRaw: each,
+        notionalUsdg: each,
+      })),
+      why: tradable.map(() => ({
+        code: "keel-seed" as const,
+        usdgRaw: each,
+        legs: tradable.length,
+      })),
+    };
   }
 
   const target = invested / BigInt(tradable.length);
   const band = (target * BigInt(cfg.bandBps)) / 10_000n;
   const intents: TradeIntent[] = [];
+  const why: (Why | null)[] = [];
   let cashLeft = snap.cashUsdg;
 
   for (const l of tradable) {
@@ -80,6 +90,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): TradeIntent[]
         sellAmountRaw: sellRaw,
         notionalUsdg: sellUsdg,
       });
+      why.push({ code: "keel-trim", symbol: l.symbol, overRaw: sellUsdg });
     } else if (-diff > band && cashLeft > 0n) {
       // Top up the laggard from cash.
       const buyUsdg = clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft);
@@ -93,8 +104,9 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): TradeIntent[]
         sellAmountRaw: buyUsdg,
         notionalUsdg: buyUsdg,
       });
+      why.push({ code: "keel-top", symbol: l.symbol, underRaw: buyUsdg });
     }
   }
 
-  return intents;
+  return { intents, why };
 }

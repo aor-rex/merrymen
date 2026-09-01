@@ -24,6 +24,12 @@ const ALL: Why[] = [
   { code: "keel-trim", symbol: "TSLA", overRaw: 12_400_000n },
   { code: "keel-top", symbol: "PLTR", underRaw: 9_800_000n },
   { code: "dip", symbol: "NVDA", dipBps: 240, priced: 3, usdgRaw: 25_000_000n },
+  { code: "trench-enter", symbol: "WIF", liqUsd: 41_000, fdvUsd: 820_000, ageSec: 2_820, usdgRaw: 5_000_000n },
+  { code: "trench-exit", symbol: "WIF", cause: "drain", pct: 62 },
+  { code: "trench-exit", symbol: "WIF", cause: "stop", pct: -31.4 },
+  { code: "trench-exit", symbol: "WIF", cause: "take", pct: 48.2 },
+  { code: "trench-exit", symbol: "WIF", cause: "aged" },
+  { code: "trench-exit", symbol: "WIF", cause: "unpriceable" },
 ];
 
 describe("every reason is publishable prose", () => {
@@ -42,7 +48,13 @@ describe("every reason is publishable prose", () => {
     // the scoreboard applies to P&L: do not publish what you cannot back.
     for (const w of ALL) {
       const s = renderWhy(w);
-      assert.doesNotMatch(s, /\bprofit|\bgain|\bwin|will |should |expect/i, `a claim in ${w.code}: ${s}`);
+      // Whole words on BOTH sides: a loose \bwin matched "window" in "held past
+      // the window I give a launch", which promises nothing at all.
+      assert.doesNotMatch(
+        s,
+        /\b(?:profits?|gains?|wins?|will|should|expects?|guarantee[ds]?)\b/i,
+        `a claim in ${w.code}: ${s}`,
+      );
       assert.doesNotMatch(s, /!/, `an exclamation in ${w.code}: ${s}`);
     }
   });
@@ -67,6 +79,27 @@ describe("every reason is publishable prose", () => {
     const clamped = renderWhy(ALL[2]!);
     assert.notEqual(plain, clamped);
     assert.match(clamped, /what today's budget still allows/);
+  });
+
+  it("an exit says WHY it left, and each cause reads differently", () => {
+    // The exit rule writes its own sentence for the owner's notes. The public
+    // one is rendered from the CODE instead, so no string crosses the boundary —
+    // and if two causes rendered the same, that distinction would be lost.
+    const said = new Set(
+      (["drain", "stop", "take", "aged", "unpriceable"] as const).map((cause) =>
+        renderWhy({ code: "trench-exit", symbol: "WIF", cause, pct: 12 }),
+      ),
+    );
+    assert.equal(said.size, 5, "every exit cause needs its own sentence");
+  });
+
+  it("an exit with no percentage still reads as a sentence", () => {
+    // `pct` is absent for the aged and unpriceable causes, and a bare
+    // "undefined%" is the classic way that leaks onto a page.
+    for (const cause of ["aged", "unpriceable"] as const) {
+      const s = renderWhy({ code: "trench-exit", symbol: "WIF", cause });
+      assert.doesNotMatch(s, /undefined|NaN|%/, s);
+    }
   });
 
   it("the gap exit makes no claim about what it made", () => {

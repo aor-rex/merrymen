@@ -93,7 +93,19 @@ export type Why =
   /** A leg has drifted below its share. */
   | { code: "keel-top"; symbol: string; underRaw: bigint }
   /** The deepest drawdown among the legs that could be priced. */
-  | { code: "dip"; symbol: string; dipBps: number; priced: number; usdgRaw: bigint };
+  | { code: "dip"; symbol: string; dipBps: number; priced: number; usdgRaw: bigint }
+  /** A launch that cleared every entry bound. */
+  | { code: "trench-enter"; symbol: string; liqUsd: number; fdvUsd: number; ageSec: number; usdgRaw: bigint }
+  /**
+   * Leaving a launch. `cause` is a CODE, not the sentence the exit rule wrote —
+   * the whole point of this module is that no string crosses the boundary.
+   */
+  | {
+      code: "trench-exit";
+      symbol: string;
+      cause: "unpriceable" | "drain" | "stop" | "take" | "aged";
+      pct?: number;
+    };
 
 /**
  * The ONLY producer of a published strategy reason.
@@ -138,6 +150,21 @@ export function renderWhy(w: Why): string {
         `${w.symbol} is ${pct(w.dipBps)}% off its rolling high, the deepest of the ${w.priced} I priced — ` +
         `${usdg(w.usdgRaw)} USDG in`
       );
+    case "trench-enter":
+      return (
+        `${w.symbol}: ${Math.round(w.liqUsd).toLocaleString("en-US")} deep, ` +
+        `FDV ${Math.round(w.fdvUsd).toLocaleString("en-US")}, ${Math.round(w.ageSec / 60)}m old — ` +
+        `inside every entry bound, ${usdg(w.usdgRaw)} USDG in`
+      );
+    case "trench-exit": {
+      const pct = w.pct === undefined ? null : Math.abs(Math.round(w.pct));
+      if (w.cause === "drain")
+        return `leaving ${w.symbol} — ${pct ?? "much"}% of the liquidity has left since entry`;
+      if (w.cause === "stop") return `leaving ${w.symbol} — it is ${pct ?? "well"}% down from where I bought it`;
+      if (w.cause === "take") return `leaving ${w.symbol} — it is ${pct ?? "well"}% up from where I bought it`;
+      if (w.cause === "aged") return `leaving ${w.symbol} — held past the window I give a launch`;
+      return `leaving ${w.symbol} — it cannot be priced any more, so I am going while there is still a route out`;
+    }
     default: {
       const exhaustive: never = w;
       return exhaustive;

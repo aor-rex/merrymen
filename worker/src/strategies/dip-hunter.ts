@@ -9,7 +9,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy } from "./types";
+import type { Snapshot, Strategy, Tick } from "./types";
 
 export interface DipHunterConfig {
   legs: { symbol: string; token: `0x${string}` }[];
@@ -27,16 +27,21 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
 
   return {
     name: "dip-hunter",
-    tick(snap: Snapshot): TradeIntent[] {
-      if (!snap.sequencerUp) return [];
-      if (snap.cashUsdg < cfg.buyPerTickUsdg) return [];
+    tick(snap: Snapshot): Tick {
+      if (!snap.sequencerUp) return { intents: [], why: [] };
+      if (snap.cashUsdg < cfg.buyPerTickUsdg) return { intents: [], why: [] };
 
-      let best: { token: `0x${string}`; dipBps: number } | null = null;
+      // `symbol` rides along so the reason can name the leg, and `priced` counts
+      // how many it actually had a fresh price for — 'deepest of the 3 I priced'
+      // is a claim we can back; 'the deepest' alone is not.
+      let best: { token: `0x${string}`; symbol: string; dipBps: number } | null = null;
+      let priced = 0;
 
       for (const leg of cfg.legs) {
         const p = snap.prices.get(leg.symbol);
         if (!p || p.stale) continue; // no fresh price → skip (updates resume when live)
         if (snap.pausedTokens.has(leg.token.toLowerCase())) continue;
+        priced += 1;
 
         const prevHigh = highs.get(leg.symbol) ?? 0n;
         const high = p.price8 > prevHigh ? p.price8 : prevHigh;
@@ -45,21 +50,32 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
 
         const dipBps = Number(((high - p.price8) * 10_000n) / high);
         if (dipBps >= cfg.minDipBps && (!best || dipBps > best.dipBps)) {
-          best = { token: leg.token, dipBps };
+          best = { token: leg.token, symbol: leg.symbol, dipBps };
         }
       }
 
-      if (!best) return [];
-      return [
-        {
-          kind: "swap",
-          target: cfg.swapRouter,
-          sellToken: cfg.usdg,
-          buyToken: best.token,
-          sellAmountRaw: cfg.buyPerTickUsdg,
-          notionalUsdg: cfg.buyPerTickUsdg,
-        },
-      ];
+      if (!best) return { intents: [], why: [] };
+      return {
+        intents: [
+          {
+            kind: "swap",
+            target: cfg.swapRouter,
+            sellToken: cfg.usdg,
+            buyToken: best.token,
+            sellAmountRaw: cfg.buyPerTickUsdg,
+            notionalUsdg: cfg.buyPerTickUsdg,
+          },
+        ],
+        why: [
+          {
+            code: "dip",
+            symbol: best.symbol,
+            dipBps: best.dipBps,
+            priced,
+            usdgRaw: cfg.buyPerTickUsdg,
+          },
+        ],
+      };
     },
   };
 }

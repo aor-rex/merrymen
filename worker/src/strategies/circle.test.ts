@@ -9,6 +9,7 @@ import { takeTick, type Holding, type Snapshot, type Strategy } from "./types";
  * the intents, so normalise and keep asserting on those.
  */
 const run = async (s: Strategy, sn: Snapshot) => takeTick(await s.tick(sn)).intents;
+const ekTick = (...a: Parameters<typeof evenKeelTick>) => takeTick(evenKeelTick(...a)).intents;
 
 const AAPL = "0xaaaa000000000000000000000000000000000000" as const;
 const MSFT = "0xbbbb000000000000000000000000000000000000" as const;
@@ -53,7 +54,7 @@ describe("even-keel (rebalancer)", () => {
   };
 
   it("cold start: lays down an equal-weight entry from cash", () => {
-    const out = evenKeelTick(cfg, snap());
+    const out = ekTick(cfg, snap());
     assert.equal(out.length, 2);
     assert.ok(out.every((i) => i.kind === "swap" && i.sellToken === USDG));
     assert.deepEqual(
@@ -67,7 +68,7 @@ describe("even-keel (rebalancer)", () => {
       ["AAPL", { token: AAPL, rawBalance: 10n ** 18n, valueUsdg: U(80), priceStale: false }],
       ["MSFT", { token: MSFT, rawBalance: 10n ** 18n, valueUsdg: U(20), priceStale: false }],
     ]);
-    const out = evenKeelTick(cfg, snap({ holdings, cashUsdg: U(50) }));
+    const out = ekTick(cfg, snap({ holdings, cashUsdg: U(50) }));
     const sell = out.find((i) => i.kind === "swap" && i.sellToken === AAPL);
     const buy = out.find((i) => i.kind === "swap" && i.buyToken === MSFT);
     assert.ok(sell, "should trim overweight AAPL");
@@ -75,7 +76,7 @@ describe("even-keel (rebalancer)", () => {
   });
 
   it("stays flat when the sequencer is down", () => {
-    assert.deepEqual(evenKeelTick(cfg, snap({ sequencerUp: false })), []);
+    assert.deepEqual(ekTick(cfg, snap({ sequencerUp: false })), []);
   });
 });
 
