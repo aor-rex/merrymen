@@ -56,8 +56,12 @@ describe("a return is published under one rule, not two", () => {
     // It printed "no deposit on record" for every null, including for an agent
     // that had funded and simply never filled anything.
     assert.match(READ, /unrankedWhy/);
-    assert.match(PAGE, /a\.unrankedWhy === "no-deposit"/);
-    assert.match(PAGE, /a\.unrankedWhy === "never-filled"/);
+    // Both arms must be reachable and distinguishable. The receiver's name is
+    // free to change; that BOTH reasons are branched on is the property.
+    assert.match(PAGE, /unrankedWhy === "no-deposit"/);
+    assert.match(PAGE, /unrankedWhy === "never-filled"/);
+    assert.match(PAGE, /no deposit on record/);
+    assert.match(PAGE, /nothing has filled yet/);
     assert.ok(
       !/pnlBps === null \? "no deposit on record"/.test(code(PAGE)),
       "a fixed reason cannot be right for both refusals",
@@ -101,7 +105,10 @@ describe("the chart and the figure above it measure the same thing", () => {
   it("always keeps the newest reading", () => {
     // A plain modulo anchors on index 0, so the last few readings never reached
     // the chart and its right-hand end was not the value the headline divides.
-    assert.match(READ, /if \(last !== undefined && out\[out\.length - 1\] !== last\) out\.push\(last\)/);
+    // The downsample must admit the final index explicitly, however it is
+    // spelled — a bare modulo anchors on 0 and can only keep the last reading
+    // by luck of the arithmetic.
+    assert.match(READ_CODE, /% step === 0 \|\| .*length - 1/);
   });
 });
 
