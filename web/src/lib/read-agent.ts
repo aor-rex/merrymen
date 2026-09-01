@@ -21,6 +21,7 @@
  */
 import { withReadDb } from "@/lib/ledger";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
+import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 
@@ -53,10 +54,17 @@ export interface AgentProfile {
    * that had funded and simply never filled anything.
    */
   unrankedWhy: UnrankedWhy | null;
+  /** Peak-to-trough of the growth index. Null whenever the return is unranked. */
   maxDdBps: number | null;
   landed: number;
   refused: number;
+  /** Raw equity readings. Moves when the owner funds it, so it is NOT performance. */
   curve: number[];
+  /**
+   * Equity with the owner's deposits and withdrawals divided out — the series
+   * that moves only when the book itself does. Starts at 1.
+   */
+  growth: number[];
   /** Empty when the owner has not opted in. `publicBook` says which it is. */
   holdings: Holding[];
   publicBook: boolean;
@@ -111,37 +119,56 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
     const account = row.smart_account;
     const epoch = Number(row.epoch ?? 1);
 
+    // THE FLOWS, ROW BY ROW AND NOT JUST SUMMED.
+    //
+    // The total is what the return divides by, but the individual timestamps
+    // are what make a drawdown mean anything: without them, money the owner
+    // takes out is indistinguishable from money the agent lost.
+    let flows: { at: number; signed: number }[] = [];
+    let contributed: number | null = null;
+    try {
+      const rows = (await db
+        .prepare(
+          `SELECT direction, amount_usdg, at FROM flows
+             WHERE agent_id = ? AND epoch = ? ORDER BY at ASC`,
+        )
+        .all(account, epoch)) as { direction: string; amount_usdg: number; at: number }[];
+      flows = rows.map((r) => ({
+        at: Number(r.at),
+        signed: (r.direction === "in" ? 1 : -1) * Number(r.amount_usdg),
+      }));
+      contributed = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
+    } catch {
+      /* flows arrives with a worker migration */
+    }
+
     let curve: number[] = [];
+    let growth: number[] = [];
     let latest: number | null = null;
     try {
       const pts = (await db
         .prepare(
-          `SELECT equity_usdg FROM (
+          `SELECT equity_usdg, at FROM (
              SELECT equity_usdg, at, id FROM equity WHERE agent_id = ? AND epoch = ?
               ORDER BY at DESC, id DESC LIMIT 500
            ) ORDER BY at ASC, id ASC`,
         )
-        .all(account, epoch)) as { equity_usdg: number }[];
-      const vals = pts.map((p) => Number(p.equity_usdg)).filter(Number.isFinite);
+        .all(account, epoch)) as { equity_usdg: number; at: number }[];
+      const clean = pts
+        .map((p) => ({ v: Number(p.equity_usdg), at: Number(p.at) }))
+        .filter((p) => Number.isFinite(p.v));
+      const vals = clean.map((p) => p.v);
       latest = vals.length ? vals[vals.length - 1]! : null;
+
+      // Computed on the FULL series before downsampling: dropping readings
+      // first would misattribute every flow that fell between two kept ones.
+      const full = growthIndex(clean, flows);
+
       const step = Math.max(1, Math.ceil(vals.length / 60));
       curve = vals.filter((_, i) => i % step === 0);
+      growth = full.filter((_, i) => i % step === 0);
     } catch {
       /* no history */
-    }
-
-    let contributed: number | null = null;
-    try {
-      const f = (await db
-        .prepare(
-          `SELECT COUNT(*) AS n,
-                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-             FROM flows WHERE agent_id = ? AND epoch = ?`,
-        )
-        .get(account, epoch)) as { n: number; net: number } | undefined;
-      contributed = !f || Number(f.n) === 0 ? null : Number(f.net);
-    } catch {
-      /* flows arrives with a worker migration */
     }
 
     let gasUsdg = 0;
@@ -234,10 +261,17 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
       strategy,
       pnlBps,
       unrankedWhy,
-      maxDdBps: drawdownBps(curve),
+      // REFUSED ON THE SAME CONDITION AS THE RETURN. An agent that has never
+      // filled has produced no drawdown either, and the figure it produced came
+      // from a paper book's flat opening balance plus the owner's deposits.
+      //
+      // Measured on the growth index rather than the equity line, so a
+      // withdrawal is not reported as a loss.
+      maxDdBps: unrankedWhy === null ? drawdownBps(growth) : null,
       landed,
       refused,
       curve,
+      growth,
       holdings,
       publicBook,
       ridingDays,
@@ -245,13 +279,4 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
   });
 }
 
-function drawdownBps(curve: number[]): number | null {
-  if (curve.length < 2) return null;
-  let peak = curve[0]!;
-  let worst = 0;
-  for (const v of curve) {
-    if (v > peak) peak = v;
-    if (peak > 0) worst = Math.max(worst, (peak - v) / peak);
-  }
-  return Math.round(worst * 10_000);
-}
+
