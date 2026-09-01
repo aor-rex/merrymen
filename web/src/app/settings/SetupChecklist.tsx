@@ -13,6 +13,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { AgentStatus } from "@/app/api/grants/route";
+import { canStart } from "@/lib/can-start";
 
 type Sess = { hosted: boolean; address: string | null };
 
@@ -29,14 +30,6 @@ const C = {
   mono: 'var(--font-jbmono, "JetBrains Mono", ui-monospace, Menlo, monospace)',
 };
 
-function hasGas(wei?: string): boolean {
-  if (!wei) return false;
-  try {
-    return BigInt(wei) > 0n;
-  } catch {
-    return Number(wei) > 0;
-  }
-}
 
 export default function SetupChecklist() {
   const [sess, setSess] = useState<Sess | null>(null);
@@ -68,14 +61,27 @@ export default function SetupChecklist() {
   const hosted = !!sess?.hosted;
   const connected = !hosted || !!sess?.address;
   const exists = !!status?.exists;
-  const funded = hasGas(status?.balances?.ethWei);
+  // The SAME question the console asks, from the same module. Two private
+  // copies meant this could report a sponsored, funded, trading owner as
+  // unfinished forever while the console had already let them in.
+  const funded = canStart(status ?? undefined);
 
   const steps = [
     ...(hosted
       ? [{ label: "Connect your wallet", done: connected, hint: "the signature is your whole login", href: "/app", cta: "Sign in" }]
       : []),
     { label: "Create your agent", done: exists, hint: "keys + caps, signed in your browser", href: "/grant", cta: "Create" },
-    { label: "Fund the account", done: funded, hint: "a little gas + USDG to trade", href: "/grant", cta: "Fund" },
+    {
+      label: "Fund the account",
+      done: funded,
+      // Sponsored, gas is not the owner's to send, so naming it would be a
+      // chore invented for them.
+      hint: status?.gasSponsored
+        ? "USDG to trade with — the network fee is covered"
+        : "a little gas + USDG to trade",
+      href: "/grant",
+      cta: "Fund",
+    },
   ];
   const doneCount = steps.filter((s) => s.done).length;
   const allDone = doneCount === steps.length;

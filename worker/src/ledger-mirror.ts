@@ -72,10 +72,45 @@ const LOG_TABLES = [
       // Otherwise 'what did sponsorship cost the house this week' is a question
       // that can only be answered by sshing into 18 separate child databases.
       "sponsored_gas_wei",
+      // GAS PRICED IN USDG, which is the figure both hosted P&L queries actually
+      // sum. Without it the dashboard read 0.00 gas AND counted every mirrored
+      // fill as unpriceable, so `gasQualifier` stamped 'this is not the full
+      // cost' on every book — a warning about our own missing column.
+      "gas_usdg",
+      "fill_cash_usdg",
+      // WHICH RUN this row belongs to. Everything below depends on it; see the
+      // note on the agents upsert.
+      "epoch",
       "created_at",
     ],
   },
-  { table: "equity", cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "equity_usdg", "at"] },
+  // `positions_usdg` is part of the equity identity (cash + vault + positions +
+  // quarantined) and was the one leg not carried, so a mirrored row could not be
+  // decomposed into the numbers that made it.
+  {
+    table: "equity",
+    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "at"],
+  },
+  // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
+  // arithmetically indistinguishable from a gain — the bug that once reported
+  // +999.48 on a book that was down 0.52 and charged a performance fee on the
+  // owner's own principal (see the flows DDL in store.ts).
+  //
+  // The table has always existed in the shared database — applyLedgerSchema
+  // creates it — so `SELECT ... FROM flows` SUCCEEDED and returned nothing. That
+  // is why hosted P&L was not merely wrong but permanently null: zero rows means
+  // contributions are UNKNOWN, and equity.ts refuses to publish a number it
+  // cannot back. Every hosted agent showed a dash, forever, by design.
+  {
+    table: "flows",
+    cols: ["agent_id", "direction", "amount_usdg", "tx_hash", "block_number", "log_index", "source", "epoch", "at"],
+  },
+  // What the house actually accrued, per agent. Read straight off `agents` by
+  // the scoreboard, but the per-accrual history is what makes a fee auditable.
+  {
+    table: "fee_accruals",
+    cols: ["agent_id", "profit_usdg", "fee_usdg", "hwm_before_usdg", "hwm_after_usdg", "epoch", "at"],
+  },
 ] as const;
 
 /**
@@ -213,20 +248,38 @@ export async function mirrorTenant(args: {
   try {
     const agents = (await child
       .prepare(
+        // `epoch`, `hwm_usdg` and `accrued_fee_usdg` MUST travel with the row
+        // tables above, in the same change. Both web routes filter every query on
+        // `agents.epoch`; while nothing carried it, the shared row sat at its
+        // DEFAULT 1 and so did every mirrored trade and equity row, so the filter
+        // matched everything and accidentally agreed. Carrying epoch on the rows
+        // alone would file epoch-2 rows under an epoch-1 agent and blank every
+        // hosted dashboard; carrying it here alone would hide a child's whole
+        // current run. The two halves are only correct together.
+        //
+        // The other two are read with COALESCE(..., 0) by the scoreboard, so an
+        // unmirrored high-water mark and accrued fee did not render as unknown —
+        // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
-                granted_at, expires_at, status, created_at, mode, beat_at FROM agents`,
+                granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, x_handle,
+                epoch, hwm_usdg, accrued_fee_usdg FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
-                               caps, granted_at, expires_at, status, created_at, mode, beat_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               caps, granted_at, expires_at, status, created_at, mode, beat_at,
+                               sponsor_gas, x_handle, epoch, hwm_usdg, accrued_fee_usdg)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
-             beat_at = excluded.beat_at`,
+             beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
+             x_handle = excluded.x_handle,
+             epoch = excluded.epoch,
+             hwm_usdg = excluded.hwm_usdg,
+             accrued_fee_usdg = excluded.accrued_fee_usdg`,
         );
         for (const a of agents) {
           await ins.run(
@@ -236,6 +289,13 @@ export async function mirrorTenant(args: {
             // and null is the honest value for that. It renders as IDLE, which
             // is what it is.
             a.mode ?? null, a.beat_at ?? null,
+            // Null until the first heartbeat, and null is the honest answer: an
+            // agent that has never run has not told us who pays.
+            a.sponsor_gas ?? null, a.x_handle ?? null,
+            // These three have NOT NULL DEFAULTs at the source, so a null here
+            // means a pre-migration child rather than an absent value — fall back
+            // to the same defaults the schema would have applied.
+            a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
           );
         }
       });
@@ -272,6 +332,30 @@ export async function mirrorTenant(args: {
         }
       });
       copied.positions = positions.length;
+
+      // WHAT IT PAID, which is the other half of what a position IS. `positions`
+      // carries today's value; without the basis there is no entry price and no
+      // P&L for a holding — the feed can say an agent holds 6,822.51 of something
+      // and not whether that is up or down. Same shape as positions: a snapshot
+      // keyed on (agent, mode, symbol), replaced rather than merged, because a
+      // closed position's basis is deleted at the source and an upsert alone
+      // would leave it here forever.
+      const basis = (await child
+        .prepare(`SELECT agent_id, mode, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis`)
+        .all()) as Record<string, unknown>[];
+      await shared.tx(async (db) => {
+        for (const a of agents) {
+          await db.prepare(`DELETE FROM cost_basis WHERE agent_id = ?`).run(a.smart_account);
+        }
+        const ins = db.prepare(
+          `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        for (const b of basis) {
+          await ins.run(b.agent_id, b.mode, b.symbol, b.qty_raw, b.cost_usdg, b.updated_at);
+        }
+      });
+      copied.cost_basis = basis.length;
     }
   } catch {
     /* as above */

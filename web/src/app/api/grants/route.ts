@@ -63,6 +63,21 @@ export interface AgentStatus {
   workerAliveAt?: number | null;
   /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
   mode?: "paper" | "live" | "idle" | null;
+  /**
+   * Is somebody else paying this agent's TRADING gas?
+   *
+   * REPORTED BY THE WORKER, never computed here. Sponsorship is worker config —
+   * sponsorGasEnabled AND a bundler key — and hosted this service is a different
+   * container with a different environment. docs/hosted-deploy.md says the web
+   * service needs no bundler key, so a local answer would read false on a
+   * correctly configured fleet and tell every sponsored owner to go send ETH;
+   * and if the two ever drifted the other way it would promise covered fees
+   * while the child refused every trade. Same reasoning as `mode` above.
+   *
+   * null/absent means the agent has not said yet, which is not the same as no.
+   * WITHDRAWAL IS NEVER SPONSORED, whatever this says.
+   */
+  gasSponsored?: boolean | null;
 }
 
 export async function POST(req: Request) {
@@ -242,10 +257,17 @@ export async function GET(req: Request) {
 
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;
+  let gasSponsored: boolean | null = null;
   try {
-    const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as { at: number; mode?: AgentStatus["mode"] };
+    const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as {
+      at: number;
+      mode?: AgentStatus["mode"];
+      sponsorGas?: boolean;
+    };
     workerAliveAt = hb.at;
     mode = hb.mode ?? null;
+    // Absent on a heartbeat written before this field existed — unknown, not no.
+    gasSponsored = hb.sponsorGas ?? null;
   } catch {
     // no heartbeat file — worker never ran, or (hosted) it beats somewhere
     // this process cannot see. Fall through to the ledger.
@@ -264,13 +286,18 @@ export async function GET(req: Request) {
       const row = await withReadDb(async (db) =>
         db
           ? ((await db
-              .prepare("SELECT mode, beat_at FROM agents WHERE smart_account = ?")
-              .get(grant.smartAccount)) as { mode?: string | null; beat_at?: number | null } | undefined)
+              .prepare("SELECT mode, beat_at, sponsor_gas FROM agents WHERE smart_account = ?")
+              .get(grant.smartAccount)) as
+              | { mode?: string | null; beat_at?: number | null; sponsor_gas?: number | null }
+              | undefined)
           : undefined,
       );
       if (row?.beat_at) {
         workerAliveAt = Number(row.beat_at);
         mode = (row.mode as AgentStatus["mode"]) ?? null;
+        // Nullable at the source, so distinguish 'has not said' from 'no'.
+        gasSponsored =
+          row.sponsor_gas === null || row.sponsor_gas === undefined ? null : Number(row.sponsor_gas) === 1;
       }
     } catch {
       // an unreadable ledger is an unknown mode, not a claim about one
@@ -291,6 +318,7 @@ export async function GET(req: Request) {
     },
     workerAliveAt,
     mode,
+    gasSponsored,
   };
   return NextResponse.json(status);
 }

@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { hostedAgentFor } from "@/lib/agent-for";
 
 export const dynamic = "force-dynamic";
 
@@ -51,11 +52,21 @@ export async function GET(req: Request) {
   // Self-hosted, this board is a transparency product: EVERY agent, publicly.
   // Hosted, that same query is a customer-list dump — every tenant's smart
   // account, caps, equity curve, P&L and fees. So hosted scopes to the caller's
-  // OWN agents (owner_address = the SIWE tenant); no session → nothing.
+  // OWN account; no session → nothing.
+  //
+  // Scoped through the GRANT STORE, not `agents.owner_address`. Hosted, that
+  // column holds the owner key the BROWSER generated and is never the tenant, so
+  // the comparison it replaced matched zero rows for every hosted user — an
+  // empty board that read as 'no agents' rather than as a broken join.
   let tenant: `0x${string}` | null = null;
+  let scopeAccount: `0x${string}` | null = null;
   if (isHostedMode()) {
     tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
+    // Signed in with no grant yet is an EMPTY board. Leaving the scope null here
+    // would fall through to the unscoped query — the customer-list dump.
+    scopeAccount = await hostedAgentFor(req);
+    if (!scopeAccount) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
   }
 
   // Reads go through the ledger driver (read-only sqlite self-hosted, shared
@@ -67,11 +78,13 @@ export async function GET(req: Request) {
     try {
       rows = (await db
         .prepare(
+          // LOWER on both sides: `smart_account` is stored checksummed, and the
+          // grant store returns it the same way — a bare `=` would miss on case.
           `SELECT smart_account, name, status, chain_id, caps, granted_at, expires_at,
                   COALESCE(hwm_usdg, 0) AS hwm_usdg, COALESCE(accrued_fee_usdg, 0) AS accrued_fee_usdg
-           FROM agents ${tenant ? "WHERE LOWER(owner_address) = ?" : ""} ORDER BY created_at DESC`,
+           FROM agents ${scopeAccount ? "WHERE LOWER(smart_account) = ?" : ""} ORDER BY created_at DESC`,
         )
-        .all(...(tenant ? [tenant] : []))) as Record<string, unknown>[];
+        .all(...(scopeAccount ? [scopeAccount.toLowerCase()] : []))) as Record<string, unknown>[];
     } catch {
       return NextResponse.json({ source: "sqlite", agents: [] } satisfies ScoreboardResponse);
     }

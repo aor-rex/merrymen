@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { evenKeelTick, type EvenKeelConfig } from "./even-keel";
 import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
-import type { Holding, Snapshot } from "./types";
+import { takeTick, type Holding, type Snapshot, type Strategy } from "./types";
+
+/**
+ * A strategy may now return reasons alongside its intents. These tests are about
+ * the intents, so normalise and keep asserting on those.
+ */
+const run = async (s: Strategy, sn: Snapshot) => takeTick(await s.tick(sn)).intents;
+const ekTick = (...a: Parameters<typeof evenKeelTick>) => takeTick(evenKeelTick(...a)).intents;
 
 const AAPL = "0xaaaa000000000000000000000000000000000000" as const;
 const MSFT = "0xbbbb000000000000000000000000000000000000" as const;
@@ -47,7 +54,7 @@ describe("even-keel (rebalancer)", () => {
   };
 
   it("cold start: lays down an equal-weight entry from cash", () => {
-    const out = evenKeelTick(cfg, snap());
+    const out = ekTick(cfg, snap());
     assert.equal(out.length, 2);
     assert.ok(out.every((i) => i.kind === "swap" && i.sellToken === USDG));
     assert.deepEqual(
@@ -61,7 +68,7 @@ describe("even-keel (rebalancer)", () => {
       ["AAPL", { token: AAPL, rawBalance: 10n ** 18n, valueUsdg: U(80), priceStale: false }],
       ["MSFT", { token: MSFT, rawBalance: 10n ** 18n, valueUsdg: U(20), priceStale: false }],
     ]);
-    const out = evenKeelTick(cfg, snap({ holdings, cashUsdg: U(50) }));
+    const out = ekTick(cfg, snap({ holdings, cashUsdg: U(50) }));
     const sell = out.find((i) => i.kind === "swap" && i.sellToken === AAPL);
     const buy = out.find((i) => i.kind === "swap" && i.buyToken === MSFT);
     assert.ok(sell, "should trim overweight AAPL");
@@ -69,7 +76,7 @@ describe("even-keel (rebalancer)", () => {
   });
 
   it("stays flat when the sequencer is down", () => {
-    assert.deepEqual(evenKeelTick(cfg, snap({ sequencerUp: false })), []);
+    assert.deepEqual(ekTick(cfg, snap({ sequencerUp: false })), []);
   });
 });
 
@@ -88,9 +95,9 @@ describe("dip-hunter", () => {
   it("no dip on the first sighting → no trade; then buys the deepest dip", async () => {
     const s = makeDipHunter(cfg);
     // First tick establishes the rolling highs at 100/100 — nothing is down yet.
-    assert.deepEqual(await s.tick(snap()), []);
+    assert.deepEqual(await run(s, snap()), []);
     // AAPL falls 5% below its high; MSFT flat → concentrate the budget on AAPL.
-    const out = await s.tick(
+    const out = await run(s, 
       snap({
         prices: new Map([
           ["AAPL", Q(95)],
@@ -104,6 +111,6 @@ describe("dip-hunter", () => {
 
   it("holds when cash can't cover a buy", async () => {
     const s = makeDipHunter(cfg);
-    assert.deepEqual(await s.tick(snap({ cashUsdg: U(1) })), []);
+    assert.deepEqual(await run(s, snap({ cashUsdg: U(1) })), []);
   });
 });

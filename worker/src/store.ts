@@ -10,6 +10,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+// The one definition of a flow's identity. Imported rather than restated so
+// the reader and the writer cannot disagree about what makes a flow unique.
+import { flowKey } from "./deposit-log";
 
 let driver: Db | null = null;
 
@@ -178,6 +181,10 @@ const SQLITE_SCHEMA = `
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
+    -- A GLOBAL feed reads across every agent, so the composite above cannot serve
+    -- it: its leading column is agent_id, so filtering on time alone has to scan.
+    -- The public thesis page is the first reader that is not scoped to one agent.
+    CREATE INDEX IF NOT EXISTS decisions_time ON decisions (at DESC);
     -- Conversation turns, so the merryman doesn't lose the thread on restart.
     -- Lives in sqlite rather than a json file because the db is already open and
     -- single-writer; a file would need its own read-modify-write and would race
@@ -404,6 +411,49 @@ const SQLITE_ALTERS: string[] = [
     // without it no depth figure for the curve is real. It never changes for a
     // given curve, so one write beats an eth_call per token per tick.
     "ALTER TABLE discovered_pools ADD COLUMN graduation_threshold TEXT",
+    // WHICH transfer, within a transaction. A deposit is identified by
+    // (tx_hash, log_index) and NOT by the transaction alone: one transaction can
+    // carry several USDG transfers, and keying on the hash would silently drop
+    // all but the first. NULL for every flow that is not read from a chain log —
+    // an inferred flow has no log to index.
+    "ALTER TABLE flows ADD COLUMN log_index INTEGER",
+    // WHO PAYS this agent's trading gas, as the WORKER resolved it.
+    //
+    // The dashboard cannot work this out for itself. Sponsorship is a worker
+    // config (sponsorGasEnabled AND a bundler key), and hosted the web service is
+    // a different container with a different environment — the deploy docs even
+    // say the web service needs no bundler key, so a web-side answer would read
+    // false on a correctly configured fleet and tell every sponsored owner to go
+    // send ETH. Worse, the two could disagree in the other direction and promise
+    // covered fees while the child refused every trade.
+    //
+    // This is the same fix, on the same row, as `mode` and `beat_at`: report the
+    // child's own resolved answer rather than letting another process guess it.
+    // NULLABLE on purpose — an agent that has never beaten has no answer, and
+    // null is the honest value for that.
+    "ALTER TABLE agents ADD COLUMN sponsor_gas INTEGER",
+    // WHO OWNS this agent, for a public page to credit — the X handle its owner
+    // typed, nothing more.
+    //
+    // DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing may look up an agent,
+    // tenant, grant or permission by this column. It is deliberately not unique
+    // and deliberately not indexed: two agents may claim the same handle and both
+    // render, because nobody has verified either and a unique constraint would
+    // imply somebody had. A handle is also reassignable on X after an account is
+    // deleted, so treating one as an identity is wrong even in principle.
+    //
+    // Lives beside `name` rather than in tenant settings because those are sealed
+    // (settings-store.ts), and a public page must never decrypt a tenant to render
+    // a name.
+    "ALTER TABLE agents ADD COLUMN x_handle TEXT",
+    // HERE AND NOT IN SQLITE_SCHEMA, because `decision_id` is itself added by an
+    // ALTER above — the base schema runs first, so an index on it there fails with
+    // 'no such column' and takes every trade insert down with it.
+    //
+    // decision_id is the join that turns what an agent thought into what actually
+    // happened, and it had no index at all: every lookup of a decision's outcome
+    // was a full scan of the tape. The public feed does one per row it publishes.
+    "CREATE INDEX IF NOT EXISTS trades_decision ON trades (decision_id)",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -912,6 +962,8 @@ export interface FlowRow {
   source: FlowSource;
   txHash?: string;
   blockNumber?: number;
+  /** Position within the block. Set only for 'chain-log' — see the migration. */
+  logIndex?: number;
 }
 
 /** Record money crossing the account boundary, and mirror it into the journal. */
@@ -927,14 +979,15 @@ export async function addFlow(flow: FlowRow): Promise<void> {
         amountUsdg: amount,
         blockNumber: flow.blockNumber ?? null,
         direction: flow.direction,
+        logIndex: flow.logIndex ?? null,
         source: flow.source,
         txHash: flow.txHash ?? null,
       },
       async (db: Db) => {
         await db
           .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             flow.agentId,
@@ -942,6 +995,7 @@ export async function addFlow(flow: FlowRow): Promise<void> {
             amount,
             flow.txHash ?? null,
             flow.blockNumber ?? null,
+            flow.logIndex ?? null,
             flow.source,
             epoch,
           );
@@ -972,6 +1026,110 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
     .get(agentId) as { n: number; net: number } | undefined;
   if (!row || row.n === 0) return null;
   return row.net;
+}
+
+/**
+ * WHAT YOU DECIDED LAST TIME, and what became of it.
+ *
+ * The strategist has never been able to see this. It wrote a decision every
+ * window and read one back never, so window N+1 had no idea what window N
+ * thought — it could contradict itself all day and never notice. This is the
+ * one read that gives a research session continuity.
+ *
+ * Joined to the trade the decision caused, because 'I proposed a buy' and 'the
+ * wall turned it back' are different memories and only the second is useful.
+ */
+export async function recentDecisions(
+  agentId: string,
+  limit = 6,
+): Promise<
+  {
+    at: number;
+    action: string | null;
+    symbol: string | null;
+    size_usdg: number | null;
+    reason: string | null;
+    dropped_rule: string | null;
+    status: string | null;
+    reject_rule: string | null;
+  }[]
+> {
+  try {
+    return (await getDb()
+      .prepare(
+        `SELECT d.at AS at, d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
+                d.reason AS reason, d.dropped_rule AS dropped_rule,
+                t.status AS status, t.reject_rule AS reject_rule
+           FROM decisions d
+           LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+          WHERE d.agent_id = ?
+          ORDER BY d.at DESC
+          LIMIT ?`,
+      )
+      .all(agentId, limit)) as never;
+  } catch {
+    // A ledger without the decisions table yet is an agent with no memory,
+    // which is the honest answer for its first window.
+    return [];
+  }
+}
+
+/**
+ * The highest block a chain-read flow has been recorded from, or null when
+ * none has. This IS the deposit scanner's watermark — it lives in the rows it
+ * describes rather than in a table of its own, so it cannot disagree with them.
+ */
+export async function lastChainLogBlock(agentId: string): Promise<number | null> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT MAX(block_number) AS b FROM flows
+        WHERE agent_id = ? AND source = 'chain-log' AND block_number IS NOT NULL`,
+    )
+    .get(agentId)) as { b: number | null } | undefined;
+  return row?.b === null || row?.b === undefined ? null : Number(row.b);
+}
+
+/**
+ * Flow keys already recorded from block `fromBlock` onward.
+ *
+ * The scan re-reads its last block every pass — a block can carry several
+ * transfers and a crash between two of them would otherwise strand the rest —
+ * so this set is what stops the re-read being booked twice.
+ */
+export async function knownFlowKeys(agentId: string, fromBlock: number): Promise<Set<string>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT tx_hash, log_index FROM flows
+        WHERE agent_id = ? AND tx_hash IS NOT NULL AND log_index IS NOT NULL
+          AND block_number >= ?`,
+    )
+    .all(agentId, fromBlock)) as { tx_hash: string; log_index: number }[];
+  const out = new Set<string>();
+  for (const r of rows) out.add(flowKey(r.tx_hash, Number(r.log_index)));
+  return out;
+}
+
+/**
+ * Transaction hashes the ledger already explains as trades.
+ *
+ * A swap moves USDG, and its Transfer log is a FILL rather than a deposit —
+ * booking fills as capital would inflate contributions by the account's whole
+ * turnover and drive reported P&L steadily negative. Vault moves are covered
+ * too: they are trade rows carrying transaction hashes.
+ *
+ * `trades` has no block number to filter on, so this is bounded by recency
+ * instead. The bound is enormous relative to a scan window — a window is
+ * minutes of blocks and this is thousands of fills — so the only thing it
+ * really prevents is an unbounded read on a long-lived agent.
+ */
+export async function recentTradeTxHashes(agentId: string, limit = 2000): Promise<Set<string>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT tx_hash FROM trades WHERE agent_id = ? AND tx_hash IS NOT NULL
+        ORDER BY id DESC LIMIT ?`,
+    )
+    .all(agentId, limit)) as { tx_hash: string }[];
+  return new Set(rows.map((r) => r.tx_hash.toLowerCase()));
 }
 
 /**
@@ -1202,11 +1360,18 @@ export async function setAgentMode(
   agentId: string,
   mode: "paper" | "live" | "idle",
   atSec: number,
+  /**
+   * Whether a sponsor is paying this agent's TRADING gas, as this worker
+   * resolved it. Travels with the heartbeat because it is the same kind of fact
+   * — something only the child knows — and the dashboard has no other way to
+   * learn it. Withdrawal is never sponsored, whatever this says.
+   */
+  sponsorGas: boolean,
 ): Promise<void> {
   try {
     await getDb()
-      .prepare("UPDATE agents SET mode = ?, beat_at = ? WHERE smart_account = ?")
-      .run(mode, atSec, agentId);
+      .prepare("UPDATE agents SET mode = ?, beat_at = ?, sponsor_gas = ? WHERE smart_account = ?")
+      .run(mode, atSec, sponsorGas ? 1 : 0, agentId);
   } catch {
     /* a missing heartbeat is a worse thing to crash over than to lose */
   }
@@ -1593,6 +1758,24 @@ export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): P
 }
 
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
+/**
+ * The owner's X handle on the agent's roster row, so a public page can credit
+ * them without decrypting a tenant's sealed settings.
+ *
+ * Deliberately not unique and deliberately not indexed — see the column comment.
+ * Two agents may claim the same handle and both render, because nobody has
+ * verified either and a constraint would imply somebody had.
+ */
+export async function setAgentXHandle(agentId: string, handle: string | null): Promise<void> {
+  try {
+    await getDb()
+      .prepare(`UPDATE agents SET x_handle = ? WHERE smart_account = ?`)
+      .run(handle, agentId);
+  } catch {
+    /* a missing handle is cosmetic — never worth failing an arm over */
+  }
+}
+
 export async function setAgentName(agentId: string, name: string): Promise<void> {
   try {
     await getDb().prepare(`UPDATE agents SET name = ? WHERE smart_account = ?`).run(name, agentId);

@@ -26,6 +26,9 @@ export default function Dashboard() {
           Robinhood Chain · 4663
         </span>
         <ChainStats />
+        <Link href="/theses" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
+          what they&apos;re saying
+        </Link>
         <Link href="/scoreboard" className="mono" style={{ color: "var(--text-dim)", fontSize: 12 }}>
           scoreboard
         </Link>

@@ -10,7 +10,7 @@
  */
 
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
-import type { Holding, Snapshot, Strategy } from "./strategies/types";
+import { takeTick, type Holding, type Snapshot, type Strategy } from "./strategies/types";
 
 /** One bar of the input series. Prices in USD (8dp bigint), per symbol. */
 export interface Bar {
@@ -149,7 +149,9 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       perTradeCapUsdg: cfg.limits.perTradeUsdg,
     };
 
-    const intents = await cfg.strategy.tick(snap);
+    // The reasons a strategy now returns are for the ledger, and the backtest
+    // has no ledger — it replays intents against bars.
+    const { intents } = takeTick(await cfg.strategy.tick(snap));
     for (const intent of intents) {
       const state: AgentState = {
         spentTodayUsdg: spentToday,

@@ -8,7 +8,8 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot } from "./types";
+import type { Snapshot, Tick } from "./types";
+import type { Why } from "./reasons";
 
 export type { Snapshot };
 
@@ -29,8 +30,8 @@ export interface SteadyBasketConfig {
   usdg: `0x${string}`;
 }
 
-export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): TradeIntent[] {
-  if (!snap.sequencerUp) return [];
+export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick {
+  if (!snap.sequencerUp) return { intents: [], why: [] };
 
   // Cash can't cover a buy but the vault can: pull enough back to fund the next
   // tick's buy plus the liquidity floor. Withdraw-only tick — buys resume next
@@ -38,10 +39,15 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
   if (snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
     const need = cfg.buyPerTickUsdg + cfg.idleFloorUsdg - snap.cashUsdg;
     const amountUsdg = need > snap.vaultUsdg ? snap.vaultUsdg : need;
-    return [{ kind: "vault-withdraw", target: cfg.vault, amountUsdg }];
+    return {
+      intents: [{ kind: "vault-withdraw", target: cfg.vault, amountUsdg }],
+      why: [{ code: "unpark", usdgRaw: amountUsdg, needRaw: need }],
+    };
   }
 
   const intents: TradeIntent[] = [];
+  // Positionally paired with `intents` — see Tick. Pushed together, always.
+  const why: (Why | null)[] = [];
 
   if (snap.cashUsdg >= cfg.buyPerTickUsdg) {
     for (const leg of cfg.legs) {
@@ -56,6 +62,13 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
         buyToken: leg.token,
         sellAmountRaw: legAmount,
         notionalUsdg: legAmount,
+      });
+      why.push({
+        code: "dca-leg",
+        symbol: leg.symbol,
+        usdgRaw: legAmount,
+        weightBps: leg.weightBps,
+        legs: cfg.legs.length,
       });
     }
   }
@@ -77,8 +90,17 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Trade
     const amountUsdg = excess < headroom ? excess : headroom;
     if (amountUsdg > 0n) {
       intents.push({ kind: "vault-deposit", target: cfg.vault, amountUsdg });
+      // `clamped` when the daily budget cut the sweep short. Saying 'parked the
+      // idle cash' while parking part of it would leave the sentence and the
+      // balance disagreeing in front of the owner.
+      why.push({
+        code: "park",
+        usdgRaw: amountUsdg,
+        floorRaw: cfg.idleFloorUsdg,
+        clamped: amountUsdg < excess,
+      });
     }
   }
 
-  return intents;
+  return { intents, why };
 }

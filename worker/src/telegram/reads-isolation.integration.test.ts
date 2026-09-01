@@ -133,3 +133,32 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
     assert.doesNotMatch(status, /222\.22/);
   });
 });
+
+/**
+ * THE DAILY REPORT IS ALSO POSTED IN PUBLIC.
+ *
+ * virtuals-streamer sends it to a terminal anybody can read, and it had been
+ * sending the owner's exact equity, their biggest holding's dollar value, and
+ * the newest event verbatim — which is where the strategist's own prose lands,
+ * and where a policy refusal naming an allowlisted recipient can land too.
+ *
+ * The percentages are the point of a public report. The balance sheet is not
+ * anybody else's business.
+ */
+describe("the daily report is also posted in public", () => {
+  it("keeps the performance and drops the balance sheet", () => {
+  const priv = readReport(ctx(ALICE));
+  const pub = readReport(ctx(ALICE), true);
+
+  assert.doesNotMatch(pub, /equity:/, "exact equity must not be published");
+  assert.doesNotMatch(pub, /last word from camp/, "the newest event must not be published");
+  assert.doesNotMatch(pub, /\$\d/, "no dollar figure survives");
+
+  // …and the owner's own report is untouched.
+  assert.match(priv, /equity:/);
+
+    // What a public reader still gets: how it did, and how the wall did.
+    assert.match(pub, /arrows today/);
+    assert.match(pub, /strategy:/);
+  });
+});

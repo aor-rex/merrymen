@@ -65,6 +65,17 @@ export interface PreflightInput {
     rpcMainnet?: string;
     rpcTestnet?: string;
   };
+  /**
+   * Is a sponsor paying this agent's TRADING gas?
+   *
+   * Not read from `settings` above, because sponsorship resolves from the
+   * settings file OR the environment and this shape is the raw file. The caller
+   * resolves it the same way the worker does and passes the answer.
+   *
+   * Absent means no, which is the default and every deployment that has not
+   * opted in.
+   */
+  sponsored?: boolean;
   grant: StoredGrant | null;
   nowSec: number;
   /** Read from the grant's chain. null = could not be read, which is not zero. */
@@ -251,6 +262,25 @@ export function preflight(input: PreflightInput): Check[] {
       level: "warn",
       title: "couldn't read the account's ETH",
       detail: "Check the RPC. Without ETH the account cannot pay for a single operation.",
+    });
+  } else if (input.ethWei === 0n && input.sponsored) {
+    // SPONSORED: zero ETH no longer stops a trade, so calling it a blocker would
+    // fail a deployment that works. It is still worth saying, because the way
+    // OUT is not sponsored — recovery pays its own fee from the balance it is
+    // sweeping — so an owner who never adds any ETH can trade for months and
+    // then find they cannot withdraw.
+    //
+    // A warning, not an ok: the account is one step short of complete, and this
+    // is the only screen that will ever mention it.
+    out.push({
+      id: "gas",
+      level: "warn",
+      title: "no ETH — trading is sponsored, but moving money OUT is not",
+      detail:
+        `A sponsor pays the network fee on this agent's trades, so an empty ETH balance does not ` +
+        "stop it trading. Sweeping funds back to your own wallet is a different path and pays " +
+        `its own way, so send a dollar or two of ETH to ${g.smartAccount} before you need to ` +
+        "withdraw.",
     });
   } else if (input.ethWei === 0n) {
     out.push({

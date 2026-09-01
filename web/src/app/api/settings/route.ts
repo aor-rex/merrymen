@@ -339,6 +339,23 @@ export async function PUT(req: Request) {
     }
   }
 
+  if ("xHandle" in body) {
+    // X's own rule: 1-15 of [A-Za-z0-9_]. One leading @ is stripped because that
+    // is how people write it and refusing over a sigil is pedantry; anything else
+    // is REFUSED rather than sanitised, so we never store a handle the owner did
+    // not type. It is unverified either way — nothing checks they own it — which
+    // is exactly why nothing may ever look an agent up by it.
+    const v = body.xHandle;
+    const norm = typeof v === "string" ? v.trim().replace(/^@/, "") : v;
+    if (norm === "" || norm === null || norm === undefined) {
+      setOrClear("xHandle", undefined);
+    } else if (typeof norm !== "string" || !/^[A-Za-z0-9_]{1,15}$/.test(norm)) {
+      errors.push("x handle: letters, numbers and underscores, up to 15 characters");
+    } else {
+      setOrClear("xHandle", norm);
+    }
+  }
+
   if ("strategy" in body) {
     const v = body.strategy;
     if (v === "" || v === null || v === undefined) {

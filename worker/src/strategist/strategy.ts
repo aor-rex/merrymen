@@ -12,6 +12,8 @@ import type { TradeIntent } from "../policy";
 import type { Snapshot, Strategy } from "../strategies/types";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
+import { runDesk, type DeskLink, type DeskWorld } from "./desk";
+import type { LlmCreds } from "../llm";
 
 /** A decision the strategist made this window — survivor (linked to an intent via
  * its id) or drop (dropped_rule set). Deliberately store-agnostic: index.ts adds
@@ -62,6 +64,30 @@ export interface LlmStrategistConfig {
   onDecision?: (d: StrategistDecision) => void | Promise<void>;
   provider?: string;
   model?: string;
+  /**
+   * RESEARCH INSTEAD OF GUESSING.
+   *
+   * When present the window runs a bounded tool loop — the model can pull
+   * depth, check what a position cost, and read back its own last decisions
+   * before it commits — and finishes by submitting a view in its own words.
+   * Absent, the old one-shot driver runs exactly as before.
+   *
+   * It costs up to maxSteps model calls instead of one, which is why it is
+   * opt-in: the scout consumed a whole day's shared token allowance once and
+   * took user chat down with it.
+   */
+  desk?: {
+    creds: LlmCreds;
+    /** The agent's own recent decisions and what became of them. */
+    recall: () => Promise<string>;
+    /** What a position cost, so the model can tell a winner from a loser. */
+    basisFor?: (symbol: string) => Promise<string | null>;
+    /** Pages the model may ask for BY INDEX. Re-read each window. */
+    links?: () => DeskLink[];
+    /** Fetch one offered link. Index-addressed; never a model-supplied URL. */
+    readLink?: (index: number) => Promise<string>;
+    maxSteps?: number;
+  };
 }
 
 /** Two decimals is plenty for a dollar figure the model reasons about, and it
@@ -125,16 +151,70 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       lastDecisionAt = t;
 
       const signals = buildSignals(snap, cfg.universe, new Date(t));
-      let raw: unknown;
-      try {
-        raw = await cfg.driver.propose(signals);
-      } catch (e) {
-        note("warn", `strategist driver failed: ${e instanceof Error ? e.message : String(e)}`);
-        return [];
-      }
 
-      const { actions, malformed } = parseProposals(raw);
-      if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
+      // THE VIEW, when the desk ran. Empty on the one-shot path, and empty
+      // whenever the desk failed to finish — an unfinished session is not a
+      // decision and must not be published as one.
+      let thesis = "";
+      let actions: import("./proposals").ProposedAction[];
+      let malformed = 0;
+
+      if (cfg.desk) {
+        const desk = cfg.desk;
+        // Composed HERE, per window, because look_up answers about THIS tick:
+        // the price, its provenance, the depth and the holding all come from the
+        // signals just built. A world fixed at construction would answer every
+        // future window with the book as it looked when the worker booted.
+        const world: DeskWorld = {
+          async lookUp(symbol: string) {
+            const p = signals.prices.find((x) => x.symbol === symbol);
+            const h = signals.holdings.find((x) => x.symbol === symbol);
+            const d = signals.depth?.find((x) => x.symbol === symbol);
+            const lines = [`${symbol}:`];
+            lines.push(
+              p
+                ? `  price ${p.usd} USD${p.stale ? " (STALE — the market is shut)" : ""}`
+                : `  no price — this symbol is not priced right now, which is not the same as worthless`,
+            );
+            lines.push(h ? `  you hold ${h.valueUsdg} USDG of it` : `  you hold none of it`);
+            const basis = await desk.basisFor?.(symbol).catch(() => null);
+            if (basis) lines.push(`  ${basis}`);
+            lines.push(
+              d
+                ? `  depth: ${d.buyUsdg} USDG buyable / ${d.sellUsdg} USDG sellable before moving it 0.5%` +
+                  `${d.supportUsd === null ? "" : `, support near ${d.supportUsd}`}` +
+                  `${d.resistanceUsd === null ? "" : `, resistance near ${d.resistanceUsd}`}`
+                : `  depth: not read — unknown, not zero`,
+            );
+            return lines.join("\n");
+          },
+          recall: desk.recall,
+          ...(desk.readLink ? { readLink: desk.readLink } : {}),
+        };
+        const r = await runDesk({
+          creds: desk.creds,
+          signals,
+          world,
+          links: desk.links?.(),
+          maxSteps: desk.maxSteps,
+          note,
+        });
+        actions = r.actions;
+        thesis = r.thesis;
+        note("ok", `desk: ${r.steps} model call(s), ${actions.length} action(s) proposed`);
+      } else {
+        let raw: unknown;
+        try {
+          raw = await cfg.driver.propose(signals);
+        } catch (e) {
+          note("warn", `strategist driver failed: ${e instanceof Error ? e.message : String(e)}`);
+          return [];
+        }
+        const parsed = parseProposals(raw);
+        actions = parsed.actions;
+        malformed = parsed.malformed;
+        if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
+      }
 
       // Merged HERE, not at construction, so the reserves are this tick's.
       const curve = cfg.curveLegsNow?.() ?? null;
@@ -166,8 +246,20 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         for (const r of rejected) {
           await cfg.onDecision({ ...base, id: randomUUID(), dropped_rule: r });
         }
+        // THE VIEW ITSELF, as its own row.
+        //
+        // Without this a window where the agent decided to do NOTHING left no
+        // trace anywhere: a hold never becomes an intent, never becomes a
+        // rejection, and never reaches the note loop — so an agent that
+        // reasoned its way to 'stay flat, and here is why' was silent. This is
+        // the row that lets it speak without trading, and it carries no symbol
+        // or action because it is about the book, not about one name.
+        if (thesis) {
+          await cfg.onDecision({ ...base, id: randomUUID(), reason: thesis });
+        }
       }
 
+      if (thesis) note("ok", `strategist: ${thesis}`);
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
       for (const a of actions) {
         if (a.action !== "hold" && a.reason) {

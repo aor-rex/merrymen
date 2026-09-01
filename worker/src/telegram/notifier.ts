@@ -38,6 +38,25 @@ export interface AlertInputs {
   breakerBps: number | null;
   /** Native gas balance; null when unknown. */
   gasWei: bigint | null;
+  /**
+   * Is a sponsor paying this agent's TRADING gas?
+   *
+   * Changes what a zero balance MEANS. Unsponsored it stops everything;
+   * sponsored it stops only the way out, because the recovery path pays its own
+   * fee from the balance it is sweeping and is never sponsored.
+   */
+  gasSponsored?: boolean;
+  /**
+   * Is the agent trading on paper?
+   *
+   * LOAD-BEARING, not decoration. The paper branch of the tick HARDCODES
+   * `ethWei: 0n` rather than reading the chain, so `gasWei` is a fabricated
+   * zero there and says nothing about the real balance. The unsponsored copy
+   * below has always handled that with its closing caveat; the sponsored arm
+   * cannot, because 'you cannot withdraw' would be an actionable claim about a
+   * balance nobody looked at.
+   */
+  paper?: boolean;
 }
 
 export interface NotifierDeps {
@@ -77,7 +96,9 @@ interface TradeRowLite {
   tx_hash: string | null;
 }
 
-function tradeLine(t: TradeRowLite, explorer: string | null): string {
+/** Exported for the same reason tradeDigestLine is: it is a pure string rule
+ *  that decides what a failure is BLAMED on, and that deserves a test. */
+export function tradeLine(t: TradeRowLite, explorer: string | null): string {
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
@@ -90,6 +111,13 @@ function tradeLine(t: TradeRowLite, explorer: string | null): string {
     return `📜 paper arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG filled at the live price (simulated, nothing signed)`;
   }
   if (t.status === "rejected") {
+    // A SPONSOR FAILURE IS NOT A WALL REFUSAL. The wall is the owner's own
+    // sealed policy, and saying it turned a trade back blames them for the
+    // house failing to pay a fee — the one reading of this line that sends
+    // somebody looking through their own settings for a fault that is ours.
+    if (t.reject_rule?.startsWith("sponsor-")) {
+      return `⛽ a ${esc(t.kind)} didn't go out — the gas sponsor declined it (${esc(t.reject_rule)}), which is ours to fix. ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+    }
     return `🛡 the wall turned back a ${esc(t.kind)} (${esc(t.reject_rule ?? "policy")}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
   }
   // "reverted" status covers both an on-chain revert AND a pre-submission failure
@@ -229,14 +257,34 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // every operation is guaranteed to fail was the one balance that produced
     // no warning at all. It gets its own, blunter message: "low" understates a
     // condition that is not low but stopped.
-    if (inputs.gasWei === 0n) {
+    const sponsored = inputs.gasSponsored === true;
+    const noGas = inputs.gasWei === 0n;
+    const lowGas = inputs.gasWei !== null && inputs.gasWei > 0n && inputs.gasWei < LOW_GAS_WEI;
+    if (sponsored) {
+      // SPONSORED: zero and low mean the same thing, so they share one alert.
+      // Trading is unaffected either way; what thins out is the way OUT.
+      //
+      // Skipped on paper entirely: the paper tick fabricates `ethWei: 0n`, so
+      // firing here would tell an owner they cannot withdraw from an account
+      // whose balance nothing read. Its own key, so the corrected message is not
+      // held behind a cooldown started by the message it replaces.
+      if (!inputs.paper && (noGas || lowGas)) {
+        await fire(
+          "withdrawal-gas",
+          `⛽ the account is low on <b>ETH</b>. The network fee on every trade is sponsored, so this does ` +
+            `not stop it trading. Moving money back <b>out</b> to your own wallet is the one thing that ` +
+            `still pays its own way, and it needs a little ETH sitting in the account — a dollar or two ` +
+            `is plenty.`,
+        );
+      }
+    } else if (noGas) {
       await fire(
         "no-gas",
         `⛽ the account has <b>no ETH</b> — live trades cannot land at all. The account pays its own gas, ` +
           `so send a little <b>ETH</b> to it; USDG is capital and cannot pay for anything. ` +
           `(Paper mode signs nothing, so this only bites once you're live.)`,
       );
-    } else if (inputs.gasWei !== null && inputs.gasWei > 0n && inputs.gasWei < LOW_GAS_WEI) {
+    } else if (lowGas) {
       // Chain- and mode-agnostic on purpose: there's no faucet on mainnet, and in
       // paper mode nothing signs, so gas can't be what's stopping a trade. Also
       // names gas-vs-capital — "top up the account" is what sends people to USDG.

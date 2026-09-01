@@ -50,6 +50,7 @@ export interface ResolvedConfig {
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
   agentName: string | undefined;
+  xHandle: string | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
   ponsAdapterAddress: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
@@ -75,6 +76,11 @@ export interface ResolvedConfig {
   trencherLiveEnabled: boolean;
   sponsorGasEnabled: boolean;
   sponsorshipPolicyId?: string;
+  /** Read flows from USDG Transfer logs rather than inferring them. */
+  depositScanEnabled: boolean;
+  /** Let the strategist research before deciding. */
+  deskEnabled: boolean;
+  deskMaxSteps: number;
   browserUrl: string | undefined;
   browserToken: string | undefined;
   scoutEnabled: boolean;
@@ -206,6 +212,7 @@ export function mergeSettings(
     rawBreaker && /^0x[0-9a-fA-F]{40}$/.test(rawBreaker) ? (rawBreaker as `0x${string}`) : undefined;
 
   const agentName = str(file.agentName, env.MERRYMEN_AGENT_NAME);
+  const xHandle = str(file.xHandle, env.MERRYMEN_X_HANDLE);
 
   const rawAdapter = str(file.v4AdapterAddress, env.MERRYMEN_V4_ADAPTER_ADDRESS);
   const v4AdapterAddress =
@@ -263,6 +270,7 @@ export function mergeSettings(
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
     agentName,
+    xHandle,
     v4AdapterAddress,
     ponsAdapterAddress,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
@@ -290,6 +298,9 @@ export function mergeSettings(
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
     sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
     sponsorshipPolicyId: str(file.sponsorshipPolicyId, env.MERRYMEN_SPONSORSHIP_POLICY_ID),
+    depositScanEnabled: bool(file.depositScanEnabled, env.MERRYMEN_DEPOSIT_SCAN, d.depositScanEnabled),
+    deskEnabled: bool(file.deskEnabled, env.MERRYMEN_DESK, d.deskEnabled),
+    deskMaxSteps: num(file.deskMaxSteps, env.MERRYMEN_DESK_MAX_STEPS, d.deskMaxSteps, 1, 12),
     browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
     browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),

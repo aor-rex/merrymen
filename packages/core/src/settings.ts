@@ -87,6 +87,15 @@ export interface MerrymenSettings {
    * Deliberately NOT a house key: a tenant must be able to name their own agent.
    */
   agentName?: string;
+  /**
+   * The owner's X handle, for a public page to credit them.
+   *
+   * DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing looks up an agent,
+   * tenant or permission by this. It is unverified — we store what the owner
+   * typed and nothing checks that they own it — so it renders disclaimed and
+   * never as a link.
+   */
+  xHandle?: string;
   v4AdapterAddress?: string;
   /**
    * The deployed PonsSelfTrade adapter for this chain, or absent.
@@ -242,8 +251,40 @@ export interface MerrymenSettings {
    * A tenant who could set this would be writing a cheque on the house.
    */
   sponsorGasEnabled?: boolean;
+  /**
+   * Let the strategist RESEARCH before it decides, instead of answering in one
+   * shot from a fixed blob of numbers.
+   *
+   * On, a decision window becomes a short tool loop: the model can pull depth,
+   * check what a position cost, read back its own last decisions, and read the
+   * project's own page where a browser is configured — then it submits a view
+   * in its own words, which is what the public feed publishes.
+   *
+   * OFF BY DEFAULT because it costs up to deskMaxSteps model calls per window
+   * instead of one. The scout consumed an entire day's shared token allowance
+   * on 2026-08-31 and took user chat down with it; this is the same class of
+   * spend and deserves the same caution.
+   */
+  deskEnabled?: boolean;
+  /** Model calls one research session may make before it must decide. */
+  deskMaxSteps?: number;
   /** Pimlico sponsorship policy id (`sp_…`), which is where the real spend limits live. */
   sponsorshipPolicyId?: string;
+  /**
+   * Read deposits and withdrawals from USDG Transfer logs instead of inferring
+   * them from balance changes.
+   *
+   * Inference can only see two cases — the first funded observation, and a cash
+   * change with no ledger row in between — so a top-up that lands in the same
+   * tick as a fill is folded into performance. Reading the logs makes every
+   * flow exact and gives it a transaction hash.
+   *
+   * OFF by default despite being strictly more accurate, because it changes how
+   * CONTRIBUTIONS are counted and contributions are what P&L is measured
+   * against. It earns its way on one agent against the live chain before the
+   * fleet, exactly like sponsorship.
+   */
+  depositScanEnabled?: boolean;
   scoutEnabled?: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. 0 = off. */
   scoutBudgetUsdg?: number;
@@ -469,6 +510,13 @@ export const SETTINGS_DEFAULTS = {
   trencherLiveEnabled: false,
   // Off by default like every other switch that spends money.
   sponsorGasEnabled: false,
+  // Off by default because it changes how contributions are counted, and a
+  // change to contributions is a change to every P&L figure derived from them.
+  depositScanEnabled: false,
+  // Off by default like every other switch that spends money — this one spends
+  // it on inference rather than gas.
+  deskEnabled: false,
+  deskMaxSteps: 4,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,
