@@ -466,7 +466,24 @@ function localMidnightUnix(now = new Date()): number {
 const trend = (delta: number) => (delta > 0.005 ? "📈" : delta < -0.005 ? "📉" : "➡️");
 
 /** The daily campfire report — also served on demand by /report. */
-export function readReport(ctx: StatusContext): string {
+/**
+ * The campfire report.
+ *
+ * `publicSafe` STRIPS THE BALANCE SHEET. This report goes two places: to the
+ * owner over Telegram, where their own numbers are exactly what they asked
+ * for, and — via virtuals-streamer — to a PUBLIC terminal, where they are
+ * somebody's account balance on the internet.
+ *
+ * That second path has been live and unredacted: exact equity, the biggest
+ * holding with its dollar value, and the last event verbatim, which is where
+ * the strategist's own prose lands and where a policy refusal naming a
+ * recipient allowlist can land too.
+ *
+ * What survives publicly is what makes a report worth reading without saying
+ * how much money anybody has: the PERCENTAGE moves, which position is the
+ * biggest without its size, and how the wall did today.
+ */
+export function readReport(ctx: StatusContext, publicSafe = false): string {
   const db = openRO();
   const lines: string[] = ["🔥 <b>campfire report</b>"];
   if (!db) return "🔥 no ledger yet — the band hasn't ridden. Nothing to report.";
@@ -478,7 +495,7 @@ export function readReport(ctx: StatusContext): string {
     const today = equitySeries(db, agentId, midnight);
     if (all.length >= 1) {
       const eq = all[all.length - 1]!.equity_usdg;
-      lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
+      if (!publicSafe) lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
     }
     // Both windows net out capital that crossed the boundary inside them, so a
     // deposit doesn't read as a day's winnings.
@@ -490,7 +507,10 @@ export function readReport(ctx: StatusContext): string {
         (netContributions(db, agentId, midnight) ?? 0);
       const base = today[0]!.equity_usdg;
       const pct = base > 0 ? (d / base) * 100 : 0;
-      lines.push(`• today: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      // The percentage says how it did; the dollar figure says how big the book
+      // is. Publicly, only the first is anybody else's business.
+      const move = publicSafe ? "" : ` ${usd(d)}`;
+      lines.push(`• today: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     } else {
       lines.push(`• today: not enough ticks yet`);
     }
@@ -500,7 +520,8 @@ export function readReport(ctx: StatusContext): string {
     } else if (all.length >= 1) {
       const d = all[all.length - 1]!.equity_usdg - contributed;
       const pct = contributed > 0 ? (d / contributed) * 100 : 0;
-      lines.push(`• all-time: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      const move = publicSafe ? "" : ` ${usd(d)}`;
+      lines.push(`• all-time: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     }
     // Positions — biggest and smallest holdings.
     try {
@@ -511,7 +532,9 @@ export function readReport(ctx: StatusContext): string {
         .all(agentId) as { symbol: string; value_usdg: number }[];
       if (pos.length) {
         const top = pos[0]!;
-        lines.push(`• biggest holding: ${esc(top.symbol)} ($${top.value_usdg.toFixed(2)})${pos.length > 1 ? ` of ${pos.length} positions` : ""}`);
+        // Which position is biggest is a view. What it is worth is a balance.
+        const size = publicSafe ? "" : ` (${top.value_usdg.toFixed(2)})`;
+        lines.push(`• biggest holding: ${esc(top.symbol)}${size}${pos.length > 1 ? ` of ${pos.length} positions` : ""}`);
       } else {
         lines.push(`• book: all in cash/vault`);
       }
@@ -536,7 +559,11 @@ export function readReport(ctx: StatusContext): string {
           "SELECT message FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .get(agentId) as { message: string } | undefined;
-      if (ev) lines.push(`• last word from camp: ${esc(ev.message.slice(0, 160))}`);
+      // NEVER PUBLICLY. This is the newest event verbatim, and events carry the
+      // strategist's own prose (which can quote the signals it was handed) and
+      // policy refusals that name allowlisted recipients. The public feed has a
+      // whitelist for exactly this text; there is no version of it here.
+      if (ev && !publicSafe) lines.push(`• last word from camp: ${esc(ev.message.slice(0, 160))}`);
     } catch {
       /* no events table yet */
     }

@@ -151,7 +151,13 @@ export function startVirtualsStreamer(deps: VirtualsStreamerDeps): { stop(): voi
     let postedReportToday = cursor.lastReportDate === today;
     const ctx = deps.buildStatusContext();
     if (!postedReportToday && d.getHours() >= cfg.telegramDigestHour && ctx.grant) {
-      const plain = readReport(ctx).replace(/<[^>]+>/g, "");
+      // PUBLIC-SAFE. This terminal is readable by anyone, and the full report
+      // carries the owner's exact equity, their biggest holding's dollar value,
+      // and the last event verbatim — which is where the strategist's own words
+      // land. The percentages, the position count and the wall's record survive;
+      // the balance sheet does not. Telegram's /report is untouched: the owner's
+      // own numbers are exactly what they asked for.
+      const plain = readReport(ctx, true).replace(/<[^>]+>/g, "");
       logs.push({
         framework_name: FRAMEWORK,
         category_name: "general",
