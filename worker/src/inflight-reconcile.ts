@@ -53,6 +53,15 @@ export interface RawLog {
   topics: readonly Hex[];
   data: Hex;
   transactionHash: Hex;
+  /**
+   * Hex, as eth_getLogs returns them — makeReconcileChain passes the raw RPC
+   * response through, so both are present on real logs. Optional because the
+   * orphan sweep never needed them and its fakes do not supply them; the
+   * deposit scanner does need both (a block number to resume from, a log index
+   * to tell two transfers in one transaction apart) and checks for itself.
+   */
+  blockNumber?: Hex;
+  logIndex?: Hex;
 }
 
 /**
@@ -87,27 +96,25 @@ export function addressTopic(addr: string): Hex {
 }
 
 /**
- * Fetch EntryPoint logs for `sender` over [fromBlock, head], halving the span on
- * a provider range error rather than guessing its limit. Filtered by the indexed
- * sender topic, so only THIS account's ops come back (≤ the daily op cap per
- * day) however wide the window — the span cap is about provider limits, not
- * result volume.
+ * Fetch logs matching `filter` over [fromBlock, toBlock], halving the span on a
+ * provider range error rather than guessing its limit.
+ *
+ * Every caller filters by an indexed address topic, so only ONE account's logs
+ * come back however wide the window — the span cap is about provider limits,
+ * not result volume.
+ *
+ * EXPORTED AND ADDRESS-AGNOSTIC because the deposit scanner needs exactly this
+ * behaviour against the USDG token rather than the EntryPoint. Writing a second
+ * halving loop is how the two drift: this one already knows that a failure at
+ * span 1 is a bad block to step over rather than a range error to halve again.
  */
-async function getLogsAdaptive(
+export async function getLogsAdaptive(
   chain: ReconcileChain,
-  sender: `0x${string}`,
+  filter: { address: `0x${string}`; topics: (Hex | Hex[] | null)[] },
   fromBlock: bigint,
   toBlock: bigint,
   maxSpan: bigint,
   log?: (m: string) => void,
-  /**
-   * Narrow to ONE operation. topic1 of UserOperationEvent is the indexed
-   * userOpHash, and this filter has always left that slot null because the
-   * orphan sweep does not know the hashes in advance. The resolver does, so
-   * passing one here turns the same window scan into an exact lookup — no new
-   * plumbing, and the adaptive halving still covers a provider range limit.
-   */
-  userOpHash?: Hex,
 ): Promise<RawLog[]> {
   const out: RawLog[] = [];
   let cursor = fromBlock;
@@ -116,17 +123,17 @@ async function getLogsAdaptive(
     const end = cursor + span - 1n < toBlock ? cursor + span - 1n : toBlock;
     try {
       const logs = await chain.getLogs({
-        address: ENTRYPOINT.v07 as `0x${string}`,
+        address: filter.address,
         fromBlock: cursor,
         toBlock: end,
-        topics: [USEROP_EVENT_TOPIC, userOpHash ?? null, addressTopic(sender)],
+        topics: filter.topics,
       });
       out.push(...logs);
       cursor = end + 1n;
     } catch (e) {
       // Almost always "block range too large" — halve and retry the same start.
       if (span <= 1n) {
-        log?.(`reconcile: getLogs failed on a single block ${cursor}, skipping it: ${e instanceof Error ? e.message : String(e)}`);
+        log?.(`getLogs failed on a single block ${cursor}, skipping it: ${e instanceof Error ? e.message : String(e)}`);
         cursor += 1n;
         span = maxSpan;
         continue;
@@ -155,7 +162,19 @@ export async function findOrphanOps(opts: {
   const { chain, smartAccount, usdgToken, knownOpHashes, lookbackBlocks } = opts;
   const head = await chain.getBlockNumber();
   const from = head > lookbackBlocks ? head - lookbackBlocks : 0n;
-  const logs = await getLogsAdaptive(chain, smartAccount, from, head, opts.maxSpan ?? 10_000n, opts.log);
+  const logs = await getLogsAdaptive(
+    chain,
+    {
+      address: ENTRYPOINT.v07 as `0x${string}`,
+      // topic1 (the indexed userOpHash) is left null: the sweep does not know
+      // the hashes in advance, which is the whole point of it.
+      topics: [USEROP_EVENT_TOPIC, null, addressTopic(smartAccount)],
+    },
+    from,
+    head,
+    opts.maxSpan ?? 10_000n,
+    opts.log,
+  );
 
   const orphans: OrphanOp[] = [];
   const seen = new Set<string>(); // guard against the same op appearing twice in a window
@@ -245,12 +264,14 @@ export async function resolveSubmittedOps(opts: {
     // EXACT LOOKUP, not a scan. topic1 is the indexed userOpHash.
     const logs = await getLogsAdaptive(
       opts.chain,
-      opts.smartAccount,
+      {
+        address: ENTRYPOINT.v07 as `0x${string}`,
+        topics: [USEROP_EVENT_TOPIC, hash as Hex, addressTopic(opts.smartAccount)],
+      },
       from,
       head,
       opts.maxSpan ?? 10_000n,
       opts.log,
-      hash as Hex,
     );
     if (logs.length === 0) continue; // not found is NOT "reverted" — leave it be
 
