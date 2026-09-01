@@ -490,11 +490,28 @@ async function mirrorLedgers(): Promise<void> {
     try {
       const r = await mirrorTenant({ tenant, child, shared });
       const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
+      // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
+      //
+      // This used to print only when n > 0, which made a stalled table and an
+      // idle fleet look identical — and mirrorTenant's per-table catch means a
+      // stall is permanent and silent. So the failures print unconditionally,
+      // for the same reason fleetHealth prints unconditionally: an operator who
+      // learns to read silence as health cannot see a wedged mirror.
+      if (r.failed) {
+        const why = Object.entries(r.failed)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(" | ");
+        log(`ledger mirror: ${tenant} STALLED — ${why}`);
+      }
       if (n > 0) {
         const detail = Object.entries(r.copied)
           .map(([k, v]) => `${k} ${v}`)
           .join(", ");
         log(`ledger mirror: ${tenant} +${n} rows (${detail})`);
+      } else if (!r.failed) {
+        // Says "read, nothing new" rather than saying nothing at all, so the
+        // absence of this line means the pass itself did not run.
+        log(`ledger mirror: ${tenant} idle`);
       }
     } catch (e) {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);

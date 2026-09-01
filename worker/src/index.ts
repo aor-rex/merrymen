@@ -2851,6 +2851,18 @@ async function main() {
         releaseBudget();
       }
     }
+    // WHICH RAIL DID THIS INTENT TAKE, AND WHY.
+    //
+    // Needs no database, so it survives a mirror that is not copying: the
+    // orchestrator tags child stdout with the tenant, so this lands in the
+    // fleet log regardless. It prints the two answers separately on purpose —
+    // the tick's notion of paper and the fork's notion of paper are computed
+    // from different expressions, and this line is what makes a disagreement
+    // between them visible instead of inferred.
+    console.log(
+      `[exec] ${intent.kind} — fork ${executor ? "live" : "paper"}, tick ${paperActive() ? "paper" : "live"}` +
+        `, cash ${lastCashUsdg === null ? "unknown" : String(lastCashUsdg)}, gas ${lastGasWei === null ? "unknown" : String(lastGasWei)}`,
+    );
     if (!executor) {
       if (!cfg.paperTradingEnabled) {
         console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler, paper trading off)`);

@@ -134,6 +134,21 @@ export interface MirrorReport {
   tenant: string;
   /** Rows copied per table this pass. Absent tables were empty or unreadable. */
   copied: Record<string, number>;
+  /**
+   * Why a table copied nothing, when the reason was an error rather than an
+   * empty source.
+   *
+   * A failing table is INVISIBLE without this. The catches below deliberately
+   * continue — one table's failure is one table's lag, not a reason to abandon
+   * the rest — and the watermark deliberately does not move, so the next pass
+   * retries. Both are right. The consequence is that a single column mismatch
+   * between a child's sqlite and shared Postgres stalls that table FOREVER
+   * while every pass reports success, because a stalled table and an idle one
+   * produce byte-identical output. That is not a hypothetical: it is
+   * indistinguishable from the fleet simply having nothing to say, which is
+   * exactly how it went unnoticed.
+   */
+  failed?: Record<string, string>;
   /** Set when the child's ledger could not be opened at all. */
   skipped?: string;
 }
@@ -169,6 +184,7 @@ export async function mirrorTenant(args: {
   const batch = args.batch ?? MIRROR_BATCH;
   const nowSec = args.nowSec ?? Math.floor(Date.now() / 1000);
   const copied: Record<string, number> = {};
+  const failed: Record<string, string> = {};
 
   // ── append-only tables ────────────────────────────────────────────────────
   for (const { table, cols } of LOG_TABLES) {
@@ -199,9 +215,11 @@ export async function mirrorTenant(args: {
           .run(tenant, table, highest, nowSec);
       });
       copied[table] = rows.length;
-    } catch {
+    } catch (e) {
       // One table failing is one table's worth of lag, not a reason to abandon
       // the others — and the watermark did not move, so the next pass retries.
+      // Recorded rather than swallowed: see MirrorReport.failed.
+      failed[table] = e instanceof Error ? e.message : String(e);
       continue;
     }
   }
@@ -236,8 +254,8 @@ export async function mirrorTenant(args: {
       });
       copied.decisions = rows.length;
     }
-  } catch {
-    /* as above */
+  } catch (e) {
+    failed.decisions = e instanceof Error ? e.message : String(e);
   }
 
   // ── snapshot tables: upsert by their own key ──────────────────────────────
@@ -357,9 +375,9 @@ export async function mirrorTenant(args: {
       });
       copied.cost_basis = basis.length;
     }
-  } catch {
-    /* as above */
+  } catch (e) {
+    failed.snapshots = e instanceof Error ? e.message : String(e);
   }
 
-  return { tenant, copied };
+  return { tenant, copied, ...(Object.keys(failed).length ? { failed } : {}) };
 }
