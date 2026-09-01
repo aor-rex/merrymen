@@ -145,6 +145,8 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
     let curve: number[] = [];
     let growth: number[] = [];
     let latest: number | null = null;
+    /** The undecimated growth index. The drawdown is measured on this. */
+    let growthFull: number[] = [];
     try {
       const pts = (await db
         .prepare(
@@ -162,11 +164,24 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
 
       // Computed on the FULL series before downsampling: dropping readings
       // first would misattribute every flow that fell between two kept ones.
-      const full = growthIndex(clean, flows);
+      growthFull = growthIndex(clean, flows);
 
+      // KEEP THE NEWEST READING, ALWAYS.
+      //
+      // A plain `i % step === 0` anchors on index 0, so with 500 rows and a
+      // step of 9 the last one kept is 495 and the four newest never reach the
+      // chart. The line's right-hand end was therefore NOT `latest` — the value
+      // the headline percentage divides — so the chart and the figure above it
+      // were measuring different last points.
       const step = Math.max(1, Math.ceil(vals.length / 60));
-      curve = vals.filter((_, i) => i % step === 0);
-      growth = full.filter((_, i) => i % step === 0);
+      const keep = (arr: number[]) => {
+        const out = arr.filter((_, i) => i % step === 0);
+        const last = arr[arr.length - 1];
+        if (last !== undefined && out[out.length - 1] !== last) out.push(last);
+        return out;
+      };
+      curve = keep(vals);
+      growth = keep(growthFull);
     } catch {
       /* no history */
     }
@@ -266,8 +281,10 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
       // from a paper book's flat opening balance plus the owner's deposits.
       //
       // Measured on the growth index rather than the equity line, so a
-      // withdrawal is not reported as a loss.
-      maxDdBps: unrankedWhy === null ? drawdownBps(growth) : null,
+      // withdrawal is not reported as a loss — and on the UNDECIMATED series,
+      // because a drawdown taken from one reading in nine cannot see a trough
+      // between two kept samples and is understated by construction.
+      maxDdBps: unrankedWhy === null ? drawdownBps(growthFull) : null,
       landed,
       refused,
       curve,
