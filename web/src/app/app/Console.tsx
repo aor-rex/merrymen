@@ -192,6 +192,7 @@ export default function Console() {
         step={step}
         smartAccount={status?.grant?.smartAccount ?? null}
         testnet={chainId === 46630}
+        gasSponsored={status?.gasSponsored ?? undefined}
         onSkipFund={markOnboarded}
       />
     );

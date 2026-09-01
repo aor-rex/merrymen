@@ -154,9 +154,11 @@ export default function Onboarding(props: {
   step: OnboardStep;
   smartAccount?: string | null;
   testnet: boolean;
+  /** Reported by the worker. Changes what this screen has to ask for. */
+  gasSponsored?: boolean;
   onSkipFund: () => void;
 }) {
-  const { hosted, step, smartAccount, testnet, onSkipFund } = props;
+  const { hosted, step, smartAccount, testnet, gasSponsored, onSkipFund } = props;
 
   // The visible rail: connect only exists as a step in hosted mode (self-hosted's
   // perimeter is localhost, so it's signed in by construction).
@@ -203,12 +205,19 @@ export default function Onboarding(props: {
             </h1>
             {step === "connect" && <ConnectStep />}
             {step === "create" && <CreateStep />}
-            {step === "fund" && <FundStep smartAccount={smartAccount} testnet={testnet} onSkip={onSkipFund} />}
+            {step === "fund" && (
+              <FundStep
+                smartAccount={smartAccount}
+                testnet={testnet}
+                gasSponsored={gasSponsored}
+                onSkip={onSkipFund}
+              />
+            )}
           </div>
 
           <div className="ob-artwrap">
             <Blueprint step={step} />
-            <span className="ob-artcap">{ARTCAP[step]}</span>
+            <span className="ob-artcap">{(gasSponsored && ARTCAP_SPONSORED[step]) || ARTCAP[step]}</span>
           </div>
         </main>
 
@@ -227,6 +236,10 @@ const LABELS: Record<OnboardStep, string> = { connect: "Connect", create: "Creat
 const KICK: Record<OnboardStep, string> = { connect: "Step one · prove it's you", create: "Step two · muster the band", fund: "Step three · fill the strongbox" };
 const TITLE: Record<OnboardStep, string> = { connect: "SIGN IN WITH YOUR WALLET", create: "MUSTER YOUR BAND", fund: "FILL THE STRONGBOX" };
 const ARTCAP: Record<OnboardStep, string> = { connect: "fig. 1 — the signature is the whole login", create: "fig. 2 — caps sealed into the draw", fund: "fig. 3 — the account self-pays its gas" };
+// Sponsored, fig. 3's caption is the one thing on the screen still saying the
+// account pays its own way — directly under copy that says the fee is covered.
+// A caption is small enough to skip and contradictory enough to notice.
+const ARTCAP_SPONSORED: Partial<Record<OnboardStep, string>> = { fund: "fig. 3 — the network fee is covered" };
 
 function ConnectStep() {
   const [busy, setBusy] = useState(false);
@@ -344,11 +357,38 @@ function CreateStep() {
   );
 }
 
-function FundStep({ smartAccount, testnet, onSkip }: { smartAccount?: string | null; testnet: boolean; onSkip: () => void }) {
+function FundStep({
+  smartAccount,
+  testnet,
+  gasSponsored,
+  onSkip,
+}: {
+  smartAccount?: string | null;
+  testnet: boolean;
+  gasSponsored?: boolean;
+  onSkip: () => void;
+}) {
+  // ASK FOR ONE ASSET WHEN ONLY ONE IS NEEDED. This screen is where the
+  // two-asset problem is actually taught, and teaching it to someone who does
+  // not have it is how a sponsored owner ends up sending ETH they were never
+  // going to spend — then reads a banner telling them their fees are covered.
+  //
+  // The withdrawal caveat is NOT in the fine print here on purpose: it is the
+  // one thing that would send them back to the gas problem on the screen whose
+  // whole job is to get them funded and trading. The status line and the
+  // recovery panel both carry it at the moment it becomes true.
   return (
     <StepBody
-      body={`Send a little ${testnet ? "testnet " : ""}ETH for gas — the account self-pays every trade — and some USDG for it to trade with, to your agent's smart account:`}
-      fine="nothing trades until there's gas in the tank"
+      body={
+        gasSponsored
+          ? `Send USDG for it to trade with, to your agent's smart account. The network fee on every trade is covered, so USDG is all it needs:`
+          : `Send a little ${testnet ? "testnet " : ""}ETH for gas — the account self-pays every trade — and some USDG for it to trade with, to your agent's smart account:`
+      }
+      fine={
+        gasSponsored
+          ? "nothing trades until there's something in it to trade with"
+          : "nothing trades until there's gas in the tank"
+      }
     >
       {smartAccount ? (
         <CopyRow value={smartAccount} />

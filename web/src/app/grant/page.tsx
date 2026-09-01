@@ -32,6 +32,7 @@ import {
   type OwnerPreview,
   type SavedWallet,
 } from "@/lib/session";
+import { canStart } from "@/lib/can-start";
 import "../app/console.css";
 import "./grant.css";
 
@@ -372,6 +373,10 @@ export default function GrantPage() {
   const [reveal, setReveal] = useState(false);
   const [ack, setAck] = useState(false);
   const [funding, setFunding] = useState<Funding | null>(null);
+  // Reported by the worker on the heartbeat; this page cannot resolve it (the
+  // browser has no env, and hosted the web service is not the process that
+  // decides). Read off the /api/grants response this page already fetches.
+  const [gasSponsored, setGasSponsored] = useState(false);
   // Whether the SERVER still holds this grant (grant.json). null = still checking.
   // The browser copy and the server file can desync — a kill switch or CLI kill
   // deletes the server file but not this localStorage — so the dashboard shows
@@ -422,7 +427,10 @@ export default function GrantPage() {
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
       .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean }) => setServerArmed(!!s.exists))
+      .then((s: { exists?: boolean; gasSponsored?: boolean | null }) => {
+        setServerArmed(!!s.exists);
+        setGasSponsored(s.gasSponsored === true);
+      })
       .catch(() => setServerArmed(null));
     // THE ONLY TRUSTWORTHY hosted signal on the client. isHostedMode() reads
     // process.env, which Next does not inline into the browser bundle, so it is
@@ -756,6 +764,17 @@ export default function GrantPage() {
   const anyChange = allChanges.length > 0;
 
   const gasFunded = (funding?.gasWei ?? 0n) > 0n;
+  // CAN IT ACTUALLY START? Not the same question as 'does it hold ETH' once a
+  // sponsor pays the fee. Through the shared rule rather than a fourth local
+  // spelling of it — the console and the settings checklist ask it too, and
+  // this page is the one that tells a new owner they are done.
+  const canTrade = canStart({
+    balances: {
+      ethWei: String(funding?.gasWei ?? 0n),
+      cashUsdg: String(funding?.usdgUnits ?? 0n),
+    },
+    gasSponsored,
+  });
   const usdgFunded = (funding?.usdgUnits ?? 0n) > 0n;
   // Once a grant exists, the truth is what's IN it — not the selector state.
   const activeChainId = grant ? grant.chainId : chainId;
@@ -1311,9 +1330,20 @@ export default function GrantPage() {
                 </>
               ) : (
                 <>
-                  Send <b>ETH (for gas)</b> and <b>USDG (trading capital)</b> on Robinhood Chain
-                  (4663) to the account address below. <b>Real funds</b> — double-check the address
-                  and start with a small test amount first.
+                  {gasSponsored ? (
+                    <>
+                      Send <b>USDG (trading capital)</b> on Robinhood Chain (4663) to the account
+                      address below — the network fee on every trade is covered, so USDG is all it
+                      needs to start. <b>Real funds</b> — double-check the address and start with a
+                      small test amount first.
+                    </>
+                  ) : (
+                    <>
+                      Send <b>ETH (for gas)</b> and <b>USDG (trading capital)</b> on Robinhood Chain
+                      (4663) to the account address below. <b>Real funds</b> — double-check the
+                      address and start with a small test amount first.
+                    </>
+                  )}
                 </>
               )}
             </p>
@@ -1354,7 +1384,11 @@ export default function GrantPage() {
                     ? "funded ✓"
                     : grantIsTestnet
                       ? "lets a UserOp land — no real swaps on testnet"
-                      : "needed to deploy + trade"}
+                      : gasSponsored
+                        // Not 'needed to deploy + trade': it is needed for neither.
+                        // The one thing it IS still needed for is the way out.
+                        ? "covered — only needed to withdraw later"
+                        : "needed to deploy + trade"}
                 </span>
               </div>
               {/* On testnet this tile reads the MAINNET USDG contract, so it is pinned at 0.00
@@ -1396,7 +1430,7 @@ export default function GrantPage() {
               </button>
             </div>
 
-            {gasFunded ? (
+            {canTrade ? (
               <div className="fund-ready mono">
                 {grantIsTestnet ? (
                   <>
