@@ -1,0 +1,257 @@
+/**
+ * The frame: rail above 860, tab bar below. Scoped under .mm.
+ *
+ * 860 is THE collapse point and appears exactly once in the product. There used
+ * to be five breakpoint sets and a 40px band where the shell and the page
+ * disagreed about whether they were mobile.
+ */
+
+.mm-app {
+  display: grid;
+  grid-template-columns: 1fr;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.mm-main {
+  min-width: 0;
+  /* Clear of the tab bar AND the home indicator. feed.css had no safe-area
+     handling at all, so in a normal browser tab its last 34px sat under the
+     indicator. */
+  padding-bottom: calc(var(--mm-nav-h) + env(safe-area-inset-bottom, 0px) + var(--mm-6));
+}
+
+/* ── the rail ────────────────────────────────────────────────────────────── */
+
+.mm-rail {
+  display: none;
+  flex-direction: column;
+  gap: var(--mm-6);
+  padding: var(--mm-5) var(--mm-3);
+  border-right: 1px solid var(--mm-edge);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.mm-rail ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mm-rail-foot {
+  margin-top: auto;
+}
+
+.mm-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 0 var(--mm-3);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mm-tx);
+}
+
+.mm-brand:hover {
+  color: var(--mm-tx);
+}
+
+.mm-navlink {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-3);
+  min-block-size: 40px;
+  padding: 0 var(--mm-3);
+  border-radius: var(--mm-r-chip);
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--mm-dim);
+  transition:
+    background-color var(--mm-fast) var(--mm-ease),
+    color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-navlink:hover {
+  background: var(--mm-surface-2);
+  color: var(--mm-tx);
+}
+
+.mm-navlink.on {
+  background: color-mix(in srgb, var(--mm-wire) 12%, transparent);
+  color: var(--mm-wire);
+}
+
+.mm-navlink.sub {
+  font-size: 13px;
+}
+
+/* ── the context column ──────────────────────────────────────────────────── */
+
+.mm-context {
+  display: none;
+  padding: var(--mm-5) var(--mm-4);
+  border-left: 1px solid var(--mm-edge);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+/* ── the tab bar ─────────────────────────────────────────────────────────── */
+
+.mm-tabbar {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 40;
+  display: flex;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: color-mix(in srgb, var(--mm-surface) 82%, transparent);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border-top: 1px solid var(--mm-edge);
+}
+
+/* SIZED ON THE CLASS, NOT THE ELEMENT. globals.css scopes its 44px minimum to
+   `button, input, select`, so the old tab bar's Settings item — an <a> — was
+   never caught and was the shortest target on the bar. Every item here is a
+   <Link>, so an element-scoped rule would have missed all four. */
+.mm-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-block-size: 48px;
+  padding: 6px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--mm-dim);
+}
+
+.mm-tab.on {
+  color: var(--mm-wire);
+}
+
+/* ── 860: THE collapse point ─────────────────────────────────────────────── */
+
+@media (min-width: 860px) {
+  .mm-app {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+  .mm-rail {
+    display: flex;
+  }
+  /* Icon-only until there is room for words. */
+  .mm-rail .mm-navlink span,
+  .mm-brand span {
+    display: none;
+  }
+  .mm-navlink {
+    justify-content: center;
+    padding: 0;
+  }
+  .mm-brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .mm-tabbar {
+    display: none;
+  }
+  .mm-main {
+    padding-bottom: var(--mm-10);
+  }
+}
+
+/* ── 1180: labels, and the context column ────────────────────────────────── */
+
+@media (min-width: 1180px) {
+  .mm-app {
+    grid-template-columns: var(--mm-rail) minmax(0, 1fr) var(--mm-context);
+  }
+  .mm-app.no-context {
+    grid-template-columns: var(--mm-rail) minmax(0, 1fr);
+  }
+  .mm-rail .mm-navlink span,
+  .mm-brand span {
+    display: inline;
+  }
+  .mm-navlink {
+    justify-content: flex-start;
+    padding: 0 var(--mm-3);
+  }
+  .mm-brand {
+    justify-content: flex-start;
+    padding: 0 var(--mm-3);
+  }
+  .mm-context {
+    display: block;
+  }
+}
+
+/* ── the sticky header ───────────────────────────────────────────────────── */
+
+.mm-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  padding-top: env(safe-area-inset-top, 0px);
+  background: color-mix(in srgb, var(--mm-bg) 86%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-header-in {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-3);
+  min-height: var(--mm-header-h);
+}
+
+.mm-header-mark {
+  display: inline-flex;
+  color: var(--mm-tx);
+  flex: none;
+}
+
+.mm-header-txt {
+  min-width: 0;
+}
+
+.mm-header-txt h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mm-tx);
+}
+
+.mm-header-txt p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mm-dim);
+}
+
+.mm-header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+}
+
+/* The rail already says what this site is; do not say it twice. */
+@media (min-width: 860px) {
+  .mm-header-mark {
+    display: none;
+  }
+}
