@@ -62,6 +62,17 @@ export interface StrategyBuildOpts {
     maxActionUsdg: number;
     /** Persist each strategist decision (survivor + drop) — see makeLlmStrategist. */
     onDecision?: (d: StrategistDecision) => void | Promise<void>;
+    /**
+     * Research instead of one-shot. Present only when the owner turned it on
+     * AND there is a model to run it — see makeLlmStrategist's `desk`.
+     */
+    desk?: {
+      recall: () => Promise<string>;
+      basisFor?: (symbol: string) => Promise<string | null>;
+      links?: () => { label: string; url: string }[];
+      readLink?: (index: number) => Promise<string>;
+      maxSteps?: number;
+    };
   };
   onNote?: (level: "ok" | "warn", message: string) => void;
   /**
@@ -191,6 +202,11 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
+      // The desk needs a real model: with the null driver there is nothing to
+      // research WITH, and a loop around no provider is just a slower no-op.
+      ...(opts.llm.desk && opts.llm.creds
+        ? { desk: { creds: opts.llm.creds, ...opts.llm.desk } }
+        : {}),
       provider: opts.llm.creds?.provider,
       model: opts.llm.creds?.model,
     });

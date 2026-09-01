@@ -185,6 +185,7 @@ import {
   adjustAgentHwm,
   knownFlowKeys,
   lastChainLogBlock,
+  recentDecisions,
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
@@ -408,6 +409,50 @@ async function main() {
         creds: resolveLlm(c),
         intervalMin: c.llmIntervalMin,
         maxActionUsdg: c.llmMaxActionUsdg,
+        // RESEARCH INSTEAD OF GUESSING. Off unless the owner asked for it —
+        // it costs several model calls a window instead of one.
+        ...(c.deskEnabled
+          ? {
+              desk: {
+                maxSteps: c.deskMaxSteps,
+                // Continuity. Until this the strategist wrote a decision every
+                // window and read one back never, so it could contradict itself
+                // all day and never know.
+                recall: async () => {
+                  if (!active) return "nothing yet — this is your first look at the book";
+                  const rows = await recentDecisions(active.agentId, 6);
+                  if (rows.length === 0) return "nothing yet — this is your first look at the book";
+                  return rows
+                    .map((d) => {
+                      const what = [d.action, d.symbol, d.size_usdg == null ? null : `${d.size_usdg} USDG`]
+                        .filter(Boolean)
+                        .join(" ");
+                      const outcome = d.dropped_rule
+                        ? "you dropped it yourself"
+                        : d.status === "landed"
+                          ? "it landed"
+                          : d.status === "rejected"
+                            ? `the wall turned it back (${d.reject_rule ?? "policy"})`
+                            : d.status
+                              ? d.status
+                              : "no trade came of it";
+                      const said = d.reason ? ` — you said: ${d.reason}` : "";
+                      return `- ${what || "a view, no action"}: ${outcome}${said}`;
+                    })
+                    .join("\n");
+                },
+                // What it cost, so a winner can be told from a loser. The old
+                // signals carried only today's value.
+                basisFor: async (symbol: string) => {
+                  if (!active) return null;
+                  const mode = paperActive() ? "paper" : "live";
+                  const b = await getBasis(active.agentId, mode, symbol);
+                  if (b.qtyRaw === 0n && b.costUsdg === 0n) return null;
+                  return `you paid ${usdgNum(b.costUsdg)} USDG for what you hold of it`;
+                },
+              },
+            }
+          : {}),
         // Persist every strategist decision (survivor + drop) against the CURRENT
         // agent — the strategist stamps each survivor's intent with the id it wrote.
         onDecision: (d) => {

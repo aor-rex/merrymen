@@ -332,6 +332,30 @@ export async function mirrorTenant(args: {
         }
       });
       copied.positions = positions.length;
+
+      // WHAT IT PAID, which is the other half of what a position IS. `positions`
+      // carries today's value; without the basis there is no entry price and no
+      // P&L for a holding — the feed can say an agent holds 6,822.51 of something
+      // and not whether that is up or down. Same shape as positions: a snapshot
+      // keyed on (agent, mode, symbol), replaced rather than merged, because a
+      // closed position's basis is deleted at the source and an upsert alone
+      // would leave it here forever.
+      const basis = (await child
+        .prepare(`SELECT agent_id, mode, symbol, qty_raw, cost_usdg, updated_at FROM cost_basis`)
+        .all()) as Record<string, unknown>[];
+      await shared.tx(async (db) => {
+        for (const a of agents) {
+          await db.prepare(`DELETE FROM cost_basis WHERE agent_id = ?`).run(a.smart_account);
+        }
+        const ins = db.prepare(
+          `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        for (const b of basis) {
+          await ins.run(b.agent_id, b.mode, b.symbol, b.qty_raw, b.cost_usdg, b.updated_at);
+        }
+      });
+      copied.cost_basis = basis.length;
     }
   } catch {
     /* as above */

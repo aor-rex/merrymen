@@ -1029,6 +1029,52 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
 }
 
 /**
+ * WHAT YOU DECIDED LAST TIME, and what became of it.
+ *
+ * The strategist has never been able to see this. It wrote a decision every
+ * window and read one back never, so window N+1 had no idea what window N
+ * thought — it could contradict itself all day and never notice. This is the
+ * one read that gives a research session continuity.
+ *
+ * Joined to the trade the decision caused, because 'I proposed a buy' and 'the
+ * wall turned it back' are different memories and only the second is useful.
+ */
+export async function recentDecisions(
+  agentId: string,
+  limit = 6,
+): Promise<
+  {
+    at: number;
+    action: string | null;
+    symbol: string | null;
+    size_usdg: number | null;
+    reason: string | null;
+    dropped_rule: string | null;
+    status: string | null;
+    reject_rule: string | null;
+  }[]
+> {
+  try {
+    return (await getDb()
+      .prepare(
+        `SELECT d.at AS at, d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
+                d.reason AS reason, d.dropped_rule AS dropped_rule,
+                t.status AS status, t.reject_rule AS reject_rule
+           FROM decisions d
+           LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+          WHERE d.agent_id = ?
+          ORDER BY d.at DESC
+          LIMIT ?`,
+      )
+      .all(agentId, limit)) as never;
+  } catch {
+    // A ledger without the decisions table yet is an agent with no memory,
+    // which is the honest answer for its first window.
+    return [];
+  }
+}
+
+/**
  * The highest block a chain-read flow has been recorded from, or null when
  * none has. This IS the deposit scanner's watermark — it lives in the rows it
  * describes rather than in a table of its own, so it cannot disagree with them.

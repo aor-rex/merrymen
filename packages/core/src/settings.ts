@@ -251,6 +251,23 @@ export interface MerrymenSettings {
    * A tenant who could set this would be writing a cheque on the house.
    */
   sponsorGasEnabled?: boolean;
+  /**
+   * Let the strategist RESEARCH before it decides, instead of answering in one
+   * shot from a fixed blob of numbers.
+   *
+   * On, a decision window becomes a short tool loop: the model can pull depth,
+   * check what a position cost, read back its own last decisions, and read the
+   * project's own page where a browser is configured — then it submits a view
+   * in its own words, which is what the public feed publishes.
+   *
+   * OFF BY DEFAULT because it costs up to deskMaxSteps model calls per window
+   * instead of one. The scout consumed an entire day's shared token allowance
+   * on 2026-08-31 and took user chat down with it; this is the same class of
+   * spend and deserves the same caution.
+   */
+  deskEnabled?: boolean;
+  /** Model calls one research session may make before it must decide. */
+  deskMaxSteps?: number;
   /** Pimlico sponsorship policy id (`sp_…`), which is where the real spend limits live. */
   sponsorshipPolicyId?: string;
   /**
@@ -496,6 +513,10 @@ export const SETTINGS_DEFAULTS = {
   // Off by default because it changes how contributions are counted, and a
   // change to contributions is a change to every P&L figure derived from them.
   depositScanEnabled: false,
+  // Off by default like every other switch that spends money — this one spends
+  // it on inference rather than gas.
+  deskEnabled: false,
+  deskMaxSteps: 4,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,

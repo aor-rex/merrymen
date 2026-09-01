@@ -30,6 +30,7 @@ const SRC = [
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, at INTEGER);",
   "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, x_handle TEXT, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
+  "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */
@@ -66,6 +67,7 @@ const seedChild = () => {
     );
   }
   raw.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
+  raw.exec("INSERT INTO cost_basis VALUES ('0xagent','live','PEPE','1','6.0',9)");
   raw.exec(
     "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, at)" +
       " VALUES ('0xagent','1000',90.0,0.0,10.0,100.0,2,120)",
@@ -291,6 +293,30 @@ describe("the ledger mirror", () => {
       .get("0xagent")) as { usdg: number; unpriced: number };
     assert.equal(Number(g.usdg), 1.25, "5 fills at 0.25");
     assert.equal(Number(g.unpriced), 0);
+  });
+
+  it("carries what a position COST, not just what it is worth", async () => {
+    // positions says the holding is worth 10.00 now; without the basis there is
+    // no entry price and no P&L, so a feed can say an agent holds something and
+    // not whether that is up or down.
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(r.copied.cost_basis, 1);
+    const b = (await shared
+      .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND symbol = ?")
+      .get("0xagent", "PEPE")) as { qty_raw: string; cost_usdg: string };
+    assert.equal(String(b.cost_usdg), "6.0");
+  });
+
+  it("drops a basis whose position closed", async () => {
+    // Deleted at the source, so an upsert alone would leave it here forever and
+    // the feed would show P&L on something the agent no longer holds.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("DELETE FROM cost_basis WHERE symbol = ?").run("PEPE");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "cost_basis"), 0);
   });
 
   it("carries the positions leg of the equity identity", async () => {
