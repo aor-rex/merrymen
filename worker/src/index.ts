@@ -142,7 +142,7 @@ import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
-import { bestCashPool, readPoolPrice } from "./venues/pool-price";
+import { bestCashPool, readExecutionPoolPrice, readPoolPrice } from "./venues/pool-price";
 import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
@@ -5677,10 +5677,8 @@ async function main() {
         const pctReserve = (lastGasWei * pct) / 100n;
         const opFloor = gasPrice * 400_000n; // one swap UserOp, entrypoint + call — not a sweep
         const reserve = pctReserve > opFloor ? pctReserve : opFloor;
-        const cash6 = balances.cashUsdg; // bigint 6dp
-        const idleFloor = BigInt(Math.round((cfg.idleFloorUsdg ?? 50) * 1e6));
         const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
-        if (surplusEth > 0n && cash6 < idleFloor && active.executor) {
+        if (surplusEth > 0n && active.executor) {
           // Expected USDG out, derived from the ON-CHAIN pool price (TWAP, the
           // same manipulation-resistant number readPoolPrice uses to value the
           // whole book). The Uniswap QuoterV2 reverts on this pair on this
@@ -5688,7 +5686,7 @@ async function main() {
           // pool itself is real and liquid (verified live), so we size minOut
           // off the TWAP with slippage, which is exactly the guard a quoter
           // would provide. The actual swap still goes through SwapRouter02.
-          const price = await readPoolPrice(active.client, {
+          const price = await readExecutionPoolPrice(active.client, {
             token: CASH.WETH as `0x${string}`,
             tokenDecimals: 18, // native ETH / WETH raw units
             cash: CASH.USDG as `0x${string}`,
@@ -5733,7 +5731,7 @@ async function main() {
             console.log(`[auto-convert] NOT converting: no WETH→USDG on-chain price for ${formatUnits(surplusEth, 18)} ETH`);
           }
         } else if (autoConvertDebugUntil > Date.now() && active.executor) {
-          console.log(`[auto-convert] NOT converting: surplus ${formatUnits(surplusEth, 18)} ETH, cash ${fmt(cash6)} ≥ floor ${cfg.idleFloorUsdg ?? 50}`);
+          console.log(`[auto-convert] NOT converting: surplus ${formatUnits(surplusEth, 18)} ETH is not above the gas reserve`);
         }
       } catch (err) {
         // Never into the tick's own path: a failed convert (no quote, wall

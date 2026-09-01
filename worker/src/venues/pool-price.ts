@@ -423,6 +423,21 @@ export async function readPoolPrice(
   }
 }
 
+/**
+ * Quote a directly executable swap. Unlike portfolio valuation, execution must
+ * still be possible for a pool that has not accumulated a TWAP observation yet.
+ * The caller still applies slippage and the wall's amount limit; this helper
+ * only chooses the current pool price when the conservative TWAP is unavailable.
+ */
+export async function readExecutionPoolPrice(
+  client: PublicClient,
+  args: { token: `0x${string}`; tokenDecimals: number; cash: `0x${string}`; cashDecimals: number },
+): Promise<PoolPrice | null> {
+  const price = await readPoolPrice(client, args);
+  if (!price || price.spot8 <= 0n || price.spot18 <= 0n) return null;
+  return price.price8 > 0n ? price : { ...price, price8: price.spot8, price18: price.spot18 };
+}
+
 /** Raw cash units at `cashDecimals` → USD at 6dp, given USD per whole cash unit.
  *  Exported so the v4 price path scales depth the SAME way — the comment at the
  *  weth-route call site exists because doing this by hand lands 1e12 out. */
