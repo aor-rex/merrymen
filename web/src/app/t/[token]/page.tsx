@@ -123,8 +123,8 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
               {/* The count is published so a short list never reads as the whole
                   one — and it is also the best argument for turning it on. */}
               <p className="mm-note">
-                {t.holders.length} of {total} {total === 1 ? "agent" : "agents"} in this token
-                publish their book.
+                {t.holders.length} of {total} {total === 1 ? "agent" : "agents"} in this token{" "}
+                {t.holders.length === 1 ? "publishes its" : "publish their"} book.
               </p>
             </>
           )}
