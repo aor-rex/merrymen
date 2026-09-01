@@ -20,6 +20,7 @@
  * No session read. Same property as the other public readers, same reason.
  */
 import { withReadDb } from "@/lib/ledger";
+import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 
@@ -42,7 +43,16 @@ export interface AgentProfile {
   /** "live" | "paper" | "idle" */
   mode: string;
   strategy: string | null;
+  /** The published return, or null. Exactly one of this and unrankedWhy is set. */
   pnlBps: number | null;
+  /**
+   * Why there is no return to show.
+   *
+   * Carried so the page can say WHICH refusal applies. It rendered "no deposit
+   * on record" for both, which is a specific and wrong explanation on an agent
+   * that had funded and simply never filled anything.
+   */
+  unrankedWhy: UnrankedWhy | null;
   maxDdBps: number | null;
   landed: number;
   refused: number;
@@ -200,10 +210,18 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
       }
     }
 
-    const pnlBps =
-      contributed !== null && contributed > 0 && latest !== null
-        ? Math.round(((latest - contributed - gasUsdg) / contributed) * 10_000)
-        : null;
+    // THE SAME RULE THE LEADERBOARD USES, and it was missing here.
+    //
+    // This computed the identical arithmetic without the landed > 0 refusal, so
+    // the profile published a return the board was correctly refusing to rank —
+    // for the same agent, on the same data, at the same moment. The bug
+    // rank-pnl exists to prevent shipped on the board and was fixed there;
+    // every profile page went on making it.
+    //
+    // Its docstring records what that looks like: +2643.3%, from a flat
+    // 1000.0000 paper opening balance divided by 36 USDG of real contributions,
+    // by an agent with zero landed trades and 1,225 refusals.
+    const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed });
 
     const granted = Number(row.granted_at ?? 0);
     const ridingDays = granted > 0 ? Math.floor((Date.now() / 1000 - granted) / 86_400) : null;
@@ -215,6 +233,7 @@ export async function readAgent(slug: string): Promise<AgentProfile | null> {
       mode: String(row.mode ?? "idle"),
       strategy,
       pnlBps,
+      unrankedWhy,
       maxDdBps: drawdownBps(curve),
       landed,
       refused,

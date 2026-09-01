@@ -113,7 +113,16 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
               label="all time"
               value={a.pnlBps === null ? "unranked" : pct(a.pnlBps)}
               tone={tone}
-              note={a.pnlBps === null ? "no deposit on record" : undefined}
+              /* TWO REFUSALS, TWO SENTENCES. This said "no deposit on record"
+                 for both, which is a specific and wrong explanation on an agent
+                 that had funded and simply never filled anything. */
+              note={
+                a.unrankedWhy === "no-deposit"
+                  ? "no deposit on record"
+                  : a.unrankedWhy === "never-filled"
+                    ? "nothing has filled yet"
+                    : undefined
+              }
             />
             <Stat
               label="max drawdown"
