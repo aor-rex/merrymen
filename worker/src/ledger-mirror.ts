@@ -188,14 +188,33 @@ export interface MirrorReport {
   skipped?: string;
 }
 
-/** Open a child's ledger READ-ONLY. Its worker is running and writing to it. */
-export function openChildLedger(home: string): Db | null {
+/**
+ * Open a child's ledger READ-ONLY. Its worker is running and writing to it.
+ *
+ * RETURNS A HANDLE THE CALLER MUST CLOSE. It used to return a bare Db, which
+ * made the file descriptor invisible — the mirror opened one per tenant per
+ * pass and closed none, so a 24-agent fleet leaked roughly twenty-two
+ * descriptors every fifteen seconds, for ever. Returning the closer alongside
+ * the database is what makes forgetting it a thing you can see in the code.
+ */
+export function openChildLedger(home: string): { db: Db; close: () => void } | null {
   const file = path.join(home, "merrymen.db");
   if (!existsSync(file)) return null;
   try {
     // readOnly so a bug here can never corrupt a live agent's ledger, and so
     // this can never take a write lock the worker is waiting on.
-    return wrapSqlite(new DatabaseSync(file, { readOnly: true }));
+    const raw = new DatabaseSync(file, { readOnly: true });
+    return {
+      db: wrapSqlite(raw),
+      close: () => {
+        try {
+          raw.close();
+        } catch {
+          // Already closed, or the file went away with a redeploy. Either way
+          // there is nothing to do and nothing worth saying.
+        }
+      },
+    };
   } catch {
     return null;
   }
