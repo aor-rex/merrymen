@@ -429,11 +429,22 @@ async function build(): Promise<Shared> {
     asked++;
     if (!r.failed) reached++;
     for (const p of r.pools) {
-      // Deduped by TOKEN and kept at its deepest venue — the same coin appears
+      // Deduped by TOKEN and kept at its BUSIEST venue — the same coin appears
       // in several feeds and often on several venues, and a reader cares about
       // the coin.
+      //
+      // Ranked on volume, with reserve only as a tiebreak. Deepest-reserve
+      // picked the wrong pool to describe a token by: a live pool here carries
+      // $27.0M of reserve against $4,506 of daily volume, so the row a reader
+      // saw was the one nobody trades. The screened set is unaffected — it
+      // already floors at $50k of volume.
       const prev = byToken.get(p.tokenAddress);
-      if (!prev || (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0)) byToken.set(p.tokenAddress, p);
+      const better =
+        !prev ||
+        (p.volume24hUsd ?? 0) > (prev.volume24hUsd ?? 0) ||
+        ((p.volume24hUsd ?? 0) === (prev.volume24hUsd ?? 0) &&
+          (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0));
+      if (better) byToken.set(p.tokenAddress, p);
     }
   }
   const all = [...byToken.values()];

@@ -218,7 +218,11 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
             : `$${r.priceUsd < 0.01 ? r.priceUsd.toPrecision(2) : r.priceUsd.toFixed(4)}`}
         </span>
         <span>
-          <i>Market cap</i>
+          {/* FDV, and it says FDV. The index substitutes fully-diluted value
+              for market cap whenever it lacks a circulating supply, and calling
+              that "market cap" systematically makes a token look bigger and
+              safer than it is. */}
+          <i>FDV</i>
           {compactUsd(r.fdvUsd)}
         </span>
         <span>

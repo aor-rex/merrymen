@@ -78,14 +78,13 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
         <section className="mm-tok-when">
           <h2 className="mm-kicker">Who got in, and when</h2>
           {/*
-            NOT A PRICE CHART, and deliberately not a placeholder for one. There
-            is no OHLC anywhere in this repo, and the index reports no pool
-            address at all for the 32-byte curve poolIds that cover most of what
-            is interesting on this chain — so for those tokens candles are not
-            "coming later", they are impossible. What IS knowable is which
-            agents entered and when, which for a product where the agents are
-            the subject is arguably the better chart anyway. The axis says what
-            it plots.
+            NOT A PRICE CHART, and deliberately not a placeholder for one. What
+            is knowable from our own ledger is which agents entered and when,
+            which for a product where the agents are the subject is arguably the
+            better chart anyway. The axis says what it plots.
+
+            This used to claim candles were impossible for curve tokens. They
+            are not — see the note in EntryTimeline for what was actually true.
           */}
           <EntryTimeline
             entries={t.holders

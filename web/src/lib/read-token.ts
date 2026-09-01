@@ -16,8 +16,9 @@
  * it were the whole one.
  *
  * MARKET FACTS DO NOT COME FROM HERE. `discovered_pools` is worker-local and
- * never mirrored, so a hosted page reading it would render blank. The page
- * fetches /api/discoveries for price, depth and volume exactly as /tokens does.
+ * never mirrored, so a hosted page reading it would render blank. They come
+ * from readTokenMarket, which shares the two memos the product already keeps
+ * and therefore adds no upstream request of its own.
  *
  * No session read. Same property as the other public readers.
  */

@@ -8,11 +8,19 @@ import { AgentAvatar } from "@/components/AgentAvatar";
  * actually supports and, for a product whose subject is the agents, arguably
  * the better chart.
  *
- * There is no OHLC anywhere in this repo, and the index reports a null pool
- * address for the 32-byte curve poolIds that cover most of what is interesting
- * on this chain — so for those tokens candles are not "coming later", they are
- * impossible. Drawing an empty chart box that promises one would be the exact
- * failure mode this codebase keeps refusing.
+ * AN EARLIER VERSION OF THIS COMMENT WAS WRONG, and it is worth recording how.
+ * It said candles were IMPOSSIBLE for the 32-byte curve poolIds that cover most
+ * of what is interesting on this chain, reasoning from GeckoPool.poolAddress
+ * being null for them. That field is about CALLABILITY — somewhere to send an
+ * eth_call — and the index indexes those pools perfectly well: asked directly,
+ * /networks/robinhood/pools/<32-byte poolId>/ohlcv/hour returns 200 with real
+ * candles.
+ *
+ * So the true statement is narrower. No OHLC exists in this repo yet, poolId is
+ * not carried as far as the page, and nothing memoises a per-token candle
+ * request on an index that refuses roughly two in five of them. This plot is
+ * what the data supports TODAY, and it stays on the page beneath any chart that
+ * later arrives — because it answers a question a candle chart cannot.
  *
  * The axis is labelled with what it plots. Nothing here implies a price.
  */

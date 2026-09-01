@@ -56,6 +56,15 @@ describe("an unread coin is not accused of silence", () => {
     assert.match(CARDS, /f\.description \?[\s\S]{0,200}?:\s*f\.bare \?/);
   });
 
+  it("calls fully-diluted value FDV, never market cap", () => {
+    // The index substitutes FDV for market cap whenever it has no circulating
+    // supply, so the two were the same number under a label that overstates it
+    // — a token reads bigger, older and safer than it is. worker/src/venues/
+    // token-stats.ts made this argument first; the card had not heard it.
+    assert.ok(!/Market cap/.test(CARDS), "FDV must not be labelled market cap");
+    assert.match(CARDS, /<i>FDV<[/]i>/);
+  });
+
   it("a missing ticker renders the ADDRESS, not the word 'unnamed'", () => {
     // "unnamed" is a statement about the coin. The coin has a name; we failed
     // to fetch it. The address is true and still useful.

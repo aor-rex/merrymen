@@ -100,7 +100,7 @@ export function Ticker() {
               {/* A stale feed is said, not hidden. A price nobody has updated in
                   an hour is not a current price, and a tape that implies it is
                   is worse than one that admits it. */}
-              {t.paused ? (
+              {t.paused === true ? (
                 <span className="mono halted">halted</span>
               ) : stale ? (
                 <span className="mono stale" title="This feed has not updated in over an hour">
