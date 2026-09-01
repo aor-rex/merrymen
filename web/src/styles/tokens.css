@@ -77,11 +77,20 @@
   --mm-10: 40px;
 
   /* ── type ────────────────────────────────────────────────────────────── */
-  /* Hanken Grotesk and JetBrains Mono are already loaded by the root layout via
-     next/font. Keeping them costs nothing and avoids the two faces every
-     generated UI reaches for. */
-  --mm-sans: var(--font-hanken), "Hanken Grotesk", system-ui, -apple-system, sans-serif;
-  --mm-mono: var(--font-jbmono), ui-monospace, "JetBrains Mono", Menlo, monospace;
+  /*
+   * GEIST, all three cuts.
+   *
+   * --mm-display is GEIST PIXEL, and it is display ONLY. It is drawn on a
+   * square pixel grid, and below roughly 24px that grid stops being legible and
+   * the face turns to mush — so it belongs on headlines and numbers big enough
+   * to read as objects, never on body copy, never on a label, never in a table.
+   *
+   * Hanken and JetBrains Mono have not gone away; they now resolve only inside
+   * legacy.css, for /grant and /settings.
+   */
+  --mm-display: var(--font-geist-pixel), var(--font-geist), ui-monospace, monospace;
+  --mm-sans: var(--font-geist), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mm-mono: var(--font-geist-mono), ui-monospace, "Geist Mono", Menlo, monospace;
 
   /* ── chrome ──────────────────────────────────────────────────────────── */
   --mm-nav-h: 56px;
