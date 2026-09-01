@@ -1487,7 +1487,12 @@ async function main() {
   // arithmetic in the tick (reserve + dynamic gas floor). The wall adds the
   // fourth: a sealed per-op valueLimit no setting can lift.
   const AUTO_CONVERT_COOLDOWN_MS = 3_600_000;
+  const AUTO_CONVERT_EXECUTION_TIMEOUT_MS = 120_000;
   let lastAutoConvertAt = 0;
+  // The executor may still be waiting on a bundler receipt after this tick
+  // returns. Keep this guard set until that underlying promise settles so a
+  // later tick cannot submit a second operation with the same account nonce.
+  let autoConvertInFlight: Promise<unknown> | null = null;
   // One re-sign notice per arm, not per tick — a warn event every minute is
   // noise, and the event log is the owner's record.
   let autoConvertSignNoteShown = false;
@@ -5659,7 +5664,7 @@ async function main() {
           `cooldownReady=${autoConvertReady}`,
       );
     }
-    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && autoConvertReady) {
+    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && autoConvertReady && !autoConvertInFlight) {
       // The marker is minted BY the wall that can do this. A grant signed
       // before nativeSwapValueLimitWei existed would only fail at the chain —
       // say so once, clearly, instead of burning gas reading a revert.
@@ -5674,6 +5679,7 @@ async function main() {
         }
       } else {
       try {
+        console.log(`[auto-convert] fetching gas price`);
         const gasPrice = await mainnetClient().getGasPrice().catch(() => 0n);
         // The owner's split, as a percent of the balance — but the floor beneath
         // it is NOT configurable: enough for one operating swap's gas at the
@@ -5684,9 +5690,20 @@ async function main() {
         // 1% setting on a small balance can never strand the agent either way.
         const pct = BigInt(Math.min(Math.max(Math.round(cfg.autoConvertReservePct), 1), 50));
         const pctReserve = (lastGasWei * pct) / 100n;
-        const opFloor = gasPrice * 400_000n; // one swap UserOp, entrypoint + call — not a sweep
+        // The prefund the EntryPoint checks is the gas cost ON TOP OF the swap's
+        // msg.value — both leave the account in the SAME operation. An undeployed
+        // account's first op additionally pays Kernel deployment + permission
+        // validator init (~1M gas all-in at 2x headroom); a deployed one needs
+        // ~600k. Understating this is how AA21 "didn't pay prefund" happened:
+        // the old 400k floor left less gas budget than the simulation required.
+        const deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
+        const opFloor = gasPrice * (deployed ? 600_000n : 1_000_000n);
         const reserve = pctReserve > opFloor ? pctReserve : opFloor;
         const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
+        console.log(
+          `[auto-convert] economics: gasPrice=${gasPrice} reserve=${reserve} ` +
+            `balance=${lastGasWei} surplus=${surplusEth}`,
+        );
         if (surplusEth > 0n && active.executor) {
           // Expected USDG out, derived from the ON-CHAIN pool price (TWAP, the
           // same manipulation-resistant number readPoolPrice uses to value the
@@ -5695,25 +5712,50 @@ async function main() {
           // pool itself is real and liquid (verified live), so we size minOut
           // off the TWAP with slippage, which is exactly the guard a quoter
           // would provide. The actual swap still goes through SwapRouter02.
+          console.log(`[auto-convert] fetching WETH/USDG execution quote`);
           const price = await readExecutionPoolPrice(active.client, {
             token: CASH.WETH as `0x${string}`,
             tokenDecimals: 18, // native ETH / WETH raw units
             cash: CASH.USDG as `0x${string}`,
             cashDecimals: USDG_DECIMALS,
           });
+          console.log(`[auto-convert] quote ${price ? `ready (fee ${price.fee})` : "unavailable"}`);
           if (price && price.price8 > 0n) {
             // price8 is USDG-per-whole-WETH at 8dp; surplusEth is raw wei (18dp).
             // USDG out (6dp) = price8/1e8 × surplusEth/1e18 × 1e6 = price8×wei/1e20.
             const expect6 = (price.price8 * surplusEth) / 1_000_000_000_000_000_000_00n; // ÷1e20
             const minOut = minOutWithSlippage(expect6, cfg.slippageBps);
             if (expect6 > 0n && minOut > 0n) {
-              const exec = await active.executor.execute([
-                buildConvertCall({
-                  surplusEth,
-                  fee: price.fee,
-                  minAmountOut: minOut,
-                  recipient: active.executor.address as `0x${string}`,
-                }),
+              console.log(
+                `[auto-convert] submitting: amountIn=${surplusEth} expectedOut=${expect6} minOut=${minOut}`,
+              );
+              const execution = active.executor.execute(
+                [
+                  buildConvertCall({
+                    surplusEth,
+                    fee: price.fee,
+                    minAmountOut: minOut,
+                    recipient: active.executor.address as `0x${string}`,
+                  }),
+                ],
+                {
+                  onSubmitted: async (userOpHash) => {
+                    console.log(`[auto-convert] submitted: ${userOpHash}`);
+                  },
+                },
+              );
+              const trackedExecution = execution.then(() => undefined, () => undefined).finally(() => {
+                if (autoConvertInFlight === trackedExecution) autoConvertInFlight = null;
+              });
+              autoConvertInFlight = trackedExecution;
+              const exec = await Promise.race([
+                execution,
+                new Promise<never>((_, reject) =>
+                  setTimeout(
+                    () => reject(new Error(`UserOperation execution timed out after ${AUTO_CONVERT_EXECUTION_TIMEOUT_MS / 1000}s; it remains in flight and will not be retried`)),
+                    AUTO_CONVERT_EXECUTION_TIMEOUT_MS,
+                  ),
+                ),
               ]);
               lastAutoConvertAt = Date.now();
               console.log(`[auto-convert] ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}) · op ${exec.userOpHash}`);

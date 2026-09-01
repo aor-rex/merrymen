@@ -433,6 +433,14 @@ export async function readExecutionPoolPrice(
   client: PublicClient,
   args: { token: `0x${string}`; tokenDecimals: number; cash: `0x${string}`; cashDecimals: number },
 ): Promise<PoolPrice | null> {
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000));
+  return Promise.race([readExecutionPoolPriceUnbounded(client, args), timeout]);
+}
+
+async function readExecutionPoolPriceUnbounded(
+  client: PublicClient,
+  args: { token: `0x${string}`; tokenDecimals: number; cash: `0x${string}`; cashDecimals: number },
+): Promise<PoolPrice | null> {
   const best = await bestCashPool(client, { token: args.token, cash: args.cash });
   if (!best) return null;
   try {
