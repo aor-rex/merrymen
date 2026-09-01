@@ -43,6 +43,29 @@ export type PoolFeed = "trending_pools" | "new_pools" | "pools";
  * and several can be absent, so parsing at the edge means the rest of the
  * codebase never handles a `"0.0000058"` that might also be `undefined`.
  */
+/**
+ * The windows GeckoTerminal publishes a tape for.
+ *
+ * FOUR, AND NOT THE FOUR THE REFERENCE PRODUCT SHOWS. Their grid reads
+ * 5M / 1H / 4H / 1D. This index has no four-hour bucket, so ours reads
+ * 5M / 1H / 6H / 24H — relabelling h6 as "4H" would be a fabrication that
+ * nothing downstream could detect.
+ */
+export const GECKO_WINDOWS = ["m5", "h1", "h6", "h24"] as const;
+export type GeckoWindow = (typeof GECKO_WINDOWS)[number];
+
+/** One window of a pool's tape. Every field is null when the index omitted it. */
+export interface GeckoBucket {
+  /** Percent change across the window (17.691 = +17.691%). */
+  changePct: number | null;
+  volumeUsd: number | null;
+  buys: number | null;
+  sells: number | null;
+  /** Distinct addresses. Harder to fake than the transaction count. */
+  buyers: number | null;
+  sellers: number | null;
+}
+
 export interface GeckoPool {
   /**
    * The pool's identifier, lowercased, exactly as the index gives it.
@@ -91,8 +114,32 @@ export interface GeckoPool {
   sells24h: number | null;
   /** Distinct buyers in 24h. Harder to fake than transaction count. */
   buyers24h: number | null;
+  /**
+   * The same tape across every window the index publishes.
+   *
+   * The flat fields above are this record's h24 entry under older names, kept
+   * because the scout's filters and their tests are written against them. Read
+   * this for anything new — it is the only place the shorter windows exist.
+   */
+  buckets: Record<GeckoWindow, GeckoBucket>;
   /** Unix seconds the pool was created, or null when unparseable. */
   createdAt: number | null;
+}
+
+/**
+ * A tape with nothing in it.
+ *
+ * Exists so a caller that must hand over a pool without having read one names
+ * the absence once, rather than hand-writing two dozen nulls and getting one
+ * of them wrong.
+ */
+export function emptyGeckoBuckets(): Record<GeckoWindow, GeckoBucket> {
+  return Object.fromEntries(
+    GECKO_WINDOWS.map((w) => [
+      w,
+      { changePct: null, volumeUsd: null, buys: null, sells: null, buyers: null, sellers: null },
+    ]),
+  ) as Record<GeckoWindow, GeckoBucket>;
 }
 
 /** A number that arrived as a string, or null — never NaN, never a silent 0. */
@@ -145,8 +192,30 @@ export function parseGeckoPool(raw: unknown): GeckoPool | null {
 
   const pct = (a.price_change_percentage ?? {}) as Record<string, unknown>;
   const vol = (a.volume_usd ?? {}) as Record<string, unknown>;
-  const tx = (a.transactions ?? {}) as Record<string, { buys?: unknown; sells?: unknown; buyers?: unknown }>;
-  const h24 = tx.h24 ?? {};
+  const tx = (a.transactions ?? {}) as Record<
+    string,
+    { buys?: unknown; sells?: unknown; buyers?: unknown; sellers?: unknown } | undefined
+  >;
+
+  // Every window, parsed once. The flat 24h fields below are DERIVED from this
+  // rather than read a second time, so what a page draws and what the scout
+  // filters on cannot drift apart.
+  const buckets = Object.fromEntries(
+    GECKO_WINDOWS.map((w) => {
+      const t = tx[w] ?? {};
+      return [
+        w,
+        {
+          changePct: num(pct[w]),
+          volumeUsd: num(vol[w]),
+          buys: int(t.buys),
+          sells: int(t.sells),
+          buyers: int(t.buyers),
+          sellers: int(t.sellers),
+        },
+      ];
+    }),
+  ) as Record<GeckoWindow, GeckoBucket>;
 
   const createdRaw = a.pool_created_at;
   const createdMs = typeof createdRaw === "string" ? Date.parse(createdRaw) : NaN;
@@ -160,12 +229,13 @@ export function parseGeckoPool(raw: unknown): GeckoPool | null {
     priceUsd: num(a.base_token_price_usd),
     reserveUsd: num(a.reserve_in_usd),
     fdvUsd: num(a.fdv_usd),
-    volume24hUsd: num(vol.h24),
-    change24hPct: num(pct.h24),
-    change1hPct: num(pct.h1),
-    buys24h: int(h24.buys),
-    sells24h: int(h24.sells),
-    buyers24h: int(h24.buyers),
+    volume24hUsd: buckets.h24.volumeUsd,
+    change24hPct: buckets.h24.changePct,
+    change1hPct: buckets.h1.changePct,
+    buys24h: buckets.h24.buys,
+    sells24h: buckets.h24.sells,
+    buyers24h: buckets.h24.buyers,
+    buckets,
     createdAt: Number.isFinite(createdMs) ? Math.floor(createdMs / 1000) : null,
   };
 }
