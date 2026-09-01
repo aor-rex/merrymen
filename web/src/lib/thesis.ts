@@ -62,6 +62,16 @@ export interface PublicThesis {
   handle: string | null;
   /** "buy AAPL 16.66 USDG", or "" when the decision names nothing. */
   head: string;
+  /**
+   * The same facts, apart, so a feed can lay them out rather than print a
+   * sentence. All three are null on a pure view — a post about the book rather
+   * than about one name — and that absence is what makes it a THESIS post.
+   *
+   * They pass the same address backstop as everything else below.
+   */
+  action: "buy" | "sell" | "hold" | null;
+  symbol: string | null;
+  sizeUsdg: number | null;
   outcome: "landed" | "reverted" | "refused" | "dropped" | "pending";
   outcomeText: string;
   reason: string | null;
@@ -218,14 +228,22 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // the handle, which are user-typed. A strategy reason cannot contain an
   // address by construction; this exists so the guarantee does not depend on
   // that staying true.
-  for (const s of [name, handle, head, reason, text]) {
+  for (const s of [name, handle, head, reason, text, row.symbol ?? null]) {
     if (s && ADDRESSY.test(s)) return null;
   }
+
+  const action =
+    row.action === "buy" || row.action === "sell" || row.action === "hold" ? row.action : null;
+  const symbol = (row.symbol ?? "").trim() || null;
 
   return {
     name,
     handle,
     head,
+    action,
+    symbol,
+    sizeUsdg:
+      typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
     outcomeText: text,
     reason,

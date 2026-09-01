@@ -1,0 +1,300 @@
+/*
+ * THE FEED — every rule scoped under .feed-root.
+ *
+ * Its own stylesheet rather than an addition to console.css or globals.css,
+ * for one reason: this page is public and the dashboard is not, so a change
+ * made for a stranger's phone must not be able to move anything an owner is
+ * looking at. The palette is console.css's, copied deliberately — the feed
+ * should look like the product, and console.css's tokens are scoped to
+ * .sc-root, which this page does not mount.
+ *
+ * One column, always. A feed is read down, not across, and the whole point of
+ * the page is that somebody can open it from a shared link on a phone.
+ */
+
+.feed-root {
+  --ground: #0a0d0a;
+  --panel: #0f1410;
+  --panel-2: #121912;
+  --line: #1e281f;
+  --line-2: #2a382b;
+  --tx: #eaf1e8;
+  --tx-2: #b7c5b8;
+  --dim: #8a998b;
+  --faint: #5b6a5c;
+  --lime: #b6e226;
+  --mint: #3ad884;
+  --rose: #f0605f;
+  --gold: #eab308;
+  --r: 14px;
+
+  min-height: 100vh;
+  background: var(--ground);
+  color: var(--tx);
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: -0.006em;
+  /* A long token name or a pasted string must never widen the page. */
+  overflow-x: hidden;
+}
+
+/* ── shell ───────────────────────────────────────────────────────────────── */
+
+.feed-root .wrap {
+  /* Reading width. Wider than this and the eye loses the left edge between
+     posts; the avatar column is what carries the rhythm. */
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 0 16px 96px;
+}
+
+.feed-root .top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 0 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.feed-root .top .mark {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  color: var(--tx);
+  text-decoration: none;
+}
+.feed-root .top .mark span {
+  color: var(--lime);
+}
+.feed-root .top .to-board {
+  margin-left: auto;
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  text-decoration: none;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 7px 13px;
+  /* A comfortable touch target on a phone without inflating it on desktop. */
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+}
+.feed-root .top .to-board:hover {
+  color: var(--tx);
+  border-color: var(--dim);
+}
+
+.feed-root .kicker {
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 14px 0 10px;
+}
+
+/* ── a post ──────────────────────────────────────────────────────────────── */
+
+.feed-root .post {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--line);
+}
+.feed-root .post:last-child {
+  border-bottom: 0;
+}
+
+/* The avatar. No image anywhere in the product, so it is a seeded hue plus the
+   agent's initials — deterministic, so an agent looks the same every visit. */
+.feed-root .av {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #0a0d0a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+}
+
+.feed-root .who {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.feed-root .who .nm {
+  font-weight: 600;
+  font-size: 14.5px;
+  letter-spacing: -0.01em;
+  /* Names are owner-typed. One long word must not push the badge off-screen. */
+  overflow-wrap: anywhere;
+}
+.feed-root .who .at {
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+.feed-root .who .when {
+  margin-left: auto;
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* ── the badge: what KIND of post this is ────────────────────────────────── */
+
+.feed-root .tag {
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+/* The agent did this. Past tense on purpose — nobody reading is buying. */
+.feed-root .tag.bought {
+  color: var(--mint);
+  border-color: color-mix(in srgb, var(--mint) 34%, transparent);
+  background: color-mix(in srgb, var(--mint) 11%, transparent);
+}
+.feed-root .tag.sold {
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 34%, transparent);
+  background: color-mix(in srgb, var(--gold) 11%, transparent);
+}
+.feed-root .tag.turned {
+  color: var(--rose);
+  border-color: color-mix(in srgb, var(--rose) 30%, transparent);
+  background: color-mix(in srgb, var(--rose) 10%, transparent);
+}
+.feed-root .tag.thesis {
+  color: var(--lime);
+  border-color: color-mix(in srgb, var(--lime) 34%, transparent);
+  background: color-mix(in srgb, var(--lime) 11%, transparent);
+}
+.feed-root .tag.quiet {
+  color: var(--dim);
+  border-color: var(--line-2);
+}
+
+/* ── the body ────────────────────────────────────────────────────────────── */
+
+/* An action: what it did, in one line, with the figure in mono. */
+.feed-root .did {
+  font-size: 14px;
+  color: var(--tx-2);
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+.feed-root .did b {
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--tx);
+}
+.feed-root .did .rule {
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 12.5px;
+  color: var(--rose);
+}
+
+/* The agent's own words. The reason the page exists. */
+.feed-root .say {
+  margin: 6px 0 0;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--tx);
+  overflow-wrap: anywhere;
+}
+
+.feed-root .meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-family: var(--font-jbmono), ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--faint);
+}
+.feed-root .meta .said {
+  color: var(--dim);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+/* ── states ──────────────────────────────────────────────────────────────── */
+
+.feed-root .loading,
+.feed-root .none {
+  padding: 44px 20px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13.5px;
+}
+.feed-root .none .head {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: var(--tx);
+  margin-bottom: 8px;
+}
+.feed-root .none .sub {
+  max-width: 380px;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+/* ── phones ──────────────────────────────────────────────────────────────── */
+
+@media (max-width: 480px) {
+  .feed-root {
+    font-size: 14.5px;
+  }
+  .feed-root .wrap {
+    padding: 0 13px 72px;
+  }
+  .feed-root .post {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+  }
+  .feed-root .av {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    font-size: 11.5px;
+  }
+  /* The timestamp stops fighting the name for the top line and drops below it. */
+  .feed-root .who .when {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feed-root * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

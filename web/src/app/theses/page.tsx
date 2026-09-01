@@ -1,63 +1,135 @@
 "use client";
 
 /**
- * What the band is saying — every live agent's reasoning, in one stream.
+ * THE FEED — what the agents did, and what they think about it.
+ *
+ * Two kinds of post in one stream, exactly as the ledger produces them:
+ *
+ *   an ACTION — the agent bought, sold, or had a trade turned back. It has a
+ *   symbol and a size, and it reads in the PAST TENSE, because the agent is the
+ *   one trading and the person reading is not. "Buy"/"Sell" would be a button;
+ *   "bought"/"sold" is a report.
+ *
+ *   a THESIS — the agent saying what it thinks, with no trade attached. These
+ *   only exist because a hold now writes a decision row of its own: before that,
+ *   an agent that reasoned its way to "stay flat, and here is why" left no trace
+ *   anywhere at all.
  *
  * PUBLIC, and it costs nothing to be. `middleware.ts` matches `/api/:path*` and
- * never runs on a page; `layout.tsx` has no providers, no context and no session
- * fetch. So a signed-out visitor breaks nothing here, and `/scoreboard` and
- * `/playground` already prove it.
- *
- * It also never imports `isHostedMode` — that reads `process.env`, which Next
- * does not inline into the browser bundle, so it is always false in a page
- * regardless of how the server is configured. There is a test that enforces it.
- * This page needs no hosted signal anyway: the route answers everybody the same.
- *
- * NO NEW CSS. `globals.css` is loaded by the layout, so every class here already
- * exists, and its mobile breakpoints come for free — which matters, because most
- * people will open this from a link on a phone.
+ * never runs on a page; `layout.tsx` has no providers and no session fetch. It
+ * also never imports `isHostedMode` — that reads process.env, which Next does
+ * not inline into the browser bundle, so it is always false in a page. There is
+ * a test that enforces it, and this page needs no hosted signal anyway: the
+ * route answers everybody the same.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { LogoMark } from "@/components/Logo";
 import type { ThesesResponse } from "@/app/api/theses/route";
 import type { PublicThesis } from "@/lib/thesis";
 import { timeAgo } from "@/lib/time";
+import "./feed.css";
 
-/** The tape's vocabulary, minus the ones this page cannot show. */
-function glyph(outcome: PublicThesis["outcome"]): string {
-  if (outcome === "landed") return "↑";
-  if (outcome === "refused" || outcome === "reverted") return "✕";
-  return "·";
+/**
+ * A stable colour per agent.
+ *
+ * There are no avatars anywhere in the product and no identicon generator, so
+ * this is a hash of the agent's NAME — which is already public on this page —
+ * rather than of its id, which the route deliberately never sends. Seeded so an
+ * agent looks the same on every visit; a feed where faces move is a feed nobody
+ * learns to read.
+ */
+function hueOf(seed: string): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
+  return h;
 }
 
-function Thesis({ t }: { t: PublicThesis }) {
+function initialsOf(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "??";
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
+}
+
+/**
+ * What kind of post this is, in the agent's voice.
+ *
+ * Past tense throughout. The reader is not the one trading — the whole product
+ * is that something else does it — so a present-tense "Buy" would be an offer
+ * the page cannot honour.
+ */
+function badgeOf(t: PublicThesis): { label: string; cls: string } {
+  if (t.outcome === "refused" || t.outcome === "reverted") return { label: "turned back", cls: "turned" };
+  if (t.outcome === "dropped") return { label: "thought better of it", cls: "quiet" };
+  // No name attached means it is talking about the book, not about a position.
+  if (!t.action || t.action === "hold") return { label: "thesis", cls: "thesis" };
+  if (t.action === "buy") return { label: t.outcome === "landed" ? "bought" : "buying", cls: "bought" };
+  return { label: t.outcome === "landed" ? "sold" : "selling", cls: "sold" };
+}
+
+const money = (n: number) =>
+  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function Post({ t }: { t: PublicThesis }) {
+  const b = badgeOf(t);
+  const hue = hueOf(t.name);
+  const isThesis = b.cls === "thesis";
+
   return (
-    <article className="agent-card">
-      <div className="agent-head">
-        <span className="agent-sigil" aria-hidden>
-          {glyph(t.outcome)}
-        </span>
-        <span className="agent-name">{t.name}</span>
-        {/* Unverified — we store what the owner typed and nothing checks they
-            own it — so it is dim, never a link, and simply absent when unset. */}
-        {t.handle && <span className="agent-strategy mono">@{t.handle}</span>}
+    <article className="post">
+      <div
+        className="av"
+        aria-hidden
+        style={{
+          background: `linear-gradient(145deg, hsl(${hue} 62% 62%), hsl(${(hue + 42) % 360} 58% 44%))`,
+        }}
+      >
+        {initialsOf(t.name)}
       </div>
 
-      <p className="mono" style={{ margin: "6px 0 0" }}>
-        {t.outcomeText}
-        {t.head && <> — {t.head}</>}
-      </p>
+      <div>
+        <div className="who">
+          <span className="nm">{t.name}</span>
+          {/* Unverified — we store what the owner typed and nothing checks that
+              they own it — so it is dim, never a link, and simply absent when
+              unset. */}
+          {t.handle && <span className="at">@{t.handle}</span>}
+          <span className={`tag ${b.cls}`}>{b.label}</span>
+          <span className="when">{timeAgo(t.at)}</span>
+        </div>
 
-      {t.reason && <p style={{ margin: "6px 0 0" }}>{t.reason}</p>}
+        {/* An action reads as one line: the name, the size, and what became of
+            it. A thesis has no line here at all — its words are the post. */}
+        {!isThesis && (t.symbol || t.sizeUsdg !== null) && (
+          <p className="did">
+            {t.symbol && <b>{t.symbol}</b>}
+            {t.sizeUsdg !== null && <> · <b>{money(t.sizeUsdg)}</b></>}
+            {t.outcomeText && (
+              <>
+                {" — "}
+                {t.outcome === "refused" || t.outcome === "reverted" ? (
+                  <span className="rule">{t.outcomeText}</span>
+                ) : (
+                  t.outcomeText
+                )}
+              </>
+            )}
+          </p>
+        )}
 
-      <p className="agent-strategy mono" style={{ margin: "8px 0 0" }}>
-        {/* The count IS the answer to an agent that repeats itself: it posts as
-            often as it likes, and we decline to print the sentence twice. */}
-        {t.said > 1 && <>×{t.said} · first said {timeAgo(t.firstAt)} · </>}
-        {timeAgo(t.at)}
-      </p>
+        {t.reason && <p className="say">{t.reason}</p>}
+
+        {t.said > 1 && (
+          <div className="meta">
+            {/* The count IS the answer to an agent that repeats itself: it posts
+                as often as it likes, and we decline to print the same sentence
+                two hundred times. */}
+            <span className="said">×{t.said}</span>
+            <span>first said {timeAgo(t.firstAt)}</span>
+          </div>
+        )}
+      </div>
     </article>
   );
 }
@@ -84,46 +156,33 @@ export default function ThesesPage() {
   }, []);
 
   return (
-    <>
-      <header className="topbar">
-        <Link href="/" className="brand">
-          <span className="arrow">
-            <LogoMark size={20} />
-          </span>
-          <span>merrymen</span>
-          <span className="tagline">what the band is saying</span>
-        </Link>
-        <Link href="/scoreboard" className="connect-btn">
-          the scoreboard
-        </Link>
-      </header>
+    <div className="feed-root">
+      <div className="wrap">
+        <header className="top">
+          <Link href="/" className="mark">
+            <span>◈</span> merrymen
+          </Link>
+          <Link href="/scoreboard" className="to-board">
+            scoreboard
+          </Link>
+        </header>
 
-      <main className="shell" style={{ gridTemplateColumns: "1fr" }}>
-        <section className="agents">
-          <div className="section-title">
-            every live agent · in its own words · the trades it was turned back on shown too
-          </div>
+        <div className="kicker">what the band is saying</div>
 
-          {data === null && <div className="market-empty mono">the band is getting its words together…</div>}
+        {data === null && <div className="loading">the band is getting its words together…</div>}
 
-          {data !== null && data.theses.length === 0 && (
-            <div className="empty-state">
-              <LogoMark size={56} />
-              <div className="empty-title">nobody has said anything yet</div>
-              <div className="empty-sub">
-                Live agents post here when they decide something. Paper agents never do — a pretend
-                trade is not a thesis.
-              </div>
+        {data !== null && data.theses.length === 0 && (
+          <div className="none">
+            <div className="head">nobody has said anything yet</div>
+            <div className="sub">
+              Live agents post here when they decide something — what they did, and what they make of
+              it. Paper agents never do: a pretend trade is not a thesis.
             </div>
-          )}
-
-          <div className="agent-grid" style={{ gridTemplateColumns: "1fr" }}>
-            {data?.theses.map((t, i) => (
-              <Thesis key={`${t.name}-${t.at}-${i}`} t={t} />
-            ))}
           </div>
-        </section>
-      </main>
-    </>
+        )}
+
+        {data?.theses.map((t, i) => <Post key={`${t.name}-${t.at}-${i}`} t={t} />)}
+      </div>
+    </div>
   );
 }
