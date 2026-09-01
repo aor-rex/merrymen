@@ -21,6 +21,7 @@
  * first states something false while looking completely normal. `read` carries
  * the difference and the page is expected to branch on it.
  */
+import { cache } from "react";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { fetchMarket, type MarketToken } from "@/lib/market";
 import { readPoolRow, sharedRead, type DiscoveryRow } from "@/lib/read-discoveries";
@@ -67,7 +68,11 @@ export interface TokenMarket {
   symbolClash: boolean;
 }
 
-export async function readTokenMarket(
+/**
+ * Memoised per request: the page asks once for its body and once for its
+ * metadata, and behind this sit two shared memos it would otherwise re-enter.
+ */
+export const readTokenMarket = cache(async function readTokenMarket(
   token: string,
   /** The ledger's symbol for this token, when it has one. Used for the clash check. */
   symbol: string | null = null,
@@ -121,4 +126,4 @@ export async function readTokenMarket(
   } catch {
     return { kind: "memecoin", read: "unread", stock: null, coin: null, symbolClash, symbol: registrySymbol };
   }
-}
+});

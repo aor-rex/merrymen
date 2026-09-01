@@ -48,7 +48,10 @@ export async function generateMetadata({
   // Memoised per request, so this costs nothing beyond the body's own read.
   const t = await readToken(token);
   const n = t.holders.length + t.privateHolders;
-  const label = t.symbol ?? (await readTokenMarket(token, t.symbol)).symbol ?? "This token";
+  // The same three sources the heading uses, in the same order, so the tab and
+  // the page cannot disagree about what this token is called.
+  const m = await readTokenMarket(token, t.symbol);
+  const label = t.symbol ?? m.symbol ?? m.coin?.name ?? "This token";
   return {
     title: `${label} — merrymen`,
     description:
@@ -109,9 +112,16 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
   const listed = STOCK_TOKENS.find((x) => x.address.toLowerCase() === token.toLowerCase());
   const history = listed?.chainlinkFeed ? await readFeedHistory(listed.chainlinkFeed) : null;
 
-  // The ledger only knows a symbol for a token somebody holds; the registry
-  // knows every listed one. A stock token nobody has bought is still AAPL.
-  const symbol = t.symbol ?? market.symbol;
+  // THREE SOURCES, IN DESCENDING ORDER OF TRUST.
+  //
+  // The ledger's symbol comes from the contract's own symbol(), for a token
+  // some agent actually holds. The registry names every listed stock token,
+  // held or not — so a stock nobody has bought is still AAPL rather than
+  // "Token". The index's pool label is the last resort and the weakest: it is
+  // attacker-chosen, which is why it is shown as a LABEL beside the address
+  // and never used as identity. Nothing is matched on it — theses are keyed on
+  // the ledger symbol, which is null exactly when this fallback is in use.
+  const symbol = t.symbol ?? market.symbol ?? market.coin?.name ?? null;
   const total = t.holders.length + t.privateHolders;
   const kindLabel = market.kind === "memecoin" ? (market.coin?.venue ?? "coin") : market.kind;
 
@@ -123,7 +133,11 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
         sub={<span className="mono">{`${token.slice(0, 10)}…${token.slice(-6)}`}</span>}
         right={
           <>
-            <TokenMark logo={market.stock?.logo ?? null} symbol={symbol} />
+            <TokenMark
+              logo={market.stock?.logo ?? null}
+              /* "CLAN / WETH" is a pair, and its initials are the base side. */
+              symbol={symbol?.split(/[s/]/)[0] ?? null}
+            />
             <span className="mm-chip quiet">{kindLabel}</span>
           </>
         }
