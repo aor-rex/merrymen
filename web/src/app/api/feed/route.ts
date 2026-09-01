@@ -10,6 +10,7 @@ import { SETTINGS_DEFAULTS, isHostedMode, type MerrymenSettings } from "@merryme
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { hostedAgentFor } from "@/lib/agent-for";
 
 // The basket the WORKER actually defaults to when none is configured.
 // TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
@@ -196,10 +197,18 @@ export async function GET(req: Request) {
   // the global "armed or newest" heuristic below (which on a shared ledger is
   // whichever tenant is armed across the whole fleet).
   let tenant: `0x${string}` | null = null;
+  // THE TENANT IS NOT THE AGENT, and the grant store is the only index that
+  // maps one to the other. Resolved here rather than in SQL, because the query
+  // this replaced — `WHERE LOWER(owner_address) = <tenant>` — could never match:
+  // hosted, `owner_address` is the owner key the BROWSER generated, so it is
+  // never the tenant. It failed closed, and an empty tape is indistinguishable
+  // from a quiet agent.
+  let hostedAgentId: `0x${string}` | null = null;
   if (isHostedMode()) {
     tenant = tenantOf(req);
     // No session: nothing to scope to, so no per-tenant identity either.
     if (!tenant) return NextResponse.json(await emptyFeed(null));
+    hostedAgentId = await hostedAgentFor(req);
   }
 
   // Reads go through the ledger driver: read-only sqlite (self-hosted) or the
@@ -223,23 +232,12 @@ export async function GET(req: Request) {
     // the lot — so two agents' equity curves interleaved and the dashboard's
     // P&L spanned both. Armed wins, else the newest.
     //
-    // HOSTED scopes by the authenticated tenant (owner_address), NOT the global
-    // heuristic: on a shared ledger "armed or newest across the fleet" is some
-    // other customer's book. The owner_address comparison is case-folded because
-    // the SIWE tenant is lowercased and the stored address may not be.
+    // HOSTED scopes to the tenant's OWN account, never the global heuristic: on a
+    // shared ledger "armed or newest across the fleet" is some other customer's
+    // book. Resolved above, through the grant store.
     let agentId: string | null = null;
     if (tenant) {
-      try {
-        const row = (await db
-          .prepare(
-            `SELECT smart_account FROM agents WHERE LOWER(owner_address) = ?
-              ORDER BY (status = 'armed') DESC, created_at DESC, smart_account DESC LIMIT 1`,
-          )
-          .get(tenant)) as { smart_account: string } | undefined;
-        agentId = row?.smart_account ?? null;
-      } catch {
-        /* no agents table yet */
-      }
+      agentId = hostedAgentId;
     } else {
       try {
         const row = (await db

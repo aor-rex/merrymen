@@ -19,50 +19,20 @@
  * their own wall check — the channel is deliberately dumb.
  */
 import { NextResponse } from "next/server";
-import { readFile } from "node:fs/promises";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { tenantOf } from "@/lib/auth";
-import { getGrantStore } from "@merrymen/grant-store";
 import { writeCommand } from "@merrymen/command-files";
 import { withReadDb } from "@/lib/ledger";
+import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Which AGENT this request may act for.
- *
- * THE TENANT IS NOT THE AGENT. `tenantOf` returns the signed-in browser
- * wallet; `agent_id` throughout this ledger is the ERC-4337 SMART ACCOUNT —
- * `ensureAgent` returns `grant.smartAccount`, and the worker claims against
- * that. Writing the tenant address into `agent_id` produced a row no worker
- * would ever match, a POST that returned 200, and a status that read 'queued'
- * forever. Caught in review.
- *
- * Resolved through the GRANT STORE, keyed on the authenticated tenant. Not
- * through `agents.owner_address` the way the feed and scoreboard routes do —
- * hosted, `owner_address` is the browser-GENERATED grant owner and is never
- * the tenant, so that lookup would find nothing here.
- */
-async function agentFor(req: Request): Promise<`0x${string}` | null> {
-  if (isHostedMode()) {
-    // The caller cannot name the agent — only the session decides, so one
-    // tenant can never probe (or spend the gas of) another's.
-    const tenant = tenantOf(req);
-    if (!tenant) return null;
-    const grant = await getGrantStore().get(tenant);
-    return (grant?.smartAccount as `0x${string}`) ?? null;
-  }
-  // Self-hosted has no auth; the localhost middleware is the perimeter, exactly
-  // as it is for /api/settings. The agent is whichever grant is on disk.
-  try {
-    const g = JSON.parse(await readFile(homePaths.grant(), "utf8")) as { smartAccount?: string };
-    return (g.smartAccount as `0x${string}`) ?? null;
-  } catch {
-    return null;
-  }
-}
-
+// Which agent this request may act for. Hosted, that is the signed-in tenant's
+// account resolved through the GRANT STORE — see web/src/lib/agent-for.ts for
+// why the `agents.owner_address` lookup cannot work here. Self-hosted has no
+// auth; the localhost middleware is the perimeter and the grant on disk is the
+// agent. The branch lives here because this file is server-side.
+const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
 export async function POST(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
