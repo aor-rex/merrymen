@@ -89,6 +89,7 @@ import { readHolderStatus } from "./circle";
 import { accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
+import { execModeOf, type ExecMode } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { resolveLlm } from "./llm";
@@ -348,11 +349,23 @@ async function main() {
    * only a READ zero counts.
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
-  const chainCanTrade = () => !!active && active.grant.chainId === TRADEABLE_CHAIN_ID;
-  const readAsBroke = () => lastCashUsdg !== null && lastCashUsdg === 0n;
-  /** Could this agent put a real order on-chain right now? */
-  const canTradeForReal = () => !!active && !!active.executor && chainCanTrade() && !readAsBroke();
-  const paperActive = () => !!active && !canTradeForReal() && cfg.paperTradingEnabled;
+  /**
+   * Which rail this agent is on, asked in ONE place.
+   *
+   * This used to be four local closures, and the execution fork asked a fifth
+   * question of its own (`!executor`) that disagreed with all of them. See
+   * exec-mode.ts. Everything that used to call paperActive() still does; it is
+   * now derived from the same answer the fork acts on, so the two cannot drift.
+   */
+  const execMode = (): ExecMode =>
+    execModeOf({
+      armed: !!active,
+      executor: !!active?.executor,
+      chainId: active?.grant.chainId ?? 0,
+      cashUsdg: lastCashUsdg,
+      paperTradingEnabled: cfg.paperTradingEnabled,
+    });
+  const paperActive = () => execMode().mode === "paper";
   /**
    * Is somebody else paying the gas?
    *
@@ -2860,28 +2873,37 @@ async function main() {
     // from different expressions, and this line is what makes a disagreement
     // between them visible instead of inferred.
     console.log(
-      `[exec] ${intent.kind} — fork ${executor ? "live" : "paper"}, tick ${paperActive() ? "paper" : "live"}` +
+      `[exec] ${intent.kind} — ${JSON.stringify(execMode())}` +
         `, cash ${lastCashUsdg === null ? "unknown" : String(lastCashUsdg)}, gas ${lastGasWei === null ? "unknown" : String(lastGasWei)}`,
     );
-    if (!executor) {
-      if (!cfg.paperTradingEnabled) {
-        console.log(`[policy] approved ${intent.kind} — execution stubbed (no bundler, paper trading off)`);
-        // Leave a trace. This used to return with only a console line, so
-        // "the wall approved N trades the agent had no way to execute" was
-        // unrecoverable from the ledger — the record simply had a hole in it
-        // exactly where practice mode ran. Recorded as rejected (nothing moved)
-        // with a rule that names the real reason.
-        await recordTrade({
-          agent_id: agentId,
-          kind: intent.kind,
-          target: tradeTarget,
-          ...tokenLegs(intent),
-          amount_usdg: usdgNum(notional),
-          status: "rejected",
-          reject_rule: "no-executor",
-        });
-        return;
-      }
+    // THE FORK ASKS THE SAME QUESTION THE TICK DOES.
+    //
+    // It used to ask `!executor`, which hosted is never true — so the paper arm
+    // below was dead code for every hosted tenant while the tick reported them
+    // as paper and zeroed their balances. Three modes, no fourth: with paper
+    // trading off, a wrong-chain or empty account previously fell THROUGH this
+    // block to the live rail and built a swap against a dead chain.
+    const execRail = execMode();
+    if (execRail.mode === "refuse") {
+      console.log(`[policy] approved ${intent.kind} — not executed (${execRail.rule})`);
+      // Leave a trace. This used to return with only a console line, so
+      // "the wall approved N trades the agent had no way to execute" was
+      // unrecoverable from the ledger — the record simply had a hole in it
+      // exactly where practice mode ran. Recorded as rejected (nothing moved)
+      // with a rule that names WHICH leg failed, because "rejected" with no
+      // reason is how the original hole stayed invisible.
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: execRail.rule,
+      });
+      return;
+    }
+    if (execRail.mode === "paper") {
       // ── PAPER FILL: same wall, simulated execution at the live oracle px ──
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
       const fill = applyPaperIntent(
@@ -2968,6 +2990,23 @@ async function main() {
       } finally {
         releaseBudget();
       }
+    }
+
+    // A LIVE RAIL NEEDS A SIGNER, and only exec-mode.ts knows that mode "live"
+    // already implies one — TypeScript cannot see through the module boundary.
+    // So this is a real check rather than a cast: if the two ever disagree,
+    // refusing is the safe direction, and the rule says which invariant broke.
+    if (!executor) {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "no-executor",
+      });
+      return;
     }
 
     // ── gas pre-flight ───────────────────────────────────────────────────
@@ -3480,11 +3519,30 @@ async function main() {
             `can't trade ${intent.assetOut.slice(0, 10)}… on its curve — this grant carries no live Pons adapter. ` +
               `Deploy it, set it in /settings and re-sign at /grant.`,
           );
-          // RELEASE BEFORE RETURNING. This sits inside processIntent's reserved
-          // region, and a return that skips the release leaks the day's budget
-          // for the rest of the run — the Rialto bug, which is why
-          // budget-reservation.invariant.test.ts walks every return in here.
-          // It caught this one.
+          // AND LEAVE A ROW, not just an event.
+          //
+          // This used to return with an event and nothing else, so the decision
+          // that led here had no trade to join and the public feed rendered it
+          // as "no trade came of it" — true, but silent about the one fact that
+          // explains it and is trivially fixable by the owner. Every other
+          // refusal in this function writes a row; this one was the exception,
+          // and it is the exception that covers every curve token, which is
+          // most of what a memecoin agent proposes.
+          //
+          // recordTrade releases the reservation on every path, so the explicit
+          // release below is now unreachable bookkeeping — but
+          // budget-reservation.invariant.test.ts walks every return in here and
+          // the rule it enforces is "release before returning", so the write
+          // goes first and the release stays where the invariant expects it.
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: tradeTarget,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "no-curve-adapter",
+          });
           releaseBudget();
           return;
         }
@@ -4444,7 +4502,13 @@ async function main() {
 
     lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks
     lastEquityKnown = !bookIncomplete;
-    lastGasWei = balances.ethWei;
+    // NOT ON PAPER. The paper tick hardcodes balances.ethWei to 0n instead of
+    // reading the chain — honest for the snapshot, since a paper book holds no
+    // ETH — but copying it here published a FABRICATED zero as the account's
+    // real ETH balance, and the gas pre-flight refuses on exactly that value.
+    // Same rule the cash balance already follows: unknown is not zero, so leave
+    // it null and let the pre-flight decline to judge.
+    if (!paper) lastGasWei = balances.ethWei;
     // Fresh feed prices → the notifier's price alerts (evaluated off-tick).
     notifierHandle?.publishPrices(market.prices);
 
@@ -4978,8 +5042,11 @@ async function main() {
       // alert that says it does would be telling the owner to fix something that
       // is not broken, and to send an asset they were told they would not need.
       gasSponsored: gasSponsored(),
-      // And whether that zero was even read. The paper tick hardcodes ethWei to
-      // 0n instead of reading the chain, so on paper this number is fabricated.
+      // And whether this agent is simulating at all. The paper tick no longer
+      // publishes its zero as a balance — lastGasWei stays null there — so
+      // gasWei above is now either a real read or explicitly unknown, never a
+      // fabrication. This stays because the alert's WORDING still depends on
+      // it: telling a paper agent to send ETH is advice it cannot act on.
       paper: paperActive(),
     }),
     getChainId: () => active?.grant.chainId ?? null,
