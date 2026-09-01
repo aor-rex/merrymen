@@ -87,6 +87,7 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
               <b>turned back in the last day</b>
               <span>
                 against this agent&rsquo;s own signed caps. {tape.counts.through} got through.
+                {tape.capped && <> The band draws the most recent {tape.cells.length}.</>}
               </span>
             </span>
           </div>

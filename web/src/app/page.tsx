@@ -53,9 +53,15 @@ export default async function FeedPage() {
             <span className="mm-wall-said">
               <b>turned back in the last day</b>
               <span>
-                Every intent above flew at the permission wall each agent signed. {turned} stopped;{" "}
-                {tape.counts.through} got through. The caps are the owner&rsquo;s, and nothing can
-                be moved outside them.
+                {turned} stopped at the permission wall each agent signed; {tape.counts.through} got
+                through. The caps are the owner&rsquo;s, and nothing can be moved outside them.
+                {tape.capped && (
+                  <>
+                    {" "}
+                    The band above draws the most recent {tape.cells.length} of them — the count is
+                    the whole day.
+                  </>
+                )}
               </span>
             </span>
           </div>
