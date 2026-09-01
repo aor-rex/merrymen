@@ -7,7 +7,8 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@merrymen/core": ["packages/core/src/index.ts"]
+      "@merrymen/core": ["packages/core/src/index.ts"],
+      "@merrymen/thesis": ["worker/src/thesis-policy.ts"]
     }
   },
   "include": ["worker/src", "packages/core/src"]
