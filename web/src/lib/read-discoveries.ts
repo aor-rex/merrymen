@@ -2,7 +2,9 @@ import { createPublicClient, http } from "viem";
 import {
   fetchGeckoPoolsResult,
   screenPools,
+  type GeckoBucket,
   type GeckoPool,
+  type GeckoWindow,
 } from "../../../worker/src/venues/geckoterminal";
 import { recentPonsLaunches } from "../../../worker/src/venues/pons";
 import {
@@ -91,6 +93,19 @@ export interface DiscoveryRow {
    * the payload says whether it could look at all.
    */
   verdict?: { conviction: number; reason: string } | null;
+  /**
+   * The index's tape across every window it published — 5m, 1h, 6h, 24h.
+   *
+   * Carried on every row rather than fetched per token on demand, because it
+   * costs nothing: these numbers arrive in the same trending_pools response
+   * that produced the row, and were being parsed and dropped. A page reading
+   * this payload for one token therefore adds ZERO upstream requests to a
+   * chain that is already refusing this fleet.
+   *
+   * A window the index omitted is null throughout, never zero — the difference
+   * between "nobody traded it" and "the index did not say".
+   */
+  buckets: Record<GeckoWindow, GeckoBucket>;
 }
 
 function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
@@ -110,6 +125,7 @@ function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
     ageDays: p.createdAt === null ? null : Math.max(0, (nowSec - p.createdAt) / 86_400),
     graduated: p.dex === GRADUATED,
     onCurve: p.dex === ON_CURVE,
+    buckets: p.buckets,
   };
 }
 
