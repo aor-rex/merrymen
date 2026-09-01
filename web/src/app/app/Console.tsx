@@ -331,6 +331,11 @@ function Loaded({ feed, status }: { feed: FeedResponse | null; status: AgentStat
           </nav>
           <div className="rail-foot">
             <nav className="nav util">
+              {/* The public feed. It lives on its own page and nothing here
+                  linked to it, so the only way to find it was to know the URL. */}
+              <Link className="navlink" href="/theses">
+                <Ic d="wallet" /> The feed
+              </Link>
               <Link className="navlink" href="/grant">
                 <Ic d="wallet" /> Wallet
               </Link>

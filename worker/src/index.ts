@@ -2189,13 +2189,32 @@ async function main() {
       );
     }
 
+    // A FAILED READ IS NOT A MISSING CONTRACT.
+    //
+    // This used to be `.catch(() => undefined)` and then treated undefined as
+    // absent — so an RPC that answered 429 produced an `err` event stating, as
+    // fact, that the wall's singletons have no code. That event becomes
+    // `lastError`, and the dashboard's status line ranks lastError above
+    // everything, so one rate-limited read told an owner their agent HAD STOPPED
+    // AND COULD NOT START AGAIN — permanently, until some newer error replaced
+    // it. All three contracts were deployed the whole time.
+    //
+    // The two cases are now told apart, because they have different remedies:
+    // a genuinely absent singleton means this grant can never trade, and an
+    // unreadable one means try again.
     const missingPolicyContracts: string[] = [];
+    const uncheckedPolicyContracts: string[] = [];
     for (const c of WALL_POLICY_CONTRACTS) {
-      const code = await client.getCode({ address: c.address }).catch(() => undefined);
-      // getCode returns `undefined` — not "0x" — for an address with no
-      // contract; viem normalises "0x" away. Both mean absent here, and a
-      // failed READ is indistinguishable from either, so this deliberately
-      // does not try to tell them apart: it says what it could not confirm.
+      let code: string | undefined;
+      try {
+        // viem normalises an empty result to `undefined`, so a SUCCESSFUL read
+        // of an address with no contract lands here as undefined — which is the
+        // real signal. A throw is a different fact entirely.
+        code = await client.getCode({ address: c.address });
+      } catch {
+        uncheckedPolicyContracts.push(c.name);
+        continue;
+      }
       if (code === undefined || code === "0x") missingPolicyContracts.push(`${c.name} (${c.address})`);
     }
     if (missingPolicyContracts.length > 0) {
@@ -2206,6 +2225,18 @@ async function main() {
         `the wall depends on contracts that have no code on chain ${chain.id}: ${missingPolicyContracts.join(", ")}. ` +
           `Every UserOp this grant signs will be validated against them, so live trading cannot work until this is resolved. ` +
           `Paper and every read-only surface are unaffected.`,
+      );
+    }
+    if (uncheckedPolicyContracts.length > 0) {
+      // A WARNING, not an error, and it says what it is: we could not look.
+      // Claiming the wall is broken because the chain was busy is the more
+      // expensive mistake — it stops an agent that was fine.
+      console.log(`[worker] could not check wall policy contracts: ${uncheckedPolicyContracts.join(", ")}`);
+      await addEvent(
+        agentId,
+        "warn",
+        `couldn't check the wall's contracts this time (${uncheckedPolicyContracts.join(", ")}) — the chain did not answer. ` +
+          `This says nothing about whether they are there; it retries on the next arm.`,
       );
     }
 
