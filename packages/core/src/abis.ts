@@ -112,6 +112,28 @@ export const CHAINLINK_ABI = [
     inputs: [],
     outputs: [{ type: "uint8" }],
   },
+  /**
+   * One historical round, by id.
+   *
+   * The id is PHASE-ENCODED: the high 64 bits identify the aggregator behind
+   * the proxy and the low 64 the round within it, so walking history means
+   * decrementing only the low half. Cross the phase boundary and the answers
+   * come back from a different aggregator with a different scale — which is
+   * what the magnitude guard in read-feed-history exists to catch.
+   */
+  {
+    type: "function",
+    name: "getRoundData",
+    stateMutability: "view",
+    inputs: [{ name: "_roundId", type: "uint80" }],
+    outputs: [
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" },
+    ],
+  },
 ] as const;
 
 /**

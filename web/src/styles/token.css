@@ -390,3 +390,57 @@
     grid-column: 1 / -1;
   }
 }
+
+/* ── the oracle's series ─────────────────────────────────────────────────── */
+
+.mm-tok-chart {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-priceline {
+  margin: var(--mm-4) 0 0;
+}
+
+.mm-priceline svg {
+  display: block;
+  width: 100%;
+  height: 168px;
+  overflow: visible;
+}
+
+.mm-priceline .axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--mm-3);
+  margin-top: var(--mm-2);
+  font-size: 10.5px;
+  color: var(--mm-faint);
+}
+
+.mm-priceline .axis .px {
+  color: var(--mm-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The caption is load-bearing: every other figure on this page is a market
+   number, and without it the line reads as one. */
+.mm-priceline figcaption {
+  margin-top: var(--mm-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mm-faint);
+}
+
+@media (max-width: 520px) {
+  .mm-priceline svg {
+    height: 132px;
+  }
+
+  /* The range is the first thing to go: the two dates are what orient a reader
+     and three items do not fit on a phone. */
+  .mm-priceline .axis .px {
+    display: none;
+  }
+}

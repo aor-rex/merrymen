@@ -8,9 +8,12 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { Feed } from "@/components/Feed";
 import { EntryTimeline } from "@/components/EntryTimeline";
 import { StatStrip, TimeframeGrid, FlowBars, RiskCallout } from "@/components/TokenFacts";
+import { PriceLine } from "@/components/PriceLine";
 import { readToken, TOKEN_RE } from "@/lib/read-token";
 import { readTokenMarket } from "@/lib/read-token-market";
+import { readFeedHistory } from "@/lib/read-feed-history";
 import { readTheses } from "@/lib/read-theses";
+import { STOCK_TOKENS } from "@merrymen/core";
 import "@/styles/tokens.css";
 import "@/styles/base.css";
 import "@/styles/shell.css";
@@ -99,6 +102,13 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
     if (th.slug && !saidBy.has(th.slug)) saidBy.set(th.slug, th);
   }
 
+  // THE ONLY PRICE HISTORY THIS PRODUCT CAN HONESTLY DRAW, and only stock and
+  // ETF tokens have one. Every round carries its own timestamp, so the series
+  // is observations rather than a reconstruction, and the whole walk is one
+  // multicall — measured at 710ms for 400 rounds, which was 61 days of AAPL.
+  const listed = STOCK_TOKENS.find((x) => x.address.toLowerCase() === token.toLowerCase());
+  const history = listed?.chainlinkFeed ? await readFeedHistory(listed.chainlinkFeed) : null;
+
   // The ledger only knows a symbol for a token somebody holds; the registry
   // knows every listed one. A stock token nobody has bought is still AAPL.
   const symbol = t.symbol ?? market.symbol;
@@ -130,6 +140,16 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
         {/* C — which way the tape leaned. Coins only, and only when both sides
             of a split are actually known. */}
         <FlowBars market={market} />
+
+        {/* D — the oracle's series. Stock and ETF only; a coin has no feed, and
+            a token whose registry entry carries no feed at all gets no section
+            rather than an empty axis. */}
+        {history && (
+          <section className="mm-tok-chart">
+            <h2 className="mm-kicker">What the feed published</h2>
+            <PriceLine history={history} symbol={symbol} />
+          </section>
+        )}
 
         {/* G — the thin-holder callout. Stocks only: no holder count exists for
             a curve coin, and "we could not count" is not "few". */}
