@@ -22,7 +22,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, STOCK_TOKENS } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
@@ -546,7 +546,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the fluid parser strips filler words and typos. Trade-shaped text is
     // parsed deterministically; everything else falls to parseSlash, and the
     // LLM is last — a down provider can never strand an order.
-    const fluid = fastParseTrade(msg.text ?? "");
+    // Build a set of known symbols from the stock registry plus the owner's
+    // custom tokens. When the symbol is not recognised, the fluid path
+    // refuses to park the trade — the message falls through to the LLM or
+    // a helpful error instead of guessing against a coin that doesn't exist.
+    // (Pons launch symbols will be resolved from the store in Phase 2.)
+    const knownSymbols = new Set([
+      ...STOCK_TOKENS.map((t) => t.symbol.toUpperCase()),
+      ...(cfg.customTokens ?? []).map((t) => t.symbol.toUpperCase()),
+    ]);
+    const fluid = fastParseTrade(msg.text ?? "", (s) => knownSymbols.has(s.toUpperCase()));
     let cmd = fluid ?? slash;
     // What the narrator recalled this turn — stored on the assistant's reply so
     // the thread survives a restart, not just a process lifetime.

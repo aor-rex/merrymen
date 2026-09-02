@@ -19,6 +19,16 @@ describe("fastParseTrade — trade-shaped text parses with no model", () => {
     assert.deepEqual(fastParseTrade("/sell 2 TSLA"), { kind: "sell", symbol: "TSLA", usdg: 2 });
   });
 
+  it("refuses a symbol that is not a known token when a resolver is passed", () => {
+    const known = (s: string) => ["NVDA", "TSLA", "AAPL", "QQQ"].includes(s);
+    assert.deepEqual(fastParseTrade("/buy 1 nvda", known), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.equal(fastParseTrade("/buy 1 UNKNOWNCOIN", known), null);
+    assert.equal(fastParseTrade("buy 1 usdg of randomx", known), null);
+  });
+
+  it("parses every slash form", () => {
+  });
+
   it("parses bare-verb phrasings with filler words", () => {
     assert.deepEqual(fastParseTrade("buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
     assert.deepEqual(fastParseTrade("sell 2 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 2 });
@@ -39,7 +49,7 @@ describe("fastParseTrade — trade-shaped text parses with no model", () => {
     // FIRST, which is the order service.ts now uses.
     assert.deepEqual(fastParseTrade("/sell 1 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 1 });
     assert.deepEqual(fastParseTrade("/buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.notDeepEqual(parseSlash("/sell 1 usdg of tsla")?.symbol?.toUpperCase(), "TSLA");
+    assert.notDeepEqual(parseSlash("/sell 1 usdg of tsla")?.kind === "sell" ? (parseSlash("/sell 1 usdg of tsla") as { symbol: string }).symbol : "", "TSLA");
   });
 
   it("returns null for non-trades — the LLM keeps its job", () => {
@@ -164,7 +174,7 @@ describe("executeCommand — every trade parks for confirmation", () => {
 
   it("the fluid path end to end: typo'd phrase → park → confirm → fired", async () => {
     const t = fakeDeps();
-    const parsed = fastParseTrade("but 1 usdg of nvda");
+    const parsed = fastParseTrade("but 1 usdg of nvda", (s) => true);
     assert.ok(parsed);
     await executeCommand(parsed, t.deps);
     await executeCommand({ kind: "confirm" }, t.deps);

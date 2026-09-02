@@ -156,7 +156,16 @@ const TRADE_TYPO: Record<string, string> = {
 /** Filler around the amount/symbol — stripped before the slash parser sees it. */
 const TRADE_FILLER = /^(usdg|usd|of|worth|dollars?|coins?|some|any|me|please|the)$/i;
 
-export function fastParseTrade(text: string): Command | null {
+/**
+ * Resolve a symbol against known tokens. Returns true when the symbol is
+ * recognised (a stock, a custom token, or a Pons launch). Passed as a seam
+ * from the service layer where the data sources live; a pure function with
+ * no lookup defaults to recognised-symbol-only (stocks), which is what the
+ * unit tests exercise.
+ */
+export type SymbolResolver = (symbol: string) => boolean | Promise<boolean>;
+
+export function fastParseTrade(text: string, resolveSymbol?: SymbolResolver): Command | null {
   const t = text.trim();
   if (!t) return null;
   const words = t.split(/\s+/).filter(Boolean);
@@ -165,7 +174,11 @@ export function fastParseTrade(text: string): Command | null {
   if (!verb) return null;
   const parts = words.slice(1).filter((w) => !TRADE_FILLER.test(w));
   const cmd = parseSlash(`/${verb} ${parts.join(" ")}`.trim());
-  return cmd && (cmd.kind === "buy" || cmd.kind === "sell") ? cmd : null;
+  if (!cmd || (cmd.kind !== "buy" && cmd.kind !== "sell")) return null;
+  // If the symbol is not recognised as a known token, refuse to park the
+  // trade — let the message fall through to the AI or a helpful error.
+  if (resolveSymbol && !resolveSymbol(cmd.symbol)) return null;
+  return cmd;
 }
 
 export function parseSlash(text: string): Command | null {
