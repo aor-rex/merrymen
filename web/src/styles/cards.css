@@ -24,10 +24,13 @@
   background: var(--mm-surface);
 }
 
+/* The skeleton keeps an edge, and it is the only card that does. Dashed means
+   "this did not fully happen", which is exactly what a placeholder is — and it
+   now states its own border, since the card above no longer draws one. */
 .mm-card.skel {
   min-height: 168px;
   background: var(--mm-surface-2);
-  border-style: dashed;
+  border: 1px dashed var(--mm-edge);
 }
 
 .mm-card > header {
@@ -52,7 +55,7 @@
   align-items: center;
   justify-content: center;
   font-family: var(--mm-mono);
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   font-weight: 700;
   color: var(--mm-dim);
 }
@@ -70,14 +73,14 @@
 }
 
 .mm-card .tick b {
-  font-size: 14.5px;
+  font-size: var(--mm-t-lead);
   font-weight: 700;
   letter-spacing: -0.015em;
   color: var(--mm-tx);
 }
 
 .mm-card .tick .nm {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -86,12 +89,12 @@
   flex-wrap: wrap;
   gap: var(--mm-2);
   margin-top: 3px;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
 }
 
 .mm-card .chg {
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -126,7 +129,7 @@
 }
 
 .mm-grad .glab {
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
   white-space: nowrap;
 }
@@ -135,7 +138,7 @@
 
 .mm-card .say {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-tx-2);
   display: -webkit-box;
@@ -155,7 +158,7 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--mm-2);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   color: var(--mm-tx-2);
 }
 
@@ -168,7 +171,7 @@
 
 .mm-figs i {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -189,14 +192,14 @@
 /* Marks, never a score out of five — conviction is an ORDERING, not a rating. */
 .mm-verdict .pips {
   font-family: var(--mm-mono);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   letter-spacing: 1px;
   color: var(--mm-wire);
   white-space: nowrap;
 }
 
 .mm-verdict .vsay {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   line-height: 1.5;
   color: var(--mm-tx-2);
 }
@@ -214,7 +217,7 @@
 
 .mm-card .soc {
   font-family: var(--mm-mono);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -234,7 +237,7 @@
 
 .mm-badge {
   font-family: var(--mm-mono);
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.06em;
   padding: 3px 6px;
@@ -260,7 +263,7 @@
   border: 1px solid color-mix(in srgb, var(--mm-warn) 30%, transparent);
   border-radius: var(--mm-r-chip);
   background: color-mix(in srgb, var(--mm-warn) 7%, transparent);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-warn);
 }
@@ -279,7 +282,7 @@
   min-block-size: 30px;
   padding: 0 var(--mm-3);
   border-radius: 4px;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   font-weight: 600;
   color: var(--mm-dim);
   transition:

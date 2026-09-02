@@ -53,7 +53,7 @@
   align-items: center;
   gap: var(--mm-2);
   padding: 0 var(--mm-3);
-  font-size: 15px;
+  font-size: var(--mm-t-lead);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--mm-tx);
@@ -70,7 +70,7 @@
   min-block-size: 40px;
   padding: 0 var(--mm-3);
   border-radius: var(--mm-r-chip);
-  font-size: 14px;
+  font-size: var(--mm-t-lead);
   font-weight: 550;
   color: var(--mm-dim);
   transition:
@@ -89,7 +89,7 @@
 }
 
 .mm-navlink.sub {
-  font-size: 13px;
+  font-size: var(--mm-t-body);
 }
 
 /* ── the context column ──────────────────────────────────────────────────── */
@@ -132,7 +132,7 @@
   gap: 3px;
   min-block-size: 48px;
   padding: 6px 2px;
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--mm-dim);
@@ -249,7 +249,7 @@
 
 .mm-header-txt h1 {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--mm-t-head);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--mm-tx);
@@ -257,7 +257,7 @@
 
 .mm-header-txt p {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -343,7 +343,7 @@
 }
 
 .mm-alert .who .nm {
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   font-weight: 650;
   color: var(--mm-tx);
   white-space: nowrap;
@@ -358,7 +358,7 @@
 
 .mm-alert .who time {
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
   white-space: nowrap;
 }
@@ -370,7 +370,7 @@
  * The colour already carries the meaning; the box was carrying nothing.
  */
 .mm-alert .mm-chip {
-  font-size: 9.5px;
+  font-size: var(--mm-t-micro);
   padding: 0;
   border: 0;
   background: none;
@@ -383,7 +383,7 @@
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-tx-2);
 }
 
@@ -397,7 +397,7 @@
 }
 
 .mm-alert .did .pp {
-  font-size: 9.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
   border: 1px dashed var(--mm-edge-2);
   border-radius: 4px;
@@ -406,7 +406,7 @@
 
 .mm-alert .say {
   grid-column: 2;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   line-height: 1.4;
   color: var(--mm-dim);
   display: -webkit-box;
@@ -458,13 +458,13 @@
   align-items: baseline;
   gap: 6px;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   flex: none;
 }
 
 .mm-tick .k {
   font-family: var(--mm-mono);
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -498,12 +498,12 @@
  */
 .mm-tick .stale {
   color: var(--mm-faint);
-  font-size: 9.5px;
+  font-size: var(--mm-t-micro);
 }
 
 .mm-tick .halted {
   color: var(--mm-warn);
-  font-size: 9.5px;
+  font-size: var(--mm-t-micro);
   border: 1px dashed color-mix(in srgb, var(--mm-warn) 45%, transparent);
   border-radius: 4px;
   padding: 0 3px;
@@ -582,7 +582,7 @@
   background: none;
   color: var(--mm-tx);
   font: inherit;
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
 }
 
 .mm-search input::placeholder {
@@ -591,7 +591,7 @@
 
 .mm-search kbd {
   flex: none;
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
   border: 1px solid var(--mm-edge-2);
   border-radius: 4px;
@@ -617,7 +617,7 @@
 .mm-search-pop .none {
   margin: 0;
   padding: 10px 8px;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   color: var(--mm-dim);
 }
 
@@ -629,7 +629,7 @@
   padding: 8px;
   border-radius: 5px;
   text-align: left;
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   color: var(--mm-tx);
 }
 
@@ -640,7 +640,7 @@
 .mm-search-pop .kind {
   flex: none;
   font-family: var(--mm-mono);
-  font-size: 9px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -663,7 +663,7 @@
 }
 
 .mm-search-pop .s {
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
   margin-left: auto;
   white-space: nowrap;
@@ -689,7 +689,7 @@
 }
 
 .mm-mine-book b {
-  font-size: 14px;
+  font-size: var(--mm-t-lead);
   font-weight: 700;
   color: var(--mm-tx);
   font-variant-numeric: tabular-nums;
@@ -698,7 +698,7 @@
 .mm-mine-book i {
   font-style: normal;
   font-family: var(--mm-mono);
-  font-size: 9.5px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -711,7 +711,7 @@
 .mm-btn.sm {
   min-block-size: 32px;
   padding: 0 var(--mm-3);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
 }
 
 @media (max-width: 620px) {

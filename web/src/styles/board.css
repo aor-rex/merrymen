@@ -34,7 +34,7 @@
 }
 
 .mm-board-row .rk {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
 }
 
@@ -45,14 +45,14 @@
 }
 
 .mm-board-row .who .nm {
-  font-size: 14.5px;
+  font-size: var(--mm-t-lead);
   font-weight: 650;
   letter-spacing: -0.012em;
   color: var(--mm-tx);
 }
 
 .mm-board-row .who .at {
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -64,7 +64,7 @@
  * heading is a list of names.
  */
 .mm-board-row .pnl {
-  font-size: 23px;
+  font-size: var(--mm-t-fig);
   font-weight: 700;
   letter-spacing: -0.02em;
   text-align: right;
@@ -83,14 +83,14 @@
 /* A word is not a figure and must never be sized like one. */
 .mm-board-row .pnl.flat {
   color: var(--mm-dim);
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   font-weight: 600;
   letter-spacing: 0;
 }
 
 .mm-board-row .dd,
 .mm-board-row .tr {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
   text-align: right;
   white-space: nowrap;
@@ -111,7 +111,7 @@
 .mm-unranked > p {
   margin: var(--mm-2) 0 var(--mm-4);
   max-width: 58ch;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   line-height: 1.6;
   color: var(--mm-dim);
 }
