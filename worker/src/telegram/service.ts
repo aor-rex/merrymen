@@ -723,7 +723,8 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
     // Handle bare number replies to "how much to buy?" prompts
     if (!cmd && askAmountCtx.has(msg.chatId)) {
       const ctx = askAmountCtx.get(msg.chatId)!;
-      const num = Number(msg.text?.trim());
+      const cleaned = (msg.text ?? "").trim().replace(/^usdg|usd$/i, "").replace(/(usdg|usd)$/i, "");
+      const num = Number(cleaned);
       if (Number.isFinite(num) && num > 0) {
         cmd = { kind: ctx.side, symbol: ctx.symbol, usdg: Math.round(num) };
         await pushHistory(msg.chatId, "user", msg.text);
