@@ -37,7 +37,7 @@ const ROUTE =
  * checks its empty states in, not to the file that happened to hold them.
  */
 const CARDS = readFileSync(new URL("../../../components/TokenCards.tsx", import.meta.url), "utf8");
-const PAGE = readFileSync(new URL("../../tokens/TokensClient.tsx", import.meta.url), "utf8");
+const PAGE = readFileSync(new URL("../../(app)/tokens/TokensClient.tsx", import.meta.url), "utf8");
 
 describe("an unread coin is not accused of silence", () => {
   it("`bare` defaults to FALSE when the metadata read failed", () => {

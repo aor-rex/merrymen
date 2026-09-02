@@ -30,11 +30,11 @@ const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 const PAGE = at("./page.tsx");
-const FACTS = at("../../../components/TokenFacts.tsx");
+const FACTS = at("../../../../components/TokenFacts.tsx");
 const FACTS_CODE = code(FACTS);
-const TIMELINE = at("../../../components/EntryTimeline.tsx");
-const READ_TOKEN = at("../../../lib/read-token.ts");
-const MARKET = at("../../../lib/market.ts");
+const TIMELINE = at("../../../../components/EntryTimeline.tsx");
+const READ_TOKEN = at("../../../../lib/read-token.ts");
+const MARKET = at("../../../../lib/market.ts");
 
 describe("the strip only prints figures it has", () => {
   it("calls fully-diluted value FDV, never market cap", () => {
@@ -176,8 +176,8 @@ describe("the page is dynamic, because its data can be degraded", () => {
 });
 
 describe("a token page does not wait for the discovery panel", () => {
-  const MARKET = at("../../../lib/read-token-market.ts");
-  const DISC = at("../../../lib/read-discoveries.ts");
+  const MARKET = at("../../../../lib/read-token-market.ts");
+  const DISC = at("../../../../lib/read-discoveries.ts");
 
   it("reads the pools, not the built payload", () => {
     // Building the panel sweeps the launchpad over chain logs, makes three

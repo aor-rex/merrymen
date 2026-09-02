@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -139,7 +138,7 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
   const kindLabel = market.kind === "memecoin" ? (market.coin?.venue ?? "coin") : market.kind;
 
   return (
-    <AppShell>
+    <>
       <LiveRefresh />
       <PageHeader
         title={symbol ?? "Token"}
@@ -350,6 +349,6 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
           )}
         </section>
       </div>
-    </AppShell>
+    </>
   );
 }

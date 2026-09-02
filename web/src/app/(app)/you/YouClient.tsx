@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { Sparkline } from "@/components/Sparkline";
@@ -126,7 +125,7 @@ export function YouClient() {
 
   if (loading) {
     return (
-      <AppShell>
+      <>
         <PageHeader title="You" />
         <div className="mm-wrap">
           <div className="mm-skel">
@@ -137,13 +136,13 @@ export function YouClient() {
             </div>
           </div>
         </div>
-      </AppShell>
+      </>
     );
   }
 
   if (!hasAgent) {
     return (
-      <AppShell>
+      <>
         <PageHeader title="You" />
         <div className="mm-wrap">
           <div className="mm-empty">
@@ -160,7 +159,7 @@ export function YouClient() {
             </p>
           </div>
         </div>
-      </AppShell>
+      </>
     );
   }
 
@@ -208,7 +207,7 @@ export function YouClient() {
   const tone = pnl === null ? "flat" : pnl >= 0 ? "up" : "down";
 
   return (
-    <AppShell>
+    <>
       <PageHeader
         title={name}
         sub={<span className="mono">{[grants?.mode, feed?.agent?.strategy].filter(Boolean).join(" · ")}</span>}
@@ -324,7 +323,7 @@ export function YouClient() {
           </div>
         </section>
       </div>
-    </AppShell>
+    </>
   );
 }
 

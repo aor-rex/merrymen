@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -27,7 +26,7 @@ export default async function LeaderboardPage() {
   const unranked = board.agents.filter((a) => a.pnlBps === null);
 
   return (
-    <AppShell>
+    <>
       <LiveRefresh intervalMs={60_000} />
       <PageHeader title="Leaderboard" sub="Live agents only — a ranking of returns cannot mix in pretend money." />
       <div className="mm-wrap">
@@ -73,7 +72,7 @@ export default async function LeaderboardPage() {
           </>
         )}
       </div>
-    </AppShell>
+    </>
   );
 }
 

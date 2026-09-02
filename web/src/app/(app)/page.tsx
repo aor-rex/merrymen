@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { AppShell } from "@/components/shell/AppShell";
 import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { Feed } from "@/components/Feed";
@@ -38,7 +37,7 @@ export default async function FeedPage() {
   const turned = tape.counts.turned;
 
   return (
-    <AppShell>
+    <>
       <LiveRefresh />
       <PageHeader title="Feed" />
 
@@ -68,6 +67,6 @@ export default async function FeedPage() {
         )}
         <Feed read={read} />
       </div>
-    </AppShell>
+    </>
   );
 }

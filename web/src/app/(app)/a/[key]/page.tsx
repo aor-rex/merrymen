@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -85,7 +84,7 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
   }
 
   return (
-    <AppShell>
+    <>
       <LiveRefresh />
       <PageHeader
         title={a.name}
@@ -190,7 +189,7 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
           />
         </section>
       </div>
-    </AppShell>
+    </>
   );
 }
 

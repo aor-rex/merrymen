@@ -29,10 +29,10 @@ const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 const PAGE = at("./page.tsx");
-const READ = at("../../../lib/read-agent.ts");
+const READ = at("../../../../lib/read-agent.ts");
 const READ_CODE = code(READ);
-const GROWTH = at("../../../lib/growth-index.ts");
-const TAPE = at("../../../lib/read-wall-tape.ts");
+const GROWTH = at("../../../../lib/growth-index.ts");
+const TAPE = at("../../../../lib/read-wall-tape.ts");
 
 describe("a return is published under one rule, not two", () => {
   it("the profile uses the same gate as the leaderboard", () => {
