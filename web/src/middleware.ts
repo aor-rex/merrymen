@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { GATE_COOKIE, GATE_PATH, gatePassword, isGatedPath, sameSecret } from "@/lib/site-gate";
 
 /**
  * The dashboard has NO login and can move real funds (/api/recover sweeps to any
@@ -69,14 +70,56 @@ function hostAllowed(hostHeader: string | null): boolean {
 const HOSTED = ["1", "true", "yes"].includes((process.env.MERRYMEN_HOSTED ?? "").trim().toLowerCase());
 
 export function middleware(req: NextRequest) {
-  if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
-    return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
+  const { pathname } = req.nextUrl;
+
+  // ── the two API guards, unchanged and still API-only ────────────────────
+  //
+  // The matcher below now sees pages as well, so these are scoped explicitly.
+  // Applying the host allowlist to a PAGE would newly refuse a self-hosted
+  // install reached over a LAN or a domain — a behaviour change nobody asked
+  // for, hidden inside a change about a holding page.
+  if (pathname.startsWith("/api/")) {
+    if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
+      return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
+    }
+    const site = req.headers.get("sec-fetch-site");
+    if (site && site !== "same-origin" && site !== "none") {
+      return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
+    }
+    return NextResponse.next();
   }
-  const site = req.headers.get("sec-fetch-site");
-  if (site && site !== "same-origin" && site !== "none") {
-    return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
-  }
-  return NextResponse.next();
+
+  // ── the holding page ────────────────────────────────────────────────────
+  //
+  // OFF UNLESS A PASSWORD IS SET, which is what keeps every local and
+  // self-hosted install exactly as it was. It is a notice with a doorknob,
+  // not authentication: one password for everyone, no session, and the
+  // things here that actually move money are guarded by the signed-session
+  // checks inside each route handler, which this neither replaces nor
+  // strengthens.
+  const expected = gatePassword();
+  if (!expected || !isGatedPath(pathname)) return NextResponse.next();
+
+  const held = req.cookies.get(GATE_COOKIE)?.value ?? "";
+  if (sameSecret(held, expected)) return NextResponse.next();
+
+  const to = req.nextUrl.clone();
+  to.pathname = GATE_PATH;
+  // Where they were going is not carried through. It would put the visitor's
+  // destination in a query string for no gain, and everything behind this
+  // door is being rebuilt anyway.
+  to.search = "";
+  return NextResponse.redirect(to);
 }
 
-export const config = { matcher: "/api/:path*" };
+/**
+ * Pages and the API, but never the framework's own assets.
+ *
+ * Gate /_next and the holding page renders unstyled; gate the API and a live
+ * fleet stops — Telegram posts webhooks to it and the browser calls it after
+ * every page load. isGatedPath() draws the same line again for the paths this
+ * pattern cannot express.
+ */
+export const config = {
+  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico).*)"],
+};
