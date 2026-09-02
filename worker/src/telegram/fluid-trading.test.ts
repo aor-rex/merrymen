@@ -13,59 +13,64 @@ import { executeCommand, type CommandDeps, type PendingAction } from "./executor
  */
 
 describe("fastParseTrade — trade-shaped text parses with no model", () => {
-  it("parses every slash form", () => {
-    assert.deepEqual(fastParseTrade("/buy 1 nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.deepEqual(fastParseTrade("/buy NVDA 1"), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.deepEqual(fastParseTrade("/sell 2 TSLA"), { kind: "sell", symbol: "TSLA", usdg: 2 });
+  it("parses every slash form", async () => {
+    assert.deepEqual(await fastParseTrade("/buy 1 nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/buy NVDA 1"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/sell 2 TSLA"), { kind: "sell", symbol: "TSLA", usdg: 2 });
   });
 
-  it("refuses a symbol that is not a known token when a resolver is passed", () => {
-    const known = (s: string) => ["NVDA", "TSLA", "AAPL", "QQQ"].includes(s);
-    assert.deepEqual(fastParseTrade("/buy 1 nvda", known), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.equal(fastParseTrade("/buy 1 UNKNOWNCOIN", known), null);
-    assert.equal(fastParseTrade("buy 1 usdg of randomx", known), null);
+  it("refuses a symbol that is not a known token when a resolver is passed", async () => {
+    const known = async (s: string) => ["NVDA", "TSLA", "AAPL", "QQQ"].includes(s);
+    assert.deepEqual(await fastParseTrade("/buy 1 nvda", known), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.equal(await fastParseTrade("/buy 1 UNKNOWNCOIN", known), null);
+    assert.equal(await fastParseTrade("buy 1 usdg of randomx", known), null);
   });
 
-  it("parses every slash form", () => {
+  it("resolves a Pons launch symbol through the async resolver", async () => {
+    const ponsSet = new Set(["POTAM", "PIPEC", "VTSI", "GALIKA"]);
+    const resolver = async (s: string) => ponsSet.has(s.toUpperCase());
+    assert.deepEqual(await fastParseTrade("/buy 1 potam", resolver), { kind: "buy", symbol: "POTAM", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/buy 1 pipec", resolver), { kind: "buy", symbol: "PIPEC", usdg: 1 });
+    assert.equal(await fastParseTrade("/buy 1 NOTAPONSCOIN", resolver), null);
   });
 
-  it("parses bare-verb phrasings with filler words", () => {
-    assert.deepEqual(fastParseTrade("buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.deepEqual(fastParseTrade("sell 2 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 2 });
-    assert.deepEqual(fastParseTrade("buy nvda 1"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+  it("parses bare-verb phrasings with filler words", async () => {
+    assert.deepEqual(await fastParseTrade("buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("sell 2 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 2 });
+    assert.deepEqual(await fastParseTrade("buy nvda 1"), { kind: "buy", symbol: "NVDA", usdg: 1 });
   });
 
-  it("corrects the one-key thumb typos", () => {
-    assert.deepEqual(fastParseTrade("but 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
-    assert.deepEqual(fastParseTrade("byu 2 nvda"), { kind: "buy", symbol: "NVDA", usdg: 2 });
-    assert.deepEqual(fastParseTrade("/buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+  it("corrects the one-key thumb typos", async () => {
+    assert.deepEqual(await fastParseTrade("but 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("byu 2 nvda"), { kind: "buy", symbol: "NVDA", usdg: 2 });
+    assert.deepEqual(await fastParseTrade("/buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
   });
 
-  it("WINS over parseSlash: filler words are stripped, not read as symbols", () => {
+  it("WINS over parseSlash: filler words are stripped, not read as symbols", async () => {
     // THE BUG THIS LOCKS. parseSlash reads the "usdg" in "/sell 1 usdg of
     // tsla" as the SYMBOL (it matches the ticker shape), producing a
     // nonsense USDG-for-USDG swap that would burn gas reaching the wall.
     // The fluid parse strips filler and gets TSLA — and it must be asked
     // FIRST, which is the order service.ts now uses.
-    assert.deepEqual(fastParseTrade("/sell 1 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 1 });
-    assert.deepEqual(fastParseTrade("/buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/sell 1 usdg of tsla"), { kind: "sell", symbol: "TSLA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/buy 1 usdg of nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
     assert.notDeepEqual(parseSlash("/sell 1 usdg of tsla")?.kind === "sell" ? (parseSlash("/sell 1 usdg of tsla") as { symbol: string }).symbol : "", "TSLA");
   });
 
-  it("returns null for non-trades — the LLM keeps its job", () => {
-    assert.equal(fastParseTrade("/status"), null);
-    assert.equal(fastParseTrade("what's my pnl?"), null);
-    assert.equal(fastParseTrade("buy 1 usdg of any coin"), null, "no symbol → not a trade");
-    assert.equal(fastParseTrade("buy"), null);
-    assert.equal(fastParseTrade(""), null);
-    assert.equal(fastParseTrade("buy 0 nvda"), null, "zero amount is not a trade");
+  it("returns null for non-trades — the LLM keeps its job", async () => {
+    assert.equal(await fastParseTrade("/status"), null);
+    assert.equal(await fastParseTrade("what's my pnl?"), null);
+    assert.equal(await fastParseTrade("buy 1 usdg of any coin"), null, "no symbol → not a trade");
+    assert.equal(await fastParseTrade("buy"), null);
+    assert.equal(await fastParseTrade(""), null);
+    assert.equal(await fastParseTrade("buy 0 nvda"), null, "zero amount is not a trade");
   });
 
-  it("never returns a non-trade kind even from a slash", () => {
+  it("never returns a non-trade kind even from a slash", async () => {
     // /pause IS a real slash command — parseSlash handles it. The fluid path
     // must simply refuse it: trading verbs only, or the LLM keeps its job.
-    assert.equal(fastParseTrade("/pause"), null);
-    assert.equal(fastParseTrade("/help"), null);
+    assert.equal(await fastParseTrade("/pause"), null);
+    assert.equal(await fastParseTrade("/help"), null);
     assert.deepEqual(parseSlash("/pause"), { kind: "pause" });
   });
 });
@@ -174,7 +179,7 @@ describe("executeCommand — every trade parks for confirmation", () => {
 
   it("the fluid path end to end: typo'd phrase → park → confirm → fired", async () => {
     const t = fakeDeps();
-    const parsed = fastParseTrade("but 1 usdg of nvda", (s) => true);
+    const parsed = await fastParseTrade("but 1 usdg of nvda", async (s) => true);
     assert.ok(parsed);
     await executeCommand(parsed, t.deps);
     await executeCommand({ kind: "confirm" }, t.deps);

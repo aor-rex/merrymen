@@ -62,7 +62,7 @@ import {
   identityBlock,
   recallForPrompt,
 } from "../soul";
-import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
+import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns, recentCandidates } from "../store";
 import { describeGap } from "../memory/retrieve";
 
 export interface TelegramServiceDeps {
@@ -546,16 +546,29 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the fluid parser strips filler words and typos. Trade-shaped text is
     // parsed deterministically; everything else falls to parseSlash, and the
     // LLM is last — a down provider can never strand an order.
-    // Build a set of known symbols from the stock registry plus the owner's
-    // custom tokens. When the symbol is not recognised, the fluid path
-    // refuses to park the trade — the message falls through to the LLM or
-    // a helpful error instead of guessing against a coin that doesn't exist.
-    // (Pons launch symbols will be resolved from the store in Phase 2.)
+    // Build a set of known symbols: stock registry + owner's custom tokens.
+    // This is the synchronous fast path; the async Pons feed check follows.
     const knownSymbols = new Set([
       ...STOCK_TOKENS.map((t) => t.symbol.toUpperCase()),
       ...(cfg.customTokens ?? []).map((t) => t.symbol.toUpperCase()),
     ]);
-    const fluid = fastParseTrade(msg.text ?? "", (s) => knownSymbols.has(s.toUpperCase()));
+    // Composite resolver: fast (stocks + custom tokens) first, then async
+    // Pons launch feed lookup — so a recently discovered memecoin can be
+    // traded by name without adding it to /settings.
+    let ponsSymbols: Set<string> | null = null;
+    const resolveSymbol = async (s: string): Promise<boolean> => {
+      if (knownSymbols.has(s.toUpperCase())) return true;
+      if (ponsSymbols === null) {
+        try {
+          const candidates = await recentCandidates(86_400, 200);
+          ponsSymbols = new Set(candidates.map((c) => c.symbol.toUpperCase()));
+        } catch {
+          ponsSymbols = new Set();
+        }
+      }
+      return ponsSymbols.has(s.toUpperCase());
+    };
+    const fluid = await fastParseTrade(msg.text ?? "", resolveSymbol);
     let cmd = fluid ?? slash;
     // What the narrator recalled this turn — stored on the assistant's reply so
     // the thread survives a restart, not just a process lifetime.

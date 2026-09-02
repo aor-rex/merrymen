@@ -165,7 +165,7 @@ const TRADE_FILLER = /^(usdg|usd|of|worth|dollars?|coins?|some|any|me|please|the
  */
 export type SymbolResolver = (symbol: string) => boolean | Promise<boolean>;
 
-export function fastParseTrade(text: string, resolveSymbol?: SymbolResolver): Command | null {
+export async function fastParseTrade(text: string, resolveSymbol?: SymbolResolver): Promise<Command | null> {
   const t = text.trim();
   if (!t) return null;
   const words = t.split(/\s+/).filter(Boolean);
@@ -177,7 +177,7 @@ export function fastParseTrade(text: string, resolveSymbol?: SymbolResolver): Co
   if (!cmd || (cmd.kind !== "buy" && cmd.kind !== "sell")) return null;
   // If the symbol is not recognised as a known token, refuse to park the
   // trade — let the message fall through to the AI or a helpful error.
-  if (resolveSymbol && !resolveSymbol(cmd.symbol)) return null;
+  if (resolveSymbol && !(await resolveSymbol(cmd.symbol))) return null;
   return cmd;
 }
 
