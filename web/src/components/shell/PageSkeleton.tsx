@@ -20,7 +20,20 @@ import "@/styles/feed.css";
  * replaces it produces a jolt on arrival, and a jolt reads as slower than the
  * wait it was meant to hide.
  */
-export function PageSkeleton({ lines = 3 }: { lines?: number }) {
+export function PageSkeleton({
+  lines = 3,
+  strip = 4,
+}: {
+  lines?: number;
+  /**
+   * How many figures the page opens with, or 0 for none.
+   *
+   * A fixed four matched the token page and nothing else, which is the jolt
+   * this component exists to avoid: a placeholder that does not match what
+   * replaces it reads as slower than the wait it was meant to hide.
+   */
+  strip?: number;
+}) {
   return (
     <div className="mm-wrap" aria-busy="true" aria-live="polite">
       <span className="mm-sr">Loading</span>
@@ -31,12 +44,14 @@ export function PageSkeleton({ lines = 3 }: { lines?: number }) {
         <i className="s" />
       </div>
 
-      {/* Four figures, the shape both rebuilt pages open with. */}
-      <div className="mm-skel-strip">
-        {[0, 1, 2, 3].map((i) => (
-          <i key={i} />
-        ))}
-      </div>
+      {/* The figures this particular page opens with, when it opens with any. */}
+      {strip > 0 && (
+        <div className="mm-skel-strip">
+          {Array.from({ length: strip }, (_, i) => (
+            <i key={i} />
+          ))}
+        </div>
+      )}
 
       {/* Then a run of rows, whatever the page's list happens to be. */}
       {Array.from({ length: lines }, (_, i) => (
