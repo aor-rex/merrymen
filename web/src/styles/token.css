@@ -2,10 +2,16 @@
  * The token page. Scoped under .mm, enforced by styles/scoped.test.ts.
  */
 
+/*
+ * SPACE, NOT A RULE.
+ *
+ * Five full-width hairlines stacked down this page, plus one per holder row —
+ * sixteen rules on a ten-holder coin. A section is announced by its kicker and
+ * its gap; the line was saying the same thing a third time.
+ */
 .mm-tok-when,
 .mm-tok-holders {
-  padding: var(--mm-5) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-6) 0 var(--mm-5);
 }
 
 /* ── the entry timeline ──────────────────────────────────────────────────── */
@@ -48,7 +54,7 @@
   display: flex;
   justify-content: space-between;
   margin-top: var(--mm-2);
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
 }
 
@@ -66,8 +72,9 @@
   padding: 0;
 }
 
+/* No per-row rule: ten holders drew ten lines through the reasoning. */
 .mm-holders li {
-  border-bottom: 1px solid var(--mm-edge);
+  padding-bottom: var(--mm-2);
 }
 
 .mm-holders li > .row {
@@ -95,7 +102,7 @@
   padding: 0 var(--mm-2);
   /* Aligned under the name, not the avatar — it is that agent's speech. */
   padding-left: calc(28px + var(--mm-3) + var(--mm-2));
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-tx-2);
   display: -webkit-box;
@@ -139,13 +146,13 @@
 }
 
 .mm-holders .who .nm {
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   font-weight: 650;
   color: var(--mm-tx);
 }
 
 .mm-holders .who .at {
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -157,7 +164,7 @@
 .mm-holders .val {
   min-width: 84px;
   text-align: right;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   font-weight: 600;
   color: var(--mm-tx-2);
   white-space: nowrap;
@@ -166,7 +173,7 @@
 .mm-holders .basis {
   min-width: 104px;
   text-align: right;
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
   white-space: nowrap;
 }
@@ -174,7 +181,7 @@
 .mm-holders .chg {
   min-width: 60px;
   text-align: right;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   font-weight: 700;
 }
 
@@ -220,8 +227,15 @@
 
 /* ── the stat strip, the timeframe grid, the flow bars ────────────────────── */
 
-.mm-tok-facts,
-.mm-tok-flow {
+/*
+ * THE ONE RULE ON THE PAGE, under the figures at the top. It separates the
+ * market's account of this token from the agents' — everything below is
+ * spaced instead.
+ *
+ * .mm-tok-flow went with the border: nothing renders it. The component
+ * emits .mm-tok-flowbars, so this selector had been dead since it shipped.
+ */
+.mm-tok-facts {
   padding: var(--mm-5) 0;
   border-bottom: 1px solid var(--mm-edge);
 }
@@ -249,7 +263,7 @@
 }
 
 .mm-tok-cell dt {
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -257,7 +271,7 @@
 
 .mm-tok-cell dd {
   margin: 2px 0 0;
-  font-size: 14.5px;
+  font-size: var(--mm-t-lead);
   font-weight: 650;
   color: var(--mm-tx);
   /* A figure broken over two lines reads as two numbers. */
@@ -268,7 +282,7 @@
 /* A word standing in for a figure — "no feed", "pre-graduation". It is an
    answer, not a number, so it does not wear the figure's weight. */
 .mm-tok-cell dd .soft {
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   font-weight: 500;
   color: var(--mm-dim);
 }
@@ -305,7 +319,7 @@
 }
 
 .mm-tok-bar .lab {
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -313,7 +327,7 @@
 
 .mm-tok-bar .lo,
 .mm-tok-bar .hi {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -358,7 +372,7 @@
   padding: var(--mm-3);
   border: 1px solid var(--mm-edge-2);
   border-radius: var(--mm-r-chip);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-dim);
 }
@@ -378,7 +392,7 @@
   }
 
   .mm-tok-tf dt {
-    font-size: 9.5px;
+    font-size: var(--mm-t-micro);
   }
 
   .mm-tok-bar {
@@ -394,8 +408,7 @@
 /* ── the oracle's series ─────────────────────────────────────────────────── */
 
 .mm-tok-chart {
-  padding: var(--mm-5) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-6) 0 var(--mm-5);
 }
 
 .mm-priceline {
@@ -415,7 +428,7 @@
   align-items: baseline;
   gap: var(--mm-3);
   margin-top: var(--mm-2);
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
 }
 
@@ -428,7 +441,7 @@
    number, and without it the line reads as one. */
 .mm-priceline figcaption {
   margin-top: var(--mm-3);
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   line-height: 1.5;
   color: var(--mm-faint);
 }
@@ -466,7 +479,7 @@
  */
 .mm-chart-note {
   margin: var(--mm-3) 0 0;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   line-height: 1.5;
   color: var(--mm-faint);
 }

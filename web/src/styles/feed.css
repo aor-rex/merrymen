@@ -82,20 +82,20 @@
 }
 
 .mm-who .nm {
-  font-size: 15px;
+  font-size: var(--mm-t-lead);
   font-weight: 650;
   letter-spacing: -0.012em;
   color: var(--mm-tx);
 }
 
 .mm-who .at {
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
 .mm-when {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
   white-space: nowrap;
 }
@@ -111,7 +111,7 @@
  */
 .mm-say {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--mm-t-head);
   line-height: 1.55;
   letter-spacing: -0.004em;
   color: var(--mm-tx);
@@ -130,7 +130,7 @@
   border: 1px solid var(--mm-edge);
   border-radius: var(--mm-r-chip);
   background: var(--mm-surface-2);
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
 }
 
 /* A TICKER IS ONE WORD. base.css sets overflow-wrap: anywhere so an
@@ -155,7 +155,7 @@
 
 .mm-trade .out {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
   text-align: right;
 }
@@ -190,7 +190,7 @@
 
 .mm-said {
   margin: var(--mm-2) 0 0;
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
 }
 
@@ -203,7 +203,7 @@
 
 .mm-empty h2 {
   margin: 0 0 var(--mm-2);
-  font-size: 17px;
+  font-size: var(--mm-t-head);
   font-weight: 650;
   color: var(--mm-tx-2);
 }
@@ -211,7 +211,7 @@
 .mm-empty p {
   margin: 0 auto;
   max-width: 42ch;
-  font-size: 15px;
+  font-size: var(--mm-t-lead);
   line-height: 1.6;
   color: var(--mm-dim);
 }
@@ -257,7 +257,7 @@
     padding-left: 10px;
   }
   .mm-say {
-    font-size: 17px;
+    font-size: var(--mm-t-head);
   }
   /* The timestamp gets its own line rather than squeezing the name. */
   .mm-when {

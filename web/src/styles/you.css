@@ -40,14 +40,14 @@
 
 .mm-status .head {
   margin: 0;
-  font-size: 14.5px;
+  font-size: var(--mm-t-lead);
   font-weight: 600;
   color: var(--mm-tx);
 }
 
 .mm-status .next {
   margin: 2px 0 0;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-dim);
 }
@@ -77,7 +77,7 @@
 
 .mm-hero-pnl {
   margin-left: auto;
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   font-weight: 700;
   text-align: right;
 }
@@ -91,7 +91,7 @@
 .mm-hero-pnl .flat {
   color: var(--mm-dim);
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
 }
 
 .mm-hero .mm-spark {
@@ -115,7 +115,7 @@
 
 .mm-slice dd {
   margin: var(--mm-1) 0 0;
-  font-size: 16px;
+  font-size: var(--mm-t-lead);
   font-weight: 700;
   color: var(--mm-tx);
 }
@@ -143,7 +143,7 @@
   gap: var(--mm-2);
   padding: 7px 0;
   border-bottom: 1px solid var(--mm-edge);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   color: var(--mm-tx-2);
 }
 
@@ -153,7 +153,7 @@
 }
 
 .mm-tape .s {
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -167,7 +167,7 @@
 }
 
 .mm-tape .w {
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
   white-space: nowrap;
 }
@@ -210,7 +210,7 @@
   background: color-mix(in srgb, var(--mm-down) 14%, transparent);
   color: var(--mm-down);
   font-family: var(--mm-sans);
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   font-weight: 700;
   letter-spacing: 0.02em;
   transition: background-color var(--mm-fast) var(--mm-ease);
@@ -236,7 +236,7 @@
 
 .mm .killall-note {
   margin: var(--mm-2) 0 0;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   line-height: 1.55;
   color: var(--mm-faint);
 }

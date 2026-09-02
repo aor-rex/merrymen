@@ -12,8 +12,7 @@
 /* Deliberately NOT --mm-warn. The wall band directly above is amber, and eight
    amber rows beneath it turn a masthead colour into a table treatment. */
 .mm-agent-lanes {
-  padding: var(--mm-4) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-4) 0 var(--mm-5);
 }
 
 .mm-agent-lanes ul {
@@ -27,20 +26,19 @@
   align-items: baseline;
   gap: var(--mm-3);
   padding: 3px 0;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
 }
 
 .mm-agent-lanes .lab {
   color: var(--mm-tx-2);
 }
 
-/* A dotted leader, so a two-item row still reads as a table. */
+/* No leader. A right-aligned tabular figure already aligns with the one
+   above it, and the dots were a rule per row in a list about refusals. */
 .mm-agent-lanes li::before {
   content: "";
   order: 1;
   flex: 1;
-  border-bottom: 1px dotted var(--mm-edge-2);
-  transform: translateY(-3px);
 }
 
 .mm-agent-lanes .n {
@@ -51,7 +49,7 @@
 
 .mm-agent-lanes .rest {
   margin: var(--mm-2) 0 0;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
 }
 
@@ -59,7 +57,7 @@
 
 .mm-agent-how {
   margin: var(--mm-4) 0 0;
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -72,19 +70,33 @@
   margin: var(--mm-5) 0 0;
 }
 
+/*
+ * NO BOXES. Four bordered tiles in a row is sixteen edges to separate four
+ * numbers that a grid already separates. The label above each figure is the
+ * only delimiter a stat row needs.
+ */
 .mm-stat {
-  padding: var(--mm-3);
-  border: 1px solid var(--mm-edge);
-  border-radius: var(--mm-r-chip);
-  background: var(--mm-surface);
+  padding: 0;
 }
 
+/*
+ * ONE SIZE FOR A FIGURE, and the first cell is the hero.
+ *
+ * All four sat at 19px, so the return — the thing the page is about — was
+ * the same weight as the count of trades that were turned back.
+ */
 .mm-stat dd {
   margin: var(--mm-1) 0 0;
-  font-size: 19px;
+  font-size: var(--mm-t-lead);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--mm-tx);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The first figure in the strip leads: it is what the page is about. */
+.mm-stats > .mm-stat:first-child dd {
+  font-size: 30px;
 }
 
 .mm-stat dd.up {
@@ -95,21 +107,20 @@
 }
 /* "unranked" is a word and must not be sized like a figure. */
 .mm-stat dd.flat {
-  font-size: 14px;
+  font-size: var(--mm-t-lead);
   font-weight: 600;
   color: var(--mm-dim);
 }
 
 .mm-stat p {
   margin: var(--mm-1) 0 0;
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   line-height: 1.4;
   color: var(--mm-faint);
 }
 
 .mm-equity-wrap {
-  padding: var(--mm-5) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-6) 0 var(--mm-5);
 }
 
 .mm-equity {
@@ -129,7 +140,7 @@
   align-items: baseline;
   gap: var(--mm-3);
   margin-top: var(--mm-2);
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
 }
 
@@ -148,7 +159,7 @@
    balance, and takes the axis for wall-clock time. */
 .mm-equity figcaption {
   margin-top: var(--mm-3);
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   line-height: 1.5;
   color: var(--mm-faint);
 }
@@ -167,7 +178,7 @@
 .mm-note {
   margin: var(--mm-2) 0 0;
   max-width: 58ch;
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   line-height: 1.6;
   color: var(--mm-dim);
 }
@@ -179,9 +190,8 @@
 }
 
 .mm-holdlist li {
-  padding: var(--mm-3) 0;
-  border-bottom: 1px solid var(--mm-edge);
-  font-size: 13px;
+  padding: var(--mm-3) 0 var(--mm-4);
+  font-size: var(--mm-t-body);
 }
 
 .mm-holdlist .row {
@@ -198,7 +208,7 @@
   flex-wrap: wrap;
   gap: var(--mm-1) var(--mm-3);
   margin: 3px 0 0;
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
 }
 
@@ -216,7 +226,7 @@
 /* THE LINE NO OTHER HOLDINGS TABLE HAS: why it says it is in this. */
 .mm-holdlist .said {
   margin: var(--mm-2) 0 0;
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   line-height: 1.55;
   color: var(--mm-tx-2);
   display: -webkit-box;
@@ -254,7 +264,7 @@
 .mm-holdlist .share {
   min-width: 82px;
   text-align: right;
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-faint);
   white-space: nowrap;
 }

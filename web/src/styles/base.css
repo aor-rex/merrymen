@@ -15,7 +15,7 @@
   background: var(--mm-bg);
   color: var(--mm-tx);
   font-family: var(--mm-sans);
-  font-size: 15px;
+  font-size: var(--mm-t-lead);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -104,7 +104,7 @@
 
 .mm-kicker {
   font-family: var(--mm-mono);
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.17em;
   text-transform: uppercase;
@@ -118,7 +118,7 @@
   align-items: center;
   gap: var(--mm-1);
   font-family: var(--mm-mono);
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -185,7 +185,7 @@
   border: 1px solid var(--mm-edge-2);
   background: var(--mm-surface-2);
   color: var(--mm-tx);
-  font-size: 13.5px;
+  font-size: var(--mm-t-body);
   font-weight: 600;
   transition:
     background-color var(--mm-fast) var(--mm-ease),

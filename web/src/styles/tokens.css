@@ -150,6 +150,26 @@ body {
   /* ── motion ──────────────────────────────────────────────────────────── */
   --mm-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --mm-fast: 140ms;
+
+  /* ── type: one scale, seven steps ──────────────────────────────────────
+   *
+   * The .mm sheets had 27 distinct font sizes, nine of them fractional —
+   * 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5 — each chosen once, in isolation,
+   * to look right next to whatever was beside it that day. The result reads
+   * as noise: a page where nothing is quite the same size as anything else
+   * has no hierarchy, only variety.
+   *
+   * Seven steps, and a rule for each. Anything at or above 24px is a DISPLAY
+   * size and keeps its own value: those are set against a pixel typeface and
+   * a canvas rather than against body copy.
+   */
+  --mm-t-micro: 10px; /* kickers, chips, axis labels — said, not read */
+  --mm-t-meta: 11.5px; /* captions, notes, the qualifying sentence */
+  --mm-t-body: 13px; /* rows, lists, holdings, the reasoning */
+  --mm-t-lead: 15px; /* emphasis, a figure that is not the figure */
+  --mm-t-head: 18px; /* a section's name, a card's title */
+  --mm-t-fig: 23px; /* a figure worth reading across the page */
+  --mm-t-hero: 30px; /* the one number a page exists to publish */
 }
 
 

@@ -30,7 +30,7 @@
   margin: var(--mm-6) 0 var(--mm-3);
   padding-bottom: var(--mm-2);
   border-bottom: 1px solid var(--mm-edge);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -38,7 +38,7 @@
 
 .mm-subtle {
   margin: var(--mm-3) 0 var(--mm-1);
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mm-faint);
@@ -76,14 +76,14 @@
 
 .mm-label {
   font-family: var(--mm-mono);
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mm-faint);
 }
 
 .mm-getkey {
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-wire);
 }
 
@@ -118,7 +118,7 @@
   background: transparent;
   color: var(--mm-tx);
   font-family: var(--mm-mono);
-  font-size: 14px;
+  font-size: var(--mm-t-lead);
   font-weight: 600;
 }
 
@@ -141,14 +141,14 @@
 .mm-unit {
   flex: none;
   font-family: var(--mm-mono);
-  font-size: 10px;
+  font-size: var(--mm-t-micro);
   color: var(--mm-faint);
 }
 
 .mm-hint {
   display: block;
   margin-top: 3px;
-  font-size: 10.5px;
+  font-size: var(--mm-t-micro);
   line-height: 1.45;
   color: var(--mm-faint);
 }
@@ -156,7 +156,7 @@
 .mm-loading {
   padding: 9px 0;
   font-family: var(--mm-mono);
-  font-size: 13px;
+  font-size: var(--mm-t-body);
   color: var(--mm-faint);
 }
 
@@ -186,7 +186,7 @@
   background: none;
   color: var(--mm-dim);
   font-family: var(--mm-sans);
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
   cursor: pointer;
   transition:
     border-color var(--mm-fast) var(--mm-ease),
@@ -213,13 +213,13 @@
   border: 1px solid var(--mm-edge);
   border-radius: 999px;
   color: var(--mm-dim);
-  font-size: 11.5px;
+  font-size: var(--mm-t-meta);
 }
 
 .mm-tag code,
 .mm-toggle code {
   font-family: var(--mm-mono);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
 }
 
 .mm-chip-x {
@@ -227,7 +227,7 @@
   border: none;
   background: none;
   color: inherit;
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
   opacity: 0.7;
   cursor: pointer;
 }
@@ -244,7 +244,7 @@
   border: 1px solid color-mix(in srgb, var(--mm-danger) 40%, transparent);
   border-radius: var(--mm-r-chip);
   background: color-mix(in srgb, var(--mm-danger) 8%, transparent);
-  font-size: 12.5px;
+  font-size: var(--mm-t-body);
   line-height: 1.6;
   color: var(--mm-danger);
 }
@@ -255,7 +255,7 @@
 
 .mm-danger code {
   font-family: var(--mm-mono);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
 }
 
 /* ── disclosure ──────────────────────────────────────────────────────────── */
@@ -272,7 +272,7 @@
   cursor: pointer;
   user-select: none;
   font-family: var(--mm-mono);
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
   color: var(--mm-dim);
 }
 
@@ -311,7 +311,7 @@
   border: 1px solid var(--mm-edge);
   border-radius: var(--mm-r-chip);
   background: var(--mm-surface);
-  font-size: 12px;
+  font-size: var(--mm-t-meta);
 }
 
 /* The address is the identity — two coins can share a ticker — so it is given
@@ -349,5 +349,5 @@
 .mm-btn.sm {
   min-block-size: 30px;
   padding: 0 var(--mm-3);
-  font-size: 11px;
+  font-size: var(--mm-t-meta);
 }
