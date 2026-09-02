@@ -57,13 +57,21 @@ describe("fastParseTrade — trade-shaped text parses with no model", () => {
     assert.notDeepEqual(parseSlash("/sell 1 usdg of tsla")?.kind === "sell" ? (parseSlash("/sell 1 usdg of tsla") as { symbol: string }).symbol : "", "TSLA");
   });
 
+  it("parses $ symbols and usdg suffixes", async () => {
+    assert.deepEqual(await fastParseTrade("/buy $nvda 1"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/buy nvda 1usdg"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("/buy $NVDA 1usdg"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    assert.deepEqual(await fastParseTrade("buy 1usdg of $nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+  });
+
   it("returns null for non-trades — the LLM keeps its job", async () => {
     assert.equal(await fastParseTrade("/status"), null);
     assert.equal(await fastParseTrade("what's my pnl?"), null);
     assert.equal(await fastParseTrade("buy 1 usdg of any coin"), null, "no symbol → not a trade");
     assert.equal(await fastParseTrade("buy"), null);
     assert.equal(await fastParseTrade(""), null);
-    assert.equal(await fastParseTrade("buy 0 nvda"), null, "zero amount is not a trade");
+    // /buy 0 defaults to 1 USDG (fluid trading fix)
+    assert.deepEqual(await fastParseTrade("buy 0 nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
   });
 
   it("never returns a non-trade kind even from a slash", async () => {

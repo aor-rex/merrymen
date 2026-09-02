@@ -31,6 +31,7 @@ import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { llmText } from "../llm";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -574,7 +575,35 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
     if (!cmd) {
+      // LLM SYMBOL RESOLUTION: when the fast path caught a trade pattern
+      // (buy/sell with amount) but the symbol wasn't recognised, ask the LLM
+      // to resolve it before falling through to general chat. The LLM only
+      // picks a symbol from a known list — never decides amounts or executes.
       const llm = resolveLlm(cfg);
+      if (llm && !slash) {
+        const partial = await fastParseTrade(msg.text ?? "");
+        if (partial && (partial.kind === "buy" || partial.kind === "sell")) {
+          const knownRoster = [...STOCK_TOKENS.map((t) => t.symbol), ...(cfg.customTokens ?? []).map((t) => t.symbol)]
+            .map((s) => s.toUpperCase()).sort().join(", ");
+          const ponsRoster = ponsSymbols ? [...ponsSymbols].sort().join(", ") : null;
+          const tradeText = `${partial.kind} ${partial.usdg} USDG of ${partial.symbol}`;
+          const resolveTask = `The user wants to ${tradeText}. I don't know "${partial.symbol}".
+Known tokens: ${knownRoster}${ponsRoster ? `\nRecently discovered tokens: ${ponsRoster}` : ""}
+Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none match.`;
+          try {
+            const resolved = await llmText(llm, { system: "You are a symbol resolver. Respond with ONLY the ticker symbol or UNKNOWN.", prompt: resolveTask, maxTokens: 10 });
+            const match = resolved?.trim().toUpperCase();
+            if (match && match !== "UNKNOWN" && match.length <= 6 && /^[A-Z]{1,6}$/.test(match)) {
+              cmd = { kind: partial.kind, symbol: match, usdg: partial.usdg };
+              await pushHistory(msg.chatId, "user", msg.text);
+            }
+          } catch {
+            // LLM resolution failed — fall through to normal chat path
+          }
+        }
+      }
+      if (!cmd) {
+        const llm = resolveLlm(cfg);
       if (llm) {
         const st = stateRef.get();
         // The classifier gets IDENTITY ONLY — it picks a value from a closed enum
@@ -642,6 +671,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
       await pushHistory(msg.chatId, "user", msg.text);
+      }
     }
 
     // Sender-level authz for state-changing commands. In a GROUP the chatId is a
