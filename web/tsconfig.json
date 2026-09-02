@@ -24,6 +24,7 @@
       "@merrymen/settings-store": ["../worker/src/settings-store.ts"],
       "@merrymen/thesis": ["../worker/src/thesis-policy.ts"],
       "@merrymen/identity-store": ["../worker/src/identity-store.ts"],
+      "@merrymen/follow-store": ["../worker/src/follow-store.ts"],
       "@merrymen/llm": ["../worker/src/llm.ts"],
       "@merrymen/settings": ["../worker/src/settings.ts"],
       "@merrymen/home": ["../worker/src/home.ts"],

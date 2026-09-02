@@ -47,7 +47,10 @@ import { getSettingsStore } from "./settings-store";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { isHostedMode, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
+import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { writePeersForChild } from "./peer-files";
+import { peerThesesForSlugs } from "./peer-theses";
 import { applyLedgerSchema } from "./store";
 import { drainCommandResults, writeCommand } from "./command-files";
 
@@ -556,6 +559,46 @@ async function mirrorLedgers(): Promise<void> {
     } finally {
       handle.close();
     }
+    // ── THE WIRE ────────────────────────────────────────────────────────────
+    //
+    // Materialise the theses of the agents this owner follows into the child's
+    // own home, beside grant.json and settings.json. Runs on the mirror's clock
+    // rather than on its own, for two reasons: the shared handle is already open
+    // here (one connection, not two), and the rows being read were written by
+    // the pass immediately above, so a peer's newest thinking is at most one
+    // cycle old rather than two.
+    //
+    // AFTER the mirror and outside its try, deliberately. A tenant whose mirror
+    // stalled should still receive peers, and a peer write that fails must not
+    // be mistaken for a mirror failure — they have different remedies and the
+    // log lines say different things.
+    // `children` is keyed by the grant store's own tenant list, which is
+    // 0x-shaped by construction — the same cast writeSettingsForChild takes.
+    await writePeersFor(tenant as `0x${string}`, shared);
+  }
+}
+
+/**
+ * Write one child's peers.json. Best-effort, and silent when there is nothing.
+ *
+ * An owner with no follows gets an EMPTY FILE rather than no file. The desk's
+ * tool registration keys on whether peers exist, so "nobody wired in" and "the
+ * orchestrator has not run yet" have to be distinguishable — and only one of
+ * them should hide the tool.
+ */
+async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
+  try {
+    const edges = await getFollowStore().following(tenant);
+    const theses = await peerThesesForSlugs(
+      shared,
+      edges.slice(0, MAX_FOLLOWS).map((e) => e.target),
+    );
+    writePeersForChild(childHome(tenant), { at: Math.floor(Date.now() / 1000), theses });
+    if (theses.length > 0) log(`wire: ${tenant} +${theses.length} peer thesis/theses from ${edges.length} follow(s)`);
+  } catch (e) {
+    // Never fatal. The wire is additional evidence; a child with a stale or
+    // absent peer file trades exactly as it did before the feature existed.
+    log(`wire: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

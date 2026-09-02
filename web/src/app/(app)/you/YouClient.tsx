@@ -241,7 +241,7 @@ export function YouClient() {
             broken execution path, when the truth was that execution had never
             been configured. */}
         {rail.length > 0 && (
-          <section className="mm-rail" aria-label="Warnings from the trading rail">
+          <section className="mm-notices" aria-label="Warnings from the trading rail">
             <h2 className="mm-kicker">What the rail is saying</h2>
             <ul>
               {rail.map((e) => (
