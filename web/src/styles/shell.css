@@ -305,8 +305,15 @@
   padding: 0;
 }
 
+/*
+ * SEPARATED BY SPACE, NOT BY A RULE.
+ *
+ * Each row drew a border AND carried a four-sided chip, which put about
+ * thirty edges into a 304px column — in green, rose, amber and blue at
+ * once. A row is one thing; it does not need an edge as well as a gap.
+ */
 .mm-alert {
-  border-bottom: 1px solid var(--mm-edge);
+  padding-bottom: var(--mm-3);
 }
 
 .mm-alert > a,
@@ -356,11 +363,18 @@
   white-space: nowrap;
 }
 
-/* The chip shrinks in the rail — it is a marker here, not a label. */
+/*
+ * A COLOURED WORD, NOT A PILL.
+ *
+ * At 8.5px inside a border this was a smudge that still cost four edges.
+ * The colour already carries the meaning; the box was carrying nothing.
+ */
 .mm-alert .mm-chip {
-  font-size: 8.5px;
-  padding: 1px 4px;
-  letter-spacing: 0.06em;
+  font-size: 9.5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  letter-spacing: 0.08em;
   flex: none;
 }
 

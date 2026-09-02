@@ -9,12 +9,17 @@
   padding: var(--mm-4) 0;
 }
 
+/*
+ * NO BOX. The grid already separates these, and a border around every card in a
+ * twelve-card grid is twelve rectangles competing with their own contents. The
+ * surface tint says where one ends without drawing a line to do it.
+ */
 .mm-card {
   display: flex;
   flex-direction: column;
   gap: var(--mm-3);
   padding: var(--mm-4);
-  border: 1px solid var(--mm-edge);
+  border: 0;
   border-radius: var(--mm-r-card);
   background: var(--mm-surface);
 }

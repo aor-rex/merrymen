@@ -12,8 +12,9 @@
   padding: 0;
 }
 
+/* Space, not a rule. The rank number and the avatar already start a row. */
 .mm-board-row {
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-1) 0;
 }
 
 .mm-board-row > a,
@@ -55,11 +56,20 @@
   color: var(--mm-dim);
 }
 
+/*
+ * THE FIGURE THIS PAGE EXISTS FOR, sized like it.
+ *
+ * It was 14px — one pixel above body copy — while the largest text on the
+ * page was its own title. A leaderboard whose returns are smaller than its
+ * heading is a list of names.
+ */
 .mm-board-row .pnl {
-  font-size: 14px;
+  font-size: 23px;
   font-weight: 700;
+  letter-spacing: -0.02em;
   text-align: right;
-  min-width: 68px;
+  min-width: 96px;
+  font-variant-numeric: tabular-nums;
 }
 
 .mm-board-row .pnl.up {
@@ -70,10 +80,12 @@
 }
 /* Unranked is a WORD, never a number. A 0.0% here would read as a flat run
    rather than as an unknown one. */
+/* A word is not a figure and must never be sized like one. */
 .mm-board-row .pnl.flat {
   color: var(--mm-dim);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0;
 }
 
 .mm-board-row .dd,

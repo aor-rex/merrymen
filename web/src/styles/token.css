@@ -2,10 +2,16 @@
  * The token page. Scoped under .mm, enforced by styles/scoped.test.ts.
  */
 
+/*
+ * SPACE, NOT A RULE.
+ *
+ * Five full-width hairlines stacked down this page, plus one per holder row —
+ * sixteen rules on a ten-holder coin. A section is announced by its kicker and
+ * its gap; the line was saying the same thing a third time.
+ */
 .mm-tok-when,
 .mm-tok-holders {
-  padding: var(--mm-5) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-6) 0 var(--mm-5);
 }
 
 /* ── the entry timeline ──────────────────────────────────────────────────── */
@@ -66,8 +72,9 @@
   padding: 0;
 }
 
+/* No per-row rule: ten holders drew ten lines through the reasoning. */
 .mm-holders li {
-  border-bottom: 1px solid var(--mm-edge);
+  padding-bottom: var(--mm-2);
 }
 
 .mm-holders li > .row {
@@ -220,8 +227,15 @@
 
 /* ── the stat strip, the timeframe grid, the flow bars ────────────────────── */
 
-.mm-tok-facts,
-.mm-tok-flow {
+/*
+ * THE ONE RULE ON THE PAGE, under the figures at the top. It separates the
+ * market's account of this token from the agents' — everything below is
+ * spaced instead.
+ *
+ * .mm-tok-flow went with the border: nothing renders it. The component
+ * emits .mm-tok-flowbars, so this selector had been dead since it shipped.
+ */
+.mm-tok-facts {
   padding: var(--mm-5) 0;
   border-bottom: 1px solid var(--mm-edge);
 }
@@ -394,8 +408,7 @@
 /* ── the oracle's series ─────────────────────────────────────────────────── */
 
 .mm-tok-chart {
-  padding: var(--mm-5) 0;
-  border-bottom: 1px solid var(--mm-edge);
+  padding: var(--mm-6) 0 var(--mm-5);
 }
 
 .mm-priceline {

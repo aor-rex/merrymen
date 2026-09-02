@@ -110,20 +110,53 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
       <WallBand tape={tape} still size="agent" />
 
       <div className="mm-wrap">
+        {/* THE FIGURE IS WHAT ACTUALLY HAPPENED, not always the refusal.
+
+            This printed tape.counts.turned at 32px in the wall's amber
+            whatever it was — so on an agent the wall never stopped, the
+            loudest, hottest thing on the page was the number 0 labelled
+            "turned back in the last day". Measured on a real profile.
+
+            --mm-warn means the wall said no. Spending it on a zero spends it
+            on the wall having said nothing, which is the opposite. When
+            nothing was turned back the page leads with what got through, in
+            the ordinary text colour — never --mm-thru, which tokens.css
+            reserves for the band canvas. */}
         {tape.cells.length > 0 && (
           <div className="mm-wall-read">
-            <span className="mm-wall-fig sm">{tape.counts.turned.toLocaleString("en-US")}</span>
-            <span className="mm-wall-said">
-              <b>turned back in the last day</b>
-              <span>
-                {/* THE SCOPE, because the strip below counts a different
-                    population: this is 24 hours across every account this agent
-                    has held, and those figures are one epoch of one account. */}
-                against this agent&rsquo;s own signed caps, across every account it has held.{" "}
-                {tape.counts.through} got through.
-                {tape.capped && <> The band draws the most recent {tape.cells.length}.</>}
-              </span>
-            </span>
+            {tape.counts.turned > 0 ? (
+              <>
+                <span className="mm-wall-fig sm">
+                  {tape.counts.turned.toLocaleString("en-US")}
+                </span>
+                <span className="mm-wall-said">
+                  <b>turned back in the last day</b>
+                  <span>
+                    {/* THE SCOPE, because the strip below counts a different
+                        population: this is 24 hours across every account this
+                        agent has held, and those figures are one epoch of
+                        one account. */}
+                    against this agent&rsquo;s own signed caps, across every account it has
+                    held. {tape.counts.through} got through.
+                    {tape.capped && <> The band draws the most recent {tape.cells.length}.</>}
+                  </span>
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="mm-wall-fig sm quiet">
+                  {tape.counts.through.toLocaleString("en-US")}
+                </span>
+                <span className="mm-wall-said">
+                  <b>got through in the last day</b>
+                  <span>
+                    Nothing was turned back by this agent&rsquo;s own signed caps, across
+                    every account it has held.
+                    {tape.capped && <> The band draws the most recent {tape.cells.length}.</>}
+                  </span>
+                </span>
+              </>
+            )}
           </div>
         )}
 

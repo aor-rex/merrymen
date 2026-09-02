@@ -123,3 +123,17 @@
     gap: var(--mm-3);
   }
 }
+
+/*
+ * THE FIGURE WHEN NOTHING WAS TURNED BACK.
+ *
+ * --mm-warn means the wall said no, so a zero refusals count must not wear it —
+ * that would spend the hottest colour in the product on the wall having said
+ * nothing. The through-count is ordinary text.
+ *
+ * Never --mm-thru: tokens.css reserves white for the band canvas, where a white
+ * pixel means exactly one thing.
+ */
+.mm-wall-fig.quiet {
+  color: var(--mm-tx);
+}
