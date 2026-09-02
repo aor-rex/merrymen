@@ -79,6 +79,32 @@ export const GAS_BOUNDS: GasBounds = {
   absoluteMax: 3_000_000n,
 };
 
+/**
+ * THE FIRST OPERATION IS A DIFFERENT OPERATION.
+ *
+ * `absoluteMax` above is reasoned about the steady state, and says so: "an
+ * approve plus an `exactInputSingle` does not approach it". True — and the
+ * first operation an account ever sends is not an approve plus a swap. It also
+ * carries the Kernel factory initCode that deploys the account, the permission
+ * validator's plugin-enable (whose enable data is ~960 bytes of ONE_OF lists
+ * alone, per wall.ts), and the verification of the enable signature.
+ *
+ * That matters because `boundGas` REFUSES rather than clamps. A ceiling chosen
+ * for the steady state, applied to the deploy, presents as a flat pre-sign
+ * refusal on the one operation in an account's life that has to succeed — and
+ * the refusal would read "the operation is not the one it is meant to be", which
+ * would be exactly wrong.
+ *
+ * 8M rather than 3M. Deliberately not unbounded: the check still has to catch an
+ * operation that is not the one we think it is, and a deploy plus an enable plus
+ * an approve plus a swap has a real upper bound. It applies ONLY while the
+ * account has no code, and the executor stops using it the moment one op lands.
+ */
+export const DEPLOY_GAS_BOUNDS: GasBounds = {
+  ...GAS_BOUNDS,
+  absoluteMax: 8_000_000n,
+};
+
 export type GasVerdict =
   | { ok: true; gas: UserOpGas; total: bigint }
   /**

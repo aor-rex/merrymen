@@ -60,8 +60,10 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
+import { checkV3SwapCalls } from "./final-fence";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
+  NotRecorded,
   createAgentExecutor,
   GasRefused,
   UserOpReverted,
@@ -279,6 +281,23 @@ interface ActiveAgent {
    */
   orderExecutor: OrderExecutor | null;
   limits: AgentLimits;
+  /**
+   * This signature seals a policy contract with no bytecode on its chain.
+   *
+   * Read once at arm and carried, because it is a property of a frozen
+   * signature: it cannot change while this grant is active, and re-deriving it
+   * per-tick would parse the serialized permission set sixty times a minute to
+   * get the same answer.
+   */
+  deadPolicy: boolean;
+  /**
+   * Does the smart account have bytecode on the grant chain?
+   *
+   * `false` is the ordinary state of an account that has never operated, and
+   * `null` means the read did not land — which is not the same and must never
+   * be rendered as one.
+   */
+  accountDeployed: boolean | null;
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
@@ -288,6 +307,12 @@ interface ActiveAgent {
    *  a grant may carry either, both or neither. */
   ponsAdapterLive: boolean;
 }
+
+/**
+ * A token address as a person reads it. Only ever a LABEL — every comparison in
+ * this file is against the full address, so a collision here is cosmetic.
+ */
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 async function main() {
   await initStore();
@@ -363,6 +388,7 @@ async function main() {
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
       cashUsdg: lastCashUsdg,
+      deadPolicy: active?.deadPolicy ?? false,
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
@@ -2190,7 +2216,8 @@ async function main() {
     //
     // Said once per arm, as an err, because the alternative is an owner
     // watching every trade fail with a validation error that names nothing.
-    if (grantHasDeadRateLimit(grant.serialized)) {
+    const deadPolicy = grantHasDeadRateLimit(grant.serialized);
+    if (deadPolicy) {
       console.log(`[worker] grant predates the rate-limit removal — cannot transact until re-signed`);
       await addEvent(
         agentId,
@@ -2250,6 +2277,46 @@ async function main() {
         "warn",
         `couldn't check the wall's contracts this time (${uncheckedPolicyContracts.join(", ")}) — the chain did not answer. ` +
           `This says nothing about whether they are there; it retries on the next arm.`,
+      );
+    }
+
+    // HAS THIS ACCOUNT EVER EXISTED?
+    //
+    // Nothing in merrymen has ever asked. Every `getCode` in the repo is aimed
+    // at a policy contract, a breaker, an adapter or a token — never at the
+    // account itself — so "is the wall deployed" was answerable and "is the
+    // thing the wall protects deployed" was not.
+    //
+    // It matters more than it looks. A 4337 account is counterfactual until its
+    // first operation, so absence here is NORMAL and not an error. What absence
+    // means is that no EVM has ever evaluated this grant: every claim about what
+    // the wall enforces is, until this reads back bytecode, a claim about
+    // calldata that was built and signed and never submitted.
+    //
+    // Three-way, for the same reason as the loop above: a throw is not an
+    // absence. `null` is "could not look".
+    let accountDeployed: boolean | null = null;
+    try {
+      const code = await client.getCode({ address: grant.smartAccount as `0x${string}` });
+      accountDeployed = code !== undefined && code !== "0x";
+    } catch {
+      accountDeployed = null;
+    }
+    if (accountDeployed === false) {
+      console.log(`[worker] smart account ${grant.smartAccount} is not deployed yet — the first op deploys it`);
+      await addEvent(
+        agentId,
+        "warn",
+        `this account does not exist on chain ${chain.id} yet. That is normal — it deploys itself with ` +
+          `its first operation — but it means the first operation costs more than the ones after it, ` +
+          `and that no chain has yet checked the permissions this key was signed under.`,
+      );
+    } else if (accountDeployed === null) {
+      await addEvent(
+        agentId,
+        "warn",
+        `couldn't check whether this account is deployed — the chain did not answer. This says nothing ` +
+          `about whether it is; it retries on the next arm.`,
       );
     }
 
@@ -2340,6 +2407,10 @@ async function main() {
       // alongside every other grant-derived bound, so a curve the agent never
       // saw launch cannot be traded even though the wall cannot pin it.
       limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
+      // Read once here, with every other grant-derived bound, because deciding
+      // it per-tick would re-parse a serialized signature that cannot change.
+      deadPolicy,
+      accountDeployed,
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,
@@ -3098,18 +3169,21 @@ async function main() {
             decision_id,
             ...sim,
           });
-          // A failed write here is not fatal — the op is already sent and the
-          // outcome path still records it. It IS worth saying, because the
-          // protection this hook exists to provide is the thing that just
-          // failed, and the next crash would be unrecoverable in the old way.
+          // A FAILED WRITE NOW STOPS THE OPERATION, and that is only possible
+          // because this hook moved ahead of the send. It used to run after,
+          // where the honest note was that a failed write "is not fatal — the
+          // op is already sent": the money was committed and the best available
+          // answer was to say so and hope. Now nothing has been broadcast, so
+          // the cheaper answer is on the table.
+          //
+          // Refusing is the right call rather than the cautious one. This row is
+          // what every reconciliation path keys on — resolveStrandedOps selects
+          // status='submitted' AND user_op_hash IS NOT NULL, and inflight-reconcile
+          // only sweeps ops that succeeded — so an operation sent without it is
+          // one that no sweep can ever resolve. A skipped tick costs nothing; an
+          // unreconcilable spend costs the notional and the ability to find out.
           submittedRow = wrote;
-          if (!wrote) {
-            void addEvent(
-              agentId,
-              "err",
-              `couldn't record ${userOpHash} before broadcast — this op is in flight with no durable row`,
-            );
-          }
+          if (!wrote) throw new NotRecorded(userOpHash);
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -3290,6 +3364,53 @@ async function main() {
           minAmountOut: minOut,
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
+
+        // ── THE FINAL FENCE ─────────────────────────────────────────────
+        //
+        // Read the bytes about to be signed and check they say what this trade
+        // decided. Every other guard on this path judges the INTENT — the wall's
+        // mirror judges a notional, the impact guard judges a probe, the gas
+        // bounds judge an estimate — and none of them has ever looked at the
+        // calldata.
+        //
+        // The v3 lane only. A v4 quote goes through a different builder with a
+        // structurally pinned recipient, and a decoder returning "fine" for a
+        // shape it does not understand would be worse than no decoder: see the
+        // scope note in final-fence.ts. Reimplemented from Vex's final-request
+        // guard with its author's permission.
+        if (!quote.v4) {
+          const fence = checkV3SwapCalls(calls, {
+            router: UNISWAP.swapRouter02 as `0x${string}`,
+            tokenIn: intent.sellToken,
+            tokenOut: intent.buyToken,
+            recipient: executor.address,
+            amountIn: intent.sellAmountRaw,
+            minOut,
+          });
+          if (!fence.ok) {
+            // Pre-broadcast, so it books like a policy refusal rather than a
+            // revert: nothing signed, nothing spent, and the rule comes from a
+            // fixed vocabulary so the loop can suppress on it.
+            releaseBudget();
+            await addEvent(
+              agentId,
+              "err",
+              `refused to sign a ${intent.kind}: ${fence.detail}. Nothing was sent. This is a merrymen ` +
+                `fault — the calldata did not match the trade that was approved.`,
+            );
+            await recordTrade({
+              agent_id: agentId,
+              kind: intent.kind,
+              target: intent.target,
+              ...tokenLegs(intent),
+              amount_usdg: usdgNum(notional),
+              status: "rejected",
+              reject_rule: `fence-${fence.rule}`,
+              ...sim,
+            });
+            return;
+          }
+        }
         exec = await send(calls);
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
@@ -3577,6 +3698,50 @@ async function main() {
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
 
+      // ── DID IT ACTUALLY ARRIVE? ──────────────────────────────────────────
+      //
+      // BEFORE the decode, and gated only on "did this operation acquire an
+      // ERC-20", because that is the only precondition the question has.
+      //
+      // It used to sit three gates deep — inside `if (fillPair)`, inside
+      // `if (measured)`, inside `if (side === "buy")` — and `fillPair` is
+      // assigned only in the Uniswap branch, under `sellIsUsdg !== buyIsUsdg`,
+      // under `if (symbol)`. So curve trades, Rialto swaps and stock-to-stock
+      // swaps got no delivery check at all. Curve is where honeypots live: it is
+      // the venue where a token is minted by whoever wants it minted, and it was
+      // the one lane with nothing watching.
+      //
+      // The other two gates were wrong for a subtler reason. `measured` is a
+      // RECEIPT DECODE, and this check exists precisely because receipt logs are
+      // contract-authored — a token that fabricates a Transfer log is exactly the
+      // token whose decode you should not be trusting to decide whether to look.
+      // Vex computes delivery before the decode for this reason.
+      //
+      // See delivery.ts for why it is exact-zero-only, why a failed read is
+      // 'unknown' rather than a zero, and why it can never fail the trade.
+      const acquired: { token: `0x${string}`; label: string } | null =
+        intent.kind === "swap" && intent.buyToken.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+          ? { token: intent.buyToken, label: fillPair?.symbol ?? short(intent.buyToken) }
+          : intent.kind === "curve-trade" &&
+              intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+            ? { token: intent.assetOut, label: short(intent.assetOut) }
+            : null;
+      if (acquired) {
+        const delivery = await checkDelivery({
+          balanceOf: () =>
+            chainClient.readContract({
+              address: acquired.token,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [executor.address],
+            }) as Promise<bigint>,
+        });
+        const note = describeDelivery(acquired.label, delivery);
+        // "delivered" says nothing, deliberately — a tape of non-events is
+        // noise, and this runs on every acquisition.
+        if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
+      }
+
       // ── what the chain says actually moved ───────────────────────────────
       // Prefer the receipt over the quote. The quote is what we hoped for; the
       // receipt is what happened, and only the receipt's quantity matches the
@@ -3599,37 +3764,19 @@ async function main() {
           const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
           slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
 
-          // ── DID IT ACTUALLY ARRIVE? ────────────────────────────────────────
-          // Everything above this line was read from logs the token contract
-          // wrote. On a buy that is the whole basis, so ask the chain the one
-          // question a fabricated log cannot answer. See delivery.ts for why
-          // this is exact-zero-only, why a failed read is not a zero, and why
-          // it can never fail the trade.
+          // THE FLOOR IS A DIFFERENT QUESTION FROM DELIVERY, and it is the one
+          // that genuinely needs the decode: it compares the SETTLED output
+          // against the minOut this operation was signed with. A settled output
+          // below that floor cannot come from a well-behaved router — it would
+          // have reverted — so it is the signature of a token taking a cut on
+          // transfer. Delivery moved above, where it needs no decode.
           if (measured.side === "buy") {
-            const delivery = await checkDelivery({
-              balanceOf: () =>
-                chainClient.readContract({
-                  address: fillPair.stockToken,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [executor.address],
-                }) as Promise<bigint>,
-            });
-            const note = describeDelivery(fillPair.symbol, delivery);
-            // "delivered" says nothing, deliberately — a tape of non-events is
-            // noise, and this runs on every buy.
-            if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
-
-            // And the floor, which is a different question from the quote. A
-            // settled output BELOW the minOut we signed cannot come from a
-            // well-behaved router — it would have reverted — so it is the
-            // signature of a token that takes a cut on transfer.
-            const short = belowFloorBps(fillPair.floorOut, receivedOut);
-            if (short !== null) {
+            const shortBps = belowFloorBps(fillPair.floorOut, receivedOut);
+            if (shortBps !== null) {
               await addEvent(
                 agentId,
                 "warn",
-                `${fillPair.symbol}: settled ${short} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
+                `${fillPair.symbol}: settled ${shortBps} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
               );
             }
           }
@@ -3730,6 +3877,37 @@ async function main() {
       // The rule string is a literal from gas-limits.ts, so it joins the
       // vocabulary the notifier and the dashboard already read rather than
       // becoming another free-form sentence in reject_rule.
+      // NOTHING WAS SENT, because nothing could have found it afterwards.
+      // The pre-broadcast row is what every reconciliation path keys on, so an
+      // operation whose row could not be written is one that no sweep can ever
+      // resolve. Refusing costs a tick; sending would have cost the notional
+      // with no way to learn what became of it.
+      //
+      // A sibling of GasRefused directly below: pre-broadcast, nothing signed,
+      // nothing spent, and a `rule` from a fixed vocabulary rather than free
+      // text — so it never reaches the generic branch that writes 'reverted'.
+      if (e instanceof NotRecorded) {
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `refused to broadcast a ${intent.kind}: the ledger would not accept the row that has to exist ` +
+            `before an operation goes out, so it was not sent. Nothing was spent. This is a merrymen ` +
+            `fault, not a configuration one.`,
+        );
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: "not-recorded",
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof GasRefused) {
         releaseBudget();
         await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
@@ -3815,10 +3993,43 @@ async function main() {
         return;
       }
 
-      // Roll back the optimistic reservation — the money didn't move. The
-      // 'reverted' row written below goes through recordTrade, which would
-      // release it anyway; doing it here keeps the counters honest for the
-      // window in between, and releaseBudget is idempotent.
+      // ── AN OPERATION THAT WENT OUT IS NOT A FAILED ONE ──────────────────
+      //
+      // `submittedRow` is set by the durable pre-broadcast write, which now
+      // happens BEFORE the send. So if it is set and this is not a typed
+      // on-chain revert, an operation reached the bundler — possibly landed —
+      // and something AFTER it threw: the receipt's fill read, the gas pricing,
+      // a ledger write, an addFlow.
+      //
+      // The old code booked that as `reverted`. Two things wrong with it, and
+      // the second is worse than the first. It asserts a chain outcome nobody
+      // observed; and with no hash to resolve on, `addTrade` INSERTS rather than
+      // resolving in place, so the same operation ends up as two rows — one
+      // 'submitted' that the resolver will later settle, and one 'reverted' that
+      // is simply false. A landed trade could be booked as a revert beside
+      // itself.
+      //
+      // Treated as unresolved instead, exactly like the receipt-read failure
+      // above: the pre-broadcast row stands, the charge stays counted, and the
+      // stranded-op resolver settles it from the chain. The budget must NOT be
+      // released here, which is why this sits above the rollback.
+      if (submittedRow) {
+        await refreshBudget(agentId);
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `${intent.kind} was submitted, and then something after it failed: ${msg.slice(0, 200)}. ` +
+            `This is NOT a revert — the operation may have landed. It stays counted against today's ` +
+            `caps and the resolver will settle it from the chain.`,
+        );
+        return;
+      }
+
+      // Roll back the optimistic reservation — the money didn't move. The row
+      // written below goes through recordTrade, which would release it anyway;
+      // doing it here keeps the counters honest for the window in between, and
+      // releaseBudget is idempotent.
       releaseBudget();
       // A genuine on-chain revert vs a failure BEFORE submission (bundler, RPC,
       // gas), so the user isn't told "reverted on-chain" for something that
@@ -3887,7 +4098,15 @@ async function main() {
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
         ...(onChain ? { user_op_hash: e.userOpHash } : {}),
-        status: "reverted",
+        // REVERTED MEANS THE CHAIN REVERTED IT. Everything reaching this line
+        // without `onChain` never got there: no operation was submitted (the
+        // branch above returns when one was), so this is a build, an encode or a
+        // pre-flight that threw. Calling that 'reverted' put words in the
+        // chain's mouth, and the ledger is the one place in this product that
+        // must never do that — `rejected` is the vocabulary for "we did not
+        // send it", and it is what every other pre-broadcast refusal on this
+        // path already writes.
+        status: onChain ? "reverted" : "rejected",
         reject_rule: reason,
         // KEEP the simulation. This row is the single most informative one in
         // the ledger — the trade we quoted, sized and submitted, that the chain

@@ -395,9 +395,11 @@ export async function mirrorTenant(args: {
   // is enough on its own. What it is NOT enough for is completeness: this used
   // to read `ORDER BY at DESC LIMIT 500` with no cursor, so a child that wrote
   // more than a batch between two passes lost the overflow PERMANENTLY. That
-  // was tolerable while a decision was only dashboard furniture. It stopped
-  // being tolerable when theses became the thing other agents read — a dropped
-  // decision is now a peer input that silently never arrives.
+  // was tolerable while a decision was only dashboard furniture, which is still
+  // all it is: no agent reads another's theses today. It stops being tolerable
+  // the moment one does, because a dropped decision is then a peer input that
+  // silently never arrives — and a cursor is much cheaper to add now than to
+  // debug later.
   //
   // Watermarked on `at` rather than on an id, because the id is a uuid and has
   // no order. `at` is not unique, so the cursor opens 300s BEHIND itself: ties

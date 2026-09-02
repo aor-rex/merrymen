@@ -8,7 +8,9 @@
  *      before this there was none — PublicThesis deliberately omits agent_id,
  *      and the feed page hashes the agent's NAME for its avatar colour because
  *      the route has nothing else to send. There was literally nothing a follow
- *      could target.
+ *      could target — which is why this exists, and is not a claim that a
+ *      follow now exists. The TARGET does; the edge, the store, the API and the
+ *      tool that would read it do not.
  *
  *   2. Which social account signed in? (Privy.) That half is declared here and
  *      wired later; it lives in this record because a DID resolves to a TENANT,

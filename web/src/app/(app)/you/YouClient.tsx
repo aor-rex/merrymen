@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { Sparkline } from "@/components/Sparkline";
 import { ThesisCard } from "@/components/ThesisCard";
 import { KillSwitch } from "@/components/KillSwitch";
+import { railNotices } from "@/lib/rail-notices";
 import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
@@ -186,6 +187,8 @@ export function YouClient() {
     (t) => (t.status === "rejected" || t.status === "reverted") && Date.parse(`${t.created_at}Z`) > today,
   ).length;
 
+  const rail = railNotices(feed?.events);
+
   const snap: AgentSnapshot = {
     name,
     mode: (grants?.mode as AgentSnapshot["mode"]) ?? "idle",
@@ -222,6 +225,34 @@ export function YouClient() {
             <p className="next">{status.next}</p>
           </div>
         </div>
+
+        {/* WHAT THE RAIL IS SAYING.
+
+            The worker has been writing `warn` events since it was built, /api/feed
+            has always returned them, and no surface in the product has ever
+            rendered one: the only consumer of `events` took `level === "err"`
+            for the status line and dropped the rest.
+
+            Among the messages that went nowhere is index.ts's "no bundler key —
+            this agent CANNOT trade live, and nothing it does will reach the
+            chain", whose own comment reads SAY IT WHERE THE OWNER WILL LOOK. It
+            was written, raised, stored, and filtered out of the only page that
+            reads events — so an audit of 1,311 intents and zero fills read as a
+            broken execution path, when the truth was that execution had never
+            been configured. */}
+        {rail.length > 0 && (
+          <section className="mm-rail" aria-label="Warnings from the trading rail">
+            <h2 className="mm-kicker">What the rail is saying</h2>
+            <ul>
+              {rail.map((e) => (
+                <li key={e.message}>
+                  <p>{e.message}</p>
+                  <span className="mono">{timeAgo(Date.parse(`${e.created_at}Z`) / 1000)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         <section className="mm-hero">
           <div className="mm-hero-top">

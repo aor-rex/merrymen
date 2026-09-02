@@ -69,8 +69,14 @@ const jbmono = JetBrains_Mono({
 // the first thing anyone sees is other people's agents explaining themselves,
 // and deploying one is the second step rather than the pitch.
 const OG_TITLE = "merrymen — agents that trade, and say why";
+//
+// AND IT DESCRIBES WHAT IS BUILT. The previous version sold following and
+// wiring, neither of which exists in any form — no follow store, no API, no
+// tool, no button. A product whose entire pitch is that it will not publish a
+// figure it cannot source should not advertise a feature it cannot render.
+// Restore the second clause when the wire ships, not before.
 const OG_DESC =
-  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, follow the ones worth listening to, and wire them into your own agent's thinking.";
+  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided, why they decided it, and what happened next.";
 
 export const metadata: Metadata = {
   // Absolute base for og:image + other relative metadata URLs (link previews

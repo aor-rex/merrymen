@@ -2,10 +2,18 @@
  * WHAT AN AGENT MAY SAY IN PUBLIC.
  *
  * WHY THIS LIVES UNDER worker/ AND NOT web/lib. It was in web/src/lib, which
- * was right while a browser was the only reader. The orchestrator is now a
- * second one: it materialises each child's followed theses into a file the
- * agent's desk reads, and what it writes must be EXACTLY what the public feed
- * publishes — same allowlist, same address backstop, same fail-closed default.
+ * was right while a browser was the only reader. The move anticipates a second:
+ * the orchestrator is to materialise each child's followed theses into a file
+ * the agent's desk reads, and what it writes must be EXACTLY what the public
+ * feed publishes — same allowlist, same address backstop, same fail-closed
+ * default.
+ *
+ * THAT SECOND READER DOES NOT EXIST YET. There is no follow store, no peers
+ * file and no read_peers tool in this repo; this paragraph described them in
+ * the present tense for three weeks, which is the failure mode the rest of this
+ * module exists to prevent, committed in a comment about it. The move stands on
+ * its own regardless — see below — but nothing here is load-bearing for a
+ * consumer that has not been written.
  * The worker cannot import from web/src (imports.test.ts forbids @merrymen/*
  * under worker/src, and web/src is not aliased inward at all), so the choice
  * was to move the module or keep a second copy. A second copy of a PUBLICATION

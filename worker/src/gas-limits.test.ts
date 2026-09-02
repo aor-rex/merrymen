@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GAS_BOUNDS, boundGas, totalGas, type UserOpGas } from "./gas-limits";
+import { readFileSync } from "node:fs";
+import { DEPLOY_GAS_BOUNDS, GAS_BOUNDS, boundGas, totalGas, type UserOpGas } from "./gas-limits";
 
 /**
  * The gap this closes was total: no floor, no ceiling, whatever the bundler
@@ -145,4 +146,51 @@ test("REGRESSION: the zero check runs BEFORE the disagreement math", () => {
   const v = boundGas(est(0n, 10n, 10n), est(900_000n, 900_000n, 900_000n));
   assert.equal(v.ok, false);
   assert.equal(v.rule, "gas-unreadable", "not 'gas-unstable'");
+});
+
+test("THE DEPLOY CEILING: the op that creates the account is not the steady state", () => {
+  // GAS_BOUNDS.absoluteMax reasons about "an approve plus an exactInputSingle",
+  // which is a fair description of every operation EXCEPT the first one. That
+  // one also carries the Kernel factory initCode, the permission validator's
+  // plugin-enable (~960 bytes of ONE_OF lists on its own) and the verification
+  // of the enable signature.
+  //
+  // boundGas REFUSES rather than clamps, so applying the steady-state ceiling to
+  // the deploy presents as a flat pre-sign refusal on the one operation in an
+  // account's life that has to succeed — and it would refuse with the words "the
+  // operation is not the one it is meant to be", which would be exactly wrong.
+  //
+  // Sized so the ×2 headroom on a plausible deploy estimate clears it.
+  const deploy = est(400_000n, 1_100_000n, 250_000n); // ×2 = 3.5M
+  const narrow = boundGas(deploy, deploy);
+  assert.equal(narrow.ok, false, "the steady-state ceiling refuses a deploy");
+  assert.equal(narrow.ok === false ? narrow.rule : null, "gas-absurd");
+
+  const wide = boundGas(deploy, deploy, DEPLOY_GAS_BOUNDS);
+  assert.equal(wide.ok, true, "the deploy ceiling admits it");
+  assert.equal(totalGas((wide as { gas: UserOpGas }).gas), 3_500_000n);
+});
+
+test("the deploy ceiling is a CEILING, not an exemption", () => {
+  // The check still has to catch an operation that is not the one we think it
+  // is. A deploy plus an enable plus an approve plus a swap has a real upper
+  // bound; anything past it is as suspect as it would be later.
+  const absurd = est(3_000_000n, 3_000_000n, 3_000_000n); // ×2 = 18M
+  const v = boundGas(absurd, absurd, DEPLOY_GAS_BOUNDS);
+  assert.equal(v.ok, false);
+  assert.equal(v.rule, "gas-absurd");
+  // And it is the only field that moved.
+  assert.equal(DEPLOY_GAS_BOUNDS.headroomBps, GAS_BOUNDS.headroomBps);
+  assert.equal(DEPLOY_GAS_BOUNDS.disagreementBps, GAS_BOUNDS.disagreementBps);
+  assert.equal(DEPLOY_GAS_BOUNDS.absoluteMax > GAS_BOUNDS.absoluteMax, true);
+});
+
+test("THE CALL SITE: the executor picks the ceiling by whether the account exists", () => {
+  // A constant nothing reads is worth nothing, and the bug next door — a grant
+  // detected as dead and then armed anyway — was exactly a correct fact with no
+  // consequence. Pin that the wide ceiling is reached only when the account has
+  // no code, and that it stops applying once an op has been accepted.
+  const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
+  assert.match(src, /await isDeployed\(\)\) \? GAS_BOUNDS : DEPLOY_GAS_BOUNDS/);
+  assert.match(src, /deployed = true;/, "a landed send must retire the deploy ceiling");
 });
