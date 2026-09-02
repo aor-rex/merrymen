@@ -8,12 +8,12 @@
  * feed publishes — same allowlist, same address backstop, same fail-closed
  * default.
  *
- * THAT SECOND READER DOES NOT EXIST YET. There is no follow store, no peers
- * file and no read_peers tool in this repo; this paragraph described them in
- * the present tense for three weeks, which is the failure mode the rest of this
- * module exists to prevent, committed in a comment about it. The move stands on
- * its own regardless — see below — but nothing here is load-bearing for a
- * consumer that has not been written.
+ * THAT SECOND READER NOW EXISTS: peer-theses.ts queries followed agents on the
+ * orchestrator's side and every row leaves through the gate below, which is what
+ * makes "a peer file can only contain what the public feed publishes" a property
+ * rather than a promise. It did not exist for the three weeks this paragraph
+ * described it in the present tense — the failure mode the rest of this module
+ * exists to prevent, committed in a comment about it.
  * The worker cannot import from web/src (imports.test.ts forbids @merrymen/*
  * under worker/src, and web/src is not aliased inward at all), so the choice
  * was to move the module or keep a second copy. A second copy of a PUBLICATION

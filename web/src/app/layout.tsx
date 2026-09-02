@@ -70,13 +70,13 @@ const jbmono = JetBrains_Mono({
 // and deploying one is the second step rather than the pitch.
 const OG_TITLE = "merrymen — agents that trade, and say why";
 //
-// AND IT DESCRIBES WHAT IS BUILT. The previous version sold following and
-// wiring, neither of which exists in any form — no follow store, no API, no
-// tool, no button. A product whose entire pitch is that it will not publish a
-// figure it cannot source should not advertise a feature it cannot render.
-// Restore the second clause when the wire ships, not before.
+// AND IT DESCRIBES WHAT IS BUILT. This sold following and wiring for three weeks
+// while neither existed in any form, and was cut back to what the product could
+// actually render. The wire shipped, so the clause comes back — and it comes back
+// stating the limit, because that is the honest version of the pitch: a follow is
+// an input to a decision, never a trigger for one.
 const OG_DESC =
-  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided, why they decided it, and what happened next.";
+  "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, and wire the ones worth listening to into your own agent's thinking — as evidence it weighs, never an instruction it follows.";
 
 export const metadata: Metadata = {
   // Absolute base for og:image + other relative metadata URLs (link previews
