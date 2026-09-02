@@ -160,8 +160,19 @@ describe("the hosted refusals stay refused", () => {
     assert.match(SRC, /providers[\s\S]{0,400}?filter\(/);
   });
 
-  it("keeps both machine-access danger blocks", () => {
-    assert.equal((code.match(/pc-danger/g) ?? []).length, 2);
+  it("keeps every machine-access warning, by its words", () => {
+    // Anchored on the PROSE, not the class. The first version of this counted
+    // `pc-danger` blocks and failed the moment they were renamed — which is a
+    // test measuring the styling rather than the property. What must survive a
+    // restyle is the sentence that tells an owner what they are arming.
+    for (const said of [
+      "This lets Telegram touch this computer",
+      "This is remote control of your computer",
+      "Free-form shell is remote code execution by an AI",
+      "The drawdown breaker cannot protect this money",
+    ]) {
+      assert.ok(SRC.includes(said), `this warning went missing: "${said}"`);
+    }
   });
 
   it("keeps the automatic-shell warning in full", () => {

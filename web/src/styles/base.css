@@ -47,7 +47,19 @@
   color: var(--mm-wire);
 }
 
-.mm button {
+/*
+ * A RESET WITH NO SPECIFICITY, which is what a reset should be.
+ *
+ * This was `.mm button`, and a descendant selector scores higher than a single
+ * class — so it beat every .mm-* class that tried to style a button, silently.
+ * Proven on one page: an <a class="mm-btn primary"> drew its border and a
+ * <button class="mm-btn primary"> beside it drew none, from the same rule.
+ * Order could not fix it; specificity always won.
+ *
+ * :where() contributes zero, so any class at all now takes precedence and a
+ * bare <button> still gets normalised.
+ */
+:where(.mm) button {
   font: inherit;
   color: inherit;
   background: none;

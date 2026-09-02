@@ -1,0 +1,353 @@
+/**
+ * FORMS, under .mm. Enforced by styles/scoped.test.ts.
+ *
+ * The last two pages in the product run on the old sheets, and they are the two
+ * that decide things: /settings says what an agent may touch, /grant signs the
+ * caps. This is what they need in order to stop.
+ *
+ * A NEW TOKEN LIVES HERE, and it is a design-system decision rather than a
+ * port. The old console had four semantic colours — rose, gold, lime, mint —
+ * and the new one has four with different meanings: up is gain, down is loss,
+ * warn means THE WALL SAID NO, wire means link and focus. None of them is
+ * "this can lose you money or control of your machine if you get it wrong",
+ * which is what the two machine-access blocks on /settings say.
+ *
+ * Spending --mm-warn on it would break its single meaning. Spending --mm-down
+ * on it would say "loss", which is a measurement rather than a risk, and the
+ * design system's own rule is that a colour means one thing. So danger is its
+ * own token, and it is deliberately a deeper, less pink red than --mm-down so
+ * the two are told apart if they ever share a screen.
+ */
+
+.mm {
+  /* Not a measurement. A warning about what you are about to permit. */
+  --mm-danger: #e5484d;
+}
+
+/* ── sections ────────────────────────────────────────────────────────────── */
+
+.mm-section {
+  margin: var(--mm-6) 0 var(--mm-3);
+  padding-bottom: var(--mm-2);
+  border-bottom: 1px solid var(--mm-edge);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-subtle {
+  margin: var(--mm-3) 0 var(--mm-1);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-panel {
+  padding: var(--mm-5);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-card);
+  background: var(--mm-surface);
+}
+
+/* ── fields ──────────────────────────────────────────────────────────────── */
+
+.mm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--mm-4);
+}
+
+.mm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  position: relative;
+  min-width: 0;
+}
+
+.mm-labelrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--mm-2);
+}
+
+.mm-label {
+  font-family: var(--mm-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-getkey {
+  font-size: 10.5px;
+  color: var(--mm-wire);
+}
+
+/*
+ * The box is the control. The input inside it is transparent and borderless, so
+ * the focus ring lands on the whole field rather than on a nested rectangle.
+ */
+.mm-input {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 0 var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface-2);
+  transition: border-color var(--mm-fast) var(--mm-ease);
+}
+
+/* Focus is --mm-wire, which is what that colour is for. */
+.mm-input:focus-within {
+  border-color: var(--mm-wire-dim);
+}
+
+.mm-input input,
+.mm-input select,
+.mm-input textarea {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--mm-tx);
+  font-family: var(--mm-mono);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.mm-input select {
+  cursor: pointer;
+}
+
+/* The native menu is painted by the OS, so its options need a ground of their
+   own or they render black-on-black on a dark page. */
+.mm-input select option {
+  background: var(--mm-surface-2);
+  color: var(--mm-tx);
+}
+
+.mm-input input::placeholder {
+  color: var(--mm-faint);
+  font-weight: 500;
+}
+
+.mm-unit {
+  flex: none;
+  font-family: var(--mm-mono);
+  font-size: 10px;
+  color: var(--mm-faint);
+}
+
+.mm-hint {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--mm-faint);
+}
+
+.mm-loading {
+  padding: 9px 0;
+  font-family: var(--mm-mono);
+  font-size: 13px;
+  color: var(--mm-faint);
+}
+
+/* ── chips that toggle ───────────────────────────────────────────────────── */
+
+.mm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-2);
+  margin-top: var(--mm-1);
+}
+
+/*
+ * ON IS NOT A COLOUR ALONE. The old chip said armed with opacity and a green
+ * border and nothing else — no pressed state, no label change — so whether
+ * shell access to the owner's machine was on came down to a shade. The state is
+ * announced in the markup now; this only has to make it visible.
+ */
+.mm-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 4px 11px;
+  border: 1px solid var(--mm-edge);
+  border-radius: 999px;
+  background: none;
+  color: var(--mm-dim);
+  font-family: var(--mm-sans);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    border-color var(--mm-fast) var(--mm-ease),
+    color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-toggle:hover {
+  border-color: var(--mm-edge-2);
+  color: var(--mm-tx-2);
+}
+
+.mm-toggle[aria-pressed="true"] {
+  border-color: var(--mm-tx-2);
+  background: var(--mm-surface-2);
+  color: var(--mm-tx);
+}
+
+/* A chip that only labels something, and never toggles. */
+.mm-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 4px 11px;
+  border: 1px solid var(--mm-edge);
+  border-radius: 999px;
+  color: var(--mm-dim);
+  font-size: 11.5px;
+}
+
+.mm-tag code,
+.mm-toggle code {
+  font-family: var(--mm-mono);
+  font-size: 11px;
+}
+
+.mm-chip-x {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.mm-chip-x:hover {
+  opacity: 1;
+}
+
+/* ── the warning that is not a measurement ───────────────────────────────── */
+
+.mm-danger {
+  margin: var(--mm-1) 0 var(--mm-4);
+  padding: var(--mm-3) var(--mm-4);
+  border: 1px solid color-mix(in srgb, var(--mm-danger) 40%, transparent);
+  border-radius: var(--mm-r-chip);
+  background: color-mix(in srgb, var(--mm-danger) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--mm-danger);
+}
+
+.mm-danger b {
+  color: var(--mm-tx);
+}
+
+.mm-danger code {
+  font-family: var(--mm-mono);
+  font-size: 11px;
+}
+
+/* ── disclosure ──────────────────────────────────────────────────────────── */
+
+.mm-advanced {
+  margin-top: var(--mm-5);
+  padding-top: var(--mm-2);
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-advanced > summary {
+  padding: var(--mm-2) 0;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--mm-mono);
+  font-size: 12px;
+  color: var(--mm-dim);
+}
+
+.mm-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mm-advanced > summary::before {
+  content: "▸ ";
+  color: var(--mm-faint);
+}
+
+.mm-advanced[open] > summary::before {
+  content: "▾ ";
+}
+
+.mm-advanced > summary:hover {
+  color: var(--mm-tx);
+}
+
+/* ── rows of owner-added things ──────────────────────────────────────────── */
+
+.mm-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mm-2);
+  margin: var(--mm-2) 0 var(--mm-3);
+}
+
+.mm-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-3);
+  padding: var(--mm-2) var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface);
+  font-size: 12px;
+}
+
+/* The address is the identity — two coins can share a ticker — so it is given
+   room and never truncated. */
+.mm-row .addr {
+  flex: 1 1 240px;
+  color: var(--mm-dim);
+  word-break: break-all;
+}
+
+@media (max-width: 520px) {
+  .mm-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── buttons that undo something ─────────────────────────────────────────── */
+
+/*
+ * Clearing a stored key is destructive and irreversible from this screen, so it
+ * wears the danger token rather than the primary one. Small, because it sits
+ * inside a field beside the input it empties.
+ */
+.mm-btn.danger {
+  border-color: color-mix(in srgb, var(--mm-danger) 30%, transparent);
+  background: color-mix(in srgb, var(--mm-danger) 8%, transparent);
+  color: var(--mm-danger);
+}
+
+.mm-btn.danger:hover {
+  background: color-mix(in srgb, var(--mm-danger) 16%, transparent);
+  border-color: color-mix(in srgb, var(--mm-danger) 45%, transparent);
+}
+
+.mm-btn.sm {
+  min-block-size: 30px;
+  padding: 0 var(--mm-3);
+  font-size: 11px;
+}

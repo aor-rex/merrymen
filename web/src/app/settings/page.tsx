@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { LogoMark } from "@/components/Logo";
+import { AppShell } from "@/components/shell/AppShell";
+import { PageHeader } from "@/components/shell/PageHeader";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
@@ -10,7 +11,11 @@ import SetupChecklist from "./SetupChecklist";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
-import "@/styles/legacy.css";
+import "@/styles/tokens.css";
+import "@/styles/base.css";
+import "@/styles/shell.css";
+import "@/styles/feed.css";
+import "@/styles/form.css";
 
 type Draft = Record<string, string>;
 
@@ -22,17 +27,17 @@ function Field(props: {
   children: React.ReactNode;
 }) {
   return (
-    <label className="field settings-field">
-      <span className="field-labelrow">
-        <span className="field-label">{props.label}</span>
+    <label className="mm-field">
+      <span className="mm-labelrow">
+        <span className="mm-label">{props.label}</span>
         {props.action && (
-          <a className="field-getkey" href={props.action.href} target="_blank" rel="noreferrer">
+          <a className="mm-getkey" href={props.action.href} target="_blank" rel="noreferrer">
             {props.action.label} ↗
           </a>
         )}
       </span>
-      <span className="field-input">{props.children}</span>
-      {props.hint && <span className="field-hint">{props.hint}</span>}
+      <span className="mm-input">{props.children}</span>
+      {props.hint && <span className="mm-hint">{props.hint}</span>}
     </label>
   );
 }
@@ -276,9 +281,12 @@ export default function SettingsPage() {
 
   if (view === null) {
     return (
-      <main className="grant-shell setup-look">
-        <div className="grant-panel mono">loading settings…</div>
-      </main>
+      <AppShell>
+        <PageHeader title="Settings" />
+        <div className="mm-wrap">
+          <p className="mm-note mono">loading settings…</p>
+        </div>
+      </AppShell>
     );
   }
 
@@ -363,35 +371,28 @@ export default function SettingsPage() {
   }
 
   return (
-    <>
-      <header className="topbar setup-look">
-        <Link href="/" className="brand" style={{ color: "inherit", textDecoration: "none" }}>
-          <span className="arrow"><LogoMark size={20} /></span>
-          <span>merrymen</span>
-          <span className="tagline">settings</span>
-        </Link>
-        <Link href="/" className="connect-btn" style={{ textDecoration: "none" }}>
-          back to the band
-        </Link>
-      </header>
+    <AppShell>
+      {/* The rail, the tape, the tab bar and the search — none of which this
+          page has ever had. Clicking Settings in the rail used to drop the
+          reader onto a screen with no navigation at all and a brand mark as
+          the only way back. */}
+      <PageHeader title="Settings" />
 
-      <main className="grant-shell setup-look">
-        <div className="grant-panel settings-panel">
-          <h1 className="grant-title">settings</h1>
-          <p className="grant-sub">
+      <div className="mm-wrap">
+        <p className="mm-note">
             The handful of things you need to get riding are up top; everything else lives under{" "}
             <b>Advanced</b>. Stored locally in <code>~/.merrymen/settings.json</code> and picked up
             by the worker within one tick — no restarts. Keys never leave your machine; leave a key
             blank to keep what&apos;s saved.
-          </p>
+        </p>
 
-          {/* Setup steps live here after the /app muster is done — a quiet, honest
-              status strip read from real state, and a fast way back to fund or re-key. */}
-          <SetupChecklist />
+        {/* Setup steps live here after the /app muster is done — a quiet, honest
+            status strip read from real state, and a fast way back to fund or re-key. */}
+        <SetupChecklist />
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
-          <div className="settings-section mono">essentials</div>
-          <div className="grant-fields settings-grid">
+          <div className="mm-section">essentials</div>
+          <div className="mm-grid">
             {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
                 This block used to be self-hosted only, on the reasoning that the
                 house pays for inference. That held until the house budget ran out:
@@ -441,7 +442,7 @@ export default function SettingsPage() {
                     onChange={set(providerKeyField)}
                   />
                   {providerKeyView.set && (
-                    <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
+                    <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
                       clear
                     </button>
                   )}
@@ -459,7 +460,7 @@ export default function SettingsPage() {
                 hint={`Which model to run. Blank uses the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.${modelsError ? ` Could not list models: ${modelsError}` : ""}`}
               >
                 {modelsLoading ? (
-                  <span className="field-loading">listing models…</span>
+                  <span className="mm-loading">listing models…</span>
                 ) : availableModels.length > 0 ? (
                   <select
                     value={v(providerModelField as keyof SettingsView["values"])}
@@ -487,7 +488,7 @@ export default function SettingsPage() {
                 label="bundler"
                 hint="The piece that puts your trades on chain. On merrymen.dev it is run for you -- nothing to paste and nothing to pay for. Self-host if you want to bring your own."
               >
-                <div className="settings-subtle mono" style={{ padding: "6px 0" }}>
+                <div className="mm-subtle mono" style={{ padding: "6px 0" }}>
                   run by the house
                 </div>
               </Field>
@@ -506,7 +507,7 @@ export default function SettingsPage() {
                   onChange={set("bundlerApiKey")}
                 />
                 {view.bundlerApiKey.set && (
-                  <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
+                  <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
                     clear
                   </button>
                 )}
@@ -548,8 +549,8 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="settings-subtle mono">basket · equal-weighted</div>
-          <div className="symbol-grid">
+          <div className="mm-subtle mono">basket · equal-weighted</div>
+          <div className="mm-chips">
             {/* Owner-added tokens sit alongside the registry ones. Selecting is
                 still an explicit act: adding a token means "know about this",
                 putting it in the basket means "trade it". */}
@@ -557,7 +558,7 @@ export default function SettingsPage() {
               <button
                 key={sym}
                 type="button"
-                className={`cap symbol-chip${activeSymbols.includes(sym) ? " on" : ""}`}
+                className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
                 /* In the basket or not, said rather than only shaded. */
                 aria-pressed={activeSymbols.includes(sym)}
                 onClick={() => toggleSymbol(sym)}
@@ -566,7 +567,7 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
-          <div className="grant-note">
+          <div className="mm-hint">
             {activeSymbols.length === 0
               ? "select at least one symbol (empty falls back to the default basket)"
               : `trading ${activeSymbols.join(" · ")}`}
@@ -575,7 +576,7 @@ export default function SettingsPage() {
               position with no exit. The buy is refused now, but say why here —
               at the moment of choosing — rather than in the event feed later. */}
           {unsellable.length > 0 && (
-            <div className="grant-note err">
+            <div className="mm-danger">
               Your agent&apos;s key can&apos;t sell <b>{unsellable.join(", ")}</b>, so it won&apos;t
               buy {unsellable.length === 1 ? "it" : "them"} either — a position with no way out is
               worse than a missed trade. Re-sign at <Link href="/grant">/grant</Link> to include{" "}
@@ -589,14 +590,14 @@ export default function SettingsPage() {
               Adding one here does NOT make it tradable — the tradable list is
               sealed into the signed key — so the /grant re-sign is spelled out
               rather than left to be discovered as a reverted trade. */}
-          <div className="settings-subtle mono">your own tokens · memecoins &amp; anything else on 4663</div>
+          <div className="mm-subtle mono">your own tokens · memecoins &amp; anything else on 4663</div>
           {activeTokens.length > 0 && (
-            <div className="token-list">
+            <div className="mm-rows">
               {activeTokens.map((t) => (
-                <div key={t.address.toLowerCase()} className="token-row mono">
+                <div key={t.address.toLowerCase()} className="mm-row mono">
                   <b>{t.symbol}</b>
-                  <span className="token-addr">{t.address}</span>
-                  <span className="token-dec">{t.decimals}dp</span>
+                  <span className="addr">{t.address}</span>
+                  <span className="dim">{t.decimals}dp</span>
                   <button type="button" className="copy-btn" onClick={() => removeToken(t.address)}>
                     remove
                   </button>
@@ -604,7 +605,7 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
-          <div className="grant-fields settings-grid">
+          <div className="mm-grid">
             <Field label="symbol">
               <input
                 value={newToken.symbol}
@@ -630,13 +631,13 @@ export default function SettingsPage() {
           <button type="button" className="copy-btn" onClick={addToken}>
             add token
           </button>
-          {tokenError && <div className="grant-note err">{tokenError}</div>}
+          {tokenError && <div className="mm-danger">{tokenError}</div>}
 
           {/* The two knobs that decide whether a token gets a price at all. They
               live here, next to the tokens they govern, because the refusal
               message names them by value ("below your $25,000 floor") and an
               owner who can't find the dial can't act on that. */}
-          <div className="grant-fields settings-grid" style={{ marginTop: 12 }}>
+          <div className="mm-grid" style={{ marginTop: 12 }}>
             <Field
               label="minimum pool depth (USD)"
               hint={`Refuse to price a token whose deepest route is thinner than this. Default ${d.minPoolLiquidityUsdg.toLocaleString()}. Lower it and you're accepting a price someone can push for pocket change — and that price feeds your equity and your drawdown breaker.`}
@@ -660,7 +661,7 @@ export default function SettingsPage() {
               />
             </Field>
           </div>
-          <div className="grant-note">
+          <div className="mm-hint">
             Paste the contract address from the explorer — merrymen prices these from the Uniswap
             pool (a time-averaged price, and only when the pool is deep enough to trust), never from
             a Chainlink feed. Thin pools are refused rather than guessed at.
@@ -673,22 +674,22 @@ export default function SettingsPage() {
           {/* ── DISCOVERY ──────────────────────────────────────────────────
               Read-only and message-only. Worth surfacing next to the token
               editor because the action it prompts is "add a token here". */}
-          <div className="settings-subtle mono">discovery · new pairs as they launch</div>
-          <div className="grant-fields settings-grid">
-            <label className="field settings-field">
-              <span className="field-label">watch for new pairs</span>
-              <span className="field-input">
+          <div className="mm-subtle mono">discovery · new pairs as they launch</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">watch for new pairs</span>
+              <span className="mm-input">
                 <input
                   type="checkbox"
                   checked={discoveryEnabledVal}
                   onChange={(e) => setDiscoveryEnabled(e.target.checked)}
                   style={{ width: "auto" }}
                 />
-                <span className="field-unit">
+                <span className="mm-unit">
                   {discoveryEnabledVal ? "tells you when something launches" : "off"}
                 </span>
               </span>
-              <span className="field-hint">
+              <span className="mm-hint">
                 Needs a Bitquery key above (or the Merry Circle brain, whose token works for both).
                 Without one this does nothing and says nothing.
               </span>
@@ -699,20 +700,20 @@ export default function SettingsPage() {
                 forever, with nothing said. index.ts says the surprise out loud
                 -- “the strategy stopped seeing anything at the exact moment it
                 became able to act” -- and then left the only remedy unreachable. */}
-            <label className="field settings-field">
-              <span className="field-label">let trencher trade for real</span>
-              <span className="field-input">
+            <label className="mm-field">
+              <span className="mm-label">let trencher trade for real</span>
+              <span className="mm-input">
                 <input
                   type="checkbox"
                   checked={trencherLiveVal}
                   onChange={(e) => setTrencherLive(e.target.checked)}
                   style={{ width: "auto" }}
                 />
-                <span className="field-unit">
+                <span className="mm-unit">
                   {trencherLiveVal ? "trencher can open real positions" : "practice only"}
                 </span>
               </span>
-              <span className="field-hint">
+              <span className="mm-hint">
                 Off by default, and until you turn it on the trencher strategy sees no
                 candidates at all once your agent can actually trade &mdash; so it looks like
                 it simply never finds anything. It still cannot touch a token your grant
@@ -731,7 +732,7 @@ export default function SettingsPage() {
               />
             </Field>
           </div>
-          <div className="grant-note">
+          <div className="mm-hint">
             Bitquery indexes Robinhood Chain from genesis, including <b>Uniswap v4</b> — where new
             pairs actually launch, and which your merryman can&apos;t see by scanning. It reports
             what it finds, with the depth and whether it could price it.
@@ -744,29 +745,29 @@ export default function SettingsPage() {
               The one place merrymen will knowingly hold something it cannot
               value. The copy has to be blunt about what that costs, because
               the usual safety net genuinely does not apply here. */}
-          <div className="settings-subtle mono">scout mode · buying what can&apos;t be priced yet</div>
-          <p className="grant-note" style={{ marginTop: 0 }}>
+          <div className="mm-subtle mono">scout mode · buying what can&apos;t be priced yet</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
             A token that just launched has no price history and almost no depth, so any price you
             could read from its pool is one someone could push. merrymen normally refuses to value
             those at all. Scout mode lets your merryman buy them anyway — <b>quarantined</b>: the
             position is carried at what it <i>cost</i>, never at a pool reading, and the total that
             may sit that way is hard-capped.
           </p>
-          <div className="grant-fields settings-grid">
-            <label className="field settings-field">
-              <span className="field-label">scout mode</span>
-              <span className="field-input">
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">scout mode</span>
+              <span className="mm-input">
                 <input
                   type="checkbox"
                   checked={scoutEnabledVal}
                   onChange={(e) => setScoutEnabled(e.target.checked)}
                   style={{ width: "auto" }}
                 />
-                <span className="field-unit">
+                <span className="mm-unit">
                   {scoutEnabledVal ? "may buy unpriceable tokens, up to the budget" : "off — unpriceable tokens are never bought"}
                 </span>
               </span>
-              <span className="field-hint">
+              <span className="mm-hint">
                 Off by default. With it off, a buy of anything merrymen couldn&apos;t price is
                 refused outright.
               </span>
@@ -794,7 +795,7 @@ export default function SettingsPage() {
               />
             </Field>
           </div>
-          <div className="grant-note err">
+          <div className="mm-danger">
             <b>The drawdown breaker cannot protect this money.</b> A quarantined position is carried
             at cost, so it doesn&apos;t move — if one goes to zero, your equity won&apos;t show it
             and the breaker won&apos;t fire. That isn&apos;t an oversight; it&apos;s what refusing to
@@ -811,14 +812,14 @@ export default function SettingsPage() {
           </div>
 
           {/* ── TELEGRAM (essentials: token + enable) ──────────────────── */}
-          <div id="telegram" className="settings-section mono">telegram · chat with your merryman</div>
-          <p className="grant-note" style={{ marginTop: 0 }}>
+          <div id="telegram" className="mm-section">telegram · chat with your merryman</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
             Create a bot with <b>@BotFather</b> in Telegram (send <code>/newbot</code>), paste its
             token below, enable, and hit <b>test</b>. Then message your bot <code>/link {tg?.linkCode ?? "……"}</code> to
             claim it. Commands and natural-language chat run inside the same policy wall — Telegram can
             never exceed your signed grant.
           </p>
-          <div className="grant-fields settings-grid">
+          <div className="mm-grid">
             <Field
               label="bot token"
               hint="From @BotFather. Stored locally, never sent back to the browser."
@@ -830,42 +831,42 @@ export default function SettingsPage() {
                 onChange={set("telegramBotToken")}
               />
               {view.telegramBotToken.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
                   clear
                 </button>
               )}
             </Field>
             <Field label="connection" hint="Live check against Telegram (getMe).">
-              <button type="button" className="cap" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
+              <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
-              <span className="field-unit">
+              <span className="mm-unit">
                 {tgTest ?? (tg?.connected ? `✓ @${tg.botUsername}` : tg?.hasToken ? "not verified" : "no token")}
               </span>
             </Field>
-            <label className="field settings-field">
-              <span className="field-label">enable telegram</span>
-              <span className="field-input">
+            <label className="mm-field">
+              <span className="mm-label">enable telegram</span>
+              <span className="mm-input">
                 <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="field-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+                <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
               </span>
-              <span className="field-hint">Master switch for the Telegram poller.</span>
+              <span className="mm-hint">Master switch for the Telegram poller.</span>
             </label>
           </div>
 
           {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
-          <details className="settings-advanced">
+          <details className="mm-advanced">
             <summary>⚙ Advanced — Telegram controls · remote PC control · RPC / fees / cadence / LLM</summary>
 
-            <div className="settings-section mono">telegram · controls &amp; transfers</div>
-            <div className="grant-fields settings-grid">
-            <label className="field settings-field">
-              <span className="field-label">allow control commands</span>
-              <span className="field-input">
+            <div className="mm-section">telegram · controls &amp; transfers</div>
+            <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">allow control commands</span>
+              <span className="mm-input">
                 <input type="checkbox" checked={tgControlVal} onChange={(e) => setTgControl(e.target.checked)} style={{ width: "auto" }} />
-                <span className="field-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
+                <span className="mm-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
               </span>
-              <span className="field-hint">Off = the bot can answer questions but not change state.</span>
+              <span className="mm-hint">Off = the bot can answer questions but not change state.</span>
             </label>
             <Field label="chat trade ceiling" hint="Max USDG per chat-triggered trade — beneath your grant caps.">
               <input
@@ -875,15 +876,15 @@ export default function SettingsPage() {
                 value={v("telegramMaxActionUsdg")}
                 onChange={set("telegramMaxActionUsdg")}
               />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
-            <label className="field settings-field">
-              <span className="field-label">allow transfers</span>
-              <span className="field-input">
+            <label className="mm-field">
+              <span className="mm-label">allow transfers</span>
+              <span className="mm-input">
                 <input type="checkbox" checked={tgTransferVal} onChange={(e) => setTgTransfer(e.target.checked)} style={{ width: "auto" }} />
-                <span className="field-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
+                <span className="mm-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
               </span>
-              <span className="field-hint">
+              <span className="mm-hint">
                 Lets chat send USDG out, if your wallet can. Wallets signed today register no withdrawal address, so their wall carries no transfer permission and the send is refused before anything is built — only grants signed before that changed can transfer. Money leaves with your owner key: merrymen recover.
               </span>
             </label>
@@ -895,15 +896,15 @@ export default function SettingsPage() {
                 value={v("telegramTransferDailyUsdg")}
                 onChange={set("telegramTransferDailyUsdg")}
               />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
-            <label className="field settings-field">
-              <span className="field-label">proactive pings</span>
-              <span className="field-input">
+            <label className="mm-field">
+              <span className="mm-label">proactive pings</span>
+              <span className="mm-input">
                 <input type="checkbox" checked={tgNotifyVal} onChange={(e) => setTgNotify(e.target.checked)} style={{ width: "auto" }} />
-                <span className="field-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
+                <span className="mm-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
               </span>
-              <span className="field-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
+              <span className="mm-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
             </label>
             {tgNotifyVal && (
               <Field
@@ -928,10 +929,10 @@ export default function SettingsPage() {
                 value={v("telegramDigestHour")}
                 onChange={set("telegramDigestHour")}
               />
-              <span className="field-unit">h</span>
+              <span className="mm-unit">h</span>
             </Field>
           </div>
-          <div className="grant-note" style={{ marginTop: 4 }}>
+          <div className="mm-hint" style={{ marginTop: 4 }}>
             {tg?.linkCode ? (
               <>
                 link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
@@ -940,10 +941,10 @@ export default function SettingsPage() {
               "save a token to generate your link code"
             )}
           </div>
-          <div className="symbol-grid" style={{ marginTop: 6 }}>
+          <div className="mm-chips" style={{ marginTop: 6 }}>
             {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
             {allowlistVal.map((id) => (
-              <span key={id} className="cap symbol-chip on">
+              <span key={id} className="mm-toggle on">
                 {id}
                 <button
                   type="button"
@@ -972,25 +973,25 @@ export default function SettingsPage() {
           </div>
 
           {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
-          <div className="settings-section mono">🖥️ remote control · your PC</div>
-          <div className="mainnet-warning" style={{ marginBottom: 12 }}>
+          <div className="mm-section">🖥️ remote control · your PC</div>
+          <div className="mm-danger" style={{ marginBottom: 12 }}>
             <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
             screenshots, open apps, browse a folder you pick, and — if you enable them — run
             allowlisted shell commands and type keystrokes. Everything is <b>off by default</b>,
             enabled one capability at a time, and the sharp ones (shell, keyboard, files, power)
             always ask you to <code>/confirm</code> first. Only turn on what you want.
           </div>
-          <label className="field settings-field">
-            <span className="field-label">enable remote control</span>
-            <span className="field-input">
+          <label className="mm-field">
+            <span className="mm-label">enable remote control</span>
+            <span className="mm-input">
               <input type="checkbox" checked={pcEnabledVal} onChange={(e) => setPcEnabled(e.target.checked)} style={{ width: "auto" }} />
-              <span className="field-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
+              <span className="mm-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
             </span>
-            <span className="field-hint">The master switch. Off = every PC command is refused, regardless of the toggles below.</span>
+            <span className="mm-hint">The master switch. Off = every PC command is refused, regardless of the toggles below.</span>
           </label>
 
-          <div className="field settings-field">
-            <span className="field-label">capabilities</span>
+          <div className="mm-field">
+            <span className="mm-label">capabilities</span>
             <div className="caps" style={{ marginTop: 4 }}>
               {PC_CAPS.map((c) => (
                 /*
@@ -1009,7 +1010,7 @@ export default function SettingsPage() {
                 <button
                   key={c.id}
                   type="button"
-                  className={`cap symbol-chip ${capsVal.includes(c.id) ? "on" : ""}`}
+                  className={`mm-toggle ${capsVal.includes(c.id) ? "on" : ""}`}
                   aria-pressed={capsVal.includes(c.id)}
                   onClick={() => toggleCap(c.id)}
                   style={{ cursor: "pointer", opacity: pcEnabledVal ? 1 : 0.5 }}
@@ -1018,11 +1019,11 @@ export default function SettingsPage() {
                 </button>
               ))}
             </div>
-            <span className="field-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
+            <span className="mm-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
           </div>
 
           {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
-            <div className="pc-danger">
+            <div className="mm-danger">
               ⚠️ <b>This is remote control of your computer.</b> <b>Keyboard</b> types keystrokes into
               whatever window is focused, and <b>shell</b> runs your allowlisted commands — together
               they can do essentially anything you can. Allowlisting an <b>interpreter</b> (python,
@@ -1033,9 +1034,9 @@ export default function SettingsPage() {
           )}
 
           {/* ── agent mode · /agent <task> ─────────────────────────────── */}
-          <label className="field settings-field">
-            <span className="field-label">🤖 agent mode · /agent</span>
-            <span className="field-input">
+          <label className="mm-field">
+            <span className="mm-label">🤖 agent mode · /agent</span>
+            <span className="mm-input">
               <input
                 type="checkbox"
                 checked={agentEnabledVal}
@@ -1043,11 +1044,11 @@ export default function SettingsPage() {
                 style={{ width: "auto" }}
                 disabled={!pcEnabledVal}
               />
-              <span className="field-unit">
+              <span className="mm-unit">
                 {!pcEnabledVal ? "needs remote control ON" : agentEnabledVal ? "ON — /agent works multi-step tasks" : "off"}
               </span>
             </span>
-            <span className="field-hint">
+            <span className="mm-hint">
               Just talk to it — “<i>clone repo X, install, build, tell me what breaks</i>” (or
               <code>/agent …</code>) — and the merryman works your PC in a tool loop (shell, files,
               screen, vision), streaming progress to the chat until it&apos;s done. It remembers
@@ -1057,25 +1058,25 @@ export default function SettingsPage() {
           </label>
           {agentEnabledVal && pcEnabledVal && (
             <>
-              <label className="field settings-field">
-                <span className="field-label">free-form shell for /agent</span>
-                <span className="field-input">
+              <label className="mm-field">
+                <span className="mm-label">free-form shell for /agent</span>
+                <span className="mm-input">
                   <input
                     type="checkbox"
                     checked={agentAutoShellVal}
                     onChange={(e) => setAgentAutoShell(e.target.checked)}
                     style={{ width: "auto" }}
                   />
-                  <span className="field-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
+                  <span className="mm-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
                 </span>
-                <span className="field-hint">
+                <span className="mm-hint">
                   Off: /agent may only run your allowlisted commands. On: it may compose its own
                   commands (installs, builds, git) — destructive commands and secrets paths are
                   refused always.
                 </span>
               </label>
               {agentAutoShellVal && (
-                <div className="pc-danger">
+                <div className="mm-danger">
                   ⚠️ <b>Free-form shell is remote code execution by an AI.</b> The agent can run
                   almost any command your account can, without asking per command — and this switch
                   also unlocks <b>typing keystrokes</b> and <b>opening any URL</b>. The destructive
@@ -1086,16 +1087,16 @@ export default function SettingsPage() {
                   allowlisted commands and can&apos;t type or open arbitrary links.
                 </div>
               )}
-              <div className="grant-fields settings-grid">
+              <div className="mm-grid">
                 <Field label="step budget" hint="Max model↔tool steps per /agent task — the runaway brake.">
                   <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
-                  <span className="field-unit">steps</span>
+                  <span className="mm-unit">steps</span>
                 </Field>
               </div>
             </>
           )}
 
-          <div className="grant-fields settings-grid">
+          <div className="mm-grid">
             <Field
               label="files root"
               hint="The ONE folder /ls and /get are confined to (absolute path). Blank = files off. Nothing outside it is reachable."
@@ -1115,13 +1116,13 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="field settings-field">
-            <span className="field-label">shell allowlist</span>
-            <div className="cap-list">
+          <div className="mm-field">
+            <span className="mm-label">shell allowlist</span>
+            <div className="mm-chips">
               {shellListVal.map((cmd) => (
-                <span key={cmd} className="cap symbol-chip on">
+                <span key={cmd} className="mm-toggle on">
                   <code>{cmd}</code>
-                  <button type="button" onClick={() => setShellList(shellListVal.filter((x) => x !== cmd))} className="chip-x">✕</button>
+                  <button type="button" onClick={() => setShellList(shellListVal.filter((x) => x !== cmd))} className="mm-chip-x">✕</button>
                 </span>
               ))}
               <input
@@ -1138,16 +1139,16 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-            <span className="field-hint">Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.</span>
+            <span className="mm-hint">Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.</span>
           </div>
 
-          <div className="field settings-field">
-            <span className="field-label">app allowlist</span>
-            <div className="cap-list">
+          <div className="mm-field">
+            <span className="mm-label">app allowlist</span>
+            <div className="mm-chips">
               {appListVal.map((app) => (
-                <span key={app} className="cap symbol-chip on">
+                <span key={app} className="mm-toggle on">
                   {app}
-                  <button type="button" onClick={() => setAppList(appListVal.filter((x) => x !== app))} className="chip-x">✕</button>
+                  <button type="button" onClick={() => setAppList(appListVal.filter((x) => x !== app))} className="mm-chip-x">✕</button>
                 </span>
               ))}
               <input
@@ -1164,11 +1165,11 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-            <span className="field-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
+            <span className="mm-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
           </div>
 
-          <div className="settings-section mono">execution &amp; keys</div>
-          <div className="grant-fields settings-grid">
+          <div className="mm-section">execution &amp; keys</div>
+          <div className="mm-grid">
             <Field
               label="mainnet RPC override"
               hint="Optional. The public RPC rate-limits at 1-minute ticks; a free Alchemy/QuickNode endpoint is smoother."
@@ -1213,7 +1214,7 @@ export default function SettingsPage() {
                 onChange={set("rialtoApiKey")}
               />
               {view.rialtoApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
                   clear
                 </button>
               )}
@@ -1223,15 +1224,15 @@ export default function SettingsPage() {
             </Field>
           </div>
 
-          <div className="settings-section mono">virtuals terminal</div>
-          <div className="grant-fields settings-grid">
-            <label className="field settings-field">
-              <span className="field-label">stream to Virtuals</span>
-              <span className="field-input">
+          <div className="mm-section">virtuals terminal</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">stream to Virtuals</span>
+              <span className="mm-input">
                 <input type="checkbox" checked={virtualsEnabledVal} onChange={(e) => setVirtualsEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="field-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
+                <span className="mm-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
               </span>
-              <span className="field-hint">
+              <span className="mm-hint">
                 Publishes landed trades and the daily report to your agent&apos;s public page on
                 app.virtuals.io. <b>Outbound &amp; public</b> — off by default; nothing streams until
                 you turn this on and add a key.
@@ -1248,7 +1249,7 @@ export default function SettingsPage() {
                 onChange={set("virtualsApiKey")}
               />
               {view.virtualsApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, virtualsApiKey: "" }))}>
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, virtualsApiKey: "" }))}>
                   clear
                 </button>
               )}
@@ -1265,7 +1266,7 @@ export default function SettingsPage() {
                 onChange={set("bitqueryApiKey")}
               />
               {view.bitqueryApiKey.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, bitqueryApiKey: "" }))}>
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bitqueryApiKey: "" }))}>
                   clear
                 </button>
               )}
@@ -1282,15 +1283,15 @@ export default function SettingsPage() {
                 onChange={set("merrymenToken")}
               />
               {view.merrymenToken.set && (
-                <button type="button" className="btn-kill settings-clear" onClick={() => setDraft((x) => ({ ...x, merrymenToken: "" }))}>
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, merrymenToken: "" }))}>
                   clear
                 </button>
               )}
             </Field>
           </div>
 
-          <div className="settings-section mono">trading knobs</div>
-          <div className="grant-fields settings-grid">
+          <div className="mm-section">trading knobs</div>
+          <div className="mm-grid">
             <Field label="swap venue" hint="uniswap = permissionless v3 (QQQ has liquidity today) · rialto = meta-router (needs the Rialto key above for full execution).">
               <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
                 <option value="uniswap">uniswap</option>
@@ -1299,61 +1300,60 @@ export default function SettingsPage() {
             </Field>
             <Field label="max slippage" hint="vs the pre-trade quote.">
               <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
-              <span className="field-unit">bps</span>
+              <span className="mm-unit">bps</span>
             </Field>
             <Field label="performance fee" hint="On profit above the high-water mark only. Accrual ledger — nothing is collected yet.">
               <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
-              <span className="field-unit">bps</span>
+              <span className="mm-unit">bps</span>
             </Field>
             <Field label="tick cadence" hint="How often the worker wakes.">
               <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
-              <span className="field-unit">sec</span>
+              <span className="mm-unit">sec</span>
             </Field>
             <Field label="buy per tick" hint="steady-basket: USDG deployed across the basket each tick.">
               <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
             <Field label="idle cash floor" hint="steady-basket: cash kept liquid; the excess sweeps to the Morpho vault.">
               <input type="number" min={0} placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={set("idleFloorUsdg")} />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
             <Field label="gap budget" hint="weekend-gap: total USDG deployed per gap window.">
               <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
             <Field label="Claude / vision model" hint="Model id used when the brain is Anthropic, and for screen vision. The active provider's model is set up top under “AI provider”.">
               <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
             </Field>
             <Field label="LLM decision window" hint="Minutes between model calls — decisions are windows, not ticks.">
               <input type="number" min={1} max={1440} placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={set("llmIntervalMin")} />
-              <span className="field-unit">min</span>
+              <span className="mm-unit">min</span>
             </Field>
             <Field label="LLM max per action" hint="Hard strategist ceiling per proposed trade — beneath the grant caps.">
               <input type="number" min={1} placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={set("llmMaxActionUsdg")} />
-              <span className="field-unit">USDG</span>
+              <span className="mm-unit">USDG</span>
             </Field>
           </div>
 
           </details>
 
-          <button className="grant-btn" onClick={() => void save()} disabled={status === "saving…"}>
+          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
             {status ?? "save settings"}
           </button>
           {errors.length > 0 && (
-            <div className="grant-error mono">
+            <div className="mm-danger mono">
               {errors.map((e, i) => (
                 <div key={i}>{e}</div>
               ))}
             </div>
           )}
 
-          <div className="grant-note">
-            precedence: these settings → environment variables → defaults. the worker re-reads this
-            file every tick; connection changes re-arm the executor automatically. keys live only in
-            ~/.merrymen/settings.json on this machine.
-          </div>
-        </div>
-      </main>
-    </>
+        <p className="mm-note">
+          precedence: these settings → environment variables → defaults. the worker re-reads this
+          file every tick; connection changes re-arm the executor automatically. keys live only in
+          ~/.merrymen/settings.json on this machine.
+        </p>
+      </div>
+    </AppShell>
   );
 }
