@@ -444,3 +444,29 @@
     display: none;
   }
 }
+
+/* ── the candles ─────────────────────────────────────────────────────────── */
+
+/*
+ * The library draws into this element and sizes itself to it. The height is set
+ * inline on the node so it is reserved before hydration — a chart that appears
+ * and pushes the reasoning down is the layout shift the rest of this redesign
+ * has been removing.
+ */
+.mm-candles {
+  margin-top: var(--mm-4);
+  width: 100%;
+}
+
+/*
+ * WHAT THE BARS ARE, said under them. A price chart is the most authoritative
+ * thing on this page and the one most able to mislead: these are one venue's
+ * trades as a third party indexed them, in dollars, and on a curve token they
+ * are not even a pool.
+ */
+.mm-chart-note {
+  margin: var(--mm-3) 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mm-faint);
+}

@@ -9,9 +9,11 @@ import { Feed } from "@/components/Feed";
 import { EntryTimeline } from "@/components/EntryTimeline";
 import { StatStrip, TimeframeGrid, FlowBars, RiskCallout } from "@/components/TokenFacts";
 import { PriceLine } from "@/components/PriceLine";
+import { CandleChart } from "@/components/CandleChart";
 import { readToken, TOKEN_RE } from "@/lib/read-token";
 import { readTokenMarket } from "@/lib/read-token-market";
 import { readFeedHistory } from "@/lib/read-feed-history";
+import { readCandles } from "@/lib/read-candles";
 import { readTheses } from "@/lib/read-theses";
 import { STOCK_TOKENS } from "@merrymen/core";
 import "@/styles/tokens.css";
@@ -112,6 +114,17 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
   const listed = STOCK_TOKENS.find((x) => x.address.toLowerCase() === token.toLowerCase());
   const history = listed?.chainlinkFeed ? await readFeedHistory(listed.chainlinkFeed) : null;
 
+  // CANDLES, FOR COINS ONLY, and only when the index actually described this
+  // pool. A stock token keeps the Chainlink line: this chain's DEX prices for
+  // them are junk while their pools are shallow — market.ts says so in its
+  // header and quotes three pools disagreeing by 0.6% on $4k of reserve — so
+  // drawing a candle chart of one would be a more convincing lie than the
+  // oracle series it replaced.
+  const candles =
+    market.kind === 'memecoin' && market.coin?.poolId
+      ? await readCandles(market.coin.poolId, token)
+      : null;
+
   // THREE SOURCES, IN DESCENDING ORDER OF TRUST.
   //
   // The ledger's symbol comes from the contract's own symbol(), for a token
@@ -155,9 +168,40 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
             of a split are actually known. */}
         <FlowBars market={market} />
 
-        {/* D — the oracle's series. Stock and ETF only; a coin has no feed, and
-            a token whose registry entry carries no feed at all gets no section
-            rather than an empty axis. */}
+        {/* D — THE PRICE, and which chart depends on what the token is.
+
+            A coin gets real candles from the index that already describes its
+            pool. A stock token keeps the Chainlink line, because this chain's
+            DEX prices for them are junk while their pools are shallow.
+
+            Neither renders an empty box: a token with no feed and no indexed
+            pool gets no section at all. */}
+        {candles && candles.state === 'ok' && (
+          <section className="mm-tok-chart">
+            <h2 className="mm-kicker">Price</h2>
+            <CandleChart candles={candles.candles} />
+            <p className="mm-chart-note">
+              {candles.candles.length} hourly bars from the index, in dollars
+              {candles.quoteSymbol ? <> — this pool is quoted in {candles.quoteSymbol}</> : null}.
+              {market.coin?.onCurve ? (
+                <> Still on its launch curve, so every bar is a curve trade rather than a pool.</>
+              ) : null}
+            </p>
+          </section>
+        )}
+
+        {/* The index would not answer. Said, rather than drawn as a flat
+            chart or left as a gap that reads like a token nobody trades. */}
+        {candles && candles.state === 'refused' && (
+          <section className="mm-tok-chart">
+            <h2 className="mm-kicker">Price</h2>
+            <div className="mm-readfail">
+              The index turned down the read for this pool&rsquo;s history, so there is no chart
+              below. It retries on its own.
+            </div>
+          </section>
+        )}
+
         {history && (
           <section className="mm-tok-chart">
             <h2 className="mm-kicker">What the feed published</h2>
