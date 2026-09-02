@@ -103,13 +103,21 @@ export function middleware(req: NextRequest) {
   const held = req.cookies.get(GATE_COOKIE)?.value ?? "";
   if (sameSecret(held, expected)) return NextResponse.next();
 
+  // A REWRITE, NOT A REDIRECT, and the difference is load-bearing here.
+  //
+  // This service runs behind a proxy with `next start -H 0.0.0.0`, so the
+  // origin the server sees is the internal listen address. A redirect built
+  // from it would send the visitor to 0.0.0.0:8080 — which is exactly the bug
+  // the POST handler had, found by asking the deployed site for it.
+  //
+  // A rewrite is resolved server-side and never reaches the browser, so an
+  // internal host cannot leak into one. It also leaves the visitor's own URL
+  // alone, which means that once they are through they are already where they
+  // were trying to go.
   const to = req.nextUrl.clone();
   to.pathname = GATE_PATH;
-  // Where they were going is not carried through. It would put the visitor's
-  // destination in a query string for no gain, and everything behind this
-  // door is being rebuilt anyway.
   to.search = "";
-  return NextResponse.redirect(to);
+  return NextResponse.rewrite(to);
 }
 
 /**

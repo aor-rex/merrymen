@@ -74,3 +74,37 @@ describe("the comparison", () => {
     assert.equal(sameSecret("", ""), true);
   });
 });
+
+describe("nothing sends a visitor to the internal listen address", () => {
+  const ROUTE = readFileSync(new URL("../app/api/gate/route.ts", import.meta.url), "utf8");
+  const MW = readFileSync(new URL("../middleware.ts", import.meta.url), "utf8");
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+  it("the POST handler builds no absolute redirect", () => {
+    // This service starts with `next start -H 0.0.0.0`, so req.url inside a
+    // route handler is the INTERNAL address. The first version redirected to
+    // `new URL("/", req.url)` and the deployed site duly answered
+    // 303 -> https://0.0.0.0:8080/ — a dead host, and the gate would have been
+    // broken the moment anyone typed the right password.
+    assert.ok(!/new URL\([^)]*req\.url/.test(strip(ROUTE)), "no redirect may be built from req.url");
+    assert.match(ROUTE, /Location: path/);
+  });
+
+  it("does not trust a forwarded host to rebuild the origin", () => {
+    // The obvious repair is worse than the bug: x-forwarded-host is supplied by
+    // the caller, so a redirect built from it is an open redirect. A relative
+    // Location resolves against the address the visitor actually used.
+    // Comments stripped: both files explain at length why this header is not
+    // trusted, and scanning the raw text would fail the rule on the paragraph
+    // describing it.
+    assert.ok(!/x-forwarded-host/i.test(strip(ROUTE)));
+    assert.ok(!/x-forwarded-host/i.test(strip(MW)));
+  });
+
+  it("the middleware rewrites rather than redirects", () => {
+    // A rewrite is resolved server-side and never reaches the browser, so the
+    // internal origin cannot leak into one.
+    assert.match(MW, /NextResponse\.rewrite\(to\)/);
+    assert.ok(!/NextResponse\.redirect/.test(strip(MW)), "a redirect here would carry the internal host");
+  });
+});
