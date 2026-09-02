@@ -74,8 +74,8 @@ describe("parseSlash — pure slash parser", () => {
   it("returns unknown (with usage) for malformed args, never throws", () => {
     assert.equal(parseSlash("/cap abc")?.kind, "unknown");
     assert.equal(parseSlash("/strategy")?.kind, "unknown");
-    // /buy without amount now defaults to 1 USDG (fluid trading fix)
-    assert.deepEqual(parseSlash("/buy QQQ"), { kind: "buy", symbol: "QQQ", usdg: 1 });
+    // /buy without amount now returns ask-amount (fluid trading)
+    assert.equal(parseSlash("/buy QQQ")?.kind, "ask-amount");
     assert.equal(parseSlash("/wat")?.kind, "unknown");
   });
 

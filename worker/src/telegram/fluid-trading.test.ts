@@ -76,8 +76,9 @@ describe("fastParseTrade — trade-shaped text parses with no model", () => {
     assert.equal(await fastParseTrade("buy 1 usdg of any coin"), null, "no symbol → not a trade");
     assert.equal(await fastParseTrade("buy"), null);
     assert.equal(await fastParseTrade(""), null);
-    // /buy 0 defaults to 1 USDG (fluid trading fix)
-    assert.deepEqual(await fastParseTrade("buy 0 nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
+    // /buy 0 is not a valid amount — returns ask-amount just like /buy without it
+    const zeroParse = await fastParseTrade("buy 0 nvda");
+    assert.ok(zeroParse === null || (zeroParse as any).kind === "ask-amount", "zero amount should not create a trade");
   });
 
   it("never returns a non-trade kind even from a slash", async () => {

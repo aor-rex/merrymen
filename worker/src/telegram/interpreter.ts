@@ -85,7 +85,9 @@ export type Command =
    * agent loop (agent.ts), not executeCommand. Gated on agent mode + PC control. */
   | { kind: "agent"; task: string }
   | { kind: "chat"; reply: string }
-  | { kind: "unknown"; text: string };
+  | { kind: "unknown"; text: string }
+  /** Fluid trading: symbol was recognised but amount missing — ask the user for it. */
+  | { kind: "ask-amount"; symbol: string; side: "buy" | "sell" };
 
 /** Commands that change state — gated by telegramControlEnabled (TRADING control).
  * NOTE: "confirm" is deliberately NOT here — it just executes an already-gated
@@ -245,14 +247,15 @@ export function parseSlash(text: string): Command | null {
     case "buy":
     case "sell": {
       // /buy QQQ 10  or  /buy 10 QQQ  or  /buy $NVDA 1usdg  or  /buy pipotam
-      // Strip $ from symbols, strip usdg/usd suffix from amounts, default to 1.
+      // Strip $ from symbols, strip usdg/usd suffix from amounts.
       const parts = rest.filter(Boolean);
       const clean = parts.map((p) => p.replace(/^\$/, "").replace(/(usdg|usd)$/i, ""));
       const sym = clean.find((p) => /^[A-Za-z]{1,10}$/.test(p))?.toUpperCase();
-      const usdg = clean.map(Number).find((n) => Number.isFinite(n) && n > 0) ?? 1;
-      return sym
-        ? { kind: cmd, symbol: sym, usdg }
-        : { kind: "unknown", text: `usage: /${cmd} <SYMBOL> [usdg] — e.g. /buy NVDA 5` };
+      const usdg = clean.map(Number).find((n) => Number.isFinite(n) && n > 0);
+      if (sym && usdg) return { kind: cmd, symbol: sym, usdg };
+      // Symbol with no amount: return ask-amount so the service can prompt.
+      if (sym && !usdg) return { kind: "ask-amount", symbol: sym, side: cmd };
+      return { kind: "unknown", text: `usage: /${cmd} <SYMBOL> [usdg] — e.g. /buy NVDA 5` };
     }
     case "transfer":
     case "send":

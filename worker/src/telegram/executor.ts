@@ -407,5 +407,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       // streams its own messages). This branch keeps the switch exhaustive and is
       // not reached in normal flow.
       return "🏹 starting…";
+    default:
+      // ask-amount is handled in service.ts before executeCommand is reached.
+      return `unknown command: ${(cmd as any).kind}`;
   }
 }

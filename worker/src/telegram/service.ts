@@ -30,7 +30,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from 
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash, type Command } from "./interpreter";
 import { llmText } from "../llm";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
@@ -579,28 +579,41 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // (buy/sell with amount) but the symbol wasn't recognised, ask the LLM
       // to resolve it before falling through to general chat. The LLM only
       // picks a symbol from a known list — never decides amounts or executes.
+      // Track whether there was a trade-shaped intent that failed resolution.
+      let hadTradePattern = false;
+      let partialTrade: Command | null = null;
       const llm = resolveLlm(cfg);
       if (llm && !slash) {
-        const partial = await fastParseTrade(msg.text ?? "");
-        if (partial && (partial.kind === "buy" || partial.kind === "sell")) {
+        partialTrade = await fastParseTrade(msg.text ?? "");
+        if (partialTrade && (partialTrade.kind === "buy" || partialTrade.kind === "sell")) {
+          hadTradePattern = true;
           const knownRoster = [...STOCK_TOKENS.map((t) => t.symbol), ...(cfg.customTokens ?? []).map((t) => t.symbol)]
             .map((s) => s.toUpperCase()).sort().join(", ");
           const ponsRoster = ponsSymbols ? [...ponsSymbols].sort().join(", ") : null;
-          const tradeText = `${partial.kind} ${partial.usdg} USDG of ${partial.symbol}`;
-          const resolveTask = `The user wants to ${tradeText}. I don't know "${partial.symbol}".
+          const tradeText = `${partialTrade.kind} ${partialTrade.usdg} USDG of ${partialTrade.symbol}`;
+          const resolveTask = `The user wants to ${tradeText}. I don't know "${partialTrade.symbol}".
 Known tokens: ${knownRoster}${ponsRoster ? `\nRecently discovered tokens: ${ponsRoster}` : ""}
 Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none match.`;
           try {
             const resolved = await llmText(llm, { system: "You are a symbol resolver. Respond with ONLY the ticker symbol or UNKNOWN.", prompt: resolveTask, maxTokens: 10 });
             const match = resolved?.trim().toUpperCase();
             if (match && match !== "UNKNOWN" && match.length <= 10 && /^[A-Z]{1,10}$/.test(match)) {
-              cmd = { kind: partial.kind, symbol: match, usdg: partial.usdg };
+              cmd = { kind: partialTrade.kind, symbol: match, usdg: partialTrade.usdg };
+              hadTradePattern = false;
               await pushHistory(msg.chatId, "user", msg.text);
             }
           } catch {
-            // LLM resolution failed — fall through to normal chat path
+            // LLM resolution failed — stay in the unknown-trade path
           }
         }
+      }
+      if (!cmd && hadTradePattern) {
+        // A trade pattern was identified but neither the fast path nor the LLM
+        // could resolve the symbol. Reply cleanly — never fall through to a
+        // general chat that might leak internal reasoning.
+        const sym = partialTrade && "symbol" in partialTrade ? partialTrade.symbol : msg.text.trim().split(/\s+/).slice(1)[0];
+        cmd = { kind: "chat", reply: `I don't know "${sym}". Check /discoveries for new tokens, or paste the contract address.` };
+        await pushHistory(msg.chatId, "user", msg.text);
       }
       if (!cmd) {
         const llm = resolveLlm(cfg);
@@ -704,12 +717,16 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
-    try {
-      reply = await executeCommand(cmd, cmdDeps);
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
-      reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
+    if (cmd.kind === "ask-amount") {
+      reply = `how much ${cmd.side === "buy" ? "to buy" : "to sell"}? e.g. <code>/${cmd.side === "buy" ? "buy" : "sell"} ${cmd.symbol} 5</code>`;
+    } else {
+      try {
+        reply = await executeCommand(cmd, cmdDeps);
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
+        reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
+      }
     }
     if (!slash) await pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
     await sendMessage({ token }, msg.chatId, reply);
