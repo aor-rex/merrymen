@@ -308,6 +308,12 @@ interface ActiveAgent {
   ponsAdapterLive: boolean;
 }
 
+/**
+ * A token address as a person reads it. Only ever a LABEL — every comparison in
+ * this file is against the full address, so a collision here is cosmetic.
+ */
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
 async function main() {
   await initStore();
   const selftest = process.argv.includes("--selftest");
@@ -3692,6 +3698,50 @@ async function main() {
       console.log(`[execute] ${intent.kind} landed: ${txHash}`);
       await addEvent(agentId, "ok", `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`);
 
+      // ── DID IT ACTUALLY ARRIVE? ──────────────────────────────────────────
+      //
+      // BEFORE the decode, and gated only on "did this operation acquire an
+      // ERC-20", because that is the only precondition the question has.
+      //
+      // It used to sit three gates deep — inside `if (fillPair)`, inside
+      // `if (measured)`, inside `if (side === "buy")` — and `fillPair` is
+      // assigned only in the Uniswap branch, under `sellIsUsdg !== buyIsUsdg`,
+      // under `if (symbol)`. So curve trades, Rialto swaps and stock-to-stock
+      // swaps got no delivery check at all. Curve is where honeypots live: it is
+      // the venue where a token is minted by whoever wants it minted, and it was
+      // the one lane with nothing watching.
+      //
+      // The other two gates were wrong for a subtler reason. `measured` is a
+      // RECEIPT DECODE, and this check exists precisely because receipt logs are
+      // contract-authored — a token that fabricates a Transfer log is exactly the
+      // token whose decode you should not be trusting to decide whether to look.
+      // Vex computes delivery before the decode for this reason.
+      //
+      // See delivery.ts for why it is exact-zero-only, why a failed read is
+      // 'unknown' rather than a zero, and why it can never fail the trade.
+      const acquired: { token: `0x${string}`; label: string } | null =
+        intent.kind === "swap" && intent.buyToken.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+          ? { token: intent.buyToken, label: fillPair?.symbol ?? short(intent.buyToken) }
+          : intent.kind === "curve-trade" &&
+              intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
+            ? { token: intent.assetOut, label: short(intent.assetOut) }
+            : null;
+      if (acquired) {
+        const delivery = await checkDelivery({
+          balanceOf: () =>
+            chainClient.readContract({
+              address: acquired.token,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [executor.address],
+            }) as Promise<bigint>,
+        });
+        const note = describeDelivery(acquired.label, delivery);
+        // "delivered" says nothing, deliberately — a tape of non-events is
+        // noise, and this runs on every acquisition.
+        if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
+      }
+
       // ── what the chain says actually moved ───────────────────────────────
       // Prefer the receipt over the quote. The quote is what we hoped for; the
       // receipt is what happened, and only the receipt's quantity matches the
@@ -3714,37 +3764,19 @@ async function main() {
           const receivedOut = measured.side === "buy" ? measured.qtyRaw : measured.cashUsdg;
           slippageBps = slippageBpsAgainst(fillPair.quotedOut, receivedOut);
 
-          // ── DID IT ACTUALLY ARRIVE? ────────────────────────────────────────
-          // Everything above this line was read from logs the token contract
-          // wrote. On a buy that is the whole basis, so ask the chain the one
-          // question a fabricated log cannot answer. See delivery.ts for why
-          // this is exact-zero-only, why a failed read is not a zero, and why
-          // it can never fail the trade.
+          // THE FLOOR IS A DIFFERENT QUESTION FROM DELIVERY, and it is the one
+          // that genuinely needs the decode: it compares the SETTLED output
+          // against the minOut this operation was signed with. A settled output
+          // below that floor cannot come from a well-behaved router — it would
+          // have reverted — so it is the signature of a token taking a cut on
+          // transfer. Delivery moved above, where it needs no decode.
           if (measured.side === "buy") {
-            const delivery = await checkDelivery({
-              balanceOf: () =>
-                chainClient.readContract({
-                  address: fillPair.stockToken,
-                  abi: erc20Abi,
-                  functionName: "balanceOf",
-                  args: [executor.address],
-                }) as Promise<bigint>,
-            });
-            const note = describeDelivery(fillPair.symbol, delivery);
-            // "delivered" says nothing, deliberately — a tape of non-events is
-            // noise, and this runs on every buy.
-            if (note) await addEvent(agentId, delivery.kind === "undelivered" ? "err" : "warn", note);
-
-            // And the floor, which is a different question from the quote. A
-            // settled output BELOW the minOut we signed cannot come from a
-            // well-behaved router — it would have reverted — so it is the
-            // signature of a token that takes a cut on transfer.
-            const short = belowFloorBps(fillPair.floorOut, receivedOut);
-            if (short !== null) {
+            const shortBps = belowFloorBps(fillPair.floorOut, receivedOut);
+            if (shortBps !== null) {
               await addEvent(
                 agentId,
                 "warn",
-                `${fillPair.symbol}: settled ${short} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
+                `${fillPair.symbol}: settled ${shortBps} bps BELOW the minOut this op was signed with. A router cannot pay out less than the floor it accepted, so the shortfall happened on transfer — treat this as a fee-on-transfer token.`,
               );
             }
           }

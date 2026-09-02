@@ -153,3 +153,28 @@ test("an operation that WENT OUT is never booked as a failure beside itself", ()
   assert.match(body, /refreshBudget\(agentId\)/, "the in-flight charge must be settled, not dropped");
   assert.match(body, /return;/, "it must not fall through to the terminal write");
 });
+
+test("DELIVERY IS CHECKED WHEREVER A TOKEN WAS ACQUIRED, not only where the decode worked", () => {
+  // It used to sit three gates deep: inside `if (fillPair)`, inside
+  // `if (measured)`, inside `if (side === "buy")`. `fillPair` is assigned only
+  // in the Uniswap branch, under `sellIsUsdg !== buyIsUsdg`, under `if (symbol)`
+  // — so curve trades, Rialto swaps and stock-to-stock swaps got no delivery
+  // check at all. Curve is the venue where a token is minted by whoever wants it
+  // minted, and it was the one lane with nothing watching.
+  const gate = INDEX.indexOf("const acquired: { token:");
+  assert.ok(gate > 0, "the acquisition gate must exist");
+  assert.match(INDEX.slice(gate, gate + 700), /intent\.kind === "curve-trade"/, "curve must be covered");
+
+  // And it must run BEFORE the decode. `measured` is a receipt decode, and this
+  // check exists precisely because receipt logs are contract-authored: a token
+  // that fabricates a Transfer log is exactly the token whose decode should not
+  // be deciding whether to look. Vex computes delivery before the decode for
+  // this reason.
+  const decodeAt = INDEX.indexOf("const deltas = netTokenDeltas(");
+  assert.ok(decodeAt > 0, "the decode must exist");
+  assert.ok(gate < decodeAt, "delivery must not depend on the decode succeeding");
+
+  // Exactly one call site — the old thrice-gated copy is gone, not merely
+  // shadowed by the new one.
+  assert.equal((INDEX.match(/await checkDelivery\(/g) ?? []).length, 1);
+});
