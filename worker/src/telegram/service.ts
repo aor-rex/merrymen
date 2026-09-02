@@ -30,7 +30,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from 
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -540,7 +540,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
 
     // Slash command wins; else natural language (LLM) if a key is set; else nudge.
-    let cmd = slash;
+    // ORDER MATTERS: the fluid trade parse WINS over the raw slash parse.
+    // parseSlash reads the "usdg" in "/sell 1 usdg of tsla" as the SYMBOL
+    // (it matches the ticker shape — a nonsense USDG-for-USDG swap), while
+    // the fluid parser strips filler words and typos. Trade-shaped text is
+    // parsed deterministically; everything else falls to parseSlash, and the
+    // LLM is last — a down provider can never strand an order.
+    const fluid = fastParseTrade(msg.text ?? "");
+    let cmd = fluid ?? slash;
     // What the narrator recalled this turn — stored on the assistant's reply so
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
@@ -554,7 +561,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = readLlmState(statusCtx());
         const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
-        const r = await interpretWithLlm(msg.text, routeCtx, llm);
+        // A DOWN PROVIDER MUST NOT LOOK LIKE A PERSONALITY. The observed
+        // failure: the free model answered with a paragraph of leaked
+        // reasoning and the user's trade went nowhere. On any throw, reply
+        // with the deterministic signpost — trades never wait on this path.
+        let llmDown = false;
+        let r: Awaited<ReturnType<typeof interpretWithLlm>>;
+        try {
+          r = await interpretWithLlm(msg.text, routeCtx, llm);
+        } catch {
+          llmDown = true;
+          r = {
+            remember: "",
+            cmd: {
+              kind: "chat",
+              reply: "⚠️ my brain didn't answer (the AI provider failed). Trades never wait on it: /buy SYMBOL AMOUNT · /sell SYMBOL AMOUNT · /status · /help",
+            },
+          };
+        }
         cmd = r.cmd;
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps). Only the
@@ -567,7 +591,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // actually just said, so a fact from months back is reachable when it's
         // the one being asked about. Written AFTER the remember side-channel, so
         // something learned this turn can be recalled in the very same reply.
-        if (cmd.kind === "chat") {
+        if (cmd.kind === "chat" && !llmDown) {
           const recalled = recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
           // Read BEFORE this turn is written, so it's the gap since they last
           // spoke rather than zero.

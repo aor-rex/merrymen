@@ -34,7 +34,16 @@ export type PendingAction =
    * key — so a misread instruction was a permanent loss of funds. A transfer of
    * $5 asks first; ending the agent should too.
    */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "kill"; expiresAt: number }
+  /**
+   * EVERY trade parks here first — no size threshold, no auto-execute. The
+   * card shows exactly what will move (side, symbol, amount) and only an
+   * explicit /confirm fires deps.trade; /cancel or the TTL discards it. The
+   * same re-vet at confirm time as every other parked action: a gate that
+   * closed during the window must not fire a stale trade.
+   */
+  | { kind: "buy"; symbol: string; usdg: number; expiresAt: number }
+  | { kind: "sell"; symbol: string; usdg: number; expiresAt: number };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -184,14 +193,18 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     }
     case "buy":
     case "sell": {
+      // PARK, DON'T FIRE. The parsed intent becomes a card the user confirms —
+      // the same rhythm a transfer already has — because a trade is real money
+      // and "buy 1 usdg of any coin" typed in a hurry deserves one look.
       let usdg = cmd.usdg;
-      let note = "";
-      if (usdg > deps.maxActionUsdg) {
-        usdg = deps.maxActionUsdg;
-        note = ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)`;
-      }
-      const reply = await deps.trade(cmd.kind, cmd.symbol, usdg);
-      return reply + note;
+      const trimmed = usdg > deps.maxActionUsdg;
+      if (trimmed) usdg = deps.maxActionUsdg;
+      deps.setPending({ kind: cmd.kind, symbol: cmd.symbol, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
+      return (
+        `🏹 pending — <b>${cmd.kind} ${usdg} USDG of ${cmd.symbol}</b>${trimmed ? ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)` : ""}
+` +
+        `nothing moves until you say so — /confirm to execute · /cancel to discard (${CONFIRM_TTL_SEC}s)`
+      );
     }
     case "transfer": {
       if (!deps.transferEnabled) {
@@ -234,6 +247,13 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "buy" || p.kind === "sell") {
+        // Same re-vet as the kill switch: control may have been switched off
+        // during the confirmation window. A stale parked trade must not fire.
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — nothing moved.";
+        }
       } else if (p.kind === "kill") {
         // Kill is a control command, not a PC capability — re-vet the control
         // switch rather than running it through pcRefusal, which knows nothing
@@ -253,6 +273,9 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       switch (p.kind) {
         case "transfer":
           return await deps.transfer(p.to, p.usdg);
+        case "buy":
+        case "sell":
+          return await deps.trade(p.kind, p.symbol, p.usdg);
         case "shell":
           return await deps.pc.runShell(p.cmd);
         case "getfile":

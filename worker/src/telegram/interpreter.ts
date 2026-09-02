@@ -129,6 +129,45 @@ export const PC_DANGEROUS = new Set(["shell", "getfile", "type", "hotkey", "powe
 export const PC_KINDS = new Set([...Object.keys(PC_CAP_OF), "pc"]);
 
 /** Pure parser for slash commands. Returns null when the text isn't a slash command. */
+/**
+ * THE FLUID PATH — a deterministic front door for trade-shaped messages.
+ *
+ * Slash forms (/buy NVDA 1), bare-verb forms ("buy 1 usdg of nvda"), and the
+ * one-key typos thumbs actually make ("but ...", "byu ...") all parse HERE,
+ * with no model call. Returns ONLY buy/sell commands; every other kind of
+ * message is null and belongs to parseSlash or the LLM exactly as before.
+ *
+ * WHY THIS EXISTS. A parseable trade must never wait on — or fail with — an
+ * AI provider. The observed failure: "/buy 1 nvda" reached the LLM because a
+ * downstream gate refused it, and the down model answered with a paragraph of
+ * leaked reasoning while the trade went nowhere. The fix is upstream of all
+ * of that: if it parses as a trade, it IS a trade.
+ */
+const TRADE_TYPO: Record<string, string> = {
+  but: "buy",
+  byu: "buy",
+  bug: "buy",
+  bu: "buy",
+  guy: "buy",
+  sel: "sell",
+  slel: "sell",
+  seal: "sell",
+};
+/** Filler around the amount/symbol — stripped before the slash parser sees it. */
+const TRADE_FILLER = /^(usdg|usd|of|worth|dollars?|coins?|some|any|me|please|the)$/i;
+
+export function fastParseTrade(text: string): Command | null {
+  const t = text.trim();
+  if (!t) return null;
+  const words = t.split(/\s+/).filter(Boolean);
+  const head = (words[0] ?? "").toLowerCase().replace(/^[/.]+/, "");
+  const verb = TRADE_TYPO[head] ?? (/^(buy|sell)$/i.test(head) ? head.toLowerCase() : null);
+  if (!verb) return null;
+  const parts = words.slice(1).filter((w) => !TRADE_FILLER.test(w));
+  const cmd = parseSlash(`/${verb} ${parts.join(" ")}`.trim());
+  return cmd && (cmd.kind === "buy" || cmd.kind === "sell") ? cmd : null;
+}
+
 export function parseSlash(text: string): Command | null {
   const t = text.trim();
   if (!t.startsWith("/")) return null;

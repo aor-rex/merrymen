@@ -264,11 +264,20 @@ describe("executeCommand — code disposes", () => {
     assert.deepEqual(d.calls, ["setCap:30"]); // stored the clamped value, not 999
   });
 
-  it("a trade is trimmed to the chat ceiling and routed through trade()", async () => {
+  it("a trade is trimmed to the chat ceiling, PARKED, and fires on /confirm", async () => {
+    // BEHAVIOR CHANGE (fluid trading): a buy/sell no longer fires on the
+    // message that parsed it. Every trade parks as a pending card — the same
+    // rhythm a transfer already had — and only an explicit /confirm routes it
+    // through trade(), with the ceiling-trimmed amount. The card names the
+    // trim; the execution carries it.
     const d = deps({ maxActionUsdg: 25 });
     const r = await executeCommand({ kind: "buy", symbol: "QQQ", usdg: 100 }, d);
-    assert.deepEqual(d.calls, ["trade:buy:QQQ:25"]); // 100 trimmed to 25
+    assert.deepEqual(d.calls, ["pend:buy"]); // parked, nothing fired
     assert.match(r, /trimmed to your 25 USDG/);
+    assert.match(r, /\/confirm/);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.deepEqual(d.calls, ["pend:buy", "trade:buy:QQQ:25"]); // 100 trimmed to 25
+    assert.match(done, /QQQ/);
   });
 
   it("pause/resume/strategy/link perform their one effect", async () => {
