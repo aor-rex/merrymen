@@ -200,11 +200,9 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       const trimmed = usdg > deps.maxActionUsdg;
       if (trimmed) usdg = deps.maxActionUsdg;
       deps.setPending({ kind: cmd.kind, symbol: cmd.symbol, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
-      return (
-        `🏹 pending — <b>${cmd.kind} ${usdg} USDG of ${cmd.symbol}</b>${trimmed ? ` (trimmed to your ${deps.maxActionUsdg} USDG chat ceiling)` : ""}
-` +
-        `nothing moves until you say so — /confirm to execute · /cancel to discard (${CONFIRM_TTL_SEC}s)`
-      );
+      let head = "🏹 pending — <b>" + cmd.kind + " " + usdg + " USDG of " + cmd.symbol + "</b>";
+      if (trimmed) head += " (trimmed to your " + deps.maxActionUsdg + " USDG chat ceiling)";
+      return head + "\nnothing moves until you say so — /confirm to execute · /cancel to discard (" + CONFIRM_TTL_SEC + "s)";
     }
     case "transfer": {
       if (!deps.transferEnabled) {

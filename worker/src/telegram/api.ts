@@ -226,6 +226,26 @@ async function sendFile(
   }
 }
 
+/**
+ * Send a message with inline keyboard buttons. Best-effort — returns a reason
+ * on failure, never throws. Uses HTML parse_mode the same as sendMessage.
+ * Falls back to sendMessage (plain text) if the keyboard is rejected.
+ */
+export async function sendMessageWithKeyboard(
+  opts: TelegramOpts,
+  chatId: number,
+  text: string,
+  buttons: { text: string; callback: string }[][],
+): Promise<{ ok: boolean; reason?: string }> {
+  const body = text.length > 4096 ? text.slice(0, 4090) + "\n…" : text;
+  const reply_markup = { inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.callback }))) };
+  const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML", reply_markup });
+  if (html.result != null) return { ok: true };
+  // Fall back to plain text without buttons on error
+  const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, "") });
+  return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
+}
+
 export function sendPhoto(opts: TelegramOpts, chatId: number, filePath: string, caption?: string) {
   return sendFile(opts, "sendPhoto", "photo", chatId, filePath, caption);
 }

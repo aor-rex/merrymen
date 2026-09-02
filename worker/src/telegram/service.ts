@@ -26,7 +26,7 @@ import { PC_CAPABILITIES, STOCK_TOKENS } from "../../../packages/core/src/index"
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, type TgMessage } from "./api";
+import { esc, getFileUrl, getMe, getUpdates, sendMessage, sendMessageWithKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
@@ -120,6 +120,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
   const stateRef = deps.stateRef;
   let warnedUnreachable = false;
+  // Ask-amount context: when the bot asks "how much to buy?", it remembers
+  // { side, symbol } per chat so a follow-up like "5" creates the full trade.
+  const askAmountCtx = new Map<number, { side: "buy" | "sell"; symbol: string }>();
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
@@ -717,19 +720,46 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
-    if (cmd.kind === "ask-amount") {
-      reply = `how much ${cmd.side === "buy" ? "to buy" : "to sell"}? e.g. <code>/${cmd.side === "buy" ? "buy" : "sell"} ${cmd.symbol} 5</code>`;
-    } else {
-      try {
-        reply = await executeCommand(cmd, cmdDeps);
-      } catch (e) {
-        const m = e instanceof Error ? e.message : String(e);
-        deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
-        reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
+    // Handle bare number replies to "how much to buy?" prompts
+    if (!cmd && askAmountCtx.has(msg.chatId)) {
+      const ctx = askAmountCtx.get(msg.chatId)!;
+      const num = Number(msg.text?.trim());
+      if (Number.isFinite(num) && num > 0) {
+        cmd = { kind: ctx.side, symbol: ctx.symbol, usdg: Math.round(num) };
+        await pushHistory(msg.chatId, "user", msg.text);
       }
+      askAmountCtx.delete(msg.chatId);
     }
+    if (!cmd) {
+      reply = "not sure what you want to do — try /buy, /sell, /status, or /help";
+      await sendMessage({ token }, msg.chatId, reply);
+      return;
+    }
+    if (cmd.kind === "ask-amount") {
+      askAmountCtx.set(msg.chatId, { side: cmd.side, symbol: cmd.symbol });
+      reply = `how much ${cmd.side === "buy" ? "to buy" : "to sell"}? e.g. <code>/${cmd.side === "buy" ? "buy" : "sell"} ${cmd.symbol} 5</code>`;
+      await sendMessage({ token }, msg.chatId, reply);
+      return;
+    }
+    try {
+      reply = await executeCommand(cmd, cmdDeps);
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
+      reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
+    }
+    // Clear any leftover ask-amount context — a non-numeric message ends it.
+    if (cmd.kind !== "confirm" && cmd.kind !== "cancel") askAmountCtx.delete(msg.chatId);
+    // Use keyboard buttons when the reply contains "pending" (trade/transfer/kill cards).
+    const useKeyboard = reply.includes("pending") || reply.includes("confirm");
     if (!slash) await pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply);
+    if (useKeyboard) {
+      await sendMessageWithKeyboard({ token }, msg.chatId, reply, [
+        [{ text: "✅ Confirm", callback: "/confirm" }, { text: "❌ Cancel", callback: "/cancel" }],
+      ]);
+    } else {
+      await sendMessage({ token }, msg.chatId, reply);
+    }
   };
 
   const pollOnce = async (): Promise<void> => {
