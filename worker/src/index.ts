@@ -279,6 +279,23 @@ interface ActiveAgent {
    */
   orderExecutor: OrderExecutor | null;
   limits: AgentLimits;
+  /**
+   * This signature seals a policy contract with no bytecode on its chain.
+   *
+   * Read once at arm and carried, because it is a property of a frozen
+   * signature: it cannot change while this grant is active, and re-deriving it
+   * per-tick would parse the serialized permission set sixty times a minute to
+   * get the same answer.
+   */
+  deadPolicy: boolean;
+  /**
+   * Does the smart account have bytecode on the grant chain?
+   *
+   * `false` is the ordinary state of an account that has never operated, and
+   * `null` means the read did not land — which is not the same and must never
+   * be rendered as one.
+   */
+  accountDeployed: boolean | null;
   /** True only when breakerAddress has CODE on the grant chain — otherwise the
    * on-chain read would silently fail open (.catch → "not tripped"). */
   breakerLive: boolean;
@@ -363,6 +380,7 @@ async function main() {
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
       cashUsdg: lastCashUsdg,
+      deadPolicy: active?.deadPolicy ?? false,
       paperTradingEnabled: cfg.paperTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
@@ -2190,7 +2208,8 @@ async function main() {
     //
     // Said once per arm, as an err, because the alternative is an owner
     // watching every trade fail with a validation error that names nothing.
-    if (grantHasDeadRateLimit(grant.serialized)) {
+    const deadPolicy = grantHasDeadRateLimit(grant.serialized);
+    if (deadPolicy) {
       console.log(`[worker] grant predates the rate-limit removal — cannot transact until re-signed`);
       await addEvent(
         agentId,
@@ -2250,6 +2269,46 @@ async function main() {
         "warn",
         `couldn't check the wall's contracts this time (${uncheckedPolicyContracts.join(", ")}) — the chain did not answer. ` +
           `This says nothing about whether they are there; it retries on the next arm.`,
+      );
+    }
+
+    // HAS THIS ACCOUNT EVER EXISTED?
+    //
+    // Nothing in merrymen has ever asked. Every `getCode` in the repo is aimed
+    // at a policy contract, a breaker, an adapter or a token — never at the
+    // account itself — so "is the wall deployed" was answerable and "is the
+    // thing the wall protects deployed" was not.
+    //
+    // It matters more than it looks. A 4337 account is counterfactual until its
+    // first operation, so absence here is NORMAL and not an error. What absence
+    // means is that no EVM has ever evaluated this grant: every claim about what
+    // the wall enforces is, until this reads back bytecode, a claim about
+    // calldata that was built and signed and never submitted.
+    //
+    // Three-way, for the same reason as the loop above: a throw is not an
+    // absence. `null` is "could not look".
+    let accountDeployed: boolean | null = null;
+    try {
+      const code = await client.getCode({ address: grant.smartAccount as `0x${string}` });
+      accountDeployed = code !== undefined && code !== "0x";
+    } catch {
+      accountDeployed = null;
+    }
+    if (accountDeployed === false) {
+      console.log(`[worker] smart account ${grant.smartAccount} is not deployed yet — the first op deploys it`);
+      await addEvent(
+        agentId,
+        "warn",
+        `this account does not exist on chain ${chain.id} yet. That is normal — it deploys itself with ` +
+          `its first operation — but it means the first operation costs more than the ones after it, ` +
+          `and that no chain has yet checked the permissions this key was signed under.`,
+      );
+    } else if (accountDeployed === null) {
+      await addEvent(
+        agentId,
+        "warn",
+        `couldn't check whether this account is deployed — the chain did not answer. This says nothing ` +
+          `about whether it is; it retries on the next arm.`,
       );
     }
 
@@ -2340,6 +2399,10 @@ async function main() {
       // alongside every other grant-derived bound, so a curve the agent never
       // saw launch cannot be traded even though the wall cannot pin it.
       limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
+      // Read once here, with every other grant-derived bound, because deciding
+      // it per-tick would re-parse a serialized signature that cannot change.
+      deadPolicy,
+      accountDeployed,
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,
