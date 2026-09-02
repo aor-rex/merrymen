@@ -8,8 +8,9 @@
  * rather than being copied: two copies of a publication policy drift, and the
  * drift is invisible until something private lands on a page.
  *
- * The follow graph is not built. Nothing reads the worker-side copy except this
- * re-export, and this comment said otherwise for three weeks.
+ * The worker-side copy now has its second reader — peer-theses.ts — so the two
+ * halves of the wire publish through one function. This comment claimed that
+ * before it was true, for three weeks.
  *
  * This file exists so every `@/lib/thesis` import in the web tree keeps
  * working. Nothing here may add behaviour — a check that lives on this side

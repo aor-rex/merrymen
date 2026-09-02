@@ -75,6 +75,6 @@ describe("the page actually renders them", () => {
     // the rest. So pin the call.
     const src = readFileSync(new URL("../app/(app)/you/YouClient.tsx", import.meta.url), "utf8");
     assert.match(src, /railNotices\(/, "the page must go through the tested rule");
-    assert.match(src, /mm-rail/, "and must have somewhere to put the result");
+    assert.match(src, /mm-notices/, "and must have somewhere to put the result");
   });
 });

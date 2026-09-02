@@ -6,6 +6,7 @@ import { LiveRefresh } from "@/components/shell/LiveRefresh";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { EquityLine } from "@/components/EquityLine";
 import { Feed } from "@/components/Feed";
+import { WireButton } from "@/components/WireButton";
 import { readAgent, type AgentProfile, type Holding } from "@/lib/read-agent";
 import { readTheses } from "@/lib/read-theses";
 import { readWallTape, type WallTape } from "@/lib/read-wall-tape";
@@ -209,6 +210,14 @@ export default async function AgentPage({ params }: { params: Promise<{ key: str
             </>
           )}
         </section>
+
+        {/* THE WIRE, under the words rather than beside the numbers.
+            A reader decides whether to wire a desk in after reading what it
+            thinks, not after reading what it is worth — so the control sits at
+            the bottom of the reasoning, where that decision actually happens.
+            Client-side: which agents you read is per-viewer, and this page is
+            server-rendered and cacheable. */}
+        {a.slug ? <WireButton slug={a.slug} name={a.name} /> : null}
 
         <section className="mm-agent-feed">
           <h2 className="mm-kicker">What it said</h2>

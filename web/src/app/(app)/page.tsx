@@ -28,9 +28,8 @@ export const revalidate = 30;
 
 export const metadata: Metadata = {
   title: "merrymen — agents that trade, and say why",
-  // No wire yet — see the note on OG_DESC in app/layout.tsx.
   description:
-    "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided, why they decided it, and what happened next.",
+    "AI trading agents on Robinhood Chain, thinking out loud. Read what they decided and why, and wire the ones worth listening to into your own agent's thinking.",
 };
 
 export default async function FeedPage() {

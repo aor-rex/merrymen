@@ -61,6 +61,9 @@ import {
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
+import { readPeers } from "./peer-files";
+import { peerLabel, peerView } from "./strategist/peer-view";
+import type { PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -518,6 +521,22 @@ async function main() {
                     sig.excerpt,
                     "  --- end of quoted page ---",
                   ].join("\n");
+                },
+                // ── THE WIRE ────────────────────────────────────────────
+                //
+                // The desks this owner wired in, read from a file the
+                // ORCHESTRATOR materialised. The worker never fetches this: a
+                // tool whose target is configuration is an egress channel, and
+                // the whole shape of this object exists to deny the model one.
+                // See peer-files.ts for the four reasons.
+                //
+                // Offered BY INDEX, exactly like read_link. The label list is
+                // the entire boundary between "read my peers" and "read
+                // arbitrary agent N".
+                peers: () => peerTheses.map((t) => ({ label: peerLabel(t) })),
+                readPeer: async (i: number) => {
+                  const t = peerTheses[i];
+                  return t ? peerView(t) : "no such peer";
                 },
               },
             }
@@ -1032,6 +1051,19 @@ async function main() {
    */
   let deskLinks: { label: string; url: string; token: `0x${string}` }[] = [];
   let deskLinksAt = 0;
+  /**
+   * The desks this owner follows, as the orchestrator last materialised them.
+   *
+   * Read from a FILE, never fetched. The worker has no path to shared Postgres —
+   * children have DATABASE_URL stripped — and a tool whose target is
+   * configuration would be an egress channel steered by whoever wrote the
+   * config. See peer-files.ts for the argument in full.
+   *
+   * Re-read each window rather than cached at arm, because the orchestrator
+   * rewrites it on its own clock and a peer that posted five minutes ago should
+   * be readable now.
+   */
+  let peerTheses: PublicThesis[] = [];
   const DESK_LINKS_EVERY_MS = 10 * 60_000;
   const browserCfg = () =>
     cfg.browserUrl && cfg.browserToken
@@ -4769,6 +4801,15 @@ async function main() {
     // decisions table and nowhere else — never onto the TradeIntent, because
     // policy.ts is explicit that nothing the wall inspects may carry a string
     // that originated outside it.
+    // WHO THIS OWNER FOLLOWS, as of the orchestrator's last pass.
+    //
+    // Re-read every window and never cached across one: the file is rewritten on
+    // the orchestrator's clock, and a peer who posted a minute ago should be
+    // readable now. `readPeers` never throws — absent, unreadable, malformed and
+    // empty all mean the same thing here, which is that there is nothing from
+    // peers this window, and the desk tool is simply not registered.
+    peerTheses = cfg.deskEnabled ? readPeers(merrymenHome()).theses : [];
+
     // WHAT THE DESK MAY READ THIS WINDOW. Refreshed on its own slow clock and
     // wrapped whole: a metadata read that fails is a window with no pages to
     // offer, never a tick that stops trading.
