@@ -91,17 +91,15 @@ export function Ticker() {
         {tokens.map((t) => {
           const stale = t.priceUpdatedAt !== null && Date.now() / 1000 - t.priceUpdatedAt > 3600;
           return (
-            // NO PREFETCH. Fourteen of these sit in the viewport on every
-            // page of the product, and /t/[token] is now force-dynamic — so
-            // the default would warm fourteen full server renders, each one a
-            // ledger read and a market read, every time anyone looks at
-            // anything.
-            <Link
-              key={t.address}
-              href={`/t/${t.address}`}
-              className="mm-tick"
-              prefetch={false}
-            >
+            // PREFETCH IS BACK ON, and the reason it was off has gone.
+            //
+            // It was disabled because fourteen of these sit in the viewport on
+            // every page and /t/[token] is force-dynamic, so the default would
+            // have warmed fourteen full server renders. That is only true
+            // without a loading boundary: with one, the router prefetches the
+            // route up to its loading.tsx and no further — a static skeleton,
+            // not a ledger read. So the click is instant and costs nothing.
+            <Link key={t.address} href={`/t/${t.address}`} className="mm-tick">
               <span className="k">{t.symbol}</span>
               <b className="mono">{money(t.priceUsd)}</b>
               {t.volume24hUsd !== null && (

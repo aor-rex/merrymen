@@ -175,8 +175,8 @@ export function FreshCard({ f }: { f: FreshRow }) {
           </a>
         )}
         {f.bare && <span className="soc mute">no socials</span>}
-        {/* Dynamic route, and a grid of these. See the note in Ticker. */}
-        <Link className="soc go" href={`/t/${f.token}`} prefetch={false}>
+        {/* Prefetches only as far as the route's loading boundary. */}
+        <Link className="soc go" href={`/t/${f.token}`}>
           who&rsquo;s in it →
         </Link>
       </footer>
@@ -249,7 +249,7 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
       <footer>
         <span className="soc mute">{r.venue}</span>
         <Reach onCurve={r.onCurve} />
-        <Link className="soc go" href={`/t/${r.token}`} prefetch={false}>
+        <Link className="soc go" href={`/t/${r.token}`}>
           who&rsquo;s in it →
         </Link>
       </footer>
