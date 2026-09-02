@@ -60,6 +60,7 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
+import { checkV3SwapCalls } from "./final-fence";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -3357,6 +3358,53 @@ async function main() {
           minAmountOut: minOut,
           deadline: Math.floor(Date.now() / 1000) + 300,
         });
+
+        // ── THE FINAL FENCE ─────────────────────────────────────────────
+        //
+        // Read the bytes about to be signed and check they say what this trade
+        // decided. Every other guard on this path judges the INTENT — the wall's
+        // mirror judges a notional, the impact guard judges a probe, the gas
+        // bounds judge an estimate — and none of them has ever looked at the
+        // calldata.
+        //
+        // The v3 lane only. A v4 quote goes through a different builder with a
+        // structurally pinned recipient, and a decoder returning "fine" for a
+        // shape it does not understand would be worse than no decoder: see the
+        // scope note in final-fence.ts. Reimplemented from Vex's final-request
+        // guard with its author's permission.
+        if (!quote.v4) {
+          const fence = checkV3SwapCalls(calls, {
+            router: UNISWAP.swapRouter02 as `0x${string}`,
+            tokenIn: intent.sellToken,
+            tokenOut: intent.buyToken,
+            recipient: executor.address,
+            amountIn: intent.sellAmountRaw,
+            minOut,
+          });
+          if (!fence.ok) {
+            // Pre-broadcast, so it books like a policy refusal rather than a
+            // revert: nothing signed, nothing spent, and the rule comes from a
+            // fixed vocabulary so the loop can suppress on it.
+            releaseBudget();
+            await addEvent(
+              agentId,
+              "err",
+              `refused to sign a ${intent.kind}: ${fence.detail}. Nothing was sent. This is a merrymen ` +
+                `fault — the calldata did not match the trade that was approved.`,
+            );
+            await recordTrade({
+              agent_id: agentId,
+              kind: intent.kind,
+              target: intent.target,
+              ...tokenLegs(intent),
+              amount_usdg: usdgNum(notional),
+              status: "rejected",
+              reject_rule: `fence-${fence.rule}`,
+              ...sim,
+            });
+            return;
+          }
+        }
         exec = await send(calls);
         const venue = quote.v4
           ? active.v4AdapterLive && grantV4Adapter(active.grant)
