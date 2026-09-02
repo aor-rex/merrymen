@@ -26,7 +26,7 @@ import { PC_CAPABILITIES, STOCK_TOKENS } from "../../../packages/core/src/index"
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, sendMessageWithKeyboard, type TgMessage } from "./api";
+import { answerCallbackQuery, esc, getFileUrl, getMe, getUpdates, sendMessage, sendMessageWithKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
@@ -760,6 +760,10 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
       ]);
     } else {
       await sendMessage({ token }, msg.chatId, reply);
+    }
+    // Answer callback queries (inline button taps) to dismiss the Telegram loading spinner.
+    if (msg.callbackQueryId) {
+      void answerCallbackQuery({ token }, msg.callbackQueryId);
     }
   };
 

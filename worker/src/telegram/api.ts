@@ -36,6 +36,8 @@ export interface TgMessage {
   text: string;
   /** Telegram file_id of an attached voice/audio note, if any (for transcription). */
   voiceFileId?: string;
+  /** For inline button taps (callback_query), the id to answer. */
+  callbackQueryId?: string;
 }
 
 export interface TgBotInfo {
@@ -107,7 +109,7 @@ export async function getUpdates(
   const { result, reason } = await call(opts, "getUpdates", {
     offset,
     timeout: timeoutSec,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
   });
   if (!Array.isArray(result)) return { messages: [], nextOffset: offset, reason };
 
@@ -115,8 +117,29 @@ export async function getUpdates(
   let nextOffset = offset;
   for (const raw of result) {
     if (!raw || typeof raw !== "object") continue;
-    const u = raw as { update_id?: unknown; message?: unknown };
+    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
+    // Callback queries (inline button taps) are converted to fake messages.
+    // The callback_data carries the slash command text (/confirm, /cancel).
+    const cb = u.callback_query as
+      | { message?: { chat?: { id?: unknown }; message_id?: unknown }; data?: unknown; from?: { id?: unknown; username?: unknown }; id?: unknown }
+      | undefined;
+    if (cb && typeof cb.data === "string" && cb.data.startsWith("/")) {
+      const cbMsg = cb.message;
+      const chatId = cbMsg?.chat?.id;
+      const fromId = cb.from?.id;
+      if (typeof chatId === "number" && typeof fromId === "number") {
+        messages.push({
+          updateId: typeof u.update_id === "number" ? u.update_id : 0,
+          chatId,
+          fromId,
+          fromUsername: typeof cb.from?.username === "string" ? cb.from.username : undefined,
+          text: cb.data,
+          callbackQueryId: typeof cb.id === "string" ? cb.id : undefined,
+        });
+      }
+      continue;
+    }
     const m = u.message as
       | {
           chat?: { id?: unknown };
@@ -244,6 +267,13 @@ export async function sendMessageWithKeyboard(
   // Fall back to plain text without buttons on error
   const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, "") });
   return plain.result != null ? { ok: true } : { ok: false, reason: plain.reason };
+}
+
+/**
+ * Answer a callback query (inline button tap) — required by Telegram or it shows a spinner.
+ */
+export async function answerCallbackQuery(opts: TelegramOpts, callbackQueryId: string): Promise<void> {
+  await call(opts, "answerCallbackQuery", { callback_query_id: callbackQueryId });
 }
 
 export function sendPhoto(opts: TelegramOpts, chatId: number, filePath: string, caption?: string) {
