@@ -62,6 +62,7 @@ import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
+  NotRecorded,
   createAgentExecutor,
   GasRefused,
   UserOpReverted,
@@ -3161,18 +3162,21 @@ async function main() {
             decision_id,
             ...sim,
           });
-          // A failed write here is not fatal — the op is already sent and the
-          // outcome path still records it. It IS worth saying, because the
-          // protection this hook exists to provide is the thing that just
-          // failed, and the next crash would be unrecoverable in the old way.
+          // A FAILED WRITE NOW STOPS THE OPERATION, and that is only possible
+          // because this hook moved ahead of the send. It used to run after,
+          // where the honest note was that a failed write "is not fatal — the
+          // op is already sent": the money was committed and the best available
+          // answer was to say so and hope. Now nothing has been broadcast, so
+          // the cheaper answer is on the table.
+          //
+          // Refusing is the right call rather than the cautious one. This row is
+          // what every reconciliation path keys on — resolveStrandedOps selects
+          // status='submitted' AND user_op_hash IS NOT NULL, and inflight-reconcile
+          // only sweeps ops that succeeded — so an operation sent without it is
+          // one that no sweep can ever resolve. A skipped tick costs nothing; an
+          // unreconcilable spend costs the notional and the ability to find out.
           submittedRow = wrote;
-          if (!wrote) {
-            void addEvent(
-              agentId,
-              "err",
-              `couldn't record ${userOpHash} before broadcast — this op is in flight with no durable row`,
-            );
-          }
+          if (!wrote) throw new NotRecorded(userOpHash);
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -3793,6 +3797,37 @@ async function main() {
       // The rule string is a literal from gas-limits.ts, so it joins the
       // vocabulary the notifier and the dashboard already read rather than
       // becoming another free-form sentence in reject_rule.
+      // NOTHING WAS SENT, because nothing could have found it afterwards.
+      // The pre-broadcast row is what every reconciliation path keys on, so an
+      // operation whose row could not be written is one that no sweep can ever
+      // resolve. Refusing costs a tick; sending would have cost the notional
+      // with no way to learn what became of it.
+      //
+      // A sibling of GasRefused directly below: pre-broadcast, nothing signed,
+      // nothing spent, and a `rule` from a fixed vocabulary rather than free
+      // text — so it never reaches the generic branch that writes 'reverted'.
+      if (e instanceof NotRecorded) {
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `refused to broadcast a ${intent.kind}: the ledger would not accept the row that has to exist ` +
+            `before an operation goes out, so it was not sent. Nothing was spent. This is a merrymen ` +
+            `fault, not a configuration one.`,
+        );
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          ...tokenLegs(intent),
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: "not-recorded",
+          ...sim,
+        });
+        return;
+      }
+
       if (e instanceof GasRefused) {
         releaseBudget();
         await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
@@ -3878,10 +3913,43 @@ async function main() {
         return;
       }
 
-      // Roll back the optimistic reservation — the money didn't move. The
-      // 'reverted' row written below goes through recordTrade, which would
-      // release it anyway; doing it here keeps the counters honest for the
-      // window in between, and releaseBudget is idempotent.
+      // ── AN OPERATION THAT WENT OUT IS NOT A FAILED ONE ──────────────────
+      //
+      // `submittedRow` is set by the durable pre-broadcast write, which now
+      // happens BEFORE the send. So if it is set and this is not a typed
+      // on-chain revert, an operation reached the bundler — possibly landed —
+      // and something AFTER it threw: the receipt's fill read, the gas pricing,
+      // a ledger write, an addFlow.
+      //
+      // The old code booked that as `reverted`. Two things wrong with it, and
+      // the second is worse than the first. It asserts a chain outcome nobody
+      // observed; and with no hash to resolve on, `addTrade` INSERTS rather than
+      // resolving in place, so the same operation ends up as two rows — one
+      // 'submitted' that the resolver will later settle, and one 'reverted' that
+      // is simply false. A landed trade could be booked as a revert beside
+      // itself.
+      //
+      // Treated as unresolved instead, exactly like the receipt-read failure
+      // above: the pre-broadcast row stands, the charge stays counted, and the
+      // stranded-op resolver settles it from the chain. The budget must NOT be
+      // released here, which is why this sits above the rollback.
+      if (submittedRow) {
+        await refreshBudget(agentId);
+        releaseBudget();
+        await addEvent(
+          agentId,
+          "err",
+          `${intent.kind} was submitted, and then something after it failed: ${msg.slice(0, 200)}. ` +
+            `This is NOT a revert — the operation may have landed. It stays counted against today's ` +
+            `caps and the resolver will settle it from the chain.`,
+        );
+        return;
+      }
+
+      // Roll back the optimistic reservation — the money didn't move. The row
+      // written below goes through recordTrade, which would release it anyway;
+      // doing it here keeps the counters honest for the window in between, and
+      // releaseBudget is idempotent.
       releaseBudget();
       // A genuine on-chain revert vs a failure BEFORE submission (bundler, RPC,
       // gas), so the user isn't told "reverted on-chain" for something that
@@ -3950,7 +4018,15 @@ async function main() {
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
         ...(onChain ? { user_op_hash: e.userOpHash } : {}),
-        status: "reverted",
+        // REVERTED MEANS THE CHAIN REVERTED IT. Everything reaching this line
+        // without `onChain` never got there: no operation was submitted (the
+        // branch above returns when one was), so this is a build, an encode or a
+        // pre-flight that threw. Calling that 'reverted' put words in the
+        // chain's mouth, and the ledger is the one place in this product that
+        // must never do that — `rejected` is the vocabulary for "we did not
+        // send it", and it is what every other pre-broadcast refusal on this
+        // path already writes.
+        status: onChain ? "reverted" : "rejected",
         reject_rule: reason,
         // KEEP the simulation. This row is the single most informative one in
         // the ledger — the trade we quoted, sized and submitted, that the chain

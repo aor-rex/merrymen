@@ -20,6 +20,7 @@ import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
+import { getUserOperationHash } from "viem/account-abstraction";
 import { boundGas, DEPLOY_GAS_BOUNDS, GAS_BOUNDS, type UserOpGas } from "./gas-limits";
 
 export interface Call {
@@ -92,6 +93,31 @@ export class UserOpUnresolved extends Error {
 }
 
 /**
+ * REFUSING TO BROADCAST UNTRACKED.
+ *
+ * The durable pre-broadcast row could not be written, so this operation would
+ * go out with nothing able to reconcile it: no 'submitted' row means
+ * `resolveStrandedOps` cannot see it, `inflight-reconcile` only sweeps ops that
+ * succeeded, and a crash before the outcome write loses it entirely.
+ *
+ * Only reachable because `onSubmitted` now runs BEFORE the send. While it ran
+ * after, this situation existed and there was nothing useful to do about it —
+ * the money was already committed, and the code said so in a comment. Now the
+ * cheaper answer is available: don't send.
+ *
+ * A sibling of GasRefused, not of a revert. Nothing was signed, nothing spent.
+ */
+export class NotRecorded extends Error {
+  constructor(readonly userOpHash: `0x${string}`) {
+    super(
+      `refusing to broadcast ${userOpHash}: the durable pre-broadcast row could not be written, ` +
+        `so nothing would be able to reconcile this operation. Nothing was sent.`,
+    );
+    this.name = "NotRecorded";
+  }
+}
+
+/**
  * Refused BEFORE broadcast, on gas grounds. Nothing was signed and nothing
  * spent, so this is a sibling of a policy rejection rather than of a revert —
  * index.ts must not book it as an on-chain failure.
@@ -108,14 +134,20 @@ const RECEIPT_ATTEMPTS = 3;
 
 export interface ExecuteHooks {
   /**
-   * Called with the hash the moment the op leaves, BEFORE the receipt wait, and
-   * awaited. Everything after this point can crash, hang or be SIGKILLed, so
-   * whatever durability this trade is going to get has to be taken here.
+   * Called with the hash BEFORE the operation is broadcast, and awaited.
    *
-   * A throw from this hook aborts before the wait — deliberately, because the
-   * reason to have it is that an unrecorded in-flight op is worse than a late
-   * one. The op is already sent by then; the error carries the hash so it is
-   * still recoverable.
+   * IT USED TO RUN AFTER THE SEND, and moving it is what makes the guarantee
+   * real rather than nearly-real. A userOpHash is a pure function of the packed
+   * operation, the EntryPoint and the chain id, so it is knowable before anyone
+   * is asked to accept it — which means the durable row can exist before the
+   * operation does, and every window after this point has something to attach
+   * itself to.
+   *
+   * A THROW FROM THIS HOOK NOW REFUSES TO BROADCAST. That is the whole benefit
+   * of the new ordering, and the caller is expected to use it: an operation
+   * whose row could not be written is an operation nothing can ever reconcile,
+   * so not sending it is strictly better than sending it blind. Nothing has been
+   * signed to the network at that point and nothing is spent.
    */
   onSubmitted?(userOpHash: `0x${string}`): Promise<void>;
 }
@@ -280,37 +312,94 @@ export async function createAgentExecutor(opts: {
         );
       }
 
+      // ── PREPARE, SIGN, HASH, PERSIST, *THEN* SEND ───────────────────
+      //
+      // THE HASH EXISTS BEFORE THE NETWORK DOES, and that ordering is the whole
+      // point of this block. It used to be one `sendUserOperation` with no
+      // try/catch, and `onSubmitted` fired after it returned — so a throw at the
+      // send edge produced three wrong answers at once in index.ts's generic
+      // catch: the budget was released, the row was written `reverted` (a claim
+      // about a chain that never saw the operation), and no hash was stored. The
+      // last one is the worst: `resolveStrandedOps` selects on
+      // `status='submitted' AND user_op_hash IS NOT NULL`, so the op was
+      // structurally unfindable by the sweep built to find it.
+      //
+      // And the failure that motivates it is not the tidy one. If the send lands
+      // on the wire but the RESPONSE is lost — a socket reset, a proxy 502, a
+      // client timeout after the bundler already accepted — then an operation is
+      // in flight, spending real money, with no record anywhere.
+      //
+      // Reimplemented from Vex's staged broadcast (permission on record from its
+      // author), which computes keccak256 of the signed transaction locally and
+      // persists it before `sendRawTransaction`. The 4337 analogue is exact: a
+      // userOpHash is a pure function of the packed operation, the EntryPoint and
+      // the chain id, so it can be known before anyone is asked to accept it.
+      //
+      // Sending the SAME object back through sendUserOperation is idempotent by
+      // construction, not by luck: viem's prepareUserOperation returns an
+      // explicit nonce, fees and factory unchanged, and sendUserOperation uses
+      // `parameters.signature ||` so a signed operation is never re-signed. It
+      // also issues the RPC with retryCount: 0, so the send is never repeated.
+      const prepared = (await client.prepareUserOperation({
+        callData,
+        // Explicit, so prepareUserOperation uses these instead of estimating.
+        ...bounded.gas,
+      } as never)) as Record<string, unknown>;
+
       // THE LIMITS WE SIGNED MUST BE THE LIMITS WE BOUNDED. viem spreads the
       // paymaster's reply OVER the prepared request, so a sponsor that returned
       // callGasLimit would replace boundGas's number with no error and no log —
       // and under sponsorship the payer of an out-of-gas is the house. The
       // allowlist in paymaster.ts stops our wrappers propagating that; this
       // proves it stayed stopped, against the operation about to be signed.
-      if (opts.sponsor) {
-        const prepared = (await client.prepareUserOperation({
-          callData,
-          ...bounded.gas,
-        } as never)) as Record<string, unknown>;
-        assertBoundsHeld(bounded.gas, prepared);
-      }
+      //
+      // It now runs against the operation we are ABOUT to send rather than a
+      // second preparation of it, which is strictly the stronger claim.
+      if (opts.sponsor) assertBoundsHeld(bounded.gas, prepared);
 
-      const userOpHash = await client.sendUserOperation({
-        callData,
-        // Explicit, so prepareUserOperation uses these instead of estimating.
-        ...bounded.gas,
-      } as never);
+      const signature = await account.signUserOperation(prepared as never);
+      const signed = { ...prepared, signature };
+      const userOpHash = getUserOperationHash({
+        chainId: opts.chain.id,
+        entryPointAddress: entryPoint.address,
+        entryPointVersion: entryPoint.version,
+        userOperation: signed as never,
+      });
+
+      // DURABLE BEFORE BROADCAST. From here on, every outcome — accepted,
+      // refused, or never answered — has a row to attach itself to.
+      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash);
+
+      let accepted: `0x${string}`;
+      try {
+        accepted = await client.sendUserOperation(signed as never);
+      } catch (err) {
+        // NOT A REVERT. Nothing on-chain has said anything. We asked, and we do
+        // not know whether the ask arrived — which is precisely the state
+        // UserOpUnresolved names, and which index.ts already handles correctly:
+        // it holds the budget charged, leaves the row 'submitted', and warns
+        // with the hash so the resolver can pick it up. NEVER re-send.
+        throw new UserOpUnresolved(userOpHash, err instanceof Error ? err.message : String(err));
+      }
       // Whatever happens to this op from here — landed, reverted, unresolved —
       // the bundler accepted it, so the account is deployed or is being deployed
       // by it. The wide deploy ceiling has done its job and must not apply to the
       // next one; a stale `false` would leave every op of this arm loosely
       // bounded, which is the guard quietly turning itself off.
       deployed = true;
-      // DURABILITY BEFORE THE WAIT. Between here and the ledger write in
-      // index.ts sits a receipt wait, a network price call and a DB round
-      // trip; nothing was written durably across any of it, so a SIGTERM from
-      // a redeploy left a landed op with no record of its hash at all.
-      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash);
 
+      // Both sides derive this from the same bytes by the same rule, so a
+      // difference is a defect in one of the two implementations rather than a
+      // condition of the network. Treated as UNRESOLVED rather than swallowed:
+      // the operation is genuinely in flight, and we no longer know which hash
+      // the chain will index it under, which is the definition of the state.
+      if (accepted.toLowerCase() !== userOpHash.toLowerCase()) {
+        throw new UserOpUnresolved(
+          userOpHash,
+          `the bundler indexed this operation as ${accepted}, not the hash it was signed under. ` +
+            `It IS in flight; which hash resolves it is now unknown.`,
+        );
+      }
       // ONLY THE READ IS RETRIED. A re-send is a second operation and a second
       // spend — the one mistake this whole shape exists to make impossible, so
       // sendUserOperation sits outside the loop by construction rather than by
