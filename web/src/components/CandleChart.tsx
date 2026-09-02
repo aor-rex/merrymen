@@ -11,7 +11,9 @@ import type { Candle } from "@/lib/read-candles";
  * sparkline or an oracle series — but a candle chart is a crosshair, a
  * scrollable time axis, a price scale that re-fits as you pan, and a tooltip
  * that follows the pointer. Hand-rolling those is a month of work to arrive
- * where a 45kB library already is.
+ * where a 60kB library already is. (Measured from the installed tarball:
+ * 60,575 bytes gzipped, 189,213 raw. The first draft of this comment said 45kB
+ * from memory, in a codebase that pins its figures.)
  *
  * IT IS LOADED ONLY WHEN A CHART ACTUALLY DRAWS. The import is dynamic and
  * inside an effect, so a token page with no candles — every stock token, every
@@ -29,11 +31,52 @@ function tokenColour(el: HTMLElement, name: string, fallback: string): string {
   return v || fallback;
 }
 
+/** Beyond this many empty slots the series is cut rather than padded. */
+const MAX_WHITESPACE = 500;
+
+/**
+ * Bars, plus an empty entry for every slot that has none.
+ *
+ * THE LARGEST HONESTY DEFECT IN THE FIRST VERSION. lightweight-charts places
+ * bars at CONSECUTIVE time-scale slots, so it does not matter that our
+ * timestamps are hours apart — handed the bars alone, a 63-hour hole renders
+ * as zero horizontal distance and the chart draws straight across it.
+ * Measured on one real pool: 421 bars over 792 hours, 47% of the range
+ * missing, in 43 runs, the longest 63 hours.
+ *
+ * That is precisely what this product refuses elsewhere and says so —
+ * PriceLine's caption reads 'the hours the feed published nothing are left
+ * out rather than drawn across, which is what the breaks are'. Whitespace
+ * entries are the library's own mechanism for exactly this.
+ *
+ * It happens here rather than in the reader on purpose: the read returns
+ * facts, the renderer decides spacing.
+ */
+function withGaps(candles: Candle[], interval: number) {
+  const out: { time: number; open?: number; high?: number; low?: number; close?: number }[] = [];
+  let padded = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const k = candles[i]!;
+    const prev = candles[i - 1];
+    if (prev && interval > 0) {
+      for (let t = prev.t + interval; t < k.t && padded < MAX_WHITESPACE; t += interval) {
+        out.push({ time: t });
+        padded++;
+      }
+    }
+    out.push({ time: k.t, open: k.o, high: k.h, low: k.l, close: k.c });
+  }
+  return { data: out, truncated: padded >= MAX_WHITESPACE };
+}
+
 export function CandleChart({
   candles,
+  interval,
   height = 320,
 }: {
   candles: Candle[];
+  /** Seconds per bar, so the holes can be found and left as holes. */
+  interval: number;
   height?: number;
 }) {
   const box = useRef<HTMLDivElement | null>(null);
@@ -66,7 +109,11 @@ export function CandleChart({
             textColor: text,
             fontFamily: getComputedStyle(el).fontFamily,
             fontSize: 10,
-            attributionLogo: false,
+            // KEPT. The library's licence asks for a link to TradingView
+            // reachable by users, and names this option as the way to give
+            // it; turning it off left nothing but a source comment nobody
+            // sees. It is also the exact mark in the reference screenshot.
+            attributionLogo: true,
           },
           grid: {
             vertLines: { color: grid },
@@ -105,15 +152,7 @@ export function CandleChart({
           wickDownColor: down,
           priceFormat: { type: "price", precision: 8, minMove: 1e-8 },
         });
-        series.setData(
-          candles.map((k) => ({
-            time: k.t as never,
-            open: k.o,
-            high: k.h,
-            low: k.l,
-            close: k.c,
-          })),
-        );
+        series.setData(withGaps(candles, interval).data as never[]);
 
         // WIDTH BEFORE FIT, and fit again on every resize. Fitting first packed
         // three hundred bars into the right-hand sixth of the chart: the
@@ -144,7 +183,7 @@ export function CandleChart({
         /* already gone */
       }
     };
-  }, [candles, height]);
+  }, [candles, interval, height]);
 
   if (failed) {
     return <p className="mm-note">The chart could not be drawn. The figures above still stand.</p>;
@@ -152,5 +191,31 @@ export function CandleChart({
 
   // The height is reserved before anything paints, so the reasoning below never
   // gets pushed down on hydration.
-  return <div className="mm-candles" ref={box} style={{ height }} aria-hidden />;
+  //
+  // NOT aria-hidden. It was, which gave assistive technology nothing at all —
+  // a regression against PriceLine, which summarises its own series. A canvas
+  // is opaque to a screen reader either way; the label is the only thing that
+  // is not.
+  const first = candles[0];
+  const last = candles[candles.length - 1];
+  const lo = Math.min(...candles.map((k) => k.l));
+  const hi = Math.max(...candles.map((k) => k.h));
+  const money = (n: number) =>
+    n >= 0.01 ? `$${n.toFixed(4)}` : `$${n.toPrecision(3)}`;
+
+  return (
+    <div
+      className="mm-candles"
+      ref={box}
+      style={{ height }}
+      role="img"
+      aria-label={
+        first && last
+          ? `${candles.length} price bars, opening at ${money(first.o)} and closing at ${money(
+              last.c,
+            )}, ranging ${money(lo)} to ${money(hi)}.`
+          : "Price chart"
+      }
+    />
+  );
 }

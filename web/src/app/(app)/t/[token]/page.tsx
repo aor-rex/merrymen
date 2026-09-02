@@ -175,29 +175,60 @@ export default async function TokenPage({ params }: { params: Promise<{ token: s
 
             Neither renders an empty box: a token with no feed and no indexed
             pool gets no section at all. */}
-        {candles && candles.state === 'ok' && (
+        {candles && (
           <section className="mm-tok-chart">
             <h2 className="mm-kicker">Price</h2>
-            <CandleChart candles={candles.candles} />
-            <p className="mm-chart-note">
-              {candles.candles.length} hourly bars from the index, in dollars
-              {candles.quoteSymbol ? <> — this pool is quoted in {candles.quoteSymbol}</> : null}.
-              {market.coin?.onCurve ? (
-                <> Still on its launch curve, so every bar is a curve trade rather than a pool.</>
-              ) : null}
-            </p>
-          </section>
-        )}
 
-        {/* The index would not answer. Said, rather than drawn as a flat
-            chart or left as a gap that reads like a token nobody trades. */}
-        {candles && candles.state === 'refused' && (
-          <section className="mm-tok-chart">
-            <h2 className="mm-kicker">Price</h2>
-            <div className="mm-readfail">
-              The index turned down the read for this pool&rsquo;s history, so there is no chart
-              below. It retries on its own.
-            </div>
+            {/* FIVE OUTCOMES AND FIVE SENTENCES. A pool with no bars, a pool
+                whose bars are about the other side of the pair, a pool minutes
+                old, and an index that would not answer are four different
+                facts, and only one of them is about us. */}
+            {candles.state === 'ok' && candles.candles.length >= 8 ? (
+              <>
+                <CandleChart candles={candles.candles} interval={candles.interval} />
+                <p className="mm-chart-note">
+                  {candles.candles.length} {candles.label} bars from the index, in dollars
+                  {market.coin?.name ? <> &mdash; {market.coin.name}</> : null}
+                  {market.coin?.dex ? <> on {market.coin.dex}</> : null}
+                  {candles.quoteSymbol ? <>, quoted in {candles.quoteSymbol}</> : null}.
+                  {/* The holes are 47% of the range on a real pool measured
+                      while building this, and drawn across they would be
+                      invisible. Said, like every other gap in this product. */}
+                  {candles.gaps > 0 ? (
+                    <> The {candles.gaps} intervals it did not trade are left as gaps rather
+                    than drawn across.</>
+                  ) : null}
+                  {/* The newest bar is always partial. Drawn like a settled one
+                      it states a high and a low the interval has not finished
+                      having a chance to break. */}
+                  {candles.lastBarAgeSec !== null && candles.lastBarAgeSec < candles.interval ? (
+                    <> The last bar is still open.</>
+                  ) : null}
+                  {market.coin?.onCurve ? (
+                    <> Still on its launch curve, so every bar is a curve trade rather than a
+                    pool.</>
+                  ) : null}
+                </p>
+              </>
+            ) : candles.state === 'ok' ? (
+              <p className="mm-note">
+                This pool has {candles.candles.length}{' '}
+                {candles.candles.length === 1 ? candles.label + ' bar' : candles.label + ' bars'}{' '}
+                so far &mdash; too few to draw.
+              </p>
+            ) : candles.state === 'mismatch' ? (
+              <p className="mm-note">
+                The index charts the other side of this pair, so it publishes no price history
+                for this token.
+              </p>
+            ) : candles.state === 'none' ? (
+              <p className="mm-note">The index has no bars for this pool.</p>
+            ) : (
+              <div className="mm-readfail">
+                The index turned down the read for this pool&rsquo;s history, so there is no
+                chart below. It retries on its own.
+              </div>
+            )}
           </section>
         )}
 
