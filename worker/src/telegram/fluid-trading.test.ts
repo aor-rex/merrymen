@@ -64,6 +64,12 @@ describe("fastParseTrade — trade-shaped text parses with no model", () => {
     assert.deepEqual(await fastParseTrade("buy 1usdg of $nvda"), { kind: "buy", symbol: "NVDA", usdg: 1 });
   });
 
+  it("accepts longer memecoin names (up to 10 chars)", async () => {
+    assert.deepEqual(await fastParseTrade("/buy pipotam 5"), { kind: "buy", symbol: "PIPOTAM", usdg: 5 });
+    assert.deepEqual(await fastParseTrade("buy 2 pipotam"), { kind: "buy", symbol: "PIPOTAM", usdg: 2 });
+    assert.deepEqual(parseSlash("/buy PIPOTAM 1"), { kind: "buy", symbol: "PIPOTAM", usdg: 1 });
+  });
+
   it("returns null for non-trades — the LLM keeps its job", async () => {
     assert.equal(await fastParseTrade("/status"), null);
     assert.equal(await fastParseTrade("what's my pnl?"), null);

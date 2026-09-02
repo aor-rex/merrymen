@@ -216,7 +216,7 @@ export function parseSlash(text: string): Command | null {
     case "levels": {
       // /depth NVDA — one ticker, because a depth map is per-pool and a list of
       // fourteen of them is a report nobody reads in a chat window.
-      const sym = rest.filter(Boolean).find((p) => /^[A-Za-z]{1,6}$/.test(p))?.toUpperCase();
+      const sym = rest.filter(Boolean).find((p) => /^[A-Za-z]{1,10}$/.test(p))?.toUpperCase();
       return sym ? { kind: "depth", symbol: sym } : { kind: "unknown", text: "usage: /depth &lt;SYMBOL&gt;" };
     }
     case "pnl":
@@ -248,7 +248,7 @@ export function parseSlash(text: string): Command | null {
       // Strip $ from symbols, strip usdg/usd suffix from amounts, default to 1.
       const parts = rest.filter(Boolean);
       const clean = parts.map((p) => p.replace(/^\$/, "").replace(/(usdg|usd)$/i, ""));
-      const sym = clean.find((p) => /^[A-Za-z]{1,6}$/.test(p))?.toUpperCase();
+      const sym = clean.find((p) => /^[A-Za-z]{1,10}$/.test(p))?.toUpperCase();
       const usdg = clean.map(Number).find((n) => Number.isFinite(n) && n > 0) ?? 1;
       return sym
         ? { kind: cmd, symbol: sym, usdg }
@@ -278,7 +278,7 @@ export function parseSlash(text: string): Command | null {
     case "alert": {
       // /alert QQQ > 600   ·   /alert QQQ above 600   ·   /alert QQQ < 550
       const parts = rest.filter(Boolean);
-      const sym = parts.find((p) => /^[A-Za-z]{1,6}$/.test(p) && !/^(above|below|over|under)$/i.test(p))?.toUpperCase();
+      const sym = parts.find((p) => /^[A-Za-z]{1,10}$/.test(p) && !/^(above|below|over|under)$/i.test(p))?.toUpperCase();
       const opTok = parts.find((p) => /^[<>]$/.test(p) || /^(above|below|over|under)$/i.test(p));
       const price = parts.map(Number).find((n) => Number.isFinite(n) && n > 0);
       const op: ">" | "<" | null = opTok

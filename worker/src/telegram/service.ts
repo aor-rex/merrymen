@@ -593,7 +593,7 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
           try {
             const resolved = await llmText(llm, { system: "You are a symbol resolver. Respond with ONLY the ticker symbol or UNKNOWN.", prompt: resolveTask, maxTokens: 10 });
             const match = resolved?.trim().toUpperCase();
-            if (match && match !== "UNKNOWN" && match.length <= 6 && /^[A-Z]{1,6}$/.test(match)) {
+            if (match && match !== "UNKNOWN" && match.length <= 10 && /^[A-Z]{1,10}$/.test(match)) {
               cmd = { kind: partial.kind, symbol: match, usdg: partial.usdg };
               await pushHistory(msg.chatId, "user", msg.text);
             }
