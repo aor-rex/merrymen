@@ -5,6 +5,18 @@
  * browser's history, in the referer of every outbound request, and in whatever
  * logs sit in front of this service. The cookie is httpOnly so no script on the
  * page can read it back out.
+ *
+ * EVERY REDIRECT HERE IS RELATIVE, and that is not a style choice. This service
+ * is started with `next start -H 0.0.0.0`, so inside a route handler `req.url`
+ * is the INTERNAL listen address — building a redirect from it sent the visitor
+ * to https://0.0.0.0:8080/, which is a dead host. Caught by asking the deployed
+ * site for it.
+ *
+ * The obvious repair is to reconstruct the public origin from x-forwarded-host,
+ * and that is worse: the header is attacker-supplied, so a redirect built from
+ * it is an open redirect wearing a helmet. HTTP has allowed a relative Location
+ * since forever and every browser resolves it against the address the visitor
+ * actually used, which is the one thing here nobody can forge.
  */
 import { NextResponse } from "next/server";
 import { GATE_COOKIE, gatePassword, sameSecret } from "@/lib/site-gate";
@@ -15,11 +27,15 @@ export const dynamic = "force-dynamic";
 /** A month. Long enough that nobody is typing it twice a day. */
 const MAX_AGE = 60 * 60 * 24 * 30;
 
+/** 303, so the browser follows with GET and a refresh cannot re-post. */
+const seeOther = (path: string) =>
+  new NextResponse(null, { status: 303, headers: { Location: path } });
+
 export async function POST(req: Request) {
   const expected = gatePassword();
   // No password configured means no gate; nothing to open, and refusing here
   // would strand a deployment whose owner had just turned it off.
-  if (!expected) return NextResponse.redirect(new URL("/", req.url), 303);
+  if (!expected) return seeOther("/");
 
   let given = "";
   try {
@@ -33,16 +49,17 @@ export async function POST(req: Request) {
   if (!sameSecret(given, expected)) {
     // The password is never echoed back into the URL, so a shoulder-surfer and
     // the server log see the same thing: that someone got it wrong.
-    return NextResponse.redirect(new URL("/gate?again=1", req.url), 303);
+    return seeOther("/gate?again=1");
   }
 
-  const res = NextResponse.redirect(new URL("/", req.url), 303);
+  const res = seeOther("/");
   res.cookies.set(GATE_COOKIE, expected, {
     httpOnly: true,
     sameSite: "lax",
-    // Set on any https origin. Left off for plain http so a local check of the
-    // gate does not silently fail to store the cookie.
-    secure: new URL(req.url).protocol === "https:",
+    // Behind Railway's proxy the inbound request is plain http, so deciding
+    // this from the request would never set Secure on a site that is HTTPS to
+    // every actual visitor. It follows the deployment instead.
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: MAX_AGE,
   });
