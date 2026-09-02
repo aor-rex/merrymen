@@ -20,7 +20,7 @@ import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
-import { boundGas, type UserOpGas } from "./gas-limits";
+import { boundGas, DEPLOY_GAS_BOUNDS, GAS_BOUNDS, type UserOpGas } from "./gas-limits";
 
 export interface Call {
   to: `0x${string}`;
@@ -171,6 +171,33 @@ export async function createAgentExecutor(opts: {
     userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
   });
 
+  /**
+   * Has this account ever operated?
+   *
+   * Asked here rather than passed in, because the answer CHANGES and the caller
+   * reads it once at arm: an `accountDeployed: false` threaded down from arm
+   * time would still say false for every later op of that arm, leaving them all
+   * under the wide deploy ceiling. That is a guard turning itself off silently.
+   *
+   * One read, memoised, and only on the first execute of a process that has an
+   * executor at all. A FAILED READ ANSWERS "not deployed", which is the safe
+   * direction here and the opposite of the rule elsewhere in this repo: being
+   * wrong that way widens a pre-sign ceiling for one operation, while being
+   * wrong the other way refuses the operation outright. The bound still holds —
+   * DEPLOY_GAS_BOUNDS is a ceiling, not an exemption.
+   */
+  let deployed: boolean | null = null;
+  const isDeployed = async (): Promise<boolean> => {
+    if (deployed !== null) return deployed;
+    try {
+      const code = await publicClient.getCode({ address: account.address });
+      deployed = code !== undefined && code !== "0x";
+    } catch {
+      deployed = false;
+    }
+    return deployed;
+  };
+
   return {
     address: account.address,
     async execute(calls: Call[], hooks?: ExecuteHooks) {
@@ -238,7 +265,10 @@ export async function createAgentExecutor(opts: {
       // Only probe a second time when the first succeeded: a null first is
       // already a refusal, and asking again would just be slower.
       const second = first ? await estimate() : null;
-      const bounded = boundGas(first, second);
+      // WHICH CEILING APPLIES DEPENDS ON WHETHER THIS ACCOUNT EXISTS YET.
+      // See DEPLOY_GAS_BOUNDS: the first op also deploys the account and enables
+      // the permission validator, and the steady-state ceiling would refuse it.
+      const bounded = boundGas(first, second, (await isDeployed()) ? GAS_BOUNDS : DEPLOY_GAS_BOUNDS);
       if (!bounded.ok) {
         // BEFORE the send, so nothing is spent and no 'submitted' row exists.
         // This is a pre-broadcast rejection in the same shape as a policy one.
@@ -269,6 +299,12 @@ export async function createAgentExecutor(opts: {
         // Explicit, so prepareUserOperation uses these instead of estimating.
         ...bounded.gas,
       } as never);
+      // Whatever happens to this op from here — landed, reverted, unresolved —
+      // the bundler accepted it, so the account is deployed or is being deployed
+      // by it. The wide deploy ceiling has done its job and must not apply to the
+      // next one; a stale `false` would leave every op of this arm loosely
+      // bounded, which is the guard quietly turning itself off.
+      deployed = true;
       // DURABILITY BEFORE THE WAIT. Between here and the ledger write in
       // index.ts sits a receipt wait, a network price call and a DB round
       // trip; nothing was written durably across any of it, so a SIGTERM from
