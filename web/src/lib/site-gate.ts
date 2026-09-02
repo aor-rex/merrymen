@@ -45,16 +45,27 @@ export function sameSecret(a: string, b: string): boolean {
 }
 
 /**
- * Whether a path is the visitor-facing site rather than plumbing.
+ * Whether a path is behind the notice.
  *
- * THE API IS DELIBERATELY NOT GATED. Telegram posts webhooks to it, the browser
- * calls it after the page loads, and anything else running against this
- * deployment talks to it — putting a password in front of those would not hide
- * an unfinished page, it would break a live fleet. The same goes for the
- * framework's own assets: gate those and the notice itself renders unstyled.
+ * THE API IS GATED TOO, and the first version of this file was wrong about why
+ * it could not be. It claimed Telegram posts webhooks to /api/telegram — that
+ * route is a dashboard status endpoint the BROWSER calls, which reaches out to
+ * the Bot API rather than receiving from it. Checked properly, nothing outside
+ * a browser calls this deployment: no worker, orchestrator, cli or gateway code
+ * fetches it, /api/bundler is built from window.location.origin, and no
+ * healthcheck path is configured. A visitor who is through the door carries the
+ * cookie on same-origin requests, so the product keeps working for them.
+ *
+ * That is worth the change because the API was the whole disclosure. With the
+ * pages behind a password and the API open, forty posts of agent reasoning and
+ * every agent name were still readable by anyone who knew the URLs.
+ *
+ * TWO THINGS STAY OPEN. /api/gate, or the password could never be handed in;
+ * and the framework's own assets, or the notice itself renders unstyled.
  */
 export function isGatedPath(pathname: string): boolean {
-  if (pathname.startsWith("/api/")) return false;
+  if (pathname === GATE_API) return false;
+  if (pathname.startsWith("/api/")) return true;
   if (pathname.startsWith("/_next/")) return false;
   if (pathname === GATE_PATH) return false;
   // Files served straight out of public/: icons, the manifest, the service

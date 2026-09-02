@@ -78,7 +78,8 @@ export function middleware(req: NextRequest) {
   // Applying the host allowlist to a PAGE would newly refuse a self-hosted
   // install reached over a LAN or a domain — a behaviour change nobody asked
   // for, hidden inside a change about a holding page.
-  if (pathname.startsWith("/api/")) {
+  const isApi = pathname.startsWith("/api/");
+  if (isApi) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
       return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
     }
@@ -86,7 +87,10 @@ export function middleware(req: NextRequest) {
     if (site && site !== "same-origin" && site !== "none") {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
-    return NextResponse.next();
+    // Falls through to the gate rather than returning. The API used to be
+    // exempt, which left every agent's name and forty posts of reasoning
+    // readable by anyone who knew the URLs while the pages showing them were
+    // behind a password.
   }
 
   // ── the holding page ────────────────────────────────────────────────────
@@ -102,6 +106,18 @@ export function middleware(req: NextRequest) {
 
   const held = req.cookies.get(GATE_COOKIE)?.value ?? "";
   if (sameSecret(held, expected)) return NextResponse.next();
+
+  // AN API REQUEST GETS A STATUS, NOT A PAGE. Rewriting it to the notice would
+  // hand a caller expecting JSON a lump of HTML with status 200, which is a
+  // worse answer than a refusal — the browser code reading it would parse the
+  // failure as data. 401 says what happened, and a visitor through the door
+  // never sees it: their cookie rides along on same-origin requests.
+  if (isApi) {
+    return NextResponse.json(
+      { error: "gated", detail: "This deployment is behind a password while it is being worked on." },
+      { status: 401 },
+    );
+  }
 
   // A REWRITE, NOT A REDIRECT, and the difference is load-bearing here.
   //

@@ -37,13 +37,21 @@ describe("the gate is off unless somebody turns it on", () => {
 });
 
 describe("what the gate must never close", () => {
-  it("leaves the API open", () => {
-    // Telegram posts webhooks to it, the browser calls it after every page
-    // load, and anything else running against this deployment talks to it.
-    // Gating these would not hide an unfinished page, it would stop a fleet.
-    for (const p of ["/api/theses", "/api/telegram", "/api/gate", "/api/grants"]) {
-      assert.equal(isGatedPath(p), false, `${p} must stay open`);
+  it("gates the API too, because that was the whole disclosure", () => {
+    // With the pages behind a password and the API open, forty posts of agent
+    // reasoning and every agent name were still readable by anyone who knew the
+    // URLs. Nothing outside a browser calls this deployment — no worker,
+    // orchestrator, cli or gateway code fetches it, /api/telegram is a
+    // dashboard endpoint that calls OUT to the Bot API rather than receiving
+    // from it, and no healthcheck path is configured.
+    for (const p of ["/api/theses", "/api/telegram", "/api/grants", "/api/leaderboard", "/api/market"]) {
+      assert.equal(isGatedPath(p), true, `${p} should be behind the notice`);
     }
+  });
+
+  it("leaves the door itself open", () => {
+    // Gate /api/gate and the password could never be handed in.
+    assert.equal(isGatedPath("/api/gate"), false, "the password endpoint must stay reachable");
   });
 
   it("leaves the framework's own assets open", () => {
@@ -106,5 +114,27 @@ describe("nothing sends a visitor to the internal listen address", () => {
     // internal origin cannot leak into one.
     assert.match(MW, /NextResponse\.rewrite\(to\)/);
     assert.ok(!/NextResponse\.redirect/.test(strip(MW)), "a redirect here would carry the internal host");
+  });
+});
+
+describe("a gated API request gets a status, not a page", () => {
+  const MW = readFileSync(new URL("../middleware.ts", import.meta.url), "utf8");
+
+  it("answers 401 rather than rewriting to the notice", () => {
+    // Handing a caller expecting JSON a lump of HTML with status 200 is worse
+    // than a refusal: the browser code reading it would parse the failure as
+    // data.
+    assert.match(MW, /if \(isApi\) \{\s*return NextResponse\.json\(/);
+    assert.match(MW, /status: 401/);
+  });
+
+  it("still runs the host and cross-site guards on the API first", () => {
+    // The gate is an addition, not a replacement. Losing either of these would
+    // reopen the DNS-rebinding and CSRF holes the middleware was written for.
+    const guards = MW.indexOf("possible DNS-rebinding");
+    const cross = MW.indexOf("cross-site request to the local API");
+    const gate = MW.indexOf("const expected = gatePassword()");
+    assert.ok(guards > 0 && cross > 0 && gate > 0);
+    assert.ok(guards < gate && cross < gate, "the API guards must run before the gate");
   });
 });
