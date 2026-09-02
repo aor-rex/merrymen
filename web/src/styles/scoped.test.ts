@@ -157,7 +157,9 @@ describe("the new stylesheets are scoped, provably", () => {
     walk(web);
     assert.deepEqual(
       importers.map((p) => p.split(path.sep).join("/")).sort(),
-      ["app/grant/page.tsx", "app/settings/page.tsx"],
+      // /settings migrated to the new system; /grant is the last one left,
+      // and it is deliberately not being restyled until its guards are pinned.
+      ["app/grant/page.tsx"],
     );
   });
 
@@ -171,6 +173,10 @@ describe("the new stylesheets are scoped, provably", () => {
           if (ALLOWED_BARE.has(sel)) continue;
           // `.mm`, `.mm-anything`, and any descendant of them.
           if (/^\.mm(?![a-zA-Z0-9])/.test(sel) || /^\.mm-[a-zA-Z0-9-]+/.test(sel)) continue;
+          // `:where(.mm) button` — scoped under .mm, and deliberately carrying
+          // no specificity so a reset loses to every class instead of beating
+          // them. Still scoped; :where() changes only the weight.
+          if (/^:where\(\.mm\)\s/.test(sel)) continue;
           offenders.push(sel);
         }
       }

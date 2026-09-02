@@ -47,7 +47,19 @@
   color: var(--mm-wire);
 }
 
-.mm button {
+/*
+ * A RESET WITH NO SPECIFICITY, which is what a reset should be.
+ *
+ * This was `.mm button`, and a descendant selector scores higher than a single
+ * class — so it beat every .mm-* class that tried to style a button, silently.
+ * Proven on one page: an <a class="mm-btn primary"> drew its border and a
+ * <button class="mm-btn primary"> beside it drew none, from the same rule.
+ * Order could not fix it; specificity always won.
+ *
+ * :where() contributes zero, so any class at all now takes precedence and a
+ * bare <button> still gets normalised.
+ */
+:where(.mm) button {
   font: inherit;
   color: inherit;
   background: none;
@@ -211,5 +223,66 @@
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* ── the loading frame ───────────────────────────────────────────────────── */
+
+/*
+ * Sized to the real blocks. A placeholder that does not match what replaces it
+ * produces a jolt on arrival, and a jolt reads as slower than the wait it hid.
+ */
+.mm-skel-head {
+  padding: var(--mm-5) 0 var(--mm-4);
+}
+
+.mm-skel-head i {
+  display: block;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+.mm-skel-head .t {
+  width: 180px;
+  height: 26px;
+}
+
+.mm-skel-head .s {
+  width: 120px;
+  height: 13px;
+  margin-top: 8px;
+}
+
+.mm-skel-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--mm-3);
+  padding-bottom: var(--mm-5);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-skel-strip i {
+  display: block;
+  height: 46px;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+/* Announced to a screen reader, drawn for nobody. */
+.mm-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .mm-skel-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--mm-4) var(--mm-3);
   }
 }

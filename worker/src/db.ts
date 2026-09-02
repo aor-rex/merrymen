@@ -226,12 +226,49 @@ class PgDb implements Db {
 }
 
 /**
+ * ONE POOL PER URL, FOR THE LIFE OF THE PROCESS.
+ *
+ * A pg.Pool is designed to be long-lived and shared — that is the entire point
+ * of a pool — so building one per call and never ending it is not a small
+ * waste, it is an unbounded one. The orchestrator called makePgDb from three
+ * places on its 15-second reconcile, which is three fresh pools every fifteen
+ * seconds, each holding its own sockets, for as long as the service runs.
+ *
+ * The web tier had already worked around it by memoising the driver by hand,
+ * which is the tell: the footgun was in this function's contract rather than in
+ * its callers. Memoising HERE removes it for every caller, present and future.
+ *
+ * Keyed on the URL because a process could legitimately talk to two databases,
+ * and the promise (not the resolved Db) is cached so concurrent first callers
+ * share one in-flight connect rather than racing to build two pools.
+ */
+const pools = new Map<string, Promise<Db>>();
+
+export function makePgDb(url: string): Promise<Db> {
+  const existing = pools.get(url);
+  if (existing) return existing;
+  const started = openPgDb(url).catch((e) => {
+    // A failed connect must not poison the cache: the next tick should get a
+    // fresh attempt rather than inheriting this rejection for ever.
+    pools.delete(url);
+    throw e;
+  });
+  pools.set(url, started);
+  return started;
+}
+
+/** Test seam: drop the cached pools so a test can change the environment. */
+export function resetPgPoolsForTest(): void {
+  pools.clear();
+}
+
+/**
  * Open the Postgres backend: dynamic-import `pg` (runtime-only, absent from this
  * repo and from any self-hosted install), teach it to hand back int8/BIGINT as a
  * JS number so the store's readers see the same shape sqlite gave them, and pool
  * the connections. The schema is run by the caller through `exec()`.
  */
-export async function makePgDb(url: string): Promise<Db> {
+async function openPgDb(url: string): Promise<Db> {
   // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
   const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
     Pool: new (c: { connectionString: string; max?: number }) => PgPoolLike;

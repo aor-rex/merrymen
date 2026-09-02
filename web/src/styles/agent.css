@@ -7,31 +7,58 @@
  * the cause and the holdings are the effect.
  */
 
-.mm-profile {
-  padding: var(--mm-5) 0;
+/* ── what turns it back ──────────────────────────────────────────────────── */
+
+/* Deliberately NOT --mm-warn. The wall band directly above is amber, and eight
+   amber rows beneath it turn a masthead colour into a table treatment. */
+.mm-agent-lanes {
+  padding: var(--mm-4) 0;
   border-bottom: 1px solid var(--mm-edge);
 }
 
-.mm-profile-top {
+.mm-agent-lanes ul {
+  list-style: none;
+  margin: var(--mm-2) 0 0;
+  padding: 0;
+}
+
+.mm-agent-lanes li {
   display: flex;
-  align-items: center;
-  gap: var(--mm-4);
+  align-items: baseline;
+  gap: var(--mm-3);
+  padding: 3px 0;
+  font-size: 13px;
 }
 
-.mm-profile-who {
-  min-width: 0;
+.mm-agent-lanes .lab {
+  color: var(--mm-tx-2);
 }
 
-.mm-profile-who h2 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.025em;
-  color: var(--mm-tx);
+/* A dotted leader, so a two-item row still reads as a table. */
+.mm-agent-lanes li::before {
+  content: "";
+  order: 1;
+  flex: 1;
+  border-bottom: 1px dotted var(--mm-edge-2);
+  transform: translateY(-3px);
 }
 
-.mm-profile-who p {
-  margin: 2px 0 0;
+.mm-agent-lanes .n {
+  order: 2;
+  color: var(--mm-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-agent-lanes .rest {
+  margin: var(--mm-2) 0 0;
+  font-size: 11.5px;
+  color: var(--mm-faint);
+}
+
+/* ── how it trades ───────────────────────────────────────────────────────── */
+
+.mm-agent-how {
+  margin: var(--mm-4) 0 0;
   font-size: 12px;
   color: var(--mm-dim);
 }
@@ -80,13 +107,50 @@
   color: var(--mm-faint);
 }
 
-.mm-profile-curve {
-  margin-top: var(--mm-5);
+.mm-equity-wrap {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
 }
 
-.mm-profile-curve .mm-spark {
+.mm-equity {
+  margin: var(--mm-4) 0 0;
+}
+
+.mm-equity svg {
+  display: block;
   width: 100%;
-  height: auto;
+  height: 168px;
+  overflow: visible;
+}
+
+.mm-equity .axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--mm-3);
+  margin-top: var(--mm-2);
+  font-size: 10.5px;
+  color: var(--mm-faint);
+}
+
+.mm-equity .axis .px {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.mm-equity .axis .px.up {
+  color: var(--mm-up);
+}
+.mm-equity .axis .px.down {
+  color: var(--mm-down);
+}
+
+/* The caption is load-bearing: without it a reader takes this for the account
+   balance, and takes the axis for wall-clock time. */
+.mm-equity figcaption {
+  margin-top: var(--mm-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mm-faint);
 }
 
 /* ── holdings ────────────────────────────────────────────────────────────── */
@@ -115,13 +179,55 @@
 }
 
 .mm-holdlist li {
+  padding: var(--mm-3) 0;
+  border-bottom: 1px solid var(--mm-edge);
+  font-size: 13px;
+}
+
+.mm-holdlist .row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--mm-3);
-  padding: var(--mm-2) 0;
-  border-bottom: 1px solid var(--mm-edge);
+}
+
+/* The evidence line: when it was bought, how that fill was known, what it cost,
+   when it was last marked. Quiet, because it qualifies the figures above it. */
+.mm-holdlist .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mm-1) var(--mm-3);
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--mm-faint);
+}
+
+.mm-holdlist .meta .ev {
+  padding: 0 4px;
+  border: 1px solid var(--mm-edge-2);
+  border-radius: var(--mm-r-chip);
+}
+
+/* A pretend fill must not look like a real one, even in a footnote. */
+.mm-holdlist .meta .ev.unsettled {
+  border-style: dashed;
+}
+
+/* THE LINE NO OTHER HOLDINGS TABLE HAS: why it says it is in this. */
+.mm-holdlist .said {
+  margin: var(--mm-2) 0 0;
   font-size: 13px;
+  line-height: 1.55;
+  color: var(--mm-tx-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mm-holdlist .said.none {
+  font-style: italic;
+  color: var(--mm-faint);
 }
 
 .mm-holdlist .sym-cell {
@@ -145,7 +251,9 @@
   font-weight: 600;
 }
 
-.mm-holdlist .basis {
+.mm-holdlist .share {
+  min-width: 82px;
+  text-align: right;
   font-size: 11.5px;
   color: var(--mm-faint);
   white-space: nowrap;
@@ -173,24 +281,31 @@
   .mm-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .mm-profile-who h2 {
-    font-size: 19px;
-  }
-  .mm-holdlist li {
+  .mm-holdlist .row {
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 2px;
   }
-  /* The basis moves under the symbol rather than competing with the figure. */
   .mm-holdlist .sym-cell {
     grid-column: 1;
     grid-row: 1;
+    flex-wrap: wrap;
   }
-  .mm-holdlist .basis {
+  /* The share moves under the symbol rather than competing with the figure. */
+  .mm-holdlist .share {
     grid-column: 1;
     grid-row: 2;
+    min-width: 0;
+    text-align: left;
   }
   .mm-holdlist .chg {
     grid-column: 2;
     grid-row: 2;
+  }
+  /* The range is the first thing to go; the two dates are what orient a reader. */
+  .mm-equity svg {
+    height: 132px;
+  }
+  .mm-equity .axis .px {
+    display: none;
   }
 }

@@ -16,11 +16,13 @@
  * it were the whole one.
  *
  * MARKET FACTS DO NOT COME FROM HERE. `discovered_pools` is worker-local and
- * never mirrored, so a hosted page reading it would render blank. The page
- * fetches /api/discoveries for price, depth and volume exactly as /tokens does.
+ * never mirrored, so a hosted page reading it would render blank. They come
+ * from readTokenMarket, which shares the two memos the product already keeps
+ * and therefore adds no upstream request of its own.
  *
  * No session read. Same property as the other public readers.
  */
+import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -35,6 +37,23 @@ export interface TokenHolder {
   pnlBps: number | null;
   /** When this agent first bought it, unix seconds. Null when unknown. */
   enteredAt: number | null;
+  /**
+   * What it paid on that first buy, USD.
+   *
+   * The agents' own marks, and the only price axis this page can honestly
+   * draw: there is no OHLC for a curve token anywhere in this repo, but a fill
+   * is a price something actually traded at. Null when the fill carried none.
+   */
+  entryPriceUsd: number | null;
+  /**
+   * How that fill price was obtained, in descending order of evidence:
+   * 'receipt' read off a settled transaction, 'paper' exact but simulated at
+   * the oracle price, 'quote' a pre-trade estimate. Null when unrecorded.
+   *
+   * Travels with the price because a pretend fill must not look like a real
+   * one — the same rule the dashed chip treatment exists for.
+   */
+  basisSource: "receipt" | "paper" | "quote" | null;
 }
 
 export interface TokenRead {
@@ -42,13 +61,33 @@ export interface TokenRead {
   holders: TokenHolder[];
   /** Agents holding it that do NOT publish their book. A count, never a list. */
   privateHolders: number;
+  /**
+   * Whether the fills query answered at all.
+   *
+   * Without it the timeline says "the position is real, the trade that opened
+   * it is older than what the ledger keeps" — a positive claim about ledger
+   * RETENTION manufactured out of a caught exception. A pre-migration ledger
+   * throws, and silence about why is not the same as knowing why.
+   */
+  fillsRead: boolean;
 }
 
 /** Addresses are the URL key here, and they are matched case-insensitively. */
 export const TOKEN_RE = /^0x[0-9a-fA-F]{6,64}$/;
 
-export async function readToken(token: string): Promise<TokenRead> {
-  const empty: TokenRead = { symbol: null, holders: [], privateHolders: 0 };
+/**
+ * Memoised per request, because the page reads this twice — once in
+ * generateMetadata and once in the body — and each call is a full ledger read.
+ */
+export const readToken = cache(async function readToken(
+  token: string,
+): Promise<TokenRead> {
+  const empty: TokenRead = {
+    symbol: null,
+    holders: [],
+    privateHolders: 0,
+    fillsRead: false,
+  };
   if (!TOKEN_RE.test(token)) return empty;
 
   // slug + which tenants opted in, read once.
@@ -110,6 +149,52 @@ export async function readToken(token: string): Promise<TokenRead> {
     }
 
     const symbol = rows.length ? String(rows[0]!.symbol) : null;
+
+    // WHEN EACH AGENT BOUGHT THIS TOKEN, and what it paid.
+    //
+    // This was a query per holder and it filtered on agent_id ALONE, with no
+    // mention of the token — so it answered "when did this agent first buy
+    // ANYTHING", and the timeline has been plotting the wrong instant for every
+    // agent that had traded before. `buy_token` is the token acquired;
+    // `target` beside it is the router, which is why the filter is not on that.
+    //
+    // Ordered earliest-first under the cap, so truncation can only drop LATER
+    // trades and can never change the first entry this computes.
+    const entry = new Map<
+      string,
+      { at: number; priceUsd: number | null; basis: TokenHolder["basisSource"] }
+    >();
+    let fillsRead = false;
+    try {
+      const fills = (await db
+        .prepare(
+          `SELECT agent_id, created_at, fill_price_usd, basis_source
+             FROM trades
+            WHERE LOWER(buy_token) = ?
+              AND status IN ('landed','paper')
+              AND fill_side = 'buy'
+            ORDER BY created_at ASC
+            LIMIT 500`,
+        )
+        .all(token.toLowerCase())) as Record<string, unknown>[];
+      // Set only once the query has actually returned. Anything after this
+      // point may say why the list is empty; anything before it may not.
+      fillsRead = true;
+      for (const fill of fills) {
+        const id = String(fill.agent_id);
+        if (entry.has(id)) continue; // earliest wins, and it is already here
+        const p = fill.fill_price_usd;
+        const b = fill.basis_source;
+        entry.set(id, {
+          at: Number(fill.created_at),
+          priceUsd: p === null || p === undefined ? null : Number(p),
+          basis: b === "receipt" || b === "paper" || b === "quote" ? b : null,
+        });
+      }
+    } catch {
+      /* fill_side and buy_token arrive with a worker migration */
+    }
+
     const holders: TokenHolder[] = [];
     let privateHolders = 0;
 
@@ -122,19 +207,7 @@ export async function readToken(token: string): Promise<TokenRead> {
       const value = Number(r.value_usdg ?? 0);
       const cost = r.cost_usdg === null || r.cost_usdg === undefined ? null : Number(r.cost_usdg);
 
-      // When it first bought in — the x-axis of the entry timeline.
-      let enteredAt: number | null = null;
-      try {
-        const t = (await db
-          .prepare(
-            `SELECT MIN(created_at) AS at FROM trades
-              WHERE agent_id = ? AND status IN ('landed','paper') AND fill_side = 'buy'`,
-          )
-          .get(String(r.agent_id))) as { at: number | null } | undefined;
-        enteredAt = t?.at ? Number(t.at) : null;
-      } catch {
-        /* fill_side arrives with a worker migration */
-      }
+      const first = entry.get(String(r.agent_id)) ?? null;
 
       holders.push({
         slug: slugFor.get(account) ?? null,
@@ -144,10 +217,12 @@ export async function readToken(token: string): Promise<TokenRead> {
         valueUsdg: value,
         costUsdg: cost,
         pnlBps: cost !== null && cost > 0 ? Math.round(((value - cost) / cost) * 10_000) : null,
-        enteredAt,
+        enteredAt: first?.at ?? null,
+        entryPriceUsd: first?.priceUsd ?? null,
+        basisSource: first?.basis ?? null,
       });
     }
 
-    return { symbol, holders, privateHolders };
+    return { symbol, holders, privateHolders, fillsRead };
   });
-}
+});

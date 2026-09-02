@@ -107,6 +107,45 @@ describe("parseGeckoPool", () => {
     assert.notEqual(p.buyers24h, p.buys24h);
   });
 
+  it("keeps every window the index published, not just the day", () => {
+    // The capture carries a five-minute tape — counts, distinct addresses on
+    // BOTH sides, its own volume and its own change — and the parser used to
+    // read the h24 entry and drop the rest. Everything a token page wants to
+    // show over a short horizon was arriving and being thrown away.
+    const b = parseGeckoPool(CHUMP)!.buckets;
+    assert.equal(b.m5.buys, 22);
+    assert.equal(b.m5.sells, 33);
+    assert.equal(b.m5.buyers, 12);
+    assert.equal(b.m5.sellers, 16);
+    assert.equal(b.m5.changePct, -2.926);
+    assert.equal(b.m5.volumeUsd, 10_344.8738645394);
+  });
+
+  it("reports a window the index omitted as null, never as zero", () => {
+    // CHUMP is a verbatim capture and it carries NO h6 at all. The distinction
+    // is the whole reason this repo prefers null: "nobody traded it in six
+    // hours" and "the index did not say" are different facts, and a split bar
+    // drawn from a zeroed window would state the first while knowing neither.
+    const b = parseGeckoPool(CHUMP)!.buckets;
+    assert.equal(b.h6.buys, null);
+    assert.equal(b.h6.sells, null);
+    assert.equal(b.h6.changePct, null);
+    assert.equal(b.h6.volumeUsd, null);
+  });
+
+  it("derives the flat 24h fields from the same buckets", () => {
+    // The scout filters on the flat names and its tests are written against
+    // them. They are now one source of truth with the tape, so a page and a
+    // trading decision can never be reading different numbers.
+    const p = parseGeckoPool(CHUMP)!;
+    assert.equal(p.buys24h, p.buckets.h24.buys);
+    assert.equal(p.sells24h, p.buckets.h24.sells);
+    assert.equal(p.buyers24h, p.buckets.h24.buyers);
+    assert.equal(p.volume24hUsd, p.buckets.h24.volumeUsd);
+    assert.equal(p.change24hPct, p.buckets.h24.changePct);
+    assert.equal(p.change1hPct, p.buckets.h1.changePct);
+  });
+
   it("dates a pool that is weeks old, not just fresh launches", () => {
     // The whole point of this source: CHUMP launched 2026-07-31 and discovery
     // (which only watches pool creation) can never see it again.

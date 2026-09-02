@@ -55,6 +55,21 @@ export interface WallTape {
   /** Index-aligned labels. The last is always the catch-all. */
   lanes: string[];
   /**
+   * How many turned-back intents fell in each lane, index-aligned with `lanes`.
+   *
+   * OVER THE DRAWN SAMPLE, NOT THE WINDOW — the same rows the band draws, which
+   * is at most the most recent `CAP`. `counts` above is the whole window, so
+   * these two do NOT sum to `counts.turned` when `capped` is true, and a
+   * consumer must publish these as SHARES rather than as totals that would
+   * visibly disagree with the headline.
+   *
+   * The tally already existed — it is what orders the lanes — and was thrown
+   * away one line after it was built, so the most informative thing this module
+   * knows (which rule actually stops this agent) reached the page as unlabelled
+   * amber and nothing else.
+   */
+  laneCounts: number[];
+  /**
    * The WHOLE window, counted — not the drawn sample.
    *
    * These are what the page prints, and `cells` is only what the canvas can
@@ -75,6 +90,7 @@ const EMPTY: WallTape = {
   source: "none",
   cells: [],
   lanes: [],
+  laneCounts: [],
   counts: { intents: 0, turned: 0, through: 0, flight: 0 },
   capped: false,
   from: 0,
@@ -183,6 +199,7 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
     const catchAll = lanes.length - 1;
 
     const cells: WallCell[] = [];
+    const laneCounts = lanes.map(() => 0);
     const counts = { intents: 0, turned: 0, through: 0, flight: 0 };
 
     // Oldest first, so the replay runs forward through the day.
@@ -199,6 +216,10 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
       const lane =
         fate === "turned" ? (r.rule && laneOf.has(r.rule) ? laneOf.get(r.rule)! : catchAll) : catchAll;
       cells.push({ t: Number(r.at), lane, fate });
+      // Only the turned ones: a lane is a REASON THE WALL SAID NO, and counting
+      // what got through under the catch-all would put passes in a breakdown of
+      // refusals.
+      if (fate === "turned") laneCounts[lane] += 1;
       counts.intents += 1;
       counts[fate] += 1;
     }
@@ -215,6 +236,7 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
       source: "sqlite",
       cells,
       lanes,
+      laneCounts,
       counts: published,
       capped,
       from,

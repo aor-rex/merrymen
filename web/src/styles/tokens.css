@@ -36,6 +36,24 @@
  * the host.
  */
 
+/*
+ * THE GROUND, PAINTED HERE AND NOWHERE ELSE.
+ *
+ * The comment above claimed the body background was painted explicitly and
+ * it was not: the only `body` rule in any live sheet belonged to the legacy
+ * one, so a route that stopped importing it would fall through to whatever
+ * the browser or the old sheet last set — and, mid-migration, render new
+ * black chrome on the old sherwood photograph at 13.5px.
+ *
+ * On :root rather than under .mm, because .mm is a div inside the body and a
+ * div cannot paint the ground behind itself.
+ */
+html,
+body {
+  background: #000000;
+  color-scheme: dark;
+}
+
 :root {
   /* ── ground: TOTAL BLACK ──────────────────────────────────────────────
      #0b0f10 was a good graphite and it is also the reason this page has
@@ -123,7 +141,7 @@
   --mm-nav-h: 56px;
   --mm-header-h: 52px;
   --mm-col: 640px;
-  --mm-rail: 232px;
+  --mm-rail: 304px;
   --mm-context: 320px;
   --mm-band-h: 168px;        /* the band on /, >=860 */
   --mm-band-h-sm: 132px;     /* the band on /, <860 */

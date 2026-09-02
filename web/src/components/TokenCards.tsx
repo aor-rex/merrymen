@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { DiscoveryRow, FreshRow, Payload } from "@/app/api/discoveries/route";
+import { compactUsd } from "@/lib/format";
+import type { DiscoveryRow, FreshRow, Payload } from "@/lib/read-discoveries";
 
 /**
  * The token cards, lifted out of the console.
@@ -23,14 +24,10 @@ export function shortAge(sec: number | null): string {
   return `${Math.round(sec / 86_400)}d`;
 }
 
-/** $1.2M / $84k / $912 — never more precision than the number deserves. */
-export function compactUsd(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-}
+// Moved to lib/format so the token page's SERVER-rendered stat strip can use
+// it without pulling this client module into its bundle. Re-exported because
+// the name is used across the coins view.
+export { compactUsd };
 
 /**
  * WHICH READS FAILED, said once per page rather than once per card.
@@ -178,6 +175,7 @@ export function FreshCard({ f }: { f: FreshRow }) {
           </a>
         )}
         {f.bare && <span className="soc mute">no socials</span>}
+        {/* Prefetches only as far as the route's loading boundary. */}
         <Link className="soc go" href={`/t/${f.token}`}>
           who&rsquo;s in it →
         </Link>
@@ -218,7 +216,11 @@ export function MarketCard({ r }: { r: DiscoveryRow }) {
             : `$${r.priceUsd < 0.01 ? r.priceUsd.toPrecision(2) : r.priceUsd.toFixed(4)}`}
         </span>
         <span>
-          <i>Market cap</i>
+          {/* FDV, and it says FDV. The index substitutes fully-diluted value
+              for market cap whenever it lacks a circulating supply, and calling
+              that "market cap" systematically makes a token look bigger and
+              safer than it is. */}
+          <i>FDV</i>
           {compactUsd(r.fdvUsd)}
         </span>
         <span>

@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
-import { LogoMark } from "@/components/Logo";
+import { AppShell } from "@/components/shell/AppShell";
+import { PageHeader } from "@/components/shell/PageHeader";
 import {
   explorerFor,
   grantHasV4,
@@ -37,6 +38,8 @@ import { canStart } from "@/lib/can-start";
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
 // they no longer reach anything else.
+import "@/styles/tokens.css";
+import "@/styles/shell.css";
 import "@/styles/legacy.css";
 import "@/styles/legacy-console.css";
 import "./grant.css";
@@ -796,17 +799,34 @@ export default function GrantPage() {
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
 
   return (
-    <div className="sc-root gw">
-      <div className="gw-grid" aria-hidden="true" />
-      <div className="gw-top">
-        <Link href="/" className="gw-brand">
-          <span className="m"><LogoMark size={15} /></span> merrymen
-        </Link>
-        <span className={`gw-chain ${activeChainId === MAINNET ? "mainnet" : ""}`}>
-          <span className="dot" />
-          {chainLabel(activeChainId)}
-        </span>
-      </div>
+    /*
+     * CHROME ONLY. Every class, every sheet and every warning on this page is
+     * untouched — this commit gives it the rail, the tape, the tab bar and the
+     * search, and nothing else.
+     *
+     * That restraint is deliberate. A sibling investigation proved by mutation
+     * that seventeen regressions to this page's signing flow pass the entire
+     * test suite, including deleting the disabled guard that stands between a
+     * reader and an unacknowledged real-funds signature. Renaming its classes
+     * is a five-hundred-line diff on a file that mints owner keys, and it does
+     * not belong in the same change as adding a navigation bar.
+     */
+    <AppShell>
+      <PageHeader
+        title="Grant"
+        /* THE CHAIN INDICATOR MOVES, IT DOES NOT GO. Its markup and its
+           classes are exactly as they were; only its parent changed. On a
+           page that seals spending caps, which chain they are being sealed
+           for is the one fact that must never be lost in a layout change. */
+        right={
+          <span className={`gw-chain ${activeChainId === MAINNET ? "mainnet" : ""}`}>
+            <span className="dot" />
+            {chainLabel(activeChainId)}
+          </span>
+        }
+      />
+      <div className="sc-root gw">
+        <div className="gw-grid" aria-hidden="true" />
 
       {wizStep >= 0 && (
         <>
@@ -825,7 +845,7 @@ export default function GrantPage() {
         </>
       )}
 
-      <main className="grant-shell">
+        <div className="grant-shell">
         {/* ─── desync banner: browser has a wallet the server no longer holds ── */}
         {desynced && (
           <div className="grant-panel desync-panel">
@@ -1749,7 +1769,8 @@ export default function GrantPage() {
             </div>
           </div>
         )}
-      </main>
-    </div>
+        </div>
+      </div>
+    </AppShell>
   );
 }

@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogoMark } from "@/components/Logo";
+import { RailAlerts } from "./RailAlerts";
+import { Ticker } from "./Ticker";
 import { NAV, activeHref } from "./nav";
 
 /**
@@ -50,6 +52,12 @@ export function AppShell({
             </li>
           ))}
         </ul>
+        {/* THE RAIL EARNS ITS WIDTH. It held four links and several hundred
+            pixels of nothing, which is most of why this read as sparse beside
+            the terminals it competes with. Labels-visible only: at 72px there
+            is no room, and a truncated alert is worse than none. */}
+        <RailAlerts />
+
         <div className="mm-rail-foot">
           {/* Needs a glyph like every other rail item: between 860 and 1180 the
               labels are hidden, and a link with only text collapsed to a
@@ -69,6 +77,10 @@ export function AppShell({
           target is sized on the CLASS below and not on the element. The old tab
           bar sized `button` and its Settings link was the shortest target on
           the bar at ~42px, under the 44px minimum, for that reason. */}
+      {/* The tape. Desktop only — below 860 the tab bar owns the bottom edge,
+          and two fixed strips there would eat a third of a phone screen. */}
+      <Ticker />
+
       <nav className="mm-tabbar" aria-label="Main">
         {NAV.map((n) => (
           <Link key={n.href} href={n.href} className={`mm-tab${active === n.href ? " on" : ""}`}>

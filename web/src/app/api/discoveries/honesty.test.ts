@@ -19,14 +19,25 @@ import { describe, it } from "node:test";
  * ask" was rendered as "nothing there", which is why it is now a test.
  */
 
-const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+// THE READ AND ITS HTTP WRAPPER, SCANNED TOGETHER.
+//
+// Most of this was one file. The read moved to lib/read-discoveries so a server
+// component could share its single-flight memo instead of fetching this process
+// over the network, which left the cache-control behaviour here and everything
+// else there. The properties below are about the discoveries read AS A WHOLE,
+// so the whole is what they read — splitting them across two constants would
+// mean deciding, per assertion, which half is allowed to satisfy it, and the
+// first one filed under the wrong half would pass by accident forever.
+const ROUTE =
+  readFileSync(new URL("../../../lib/read-discoveries.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./route.ts", import.meta.url), "utf8");
 /**
  * The coins view moved out of the console onto its own page. These assertions
  * follow it: the properties belong to the CARDS and to the ORDER the page
  * checks its empty states in, not to the file that happened to hold them.
  */
 const CARDS = readFileSync(new URL("../../../components/TokenCards.tsx", import.meta.url), "utf8");
-const PAGE = readFileSync(new URL("../../tokens/TokensClient.tsx", import.meta.url), "utf8");
+const PAGE = readFileSync(new URL("../../(app)/tokens/TokensClient.tsx", import.meta.url), "utf8");
 
 describe("an unread coin is not accused of silence", () => {
   it("`bare` defaults to FALSE when the metadata read failed", () => {
@@ -43,6 +54,15 @@ describe("an unread coin is not accused of silence", () => {
     // Three states, not two: has a description / read and genuinely empty /
     // never read. The middle one is the only one that earns the sentence.
     assert.match(CARDS, /f\.description \?[\s\S]{0,200}?:\s*f\.bare \?/);
+  });
+
+  it("calls fully-diluted value FDV, never market cap", () => {
+    // The index substitutes FDV for market cap whenever it has no circulating
+    // supply, so the two were the same number under a label that overstates it
+    // — a token reads bigger, older and safer than it is. worker/src/venues/
+    // token-stats.ts made this argument first; the card had not heard it.
+    assert.ok(!/Market cap/.test(CARDS), "FDV must not be labelled market cap");
+    assert.match(CARDS, /<i>FDV<[/]i>/);
   });
 
   it("a missing ticker renders the ADDRESS, not the word 'unnamed'", () => {
@@ -114,7 +134,11 @@ describe("a degraded read is not cached like a good one", () => {
   it("single-flight, because the route is dynamic and every tab polls it", () => {
     // Without it, N tabs missing together each fire two heavy log sweeps plus
     // three enrichment reads — manufacturing the very burst this fixes.
-    assert.match(ROUTE, /let inFlight: Promise<Payload> \| null/);
+    // The type parameter is deliberately loose. What must hold is that ONE
+    // promise is held at module scope and reused; what that promise resolves to
+    // is free to change, and pinning it meant this failed the first time the
+    // memo started carrying more than the payload.
+    assert.match(ROUTE, /let inFlight: Promise<\w+> \| null/);
     assert.match(ROUTE, /if \(inFlight\) return inFlight;/);
     // Anchored to a real export, not a mention: the comment above the memo
     // explains what it replaced, and matching prose would fail forever.

@@ -27,10 +27,19 @@ export interface MarketToken {
   priceUsd: number | null;
   /** Unix seconds of the last Chainlink update; null when the token has no feed. */
   priceUpdatedAt: number | null;
-  paused: boolean;
+  /**
+   * Trading halted on the token contract. NULL WHEN THE READ FAILED.
+   *
+   * It fell back to `false`, so one refused multicall leg published "trading
+   * normally" for a token nobody had asked. A halt is the single most
+   * consequential thing this row says; it may only be asserted when the chain
+   * actually answered.
+   */
+  paused: boolean | null;
   /** 1.0 = no pending corporate action. */
   uiMultiplier: number | null;
-  rialtoLiquid: boolean;
+  /** Whether Rialto considers it liquid. Null when Rialto could not be asked. */
+  rialtoLiquid: boolean | null;
   volume24hUsd: number | null;
   holders: number | null;
 }
@@ -124,16 +133,26 @@ export async function fetchMarket(): Promise<MarketData> {
       logo: stats.iconUrl ?? LOGO_CDN(t.address),
       priceUsd: price?.priceUsd ?? null,
       priceUpdatedAt: price?.updatedAt ?? null,
-      paused: pausedRes?.status === "success" ? (pausedRes.result as boolean) : false,
+      paused: pausedRes?.status === "success" ? (pausedRes.result as boolean) : null,
       uiMultiplier:
         multRes?.status === "success" ? Number(multRes.result as bigint) / 1e18 : null,
-      rialtoLiquid: rialtoLiquid.get(t.address.toLowerCase()) ?? false,
+      // fetchRialtoLiquidity returns an EMPTY MAP when Rialto is down, so a
+      // `?? false` stamped "illiquid" on all 25 tokens during one outage.
+      rialtoLiquid: rialtoLiquid.get(t.address.toLowerCase()) ?? null,
       volume24hUsd: stats.volume24hUsd,
       holders: stats.holders,
     };
   });
 
-  tokens.sort((a, b) => (b.volume24hUsd ?? 0) - (a.volume24hUsd ?? 0));
+  // Unknown volume sorts LAST rather than as zero: `?? 0` ranked a token
+  // Blockscout did not answer for identically to one that genuinely did no
+  // trade, which is the same conflation this file just removed from `paused`.
+  tokens.sort((a, b) => {
+    if (a.volume24hUsd === b.volume24hUsd) return 0;
+    if (a.volume24hUsd === null) return 1;
+    if (b.volume24hUsd === null) return -1;
+    return b.volume24hUsd - a.volume24hUsd;
+  });
 
   return { fetchedAt: Math.floor(Date.now() / 1000), tokens };
 }

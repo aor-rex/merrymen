@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { LogoMark } from "@/components/Logo";
+import { TopBar } from "./TopBar";
 
 /**
  * The sticky top bar.
@@ -21,6 +22,10 @@ export function PageHeader({
 }) {
   return (
     <header className="mm-header">
+      {/* Search and your own position, on every route — a trading surface is
+          navigated by typing a symbol, and it says where you stand without
+          being asked. Full width, not inside the reading column. */}
+      <TopBar />
       <div className="mm-wrap mm-header-in">
         <Link href="/" className="mm-header-mark" aria-label="merrymen">
           <LogoMark size={20} />

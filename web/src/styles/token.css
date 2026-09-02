@@ -16,7 +16,7 @@
 
 .mm-timeline .track {
   position: relative;
-  height: 46px;
+  height: 72px;
   /* Room for an avatar centred on either end without clipping. */
   margin: 0 13px;
 }
@@ -37,6 +37,11 @@
      rather than one smeared shape. */
   border-radius: var(--mm-r-agent);
   box-shadow: 0 0 0 2px var(--mm-bg);
+}
+
+.mm-timeline .pin.unsettled {
+  outline: 1px dashed var(--mm-edge-2);
+  outline-offset: 2px;
 }
 
 .mm-timeline .axis {
@@ -65,8 +70,7 @@
   border-bottom: 1px solid var(--mm-edge);
 }
 
-.mm-holders li > a,
-.mm-holders li > span {
+.mm-holders li > .row {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) auto auto auto auto;
   align-items: center;
@@ -76,9 +80,56 @@
   transition: background-color var(--mm-fast) var(--mm-ease);
 }
 
-.mm-holders li > a:hover {
+.mm-holders li:hover > .row {
   background: var(--mm-surface-2);
+}
+
+.mm-holders .who:hover {
   color: inherit;
+}
+
+/* THE LINE THE REFERENCE PRODUCT HAS AND EVERY OTHER HOLDERS TABLE LACKS: not
+   just who is in it and for how much, but why they say they are. */
+.mm-holders .said {
+  margin: 0 0 var(--mm-2);
+  padding: 0 var(--mm-2);
+  /* Aligned under the name, not the avatar — it is that agent's speech. */
+  padding-left: calc(28px + var(--mm-3) + var(--mm-2));
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--mm-tx-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Said nothing lately is a fact about the window, and it is quieter than
+   speech. It is NOT the same as having no slug to match on, which renders
+   nothing at all. */
+.mm-holders .said.none {
+  font-style: italic;
+  color: var(--mm-faint);
+}
+
+/* EVERY CELL PINNED TO ITS COLUMN. The paper chip is conditional, so with
+   auto-placement a row without one shifted every figure after it one track to
+   the left — the value, cost and P&L of a live agent did not line up with those
+   of a paper one, in a table whose whole job is comparing them. */
+.mm-holders .who {
+  grid-column: 2;
+}
+.mm-holders .row > .mm-chip {
+  grid-column: 3;
+}
+.mm-holders .val {
+  grid-column: 4;
+}
+.mm-holders .basis {
+  grid-column: 5;
+}
+.mm-holders .chg {
+  grid-column: 6;
 }
 
 .mm-holders .who {
@@ -98,7 +149,14 @@
   color: var(--mm-dim);
 }
 
+/* FIXED WIDTHS AND RIGHT-ALIGNED, because every row is its own grid: an
+   auto-sized track is measured against that row's own content, so "cost
+   $96.50" and "cost $168.00" put their columns in different places and the
+   figures a reader is comparing did not line up. The 1fr name column absorbs
+   the slack, including the paper chip's track when a row has no chip. */
 .mm-holders .val {
+  min-width: 84px;
+  text-align: right;
   font-size: 13px;
   font-weight: 600;
   color: var(--mm-tx-2);
@@ -106,6 +164,8 @@
 }
 
 .mm-holders .basis {
+  min-width: 104px;
+  text-align: right;
   font-size: 11px;
   color: var(--mm-faint);
   white-space: nowrap;
@@ -129,22 +189,284 @@
 }
 
 @media (max-width: 520px) {
-  .mm-holders li > a,
-  .mm-holders li > span {
+  .mm-holders li > .row {
     grid-template-columns: 28px minmax(0, 1fr) auto;
     row-gap: 2px;
+  }
+
+  .mm-holders .said {
+    padding-left: var(--mm-2);
   }
   /* The basis is the first thing to go: it is the least useful figure on a
      phone and the row is better short than complete. */
   .mm-holders .basis {
     display: none;
   }
+  .mm-holders .row > .mm-chip {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
   .mm-holders .val {
     grid-column: 3;
     grid-row: 1;
   }
   .mm-holders .chg {
-    grid-column: 2 / 4;
+    grid-column: 3;
     grid-row: 2;
+    text-align: right;
   }
+}
+
+/* ── the stat strip, the timeframe grid, the flow bars ────────────────────── */
+
+.mm-tok-facts,
+.mm-tok-flow {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+/* Conditions sit above the figures: a halt is not a number. */
+.mm-tok-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mm-2);
+  margin-bottom: var(--mm-3);
+}
+
+.mm-tok-strip,
+.mm-tok-tf {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--mm-3);
+  margin: 0;
+}
+
+.mm-tok-tf {
+  margin-top: var(--mm-4);
+  padding-top: var(--mm-4);
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-tok-cell dt {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-tok-cell dd {
+  margin: 2px 0 0;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--mm-tx);
+  /* A figure broken over two lines reads as two numbers. */
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A word standing in for a figure — "no feed", "pre-graduation". It is an
+   answer, not a number, so it does not wear the figure's weight. */
+.mm-tok-cell dd .soft {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--mm-dim);
+}
+
+.mm-tok-cell dd .mm-chip {
+  margin-left: var(--mm-2);
+  vertical-align: 1px;
+}
+
+.mm-tok-tf dd.up {
+  color: var(--mm-up);
+}
+.mm-tok-tf dd.down {
+  color: var(--mm-down);
+}
+.mm-tok-tf dd.flat {
+  color: var(--mm-dim);
+}
+
+/* ── the split bars ──────────────────────────────────────────────────────── */
+
+.mm-tok-flowbars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mm-4);
+  margin-top: var(--mm-4);
+}
+
+.mm-tok-bar {
+  display: grid;
+  grid-template-columns: 58px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mm-3);
+}
+
+.mm-tok-bar .lab {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-tok-bar .lo,
+.mm-tok-bar .hi {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mm-tok-bar .lo {
+  color: var(--mm-up);
+}
+.mm-tok-bar .hi {
+  color: var(--mm-down);
+}
+
+/* The track is the page's own surface when nothing traded, which is how a
+   window with no trades reads as empty rather than as an even split. */
+.mm-tok-bar .t {
+  display: flex;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--mm-surface-3);
+}
+
+.mm-tok-bar .t u,
+.mm-tok-bar .t s {
+  display: block;
+  height: 100%;
+  text-decoration: none;
+}
+
+.mm-tok-bar .t u {
+  background: var(--mm-up);
+}
+.mm-tok-bar .t s {
+  background: var(--mm-down);
+}
+
+/* ── the thin-holders callout ────────────────────────────────────────────── */
+
+/* Deliberately NOT --mm-warn: that colour means the wall said no, and nothing
+   else in this product may borrow it. */
+.mm-tok-risk {
+  margin: var(--mm-4) 0 0;
+  padding: var(--mm-3);
+  border: 1px solid var(--mm-edge-2);
+  border-radius: var(--mm-r-chip);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--mm-dim);
+}
+
+@media (max-width: 520px) {
+  /* Four across becomes two, the same collapse the agent stats use. Five cells
+     would leave an orphan on the second row, which is why the strip is four. */
+  .mm-tok-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--mm-4) var(--mm-3);
+  }
+
+  /* The timeframe grid stays four across: the cells are narrow to begin with
+     and the row reads as a sequence. */
+  .mm-tok-tf {
+    gap: var(--mm-2);
+  }
+
+  .mm-tok-tf dt {
+    font-size: 9.5px;
+  }
+
+  .mm-tok-bar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: var(--mm-1);
+  }
+
+  .mm-tok-bar .lab {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── the oracle's series ─────────────────────────────────────────────────── */
+
+.mm-tok-chart {
+  padding: var(--mm-5) 0;
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-priceline {
+  margin: var(--mm-4) 0 0;
+}
+
+.mm-priceline svg {
+  display: block;
+  width: 100%;
+  height: 168px;
+  overflow: visible;
+}
+
+.mm-priceline .axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--mm-3);
+  margin-top: var(--mm-2);
+  font-size: 10.5px;
+  color: var(--mm-faint);
+}
+
+.mm-priceline .axis .px {
+  color: var(--mm-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The caption is load-bearing: every other figure on this page is a market
+   number, and without it the line reads as one. */
+.mm-priceline figcaption {
+  margin-top: var(--mm-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mm-faint);
+}
+
+@media (max-width: 520px) {
+  .mm-priceline svg {
+    height: 132px;
+  }
+
+  /* The range is the first thing to go: the two dates are what orient a reader
+     and three items do not fit on a phone. */
+  .mm-priceline .axis .px {
+    display: none;
+  }
+}
+
+/* ── the candles ─────────────────────────────────────────────────────────── */
+
+/*
+ * The library draws into this element and sizes itself to it. The height is set
+ * inline on the node so it is reserved before hydration — a chart that appears
+ * and pushes the reasoning down is the layout shift the rest of this redesign
+ * has been removing.
+ */
+.mm-candles {
+  margin-top: var(--mm-4);
+  width: 100%;
+}
+
+/*
+ * WHAT THE BARS ARE, said under them. A price chart is the most authoritative
+ * thing on this page and the one most able to mislead: these are one venue's
+ * trades as a third party indexed them, in dollars, and on a curve token they
+ * are not even a pool.
+ */
+.mm-chart-note {
+  margin: var(--mm-3) 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mm-faint);
 }

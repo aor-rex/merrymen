@@ -18,7 +18,7 @@ import {
   type Discovery,
 } from "./discovery";
 import { applyVerdicts, nullScout } from "./strategist/memecoin-scout";
-import type { GeckoPool } from "./venues/geckoterminal";
+import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const USDG = (CASH.USDG as string).toLowerCase() as `0x${string}`;
 const WETH = (CASH.WETH as string).toLowerCase() as `0x${string}`;
@@ -301,6 +301,7 @@ describe("discoverTrending", () => {
     buys24h: 900,
     sells24h: 700,
     buyers24h: 400,
+    buckets: emptyGeckoBuckets(),
     createdAt: 1,
     ...over,
   });

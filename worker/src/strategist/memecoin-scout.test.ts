@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { applyVerdicts, nullScout, toScoutCandidates } from "./memecoin-scout";
-import type { GeckoPool } from "../venues/geckoterminal";
+import { emptyGeckoBuckets, type GeckoPool } from "../venues/geckoterminal";
 
 /**
  * The scout's contract is a SUBSET, guaranteed against the model rather than
@@ -27,6 +27,7 @@ const pool = (name: string, over: Partial<GeckoPool> = {}): GeckoPool => ({
   buys24h: 900,
   sells24h: 700,
   buyers24h: 300,
+  buckets: emptyGeckoBuckets(),
   createdAt: NOW - 86_400 * 3,
   ...over,
 });

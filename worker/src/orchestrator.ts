@@ -510,10 +510,13 @@ async function mirrorLedgers(): Promise<void> {
     return;
   }
   for (const tenant of [...children.keys()]) {
-    const child = openChildLedger(childHome(tenant));
-    if (!child) continue;
+    // CLOSED IN THE finally BELOW. One descriptor per tenant per pass, on a
+    // fifteen-second clock, is twenty-two leaked handles a quarter-minute for
+    // as long as the service runs.
+    const handle = openChildLedger(childHome(tenant));
+    if (!handle) continue;
     try {
-      const r = await mirrorTenant({ tenant, child, shared });
+      const r = await mirrorTenant({ tenant, child: handle.db, shared });
       const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
@@ -550,6 +553,8 @@ async function mirrorLedgers(): Promise<void> {
       }
     } catch (e) {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      handle.close();
     }
   }
 }

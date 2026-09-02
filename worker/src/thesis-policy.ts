@@ -226,6 +226,11 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   slippage: "the price moved too far between quote and fill",
   "insufficient-balance": "it did not hold what it tried to spend",
   "curve-graduated": "that launch had already graduated",
+  // The worker writes this whenever a curve trade is proposed against a grant
+  // carrying no Pons adapter. It was missing from this map, so a real and
+  // common refusal fell to the catch-all and rendered as nothing at all —
+  // invisible in the lane breakdown and unnamed in the feed.
+  "no-curve-adapter": "this grant carries no adapter for that launchpad",
   "curve-provenance": "the launch could not be verified",
 });
 
@@ -238,6 +243,24 @@ const R: Readonly<Record<string, string>> = Object.freeze({
  * catch-all — the same refusal `outcomeOf` makes one line below.
  */
 export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
+
+/**
+ * The same sentence `outcomeOf` would use, for a reader GROUPING by rule.
+ *
+ * The wall band already knows which rule stopped each intent and renders it as
+ * unlabelled amber. A page that wants to say "past the per-trade cap · 31" must
+ * get the wording from here rather than title-casing the slug, for the reason
+ * this whole map exists: the slug is an internal name and some of them read as
+ * accusations ("insufficient-balance") that the sentence does not.
+ *
+ * Returns null for anything outside the set — including the band's catch-all —
+ * so an unrecognised rule is rendered as nothing rather than echoed raw. The
+ * detail after the slug is author-written and is never selected.
+ */
+export function rejectRuleLabel(rule: string | null | undefined): string | null {
+  if (!rule) return null;
+  return Object.prototype.hasOwnProperty.call(R, rule) ? R[rule]! : null;
+}
 
 /** What the wall said, from the slug alone — the detail is never selected. */
 export function outcomeOf(

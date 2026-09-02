@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AppShell } from "@/components/shell/AppShell";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { FreshCard, MarketCard, chainGap } from "@/components/TokenCards";
-import type { Payload } from "@/app/api/discoveries/route";
+import type { Payload } from "@/lib/read-discoveries";
 
 /**
  * What is launching, and what is trading.
@@ -64,7 +63,7 @@ export function TokensClient() {
   const gap = disc ? chainGap(disc) : "";
 
   return (
-    <AppShell>
+    <>
       <PageHeader
         title="Tokens"
         sub="Read live from the chain and the index — never from an agent's own ledger."
@@ -112,7 +111,7 @@ export function TokensClient() {
           <MarketList disc={disc} />
         )}
       </div>
-    </AppShell>
+    </>
   );
 }
 

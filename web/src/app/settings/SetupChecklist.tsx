@@ -17,17 +17,34 @@ import { canStart } from "@/lib/can-start";
 
 type Sess = { hosted: boolean; address: string | null };
 
+/*
+ * THE DESIGN SYSTEM, not eleven hexes copied out of the old console.
+ *
+ * These were literals from the retired green palette — a #0f1410 card and a
+ * #b6e226 lime — so this strip stayed the colour of a page that no longer
+ * exists while everything around it went black. Reading the tokens means it
+ * simply follows whatever the system says next.
+ */
 const C = {
-  card: "#0f1410",
-  line: "#1e281f",
-  line2: "#2a382b",
-  lime: "#b6e226",
-  mint: "#3ad884",
-  tx: "#eaf1e8",
-  tx2: "#b7c5b8",
-  dim: "#8a998b",
-  faint: "#5b6a5c",
-  mono: 'var(--font-jbmono, "JetBrains Mono", ui-monospace, Menlo, monospace)',
+  card: "var(--mm-surface)",
+  line: "var(--mm-edge)",
+  line2: "var(--mm-edge-2)",
+  /*
+   * TWO ROLES, NOT ONE GREEN. The old sheet spent lime on both the call to
+   * action and the completed state, which mapped to --mm-up and put three
+   * bright green things on a black page whose accent is meant to be single.
+   *
+   * A button asking you to create an agent is an ACTION, so it takes --mm-wire,
+   * the same colour "Deploy an agent" wears in the bar directly above it. Only
+   * a finished step is a gain.
+   */
+  lime: "var(--mm-wire)",
+  mint: "var(--mm-up)",
+  tx: "var(--mm-tx)",
+  tx2: "var(--mm-tx-2)",
+  dim: "var(--mm-dim)",
+  faint: "var(--mm-faint)",
+  mono: "var(--mm-mono)",
 };
 
 
@@ -89,7 +106,7 @@ export default function SetupChecklist() {
   return (
     <section
       style={{
-        border: `1px solid ${allDone ? "#243024" : C.line2}`,
+        border: `1px solid ${allDone ? "var(--mm-edge)" : C.line2}`,
         background: C.card,
         borderRadius: 12,
         padding: "14px 16px",
@@ -122,7 +139,7 @@ export default function SetupChecklist() {
                   fontSize: 11,
                   border: `1px solid ${s.done ? "transparent" : C.line2}`,
                   background: s.done ? "rgba(182,226,38,0.16)" : "transparent",
-                  color: s.done ? C.lime : C.faint,
+                  color: s.done ? C.mint : C.faint,
                 }}
               >
                 {s.done ? "✓" : ""}
@@ -139,7 +156,7 @@ export default function SetupChecklist() {
                     flex: "none",
                     fontFamily: C.mono,
                     fontSize: 12,
-                    color: "#14210a",
+                    color: "var(--mm-bg)",
                     background: C.lime,
                     padding: "6px 12px",
                     borderRadius: 8,
