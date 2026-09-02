@@ -4901,7 +4901,11 @@ async function main() {
     }
     await ensureDecision(intent, "chat", `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`);
     await processIntent(intent, lastEquityUsdg, lastEquityKnown);
-    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — watch /trades for the result (it still passes the policy wall).`;
+    const outcome = lastTradeOutcome;
+    if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
+    if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
+    if (outcome?.status === "reverted") return `❌ ${side} ${usdgAmount} USDG ${symbol} reverted on-chain.`;
+    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — check /trades for the result.`;
   }
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
