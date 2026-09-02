@@ -558,6 +558,8 @@ export default function SettingsPage() {
                 key={sym}
                 type="button"
                 className={`cap symbol-chip${activeSymbols.includes(sym) ? " on" : ""}`}
+                /* In the basket or not, said rather than only shaded. */
+                aria-pressed={activeSymbols.includes(sym)}
                 onClick={() => toggleSymbol(sym)}
               >
                 {sym}
@@ -991,14 +993,29 @@ export default function SettingsPage() {
             <span className="field-label">capabilities</span>
             <div className="caps" style={{ marginTop: 4 }}>
               {PC_CAPS.map((c) => (
-                <span
+                /*
+                 * A BUTTON, AND IT SAYS WHETHER IT IS ON.
+                 *
+                 * This was a <span> with an onClick: not reachable by keyboard,
+                 * not announced as a control, and carrying no pressed state — so
+                 * whether SHELL AND KEYBOARD ACCESS TO THE OWNER'S MACHINE were
+                 * armed was communicated by colour and opacity alone. Nothing in
+                 * this file used aria-pressed or aria-checked anywhere.
+                 *
+                 * It keeps its classes, so it looks exactly as it did; the
+                 * neighbouring basket chips are already buttons with the same
+                 * ones.
+                 */
+                <button
                   key={c.id}
+                  type="button"
                   className={`cap symbol-chip ${capsVal.includes(c.id) ? "on" : ""}`}
+                  aria-pressed={capsVal.includes(c.id)}
                   onClick={() => toggleCap(c.id)}
                   style={{ cursor: "pointer", opacity: pcEnabledVal ? 1 : 0.5 }}
                 >
                   {c.label}
-                </span>
+                </button>
               ))}
             </div>
             <span className="field-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
