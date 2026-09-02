@@ -24,7 +24,7 @@
 import { cache } from "react";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { fetchMarket, type MarketToken } from "@/lib/market";
-import { readPoolRow, sharedRead, type DiscoveryRow } from "@/lib/read-discoveries";
+import { readPoolFor, type DiscoveryRow } from "@/lib/read-discoveries";
 
 export interface TokenMarket {
   /** Decided from the static stock list, so this is never a guess. */
@@ -103,21 +103,25 @@ export const readTokenMarket = cache(async function readTokenMarket(
   }
 
   try {
-    // readPoolRow, NOT payload.rows. The payload's rows are screened for a
-    // discovery panel and drop everything under a display floor of $25k depth
-    // and 100 buyers — which is most of what an agent actually holds. Asked
-    // against those, this would report "no market data" for a coin the index
-    // had just described in full.
-    const row = await readPoolRow(addr);
+    // THE POOLS, NOT THE PANEL. Two things are being avoided here.
+    //
+    // The panel's rows are SCREENED — they drop everything under a display
+    // floor of $25k depth and 100 buyers, which is most of what an agent
+    // actually holds. Asked against those, this would report "no market data"
+    // for a coin the index had just described in full.
+    //
+    // And the panel is EXPENSIVE: building it sweeps the launchpad, makes
+    // three chain enrichment reads and runs the scout's model. A token page
+    // has no use for any of that and used to wait for all of it.
+    const { row, indexUnreachable } = await readPoolFor(addr);
     if (row) return { kind: "memecoin", read: "found", stock: null, coin: row, symbolClash, symbol: registrySymbol };
 
-    // Genuinely not among the pools the index returned. That is only an absence
-    // if the index answered at all, which is the distinction this file exists
-    // for.
-    const payload = await sharedRead();
+    // Genuinely not among the pools the index returned. That is only an
+    // absence if the index answered at all, which is the distinction this
+    // file exists for.
     return {
       kind: "memecoin",
-      read: payload.indexUnreachable ? "unread" : "absent",
+      read: indexUnreachable ? "unread" : "absent",
       stock: null,
       coin: null,
       symbolClash,

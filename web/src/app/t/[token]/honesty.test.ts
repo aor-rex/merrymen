@@ -174,3 +174,37 @@ describe("the page is dynamic, because its data can be degraded", () => {
     assert.match(PAGE, /^export const dynamic = "force-dynamic";/m);
   });
 });
+
+describe("a token page does not wait for the discovery panel", () => {
+  const MARKET = at("../../../lib/read-token-market.ts");
+  const DISC = at("../../../lib/read-discoveries.ts");
+
+  it("reads the pools, not the built payload", () => {
+    // Building the panel sweeps the launchpad over chain logs, makes three
+    // enrichment reads and runs the scout's MODEL. A cold memo therefore made a
+    // token page view block on an LLM call to show four figures about one
+    // token, none of which that work says anything about.
+    assert.match(MARKET, /readPoolFor/);
+    assert.ok(
+      !/sharedRead\(\)/.test(code(MARKET)),
+      "a token page must not await the panel build",
+    );
+  });
+
+  it("the light read has no model in it", () => {
+    // Pinned on the function rather than the comment: the scout must stay on
+    // the far side of the split, where only the panel waits for it.
+    const light = DISC.slice(
+      DISC.indexOf("async function readPools()"),
+      DISC.indexOf("async function build()"),
+    );
+    assert.ok(light.length > 0, "readPools must exist and precede build");
+    assert.ok(!/rankForDisplay/.test(light), "no verdict pass inside the pool read");
+    assert.ok(!/readFresh/.test(light), "no launchpad sweep inside the pool read");
+  });
+
+  it("still shares one fetch between the two paths", () => {
+    // The split must not double the index requests it was made to protect.
+    assert.match(DISC, /await sharedPools\(\)/);
+  });
+});

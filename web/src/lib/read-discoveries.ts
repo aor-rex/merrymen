@@ -106,6 +106,17 @@ export interface DiscoveryRow {
    * between "nobody traded it" and "the index did not say".
    */
   buckets: Record<GeckoWindow, GeckoBucket>;
+  /**
+   * The pool this row describes, as the index identifies it.
+   *
+   * TWO WIDTHS AND THE DIFFERENCE MATTERS: 20 bytes is a pool contract, 32 is
+   * a v4/Pons poolId that cannot be called. Both are perfectly good keys for
+   * the index's own OHLCV endpoint, which is the only thing this field is for
+   * — it is never somewhere to send an eth_call.
+   */
+  poolId: string;
+  /** Which venue these figures came from, so a page can say. */
+  dex: string;
 }
 
 function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
@@ -126,6 +137,8 @@ function toRow(p: GeckoPool, nowSec: number): DiscoveryRow {
     graduated: p.dex === GRADUATED,
     onCurve: p.dex === ON_CURVE,
     buckets: p.buckets,
+    poolId: p.poolId,
+    dex: p.dex,
   };
 }
 
@@ -396,16 +409,25 @@ export function sharedRead(): Promise<Payload> {
 }
 
 /**
- * What the index said about ONE token, screened or not.
+ * What the index said about ONE token, and whether it could be asked at all.
  *
- * Shares the memo above, so asking costs nothing beyond the read the page was
- * making anyway. Returns null when the index returned pools and this token was
- * not among them — read `indexUnreachable` on the payload before calling that
- * an absence, because the two are different facts.
+ * Reads sharedPools, NOT the whole payload. A token page wanting four figures
+ * was otherwise waiting on a launchpad sweep, three chain enrichment reads and
+ * the scout's LLM pass — none of which say anything about the token in the URL.
+ *
+ * A null row means the index answered and this token was not among the pools
+ * it returned. That is only an absence if it answered, which is what the
+ * second half of the result is for.
  */
-export async function readPoolRow(token: string): Promise<DiscoveryRow | null> {
-  const { unscreened } = await sharedReadFull();
-  return unscreened.get(token.toLowerCase()) ?? null;
+export async function readPoolFor(
+  token: string,
+): Promise<{ row: DiscoveryRow | null; indexUnreachable: boolean }> {
+  const { byToken, asked, reached } = await sharedPools();
+  return {
+    row: byToken.get(token.toLowerCase()) ?? null,
+    // False only when NOT ONE feed answered. A partial read is still a read.
+    indexUnreachable: reached === 0 && asked > 0,
+  };
 }
 
 /** A payload, and the wider set only a same-process caller can reach. */
@@ -414,10 +436,51 @@ interface Shared {
   unscreened: Map<string, DiscoveryRow>;
 }
 
-async function build(): Promise<Shared> {
+/** What the index said about the market, before anything is built on top. */
+interface Pools {
+  /** Every pool it returned, keyed by token, screened by nothing. */
+  byToken: Map<string, DiscoveryRow>;
+  all: GeckoPool[];
+  asked: number;
+  reached: number;
+  nowSec: number;
+}
+
+/**
+ * THE FEEDS, AND ONLY THE FEEDS.
+ *
+ * Split out of build() because a page wanting four figures about ONE token was
+ * waiting for the whole discovery panel: a launchpad sweep over chain logs,
+ * three enrichment reads, and AN LLM CALL — the scout's verdict pass runs
+ * inside build(), so a cold memo made a token page view block on a model.
+ * None of that says anything about the token being looked at.
+ *
+ * Memoised in its own right, so the two paths still share the three fetches
+ * rather than doubling them.
+ */
+let poolsInFlight: Promise<Pools> | null = null;
+let poolsLast: { at: number; pools: Pools } | null = null;
+
+export function sharedPools(): Promise<Pools> {
+  // A refused sweep is worth retrying sooner than a whole one — the same split
+  // the payload memo below makes, for the same reason.
+  const ttl = poolsLast && poolsLast.pools.reached === 0 ? DEGRADED_MS : WHOLE_MS;
+  if (poolsLast && Date.now() - poolsLast.at < ttl) return Promise.resolve(poolsLast.pools);
+  if (poolsInFlight) return poolsInFlight;
+  poolsInFlight = readPools()
+    .then((p) => {
+      poolsLast = { at: Date.now(), pools: p };
+      return p;
+    })
+    .finally(() => {
+      poolsInFlight = null;
+    });
+  return poolsInFlight;
+}
+
+async function readPools(): Promise<Pools> {
   const nowSec = Math.floor(Date.now() / 1000);
-  const { rows: fresh, chain } = await readFresh();
-  const byToken = new Map<string, GeckoPool>();
+  const byPool = new Map<string, GeckoPool>();
   // Every feed refused is a different fact from every feed being empty, and
   // only one of them means the market is quiet. This API is keyless and
   // rate-limited, so the refusal is routine — and a page that renders it as
@@ -438,16 +501,29 @@ async function build(): Promise<Shared> {
       // $27.0M of reserve against $4,506 of daily volume, so the row a reader
       // saw was the one nobody trades. The screened set is unaffected — it
       // already floors at $50k of volume.
-      const prev = byToken.get(p.tokenAddress);
+      const prev = byPool.get(p.tokenAddress);
       const better =
         !prev ||
         (p.volume24hUsd ?? 0) > (prev.volume24hUsd ?? 0) ||
         ((p.volume24hUsd ?? 0) === (prev.volume24hUsd ?? 0) &&
           (p.reserveUsd ?? 0) > (prev.reserveUsd ?? 0));
-      if (better) byToken.set(p.tokenAddress, p);
+      if (better) byPool.set(p.tokenAddress, p);
     }
   }
-  const all = [...byToken.values()];
+
+  const all = [...byPool.values()];
+  const byToken = new Map<string, DiscoveryRow>();
+  for (const p of all) {
+    byToken.set(p.tokenAddress.toLowerCase(), { ...toRow(p, nowSec), verdict: null });
+  }
+  return { byToken, all, asked, reached, nowSec };
+}
+
+async function build(): Promise<Shared> {
+  // The feeds, shared with every token page. The only await the two paths
+  // still have in common.
+  const { byToken, all, asked, reached, nowSec } = await sharedPools();
+  const { rows: fresh, chain } = await readFresh();
   const { kept } = screenPools(all, LIMITS);
 
   // ── THE AGENT'S OWN VERDICT, FORMED HERE ────────────────────────────────
@@ -487,12 +563,13 @@ async function build(): Promise<Shared> {
   //
   // Kept in the memo rather than on the payload: it is several times the size
   // and no HTTP caller wants it.
+  //
+  // COPIED rather than mutated: sharedPools' map is handed to token pages as
+  // well, and stamping this render's verdicts into it would leak one panel's
+  // opinions onto every reader of a single token.
   const unscreened = new Map<string, DiscoveryRow>();
-  for (const p of all) {
-    unscreened.set(p.tokenAddress.toLowerCase(), {
-      ...toRow(p, nowSec),
-      verdict: verdictByToken.get(p.tokenAddress.toLowerCase()) ?? null,
-    });
+  for (const [key, row] of byToken) {
+    unscreened.set(key, { ...row, verdict: verdictByToken.get(key) ?? null });
   }
   const rows = kept
     .map((p) => unscreened.get(p.tokenAddress.toLowerCase()))
