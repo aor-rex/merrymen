@@ -189,6 +189,11 @@ async function mintGrant(
    * client can trust.
    */
   hostedAs?: Address,
+/**
+   * Opt-in: include "*pons" in grantTokens so every Pons launchpad token
+   * passes the asset-allowlist check. No on-chain permission change.
+   */
+  ponsWildcard?: boolean,
 ): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -328,7 +333,10 @@ async function mintGrant(
     // Same filter the wall itself applied, so what we RECORD as covered and what
     // the policy actually covers cannot disagree — the worker compares this
     // against the owner's configured tokens and warns when they've drifted.
-    grantTokens: usableExtraTokens(extraTokens).map((t) => t.address.toLowerCase()),
+    grantTokens: [
+      ...usableExtraTokens(extraTokens).map((t) => t.address.toLowerCase()),
+      ...(ponsWildcard ? ["*pons"] : []),
+    ],
     demoSessionPrivateKey: sessionPrivateKey,
     // THE CUSTODY LINE. Self-hosted keeps the owner key on the grant object: it
     // is a localhost round-trip to a 0600 file on the user's own machine, which
@@ -644,6 +652,8 @@ export interface MintOptions {
   ponsAdapterAddress?: `0x${string}`;
   /** The signed-in wallet, on the hosted service. Absent when self-hosted. */
   hostedAs?: Address;
+  /** Opt-in: allow trades of ANY Pons launchpad token without adding each one individually. */
+  ponsWildcard?: boolean;
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
@@ -657,6 +667,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
     o.hostedAs,
+    o.ponsWildcard,
   );
 }
 
@@ -685,6 +696,7 @@ export async function restoreAgentWallet(
     o.v4AdapterAddress,
     o.ponsAdapterAddress,
     o.hostedAs,
+    o.ponsWildcard,
   );
 }
 

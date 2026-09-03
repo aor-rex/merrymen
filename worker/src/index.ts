@@ -723,6 +723,20 @@ async function main() {
     smartAccount: `0x${string}`,
   ): Promise<void> => {
     try {
+      // TIME BUDGET: under sustained RPC rate-limiting the span-halving scan
+      // degrades to per-block requests and can stall the first tick for 30+
+      // minutes. The orphan check is a safety net, not a gate — a delayed
+      // retry is safe; a stalled worker protects nothing.
+      const RECONCILE_DEADLINE = Date.now() + 90_000;
+      // Check the budget before each blocking call. If the deadline has passed,
+      // log and return — the next arm retries the scan.
+      const checkBudget = (label: string) => {
+        if (Date.now() > RECONCILE_DEADLINE) {
+          console.log(`[reconcile] time budget exhausted (${label}) — will retry next arm`);
+          return true; // exhausted
+        }
+        return false;
+      };
       // Convert the 24h cap window to a block span without hardcoding a block
       // time we don't know: sample a recent span and divide. A generous margin
       // over 24h, clamped so a mis-estimate can't trigger an enormous scan.
@@ -756,8 +770,10 @@ async function main() {
       // first means anything settled here is already settled when
       // listOpHashes is read below, so the two sweeps cannot both act on one
       // hash. See resolveStrandedOps.
+      if (checkBudget("resolveStrandedOps")) return;
       await resolveStrandedOps(agentId, chain, smartAccount, lookbackBlocks);
       const known = await listOpHashes(agentId);
+      if (checkBudget("findOrphanOps")) return;
       const orphans = await findOrphanOps({
         chain,
         smartAccount,

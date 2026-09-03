@@ -413,6 +413,7 @@ export default function GrantPage() {
   // the wall at signing — which is why it is read here and not at trade time.
   const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
   const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
+  const [ponsWildcard, setPonsWildcard] = useState(false);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -563,6 +564,7 @@ export default function GrantPage() {
         v4AdapterAddress: v4Adapter,
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
+        ponsWildcard,
       });
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
@@ -614,6 +616,7 @@ export default function GrantPage() {
         v4AdapterAddress: v4Adapter,
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
+        ponsWildcard,
       });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
@@ -1163,6 +1166,20 @@ export default function GrantPage() {
                 It rested on ZeroDev's rate-limit policy, whose contract has no bytecode on
                 Robinhood Chain.
               */}
+            </div>
+
+            <div className="caps-section" style={{ marginTop: 16 }}>
+              <label className="ack-row">
+                <input
+                  type="checkbox"
+                  checked={ponsWildcard}
+                  onChange={(e) => setPonsWildcard(e.target.checked)}
+                />
+                <span>
+                  <b>Allow all Pons launchpad tokens</b> — trade any memecoin from the Pons feed
+                  without adding it in /settings. Each trade still respects your caps above.
+                </span>
+              </label>
             </div>
 
             {mode === "create" ? (
