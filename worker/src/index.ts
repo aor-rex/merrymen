@@ -222,7 +222,9 @@ import {
   setTrenchEntry,
   upgradeTrenchEntry,
   setPositions,
-  type TradeRow,  knownCurves,
+  type TradeRow,
+  knownCurves,
+  knownPonsAssets,
 } from "./store";
 import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
 
@@ -531,7 +533,7 @@ async function main() {
       watchTokens = watchTokensFor(next.basketSymbols, next.customTokens);
       console.log(`[settings] strategy settings applied — ${strategy.name}, venue ${next.swapVenue}`);
       if (active) {
-        active.limits = limitsFromGrant(active.grant, watchTokens, (await knownCurves()) ?? undefined);
+        active.limits = limitsFromGrant(active.grant, watchTokens, (await knownCurves()) ?? undefined, (await knownPonsAssets()) ?? undefined);
         await addEvent(active.agentId, "ok", `settings applied — strategy ${strategy.name}, venue ${next.swapVenue}`);
       }
       stratKey = nextStrat;
@@ -2339,7 +2341,7 @@ async function main() {
       // The provenance set for the curve-trade rule. Read once at arm time,
       // alongside every other grant-derived bound, so a curve the agent never
       // saw launch cannot be traded even though the wall cannot pin it.
-      limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined),
+      limits: limitsFromGrant(grant, watchTokens, (await knownCurves()) ?? undefined, (await knownPonsAssets()) ?? undefined),
       breakerLive,
       v4AdapterLive,
       ponsAdapterLive,

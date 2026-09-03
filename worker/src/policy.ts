@@ -67,6 +67,15 @@ export interface AgentLimits {
    */
   knownCurves?: readonly string[];
   /**
+   * Token addresses the wildcard `*pons` covers — populated from the same Pons
+   * launchpad discovery feed as knownCurves. When sellableAssets contains
+   * "*pons", a token whose address is in this list passes the asset-allowlist
+   * check even though it isn't individually in the grant's grantTokens.
+   *
+   * Optional for the same reason knownCurves is: fixtures have no feed.
+   */
+  ponsAssets?: readonly string[];
+  /**
    * The QUOTE side of the book: USDG and the tradeable stock tokens.
    *
    * `builtinGrantTargets(grant)` -- deliberately NOT sellableAssets, which also
@@ -317,15 +326,19 @@ export function checkPolicy(
     if (limits.sellableAssets) {
       const sellable = limits.sellableAssets.map(lc);
       for (const token of [intent.assetIn, intent.assetOut]) {
-        if (!sellable.includes(lc(token))) {
-          return {
-            ok: false,
-            rule: "asset-allowlist",
-            detail:
-              `asset ${token} is not in the signed grant, so the wall will refuse this trade. ` +
-              `Add it at /settings and re-sign the grant at /grant to cover it.`,
-          };
-        }
+        if (sellable.includes(lc(token))) continue;
+        // WILDCARD: if the grant carries "*pons" and this token is a known Pons
+        // launchpad asset, it passes the asset check even though it's not in the
+        // signed grantTokens. The launchpad pre-vets the token, and the curve
+        // adapter — which is pinned in the grant — is the only route into it.
+        if (sellable.includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+        return {
+          ok: false,
+          rule: "asset-allowlist",
+          detail:
+            `asset ${token} is not in the signed grant, so the wall will refuse this trade. ` +
+            `Add it at /settings and re-sign the grant at /grant to cover it.`,
+        };
       }
     }
 
@@ -349,9 +362,10 @@ export function checkPolicy(
 
   if (intent.kind === "swap") {
     for (const token of [intent.sellToken, intent.buyToken]) {
-      if (!limits.allowedAssets.map(lc).includes(lc(token))) {
-        return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
-      }
+      if (limits.allowedAssets.map(lc).includes(lc(token))) continue;
+      // WILDCARD: "*pons" in allowedAssets means any Pons launchpad token passes.
+      if (limits.allowedAssets.map(lc).includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+      return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
     }
 
     // NEVER ENTER A POSITION THE KEY CANNOT EXIT.
@@ -369,15 +383,17 @@ export function checkPolicy(
     // Sells are never blocked by this rule — an exit must always be attemptable.
     if (limits.sellableAssets) {
       const sellable = limits.sellableAssets.map(lc);
-      if (!sellable.includes(lc(intent.buyToken))) {
-        return {
+      if (sellable.includes(lc(intent.buyToken))) {
+        // pass
+      } else if (sellable.includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(intent.buyToken))) {
+        // WILDCARD: Pons launchpad token — key can sell through the curve adapter, so no-exit doesn't apply
+      } else return {
           ok: false,
           rule: "no-exit",
           detail:
             `refusing to buy ${intent.buyToken}: this key can't approve it for a sell, ` +
             `so the position could be opened and never closed. Re-sign the grant at /grant to cover it.`,
         };
-      }
     }
 
     // BUYING SOMETHING NOBODY CAN PRICE.

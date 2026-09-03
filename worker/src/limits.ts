@@ -31,6 +31,13 @@ export function limitsFromGrant(
    * blanket refusal either.
    */
   knownCurves?: readonly string[],
+  /**
+   * Token addresses from the Pons launchpad feed — used by the "*pons" wildcard
+   * in asset-allowlist checks. Same provenance as knownCurves (factory-filtered
+   * discovery), but the TOKEN addresses, not the curve addresses. Optional for
+   * the same reason knownCurves is.
+   */
+  ponsAssets?: readonly string[],
 ): AgentLimits {
   return {
     perTradeUsdg: usdgUnits(grant.caps.perTradeUsdg),
@@ -87,12 +94,19 @@ export function limitsFromGrant(
         return a ? [a] : [];
       })(),
     ],
-    allowedAssets: [CASH.USDG as `0x${string}`, ...watchTokens.map((token) => token.address)],
+    allowedAssets: [
+      CASH.USDG as `0x${string}`,
+      ...watchTokens.map((token) => token.address),
+      // WILDCARD: if the grant carries "*pons", pass it through to allowedAssets
+      // so the swap path also recognises Pons launchpad tokens.
+      ...(grant.grantTokens?.includes("*pons") ? ["*pons" as `0x${string}`] : []),
+    ],
     sellableAssets: [...sellableAssets(grant)],
     // The quote side only -- see AgentLimits.quoteAssets. sellableAssets minus
     // this is the set of tokens a curve trade could be buying INTO.
     quoteAssets: [...builtinGrantTargets(grant)],
     knownCurves,
+    ponsAssets,
     // THE TRANSFER PERMISSION, MIRRORED. checkPolicy has always known how to
     // judge this — it was simply never told. A grant without the transfer
     // marker has NO USDG transfer permission in its call policy:

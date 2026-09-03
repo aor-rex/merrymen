@@ -2529,6 +2529,22 @@ export async function knownCurves(): Promise<string[] | null> {
   }
 }
 
+/**
+ * Token addresses from the Pons launchpad discovery feed — used by the "*pons"
+ * wildcard in asset-allowlist checks. Same provenance as knownCurves() but
+ * returns TOKEN addresses (the `address` column), not curve addresses.
+ */
+export async function knownPonsAssets(): Promise<string[] | null> {
+  try {
+    const rows = (await getDb()
+      .prepare(`SELECT DISTINCT address FROM discovered_pools WHERE address IS NOT NULL`)
+      .all()) as { address: string | null }[];
+    return rows.map((r) => r.address).filter((a): a is string => !!a).map((a) => a.toLowerCase());
+  } catch {
+    return null;
+  }
+}
+
 
 /**
  * Where a specific token trades on the launchpad — by address, not by recency.

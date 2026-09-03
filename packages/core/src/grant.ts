@@ -344,6 +344,11 @@ export function builtinGrantTargets(grant?: Pick<StoredGrant, "grantFeatures"> |
 export function sellableAssets(grant: Pick<StoredGrant, "grantFeatures" | "grantTokens"> | null): Set<string> {
   const set = builtinGrantTargets(grant);
   for (const a of grant?.grantTokens ?? []) set.add(a.toLowerCase());
+  // WILDCARD: "*pons" in grantTokens means every token discovered through the
+  // Pons launchpad is treated as approved. The actual token list is checked at
+  // policy time against knownCurves/ponsAssets. The sentinel value is always
+  // lowercase so a simple includes check works.
+  if (grant?.grantTokens?.includes("*pons")) set.add("*pons");
   return set;
 }
 
