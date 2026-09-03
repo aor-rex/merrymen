@@ -56,8 +56,25 @@ import { drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
-/** A child with no fresh heartbeat for this many seconds is wedged → SIGKILL. */
-const WATCHDOG_STALE_SEC = 180;
+/**
+ * FLOOR for the staleness threshold. The real one is DERIVED per child — see
+ * `staleThresholdSec`.
+ *
+ * A CONSTANT HERE WAS A BUG, AND IT WAS ARITHMETIC RATHER THAN A RACE. The
+ * heartbeat is written once per tick, so the minimum possible gap between two
+ * beats is the tick period. With `MERRYMEN_TICK_SECONDS=240` on the hosted
+ * fleet and this fixed at 180, every child was SIGKILLed at ~185s — before its
+ * SECOND TICK EVER RAN. Measured: all 71 observed `heartbeat stale` events
+ * landed in a 181-196s band, which is exactly 180 plus one 15s poll interval.
+ *
+ * That killed the fleet in a loop: kill → re-arm → a 200,000-block getLogs
+ * sweep → rate limits → a tick that dies before writing its beat → kill again.
+ * Nothing about it required a slow RPC; the numbers alone guaranteed it.
+ *
+ * So the threshold is now computed from the tick this child actually runs, and
+ * this value is only the lower bound for a fast one.
+ */
+const WATCHDOG_STALE_FLOOR_SEC = 180;
 /** Don't watchdog a child until it's had a chance to write its first beat. */
 const WATCHDOG_GRACE_SEC = 90;
 /** Cap a child's heap well below the container so an OOM kills the offender, not the box. */
@@ -129,6 +146,30 @@ interface Child {
   tenant: `0x${string}`;
   startedAt: number;
   restarts: number;
+  /**
+   * Seconds without a heartbeat before this child is considered wedged.
+   *
+   * Per child rather than global, because `tickSeconds` is per tenant: the
+   * settings file the orchestrator writes for a child can override the fleet
+   * env var (settings.ts resolves file BEFORE env), so one global number cannot
+   * be correct for every child at once.
+   */
+  staleSec: number;
+}
+
+/**
+ * How long to wait for a beat from a child whose tick is `tickSeconds`.
+ *
+ * TWO TICKS PLUS THE GRACE PERIOD. One tick is the floor by definition — a beat
+ * cannot arrive sooner — so one tick of margin allows a single slow or failed
+ * pass without declaring the process dead, and the grace absorbs the watchdog's
+ * own 15s polling granularity. Below that, a healthy agent on a slow RPC is
+ * indistinguishable from a wedged one.
+ *
+ * Exported for the test that pins the invariant this replaced.
+ */
+export function staleThresholdSec(tickSeconds: number): number {
+  return Math.max(WATCHDOG_STALE_FLOOR_SEC, Math.ceil(tickSeconds) * 2 + WATCHDOG_GRACE_SEC);
 }
 
 const children = new Map<string, Child>();
@@ -213,18 +254,25 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<boolean> {
  * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
  * the tenant stored can only ever be their own legitimate configuration.
  */
-async function writeSettingsForChild(tenant: `0x${string}`, seenBotTokens?: Set<string>): Promise<void> {
+async function writeSettingsForChild(
+  tenant: `0x${string}`,
+  seenBotTokens?: Set<string>,
+): Promise<MerrymenSettings | null> {
   try {
     const settings = await getSettingsStore().get(tenant);
-    if (!settings) return;
+    if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
     }
     const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+    // Returned so the caller can size the watchdog to the tick THIS child will
+    // read. Nothing else about the write changes.
+    return settings;
   } catch {
     /* best-effort — the child falls back to defaults */
+    return null;
   }
 }
 
@@ -244,13 +292,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: no grant in the store — not spawning`);
     return;
   }
-  await writeSettingsForChild(tenant);
+  // The settings the child will actually read, so the watchdog can size its
+  // patience to the tick that child will actually run. `tickSeconds` resolves
+  // file-before-env (settings.ts), and the file is what we just wrote.
+  const settings = await writeSettingsForChild(tenant);
+  const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
+  const staleSec = staleThresholdSec(tickSeconds);
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
     { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
   );
-  const child: Child = { proc, tenant, startedAt: Date.now(), restarts };
+  const child: Child = { proc, tenant, startedAt: Date.now(), restarts, staleSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
@@ -264,7 +317,17 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   pipe(proc.stderr, process.stderr);
 
   proc.on("exit", (code) => {
-    children.delete(tenant);
+    // ONLY IF THIS ENTRY IS STILL OURS.
+    //
+    // `children.delete(tenant)` unconditionally was a double-spawn generator.
+    // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
+    // NEW entry under the same key — and then this handler, running for the
+    // corpse, deleted the replacement. A second later the `!children.has`
+    // guard below was true and a SECOND child spawned. The first replacement
+    // was orphaned: still ticking, still hitting the RPC, invisible to the
+    // watchdog, never mirrored, sharing one home and one sqlite file with its
+    // own replacement. Measured: 105 spawns against 61 exits in one window.
+    if (children.get(tenant) === child) children.delete(tenant);
     if (stopping) return;
     log(`${tenant} exited (${code})`);
     // A long healthy run that then dies is a fresh incident, not a crash loop.
@@ -280,10 +343,25 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       if (!stopping && !children.has(tenant)) void spawnChild(tenant, freshRestarts);
     }, delay);
   });
-  log(`${tenant} spawned (pid ${proc.pid})`);
+  log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
 }
 
-/** Stop a child hard. SIGTERM first for a clean exit, then SIGKILL — a wedged tick only the OS can reclaim. */
+/** The fleet-wide tick, for a tenant whose own settings do not name one. */
+function envTickSeconds(): number {
+  const raw = Number(process.env.MERRYMEN_TICK_SECONDS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60;
+}
+
+/**
+ * Stop a child hard. SIGTERM first for a clean exit, then SIGKILL — a wedged
+ * tick only the OS can reclaim.
+ *
+ * The delete below is now load-bearing in the way this function always claimed:
+ * the exit handler compares identity, so removing our entry first genuinely
+ * does mark the exit as intentional. Before that comparison existed, this
+ * survived only because `releaseLease` happened to win a race against the
+ * handler's 1s respawn timer.
+ */
 function killChild(tenant: string): void {
   const child = children.get(tenant);
   if (!child) return;
@@ -609,9 +687,11 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
     const ageSec = (Date.now() - child.startedAt) / 1000;
     if (ageSec < WATCHDOG_GRACE_SEC) continue; // give it time to write its first beat
     const beat = heartbeatAt(tenant);
-    const stale = beat === null || nowSec - beat > WATCHDOG_STALE_SEC;
+    const stale = beat === null || nowSec - beat > child.staleSec;
     if (stale) {
-      log(`${tenant} heartbeat stale (${beat === null ? "never beat" : `${nowSec - beat}s`}) — SIGKILL + restart`);
+      log(
+        `${tenant} heartbeat stale (${beat === null ? "never beat" : `${nowSec - beat}s`} > ${child.staleSec}s) — SIGKILL + restart`,
+      );
       const restarts = child.restarts;
       children.delete(tenant);
       try {

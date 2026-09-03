@@ -22,6 +22,7 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
+import { metered, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -2224,7 +2225,7 @@ async function main() {
       );
     }
 
-    const client = createPublicClient({ chain, transport: http(rpc) });
+    const client = createPublicClient({ chain, transport: metered(http(rpc), "read") });
 
     // ── THE WALL'S OWN CONTRACTS MUST EXIST ──────────────────────────────
     // Same discipline as the breaker below, applied to the singletons the
@@ -4163,7 +4164,21 @@ async function main() {
     }
   }
 
-  function heartbeat(blockNumber: bigint) {
+  /**
+   * LIVENESS, WHICH IS NOT THE SAME QUESTION AS "DID THE CHAIN ANSWER".
+   *
+   * The block number is optional now, and that is the whole fix. This used to
+   * be called once per tick, AFTER `readMarketSafety()` — so a rate-limited
+   * `eth_getBlockByNumber` threw out of the tick one line before the beat, the
+   * file went stale, and the orchestrator SIGKILLed a process that was working
+   * perfectly. 14.6% of ticks died that way, and each death fed the restart
+   * loop that caused the rate limiting in the first place.
+   *
+   * A heartbeat answers "is this process alive". That is true whether or not a
+   * third party answered an HTTP request, and conflating the two let a provider
+   * outage read as a dead worker.
+   */
+  function heartbeat(blockNumber?: bigint) {
     const at = Math.floor(Date.now() / 1000);
     const mode = paperActive() ? "paper" : active?.executor ? "live" : "idle";
     // WHO PAYS, reported rather than guessed. Only this process resolves it
@@ -4175,7 +4190,10 @@ async function main() {
       ensureHome();
       writeFileSync(
         homePaths.heartbeat(),
-        JSON.stringify({ at, block: blockNumber.toString(), mode, sponsorGas }),
+        // `block` is omitted rather than zeroed when the chain was not read:
+        // a zero here would be a claim about chain height, and the dashboard
+        // would render it. Absent means absent.
+        JSON.stringify({ at, ...(blockNumber === undefined ? {} : { block: blockNumber.toString() }), mode, sponsorGas }),
         "utf8",
       );
     } catch {
@@ -4193,16 +4211,61 @@ async function main() {
     if (active) void setAgentMode(active.agentId, mode, at, sponsorGas);
   }
 
+  /**
+   * One line per RPC provider, per tick, then the counters reset.
+   *
+   * Printed at the END of the tick and in a `finally`, so a tick that returns
+   * early — an unreadable market, an unread book, a disarmed agent — still
+   * reports what it spent. A measurement that only appears on the happy path
+   * would miss exactly the ticks worth measuring.
+   */
+  function reportRpc() {
+    for (const line of rpcSummaryLines()) console.log(line);
+    resetRpcMeters();
+  }
+
   async function tick() {
+    // BEAT FIRST, BEFORE ANY NETWORK CALL. See heartbeat() for why this line
+    // moved: everything below can fail on somebody else’s rate limit, and none
+    // of it changes whether this process is alive.
+    heartbeat();
+
     await refreshConfig();
     const armed = await syncGrant();
 
     const market = await readMarketSafety();
-    heartbeat(market.blockNumber);
+    // Beat again WITH the height once the chain has answered, so the file still
+    // carries block number whenever it is genuinely known.
+    heartbeat(market.blockNumber ?? undefined);
     console.log(
-      `[tick] mainnet block ${market.blockNumber} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
-        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale feeds`,
+      `[tick] mainnet block ${market.blockNumber ?? "unread"} · sequencer ${market.sequencerUp ? "up" : "DOWN"} · ` +
+        `${market.pausedTokens.size} paused · ${market.staleFeeds.size} stale · ${market.unread.length} unread`,
     );
+
+    // ── FAIL CLOSED ON AN UNKNOWN MARKET ────────────────────────────────
+    //
+    // This tick used to end here by THROWING, which is why the heartbeat above
+    // never got written and the orchestrator killed the process. It ends by
+    // RETURNING now, with the beat already recorded and the reason named.
+    //
+    // No trading decision changes: an unreadable market produced no trade
+    // before and produces no trade now. What changes is that the worker stays
+    // alive and says which reads failed, instead of dying and saying nothing.
+    if (market.unreadable) {
+      console.log(
+        `[tick] market unreadable (${market.unread.slice(0, 6).join(", ")}${market.unread.length > 6 ? "…" : ""}) — ` +
+          `no trading this tick. A fact about our reads, not about the market.`,
+      );
+      if (active) {
+        await addEvent(
+          active.agentId,
+          "warn",
+          `the market could not be read this tick (${market.unread.length} read(s) failed) — nothing was traded. ` +
+            `This says nothing about prices or liquidity; it retries on the next tick.`,
+        );
+      }
+      return;
+    }
 
     if (active && market.sequencerUp !== lastSequencerUp) {
       await addEvent(
@@ -4679,7 +4742,8 @@ async function main() {
           stale: p.priceStale,
         })),
         // The block the balances were read at — where an auditor re-reads from.
-        blockNumber: market.blockNumber,
+        // Non-null by construction: an unreadable market returned above.
+        blockNumber: market.blockNumber ?? undefined,
       });
     }
     await setPositions(
@@ -5339,7 +5403,12 @@ async function main() {
   const runLoop = () => {
     tick()
       .catch((e) => console.error("[tick]", e))
-      .finally(() => setTimeout(runLoop, cfg.tickSeconds * 1000));
+      // In the finally so a tick that threw still reports what it spent — the
+      // ticks that fail are exactly the ones whose RPC cost matters most.
+      .finally(() => {
+        reportRpc();
+        setTimeout(runLoop, cfg.tickSeconds * 1000);
+      });
   };
   runLoop();
 }

@@ -191,6 +191,15 @@ test("THE CALL SITE: the executor picks the ceiling by whether the account exist
   // consequence. Pin that the wide ceiling is reached only when the account has
   // no code, and that it stops applying once an op has been accepted.
   const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
-  assert.match(src, /await isDeployed\(\)\) \? GAS_BOUNDS : DEPLOY_GAS_BOUNDS/);
+  // Pinned on the PROPERTY, not the phrasing. This asserted one exact
+  // expression and broke when the same logic was split across two lines so the
+  // gas numbers could be logged — a test that fails on a rename while the
+  // behaviour is intact teaches the next person to stop reading it.
+  assert.match(src, /await isDeployed\(\)/, "the deploy state must be consulted");
+  assert.match(
+    src,
+    /\? GAS_BOUNDS : DEPLOY_GAS_BOUNDS/,
+    "deployed picks the steady-state ceiling, undeployed the wider one",
+  );
   assert.match(src, /deployed = true;/, "a landed send must retire the deploy ceiling");
 });
