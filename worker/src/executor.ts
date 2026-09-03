@@ -14,6 +14,7 @@
  */
 
 import { http, createPublicClient, type Chain, type Hex } from "viem";
+import { metered } from "./rpc-meter";
 import { createKernelAccountClient } from "@zerodev/sdk";
 import { SponsorRefused, assertBoundsHeld, type Sponsor } from "./paymaster";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -21,7 +22,7 @@ import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
-import { boundGas, DEPLOY_GAS_BOUNDS, GAS_BOUNDS, type UserOpGas } from "./gas-limits";
+import { boundGas, DEPLOY_GAS_BOUNDS, GAS_BOUNDS, totalGas, type UserOpGas } from "./gas-limits";
 
 export interface Call {
   to: `0x${string}`;
@@ -172,7 +173,7 @@ export async function createAgentExecutor(opts: {
    */
   sponsor?: Sponsor;
 }): Promise<AgentExecutor> {
-  const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
+  const publicClient = createPublicClient({ chain: opts.chain, transport: metered(http(opts.rpcUrl), "read") });
   const entryPoint = getEntryPoint("0.7");
 
   // NOT deserializePermissionAccount. That function silently drops the policy
@@ -194,7 +195,12 @@ export async function createAgentExecutor(opts: {
   const client = createKernelAccountClient({
     account,
     chain: opts.chain,
-    bundlerTransport: http(opts.bundlerUrl),
+    // METERED, NEVER MANAGED. This transport carries eth_sendUserOperation. It
+    // is counted so the bundler quota stays visible separately from the chain
+    // RPC, and it must never gain retry, queueing or dedupe: the send-edge
+    // rules — persist the hash, send once, never re-send — are the whole reason
+    // a lost operation is recoverable.
+    bundlerTransport: metered(http(opts.bundlerUrl), "bundler"),
     ...(opts.sponsor
       ? { paymaster: opts.sponsor.paymaster, paymasterContext: opts.sponsor.paymasterContext }
       : {}),
@@ -300,7 +306,31 @@ export async function createAgentExecutor(opts: {
       // WHICH CEILING APPLIES DEPENDS ON WHETHER THIS ACCOUNT EXISTS YET.
       // See DEPLOY_GAS_BOUNDS: the first op also deploys the account and enables
       // the permission validator, and the steady-state ceiling would refuse it.
-      const bounded = boundGas(first, second, (await isDeployed()) ? GAS_BOUNDS : DEPLOY_GAS_BOUNDS);
+      const accountLive = await isDeployed();
+      const bounds = accountLive ? GAS_BOUNDS : DEPLOY_GAS_BOUNDS;
+      const bounded = boundGas(first, second, bounds);
+
+      // SAY WHAT THE NUMBERS WERE.
+      //
+      // Twenty-four consecutive live attempts died on this path and left no gas
+      // figure anywhere, because `GasRefused.detail` only carries one on the
+      // absurd/unstable branches — a `gas-unreadable` refusal, which is what all
+      // twenty-four were, prints nothing at all. Diagnosing it meant decoding
+      // handleOps calldata from two unrelated landed transactions.
+      //
+      // One line, on every execution. `null` is printed as "unreadable" rather
+      // than as a zero: an estimate the bundler refused to give is not an
+      // estimate of nothing.
+      const fmt = (g: UserOpGas | null) =>
+        g === null
+          ? "unreadable"
+          : `call ${g.callGasLimit} + verif ${g.verificationGasLimit} + preVerif ${g.preVerificationGas} = ${totalGas(g)}`;
+      console.log(
+        `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ceiling ${bounds.absoluteMax} · ` +
+          `estimate1 ${fmt(first)} · estimate2 ${fmt(second)} · ` +
+          `signed ${bounded.ok ? totalGas(bounded.gas) : "refused"}` +
+          `${bounded.ok ? "" : ` (${bounded.rule})`}`,
+      );
       if (!bounded.ok) {
         // BEFORE the send, so nothing is spent and no 'submitted' row exists.
         // This is a pre-broadcast rejection in the same shape as a policy one.

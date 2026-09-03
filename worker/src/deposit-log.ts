@@ -110,13 +110,42 @@ export async function findTransferFlows(opts: {
   const span = opts.maxSpan ?? 10_000n;
   const me = addressTopic(smartAccount);
 
+  // A SHORT SCAN MUST NOT LOOK LIKE AN EMPTY ONE.
+  //
+  // getLogsAdaptive no longer loops forever on a rate limit; it returns what it
+  // covered and says so. That is better, but it moves a decision here: this
+  // caller advances a deposit cursor, and treating a half-scanned window as
+  // "no deposits found" would step the cursor past money that arrived.
+  //
+  // So incomplete coverage is raised, because the ONE caller
+  // (index.ts scanChainFlows) already catches and does exactly the right thing
+  // with it: "An RPC that will not answer is not evidence of no deposits. Leave
+  // the cursor where it is so the same window is retried."
+  const scanOrRefuse = async (
+    c: typeof chain,
+    address: `0x${string}`,
+    topics: (Hex | Hex[] | null)[],
+    lo: bigint,
+    hi: bigint,
+    sp: bigint,
+    log?: (m: string) => void,
+  ): Promise<RawLog[]> => {
+    const r = await getLogsAdaptive(c, { address, topics }, lo, hi, sp, log);
+    if (!r.complete) {
+      throw new Error(
+        `deposit scan covered only ${lo}..${r.scannedTo} of ${lo}..${hi} — refusing to advance the cursor past blocks nobody read`,
+      );
+    }
+    return r.logs;
+  };
+
   const raw: RawLog[] = [];
   for (const topics of [
     [TRANSFER_TOPIC, null, me], // inbound: to = us
     [TRANSFER_TOPIC, me, null], // outbound: from = us
   ] as (Hex | Hex[] | null)[][]) {
     raw.push(
-      ...(await getLogsAdaptive(chain, { address: usdgToken, topics }, fromBlock, toBlock, span, opts.log)),
+      ...(await scanOrRefuse(chain, usdgToken, topics, fromBlock, toBlock, span, opts.log)),
     );
   }
 
