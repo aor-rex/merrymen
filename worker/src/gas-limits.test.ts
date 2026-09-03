@@ -677,3 +677,40 @@ test("the requirement counts the PAYMASTER fields too, because the EntryPoint do
   assert.equal(v.required, (totalGas(WALL_GAS) + 1_000_000n) * REAL_FEE);
 });
 
+
+test("A ZERO PAYMASTER FIELD IS AN ANSWER, NOT A MISSING ESTIMATE", () => {
+  // Measured live on 4663, 2026-09-03. The canary's first enable estimated
+  // cleanly — call 203,258 + verif 7,447,694 + preVerif 247,647 — and was
+  // refused `gas-unreadable` because the bundler returned 0 for
+  // paymasterVerificationGasLimit. An unsponsored operation HAS no paymaster,
+  // so zero there is the truth. The zero-guard iterated every field of
+  // UserOpGas, which was correct when UserOpGas had exactly three.
+  const measured: UserOpGas = {
+    callGasLimit: 203_258n,
+    verificationGasLimit: 7_447_694n,
+    preVerificationGas: 247_647n,
+    paymasterVerificationGasLimit: 0n,
+    paymasterPostOpGasLimit: 0n,
+  };
+  const v = boundGas(measured, measured, FIRST_ENABLE_GAS_BOUNDS);
+  assert.ok(v.ok, `the real first enable must be signable, got ${v.ok === false ? v.rule : ""}`);
+  assert.equal(v.total, 10_025_691n, "406,516 + 9,309,617 + 309,558");
+  assert.ok(v.total < FIRST_ENABLE_GAS_BOUNDS.absoluteMax, "and it clears the derived ceiling");
+
+  // THE GUARD KEEPS ITS FULL STRENGTH where it earns it: a zero in any of the
+  // three real limits is still unreadable, because a zero callGasLimit
+  // guarantees the OOG this file exists to prevent.
+  for (const field of ["callGasLimit", "verificationGasLimit", "preVerificationGas"] as const) {
+    const bad = { ...measured, [field]: 0n };
+    const r = boundGas(bad, bad, FIRST_ENABLE_GAS_BOUNDS);
+    assert.equal(r.ok, false, `a zero ${field} must still be refused`);
+    assert.equal(r.ok === false ? r.rule : null, "gas-unreadable");
+  }
+
+  // And the direction that can actually hide prefund is still refused: a
+  // NONZERO paymaster on a self-paying operation.
+  const sneaky = { ...measured, paymasterVerificationGasLimit: 1n };
+  const s = boundGas(sneaky, sneaky, FIRST_ENABLE_GAS_BOUNDS);
+  assert.equal(s.ok, false);
+  assert.equal(s.ok === false ? s.rule : null, "gas-paymaster-unexpected");
+});
