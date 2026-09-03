@@ -30,7 +30,7 @@ import { answerCallbackQuery, esc, getFileUrl, getMe, getUpdates, sendMessage, s
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash, type Command } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, fastParseTrade, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { llmText } from "../llm";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
@@ -649,6 +649,10 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
           };
         }
         cmd = r.cmd;
+        // Strip any reasoning blocks from the LLM's reply
+        if (cmd.kind === "chat" && typeof cmd.reply === "string") {
+          cmd = { kind: "chat", reply: stripThinkingBlock(cmd.reply) };
+        }
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps). Only the
         // OWNER may write it — else a group member could poison/evict owner memory.
@@ -678,7 +682,7 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
             history: await historyFor(msg.chatId),
           };
           const fluent = await narrateChat(msg.text, chatCtx, llm);
-          if (fluent) cmd = { kind: "chat", reply: fluent };
+          if (fluent) cmd = { kind: "chat", reply: stripThinkingBlock(fluent) };
           // Carry what was surfaced into the next turn so a pronoun follow-up
           // ("is it done?") keeps the thread instead of losing it to zero word
           // overlap. Persisted on the turn below, so it survives a restart too.

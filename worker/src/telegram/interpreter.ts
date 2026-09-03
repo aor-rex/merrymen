@@ -651,6 +651,27 @@ You're talking with your owner in plain language. Reply AS YOURSELF:
 - Never narrate your own machinery: no talk of memory files, notes, context, saving, or "setting things up". You simply remember; you don't describe how.`;
 
 /**
+/**
+ * Strip reasoning blocks from LLM responses. Some models (nemotron, deepseek)
+ * emit a chain-of-thought block before the actual reply, typically starting
+ * with "Here's a thinking process" or "1. **Analyze**". This strips everything
+ * up to and including the first blank line after the reasoning block.
+ */
+export function stripThinkingBlock(text: string): string {
+  const lines = text.split("\n");
+  // If the first line starts a thinking block, drop everything until the
+  // first line that doesn't look like part of the reasoning.
+  if (/^(Here's a thinking process|1\.\s*\*\*Analyze)/i.test(lines[0]?.trim() ?? "")) {
+    const idx = lines.findIndex((l, i) => i > 0 && /^$/.test(l) && i + 1 < lines.length && !/^\s*(\d+\.\s*)?\*\*/.test(lines[i + 1] ?? ""));
+    if (idx > 0) return lines.slice(idx + 1).join("\n").trim();
+    // Fallback: find the first line that looks like an actual reply
+    const replyStart = lines.findIndex((l) => /^[""“]/.test(l) || /^\w/.test(l) && !/^(\d+\.|Here's|Let me|I need|My task|The user|Looking at)/i.test(l) && l.length > 20);
+    if (replyStart > 0) return lines.slice(replyStart).join("\n").trim();
+  }
+  return text.trim();
+}
+
+/**
  * Turn a conversational message into a warm, in-character reply. Free text OUT
  * only — it becomes cmd.reply and can trigger nothing. Returns "" on any error
  * (the caller then falls back to the classifier's terse reply). Reuses the same
