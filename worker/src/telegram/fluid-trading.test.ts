@@ -105,6 +105,10 @@ function fakeDeps(over: Partial<CommandDeps> = {}) {
       calls.push({ side, symbol, usdg });
       return `⚡ executed — ${side} ${usdg} USDG of ${symbol}`;
     },
+    confirmTrade: async (side, symbol, usdg) => {
+      calls.push({ side, symbol, usdg });
+      return `✅ confirmed — ${side} ${usdg} USDG of ${symbol}`;
+    },
     transfer: async () => "unused",
     getPending: () => pending,
     setPending: (p) => {
@@ -146,7 +150,7 @@ describe("executeCommand — every trade parks for confirmation", () => {
     const t = fakeDeps();
     await executeCommand({ kind: "buy", symbol: "NVDA", usdg: 1 }, t.deps);
     const reply = await executeCommand({ kind: "confirm" }, t.deps);
-    assert.match(reply, /executed/);
+    assert.match(reply, /confirmed/);
     assert.deepEqual(t.calls, [{ side: "buy", symbol: "NVDA", usdg: 1 }]);
     assert.equal(t.pending, null, "the slot clears after firing");
   });

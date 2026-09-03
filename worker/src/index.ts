@@ -4908,6 +4908,40 @@ async function main() {
     return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — check /trades for the result.`;
   }
 
+  async function submitChatConfirmTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
+    // SKIPS the lastEquityUsdg === 0n check that submitChatTrade does.
+    // A confirmed trade was already validated when it was parked — the
+    // first tick may not have completed yet, but the trade is still valid.
+    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    const token = watchTokens.find((t) => t.symbol === symbol)?.address;
+    if (!token) {
+      const known = watchTokens.map((t) => t.symbol).join(", ");
+      return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}.`;
+    }
+    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount);
+    const router = swapRouterFor(cfg);
+    let intent: TradeIntent;
+    if (side === "buy") {
+      const raw = usdg(usdgAmount);
+      intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
+    } else {
+      const pos = readPositionRaw(active.agentId, symbol, usdg);
+      if (!pos) return `you don't hold any ${symbol}.`;
+      const want = usdg(usdgAmount);
+      const sellRaw = want < pos.valueUsdg ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+      const notional = want < pos.valueUsdg ? want : pos.valueUsdg;
+      if (sellRaw === 0n) return `${symbol} amount rounds to zero shares.`;
+      intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
+    }
+    await ensureDecision(intent, "chat", `owner confirmed ${side} ${usdgAmount} USDG ${symbol} in chat`);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    const outcome = lastTradeOutcome;
+    if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
+    if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
+    if (outcome?.status === "reverted") return `❌ ${side} ${usdgAmount} USDG ${symbol} reverted on-chain.`;
+    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — check /trades for the result.`;
+  }
+
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
     if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
@@ -4993,7 +5027,7 @@ async function main() {
     // mirror must answer this question the same way or one of them is lying.
     grantHasTransfer: () => grantCarriesTransfer(active?.grant),
     readDepth: readDepthFor,
-    submitTrade: submitChatTrade,
+    submitTrade: submitChatTrade,    submitConfirmTrade: submitChatConfirmTrade,
     submitTransfer: submitChatTransfer,
     onNameChange: (name) => {
       if (active) void setAgentName(active.agentId, name);

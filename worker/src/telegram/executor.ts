@@ -77,6 +77,8 @@ export interface CommandDeps {
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
+  /** Execute a confirmed trade (parked → /confirm). Skips the first-tick check submitChatTrade does. */
+  confirmTrade: (side: "buy" | "sell", symbol: string, usdg: number) => Promise<string>;
   /** Build a bounded transfer intent and route it through processIntent → policy wall. */
   transfer(to: `0x${string}`, usdg: number): Promise<string>;
   /** Pending-confirm store, bound to this chat by the service. */
@@ -273,7 +275,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.transfer(p.to, p.usdg);
         case "buy":
         case "sell":
-          return await deps.trade(p.kind, p.symbol, p.usdg);
+          return await deps.confirmTrade(p.kind, p.symbol, p.usdg);
         case "shell":
           return await deps.pc.runShell(p.cmd);
         case "getfile":

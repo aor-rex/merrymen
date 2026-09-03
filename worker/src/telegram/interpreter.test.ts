@@ -164,6 +164,10 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps & { calls: string[] 
       calls.push(`trade:${side}:${sym}:${usdg}`);
       return `submitted ${side} ${usdg} ${sym}`;
     },
+    confirmTrade: async (side, sym, usdg) => {
+      calls.push(`confirmTrade:${side}:${sym}:${usdg}`);
+      return `confirmed ${side} ${usdg} ${sym}`;
+    },
     transfer: async (to, usdg) => {
       calls.push(`transfer:${to}:${usdg}`);
       return `submitted transfer ${usdg} to ${to}`;
