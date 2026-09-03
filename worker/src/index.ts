@@ -226,7 +226,7 @@ import {
   knownCurves,
   knownPonsAssets,
 } from "./store";
-import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
+import { quoteDecimalsOf, readCurveReserves, verifyPonsToken } from "./venues/pons";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 const VAULT_ABI = parseAbi([
@@ -2583,22 +2583,41 @@ async function main() {
    * Returns undefined for non-swaps, so vault moves and transfers are untouched.
    */
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
-    if (intent.kind !== "swap" || !active) return undefined;
-    const symbol = symbolOfToken(intent.buyToken);
-    const buyUnpriceable = lastUnpriceable.has(intent.buyToken.toLowerCase());
-    return {
-      limits: {
-        enabled: cfg.scoutEnabled,
-        budgetUsdg: usdg(cfg.scoutBudgetUsdg),
-        perTokenUsdg: usdg(cfg.scoutPerTokenUsdg),
-      },
-      buyUnpriceable,
-      existingCostUsdg:
-        symbol !== undefined
-          ? (await getBasis(active.agentId, paperActive() ? "paper" : "live", symbol)).costUsdg
-          : 0n,
-      quarantinedUsdg: lastQuarantinedUsdg,
-    };
+    if (!active) return undefined;
+    if (intent.kind === "swap") {
+      const symbol = symbolOfToken(intent.buyToken);
+      const buyUnpriceable = lastUnpriceable.has(intent.buyToken.toLowerCase());
+      // Pre-populate Pons token verification (synchronous check for checkPolicy)
+      let ponsVerified: string[] | undefined;
+      try {
+        const isPons = await verifyPonsToken(active.client, intent.buyToken);
+        if (isPons) ponsVerified = [intent.buyToken.toLowerCase()];
+      } catch { /* fallback: no on-chain verification */ }
+      return {
+        limits: {
+          enabled: cfg.scoutEnabled,
+          budgetUsdg: usdg(cfg.scoutBudgetUsdg),
+          perTokenUsdg: usdg(cfg.scoutPerTokenUsdg),
+        },
+        buyUnpriceable,
+        existingCostUsdg:
+          symbol !== undefined
+            ? (await getBasis(active.agentId, paperActive() ? "paper" : "live", symbol)).costUsdg
+            : 0n,
+        quarantinedUsdg: lastQuarantinedUsdg,
+        ...(ponsVerified ? { verifiedPonsTokens: ponsVerified } : {}),
+      };
+    }
+    // For curve-trade intents, also check the Pons factory
+    if (intent.kind === "curve-trade") {
+      let ponsVerified: string[] | undefined;
+      try {
+        const isPons = await verifyPonsToken(active.client, intent.assetIn);
+        if (isPons) ponsVerified = [intent.assetIn.toLowerCase(), intent.assetOut.toLowerCase()];
+      } catch { /* fallback */ }
+      return ponsVerified ? { verifiedPonsTokens: ponsVerified } as ScoutContext : undefined;
+    }
+    return undefined;
   }
 
   /**

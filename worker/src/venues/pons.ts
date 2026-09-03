@@ -29,6 +29,41 @@
  */
 import type { PublicClient } from "viem";
 
+/**
+ * Check whether a token address was launched by the Pons V2 factory.
+ * Uses a targeted getLogs query for the launch event with the token as the
+ * first indexed argument. This is efficient — the topic filters the response
+ * to a single event (or zero) regardless of how many launches exist.
+ */
+export async function verifyPonsToken(
+  client: PublicClient,
+  token: `0x${string}`,
+  lookbackBlocks = 300_000n,
+): Promise<boolean> {
+  try {
+    const head = await client.getBlockNumber();
+    const fromBlock = head > lookbackBlocks ? head - lookbackBlocks : 0n;
+    const logs = await client.getLogs({
+      address: PONS_V2_FACTORY,
+      event: {
+        type: "event" as const,
+        name: "Launch",
+        inputs: [
+          { type: "address", name: "token", indexed: true },
+          { type: "address", name: "curve", indexed: true },
+          { type: "address", name: "creator", indexed: true },
+        ],
+      },
+      args: { token },
+      fromBlock,
+      toBlock: head,
+    });
+    return logs.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** PonsV2LaunchFactory on Robinhood Chain mainnet. Verified: 24,177 bytes. */
 export const PONS_V2_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e" as const;
 

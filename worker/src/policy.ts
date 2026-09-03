@@ -256,6 +256,14 @@ export interface ScoutContext {
   existingCostUsdg: bigint;
   /** USDG (6dp) total across every unpriceable position held. */
   quarantinedUsdg: bigint;
+  /**
+   * Token addresses verified as Pons launchpad tokens via on-chain factory
+   * check. Populated BEFORE checkPolicy runs so the policy check stays
+   * synchronous. When the `*pons` wildcard is active but the token isn't
+   * in the local ponsAssets cache, this fallback catches it.
+   * Undefined = no on-chain fallback, which is correct for backtests/fixtures.
+   */
+  verifiedPonsTokens?: string[];
 }
 
 export function checkPolicy(
@@ -331,7 +339,12 @@ export function checkPolicy(
         // launchpad asset, it passes the asset check even though it's not in the
         // signed grantTokens. The launchpad pre-vets the token, and the curve
         // adapter — which is pinned in the grant — is the only route into it.
-        if (sellable.includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+        if (sellable.includes("*pons")) {
+          // Check local cache first
+          if (limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+          // Fallback: check the on-chain verification (pre-populated by scoutContextFor)
+          if (scout?.verifiedPonsTokens?.map(lc).includes(lc(token))) continue;
+        }
         return {
           ok: false,
           rule: "asset-allowlist",
@@ -364,7 +377,10 @@ export function checkPolicy(
     for (const token of [intent.sellToken, intent.buyToken]) {
       if (limits.allowedAssets.map(lc).includes(lc(token))) continue;
       // WILDCARD: "*pons" in allowedAssets means any Pons launchpad token passes.
-      if (limits.allowedAssets.map(lc).includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+      if (limits.allowedAssets.map(lc).includes("*pons")) {
+        if (limits.ponsAssets?.map(lc).includes(lc(token))) continue;
+        if (scout?.verifiedPonsTokens?.map(lc).includes(lc(token))) continue;
+      }
       return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
     }
 
@@ -385,15 +401,18 @@ export function checkPolicy(
       const sellable = limits.sellableAssets.map(lc);
       if (sellable.includes(lc(intent.buyToken))) {
         // pass
-      } else if (sellable.includes("*pons") && limits.ponsAssets?.map(lc).includes(lc(intent.buyToken))) {
-        // WILDCARD: Pons launchpad token — key can sell through the curve adapter, so no-exit doesn't apply
-      } else return {
-          ok: false,
-          rule: "no-exit",
-          detail:
-            `refusing to buy ${intent.buyToken}: this key can't approve it for a sell, ` +
-            `so the position could be opened and never closed. Re-sign the grant at /grant to cover it.`,
-        };
+      } else if (sellable.includes("*pons")) {
+        // WILDCARD: check local cache first, then on-chain fallback
+        if (limits.ponsAssets?.map(lc).includes(lc(intent.buyToken))) {
+          // pass
+        } else if (scout?.verifiedPonsTokens?.map(lc).includes(lc(intent.buyToken))) {
+          // pass
+        } else {
+          return { ok: false, rule: "no-exit", detail: `refusing to buy ${intent.buyToken}: this key can't approve it for a sell, so the position could be opened and never closed. Re-sign the grant at /grant to cover it.` };
+        }
+      } else {
+        return { ok: false, rule: "no-exit", detail: `refusing to buy ${intent.buyToken}: this key can't approve it for a sell, so the position could be opened and never closed. Re-sign the grant at /grant to cover it.` };
+      }
     }
 
     // BUYING SOMETHING NOBODY CAN PRICE.
