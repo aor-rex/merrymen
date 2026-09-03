@@ -157,7 +157,7 @@ const TRADE_TYPO: Record<string, string> = {
   seal: "sell",
 };
 /** Filler around the amount/symbol — stripped before the slash parser sees it. */
-const TRADE_FILLER = /^(usdg|usd|of|worth|dollars?|coins?|some|any|me|please|the)$/i;
+const TRADE_FILLER = /^(usdg|usd|of|worth|dollars?|coins?|some|any|me|please|the|my|that|this|a|an)$/i;
 
 /**
  * Resolve a symbol against known tokens. Returns true when the symbol is
@@ -177,7 +177,7 @@ export async function fastParseTrade(text: string, resolveSymbol?: SymbolResolve
   if (!verb) return null;
   const parts = words.slice(1).filter((w) => !TRADE_FILLER.test(w));
   const cmd = parseSlash(`/${verb} ${parts.join(" ")}`.trim());
-  if (!cmd || (cmd.kind !== "buy" && cmd.kind !== "sell")) return null;
+  if (!cmd || (cmd.kind !== "buy" && cmd.kind !== "sell" && cmd.kind !== "ask-amount")) return null;
   // If the symbol is not recognised as a known token, refuse to park the
   // trade — let the message fall through to the AI or a helpful error.
   // Skip this check when trading by contract address (address is set).
