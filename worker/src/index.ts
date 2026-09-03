@@ -225,8 +225,9 @@ import {
   type TradeRow,
   knownCurves,
   knownPonsAssets,
+  recordPonsCurve,
 } from "./store";
-import { quoteDecimalsOf, readCurveReserves, verifyPonsToken } from "./venues/pons";
+import { quoteDecimalsOf, readCurveReserves, verifyPonsToken, curveForToken } from "./venues/pons";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 const VAULT_ABI = parseAbi([
@@ -4988,6 +4989,16 @@ async function main() {
     // Address provided: use it directly, skip symbol resolution.
     if (address) {
       if (await curveFor(address)) return submitChatCurveTrade(side, symbol, address, usdgAmount);
+      // Curve not in local cache. Check the Pons factory on-chain — the token
+      // may be a recently launched Pons token that hasn't been discovered yet.
+      if (active) {
+        const pons = await curveForToken(active.client, address);
+        if (pons) {
+          // Cache it so subsequent calls use the local DB
+          await recordPonsCurve(address, symbol, pons.curve, pons.quoteToken);
+          return submitChatCurveTrade(side, symbol, address, usdgAmount);
+        }
+      }
       return submitChatDirectSwap(side, symbol, address, usdgAmount);
     }
     const token = watchTokens.find((t) => t.symbol === symbol)?.address;

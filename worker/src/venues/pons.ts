@@ -65,6 +65,38 @@ export async function verifyPonsToken(
 }
 
 /**
+ * Get the curve address for a Pons launchpad token by querying the factory
+ * on-chain. Returns the curve address and quote token, or null if not found.
+ * The curve address is the second indexed topic of the launch event.
+ */
+export async function curveForToken(
+  client: PublicClient,
+  token: `0x${string}`,
+  lookbackBlocks = 300_000n,
+): Promise<{ curve: `0x${string}`; quoteToken: `0x${string}` } | null> {
+  try {
+    const head = await client.getBlockNumber();
+    const fromBlock = head > lookbackBlocks ? head - lookbackBlocks : 0n;
+    const logs = (await client.getLogs({
+      address: PONS_V2_FACTORY,
+      fromBlock,
+      toBlock: head,
+      topics: [PONS_LAUNCH_TOPIC, token.toLowerCase() as `0x${string}`],
+    } as never)) as { topics: string[]; data: string }[];
+    if (logs.length === 0 || !logs[0]) return null;
+    // Topic structure: topic0=event sig, topic1=token (indexed), topic2=curve (indexed)
+    // Data contains: quote_token (32 bytes), zero word (32 bytes), graduation_threshold (32 bytes)
+    const first = logs[0]!;
+    const curve = first.topics[2] as `0x${string}` | undefined;
+    const quoteToken = first.data ? (`0x${first.data.slice(2, 42)}`) as `0x${string}` : undefined;
+    if (!curve || !quoteToken) return null;
+    return { curve, quoteToken };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * How far back a single scan may look.
  *
  * NOT arbitrary, and not really about block range. This RPC accepts 864,000-block

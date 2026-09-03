@@ -2545,6 +2545,29 @@ export async function knownPonsAssets(): Promise<string[] | null> {
   }
 }
 
+/**
+ * Record a Pons launchpad token's curve in the discovered_pools table.
+ * Called when the on-chain factory check confirms the token is a real Pons
+ * launch but the local cache didn't have it yet. Caches the curve address
+ * so subsequent calls use the local DB instead of an RPC query.
+ */
+export async function recordPonsCurve(
+  address: string,
+  symbol: string,
+  curve: string,
+  quoteToken: string,
+): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT OR IGNORE INTO discovered_pools (address, symbol, curve, quote_token, first_seen)
+         VALUES (?, ?, ?, ?, unixepoch())`,
+      )
+      .run(address.toLowerCase(), symbol, curve.toLowerCase(), quoteToken.toLowerCase());
+  } catch {
+    // Non-critical cache — silently ignore failures
+  }
+}
 
 /**
  * Where a specific token trades on the launchpad — by address, not by recency.
