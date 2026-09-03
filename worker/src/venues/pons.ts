@@ -29,11 +29,20 @@
  */
 import type { PublicClient } from "viem";
 
+/** PonsV2LaunchFactory on Robinhood Chain mainnet. Verified: 24,177 bytes. */
+export const PONS_V2_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e" as const;
+
+/**
+ * topic0 of the launch event, taken from the chain rather than a signature
+ * guess — with no published ABI the hash IS the specification.
+ */
+export const PONS_LAUNCH_TOPIC =
+  "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607" as const;
+
 /**
  * Check whether a token address was launched by the Pons V2 factory.
- * Uses a targeted getLogs query for the launch event with the token as the
- * first indexed argument. This is efficient — the topic filters the response
- * to a single event (or zero) regardless of how many launches exist.
+ * Uses a targeted getLogs query by raw topic — the factory has no published ABI,
+ * so the event signature hash is the only reliable filter.
  */
 export async function verifyPonsToken(
   client: PublicClient,
@@ -43,41 +52,17 @@ export async function verifyPonsToken(
   try {
     const head = await client.getBlockNumber();
     const fromBlock = head > lookbackBlocks ? head - lookbackBlocks : 0n;
-    const logs = await client.getLogs({
+    const logs = (await client.getLogs({
       address: PONS_V2_FACTORY,
-      event: {
-        type: "event" as const,
-        name: "Launch",
-        inputs: [
-          { type: "address", name: "token", indexed: true },
-          { type: "address", name: "curve", indexed: true },
-          { type: "address", name: "creator", indexed: true },
-        ],
-      },
-      args: { token },
       fromBlock,
       toBlock: head,
-    });
+      topics: [PONS_LAUNCH_TOPIC, token.toLowerCase() as `0x${string}`],
+    } as never)) as { topics: string[] }[];
     return logs.length > 0;
   } catch {
     return false;
   }
 }
-
-/** PonsV2LaunchFactory on Robinhood Chain mainnet. Verified: 24,177 bytes. */
-export const PONS_V2_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e" as const;
-
-/**
- * topic0 of the launch event, taken from the chain rather than a signature
- * guess — with no published ABI the hash IS the specification.
- *
- * Shape, established by probing: (token indexed, curve indexed, creator
- * indexed) plus THREE data words — the quote token, a word that is always
- * zero across all 11,395 launches sampled in 24h, and the curve's graduation
- * threshold in raw quote units.
- */
-export const PONS_LAUNCH_TOPIC =
-  "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607" as const;
 
 /**
  * How far back a single scan may look.
