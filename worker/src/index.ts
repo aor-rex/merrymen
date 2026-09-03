@@ -4876,7 +4876,15 @@ async function main() {
     // memecoin the owner added, covered by their grant and priced from its pool
     // still came back "unknown symbol" when they asked for it by name.
     const token = watchTokens.find((t) => t.symbol === symbol)?.address;
+    // PONS FALLBACK: if the symbol isn't in watchTokens, check the Pons
+    // launchpad. A Pons token has no Uniswap pool until it graduates, so
+    // it must trade through the curve adapter instead.
     if (!token) {
+      const candidates = await recentCandidates(604800, 200);
+      const pons = candidates.find((c) => c.symbol.toUpperCase() === symbol.toUpperCase());
+      if (pons && pons.curve) {
+        return submitChatCurveTrade(side, symbol, pons.address as `0x${string}`, usdgAmount);
+      }
       const known = watchTokens.map((t) => t.symbol).join(", ");
       return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`;
     }
@@ -4908,13 +4916,48 @@ async function main() {
     return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — check /trades for the result.`;
   }
 
-  async function submitChatConfirmTrade(side: "buy" | "sell", symbol: string, usdgAmount: number): Promise<string> {
+  async function submitChatDirectSwap(side: "buy" | "sell", symbol: string, token: `0x${string}`, usdgAmount: number): Promise<string> {
+    if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    const router = swapRouterFor(cfg);
+    let intent: TradeIntent;
+    if (side === "buy") {
+      const raw = usdg(usdgAmount);
+      intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
+    } else {
+      const pos = readPositionRaw(active.agentId, symbol, usdg);
+      if (!pos) return `you don't hold any ${symbol}.`;
+      const want = usdg(usdgAmount);
+      const sellRaw = want < pos.valueUsdg ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+      const notional = want < pos.valueUsdg ? want : pos.valueUsdg;
+      if (sellRaw === 0n) return `${symbol} amount rounds to zero shares.`;
+      intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
+    }
+    await ensureDecision(intent, "chat", `owner confirmed ${side} ${usdgAmount} USDG ${symbol} in chat`);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    const outcome = lastTradeOutcome;
+    if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
+    if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
+    if (outcome?.status === "reverted") return `❌ ${side} ${usdgAmount} USDG ${symbol} reverted on-chain.`;
+    return `🏹 submitted ${side} ${usdgAmount} USDG ${symbol} — check /trades for the result.`;
+  }
+
+  async function submitChatConfirmTrade(side: "buy" | "sell", symbol: string, usdgAmount: number, address?: `0x${string}`): Promise<string> {
     // SKIPS the lastEquityUsdg === 0n check that submitChatTrade does.
     // A confirmed trade was already validated when it was parked — the
     // first tick may not have completed yet, but the trade is still valid.
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
+    // Address provided: use it directly, skip symbol resolution.
+    if (address) {
+      if (await curveFor(address)) return submitChatCurveTrade(side, symbol, address, usdgAmount);
+      return submitChatDirectSwap(side, symbol, address, usdgAmount);
+    }
     const token = watchTokens.find((t) => t.symbol === symbol)?.address;
     if (!token) {
+      const candidates = await recentCandidates(604800, 200);
+      const pons = candidates.find((c) => c.symbol.toUpperCase() === symbol.toUpperCase());
+      if (pons && pons.curve) {
+        return submitChatCurveTrade(side, symbol, pons.address as `0x${string}`, usdgAmount);
+      }
       const known = watchTokens.map((t) => t.symbol).join(", ");
       return `I don't know ${symbol}. I'm watching: ${known || "nothing yet"}.`;
     }

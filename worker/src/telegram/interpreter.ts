@@ -43,8 +43,9 @@ export type Command =
   | { kind: "resume" }
   | { kind: "strategy"; name: string }
   | { kind: "cap"; usdg: number }
-  | { kind: "buy"; symbol: string; usdg: number }
-  | { kind: "sell"; symbol: string; usdg: number }
+  | { kind: "buy"; symbol: string; usdg: number; address?: `0x${string}` }
+  | { kind: "sell"; symbol: string; usdg: number; address?: `0x${string}` }
+  | { kind: "ask-amount"; symbol: string; side: "buy" | "sell"; address?: `0x${string}` }
   | { kind: "transfer"; to: `0x${string}`; usdg: number }
   | { kind: "confirm" }
   | { kind: "cancel" }
@@ -87,7 +88,7 @@ export type Command =
   | { kind: "chat"; reply: string }
   | { kind: "unknown"; text: string }
   /** Fluid trading: symbol was recognised but amount missing — ask the user for it. */
-  | { kind: "ask-amount"; symbol: string; side: "buy" | "sell" };
+  | { kind: "ask-amount"; symbol: string; side: "buy" | "sell"; address?: `0x${string}` };
 
 /** Commands that change state — gated by telegramControlEnabled (TRADING control).
  * NOTE: "confirm" is deliberately NOT here — it just executes an already-gated
@@ -179,7 +180,8 @@ export async function fastParseTrade(text: string, resolveSymbol?: SymbolResolve
   if (!cmd || (cmd.kind !== "buy" && cmd.kind !== "sell")) return null;
   // If the symbol is not recognised as a known token, refuse to park the
   // trade — let the message fall through to the AI or a helpful error.
-  if (resolveSymbol && !(await resolveSymbol(cmd.symbol))) return null;
+  // Skip this check when trading by contract address (address is set).
+  if (resolveSymbol && !cmd.address && !(await resolveSymbol(cmd.symbol))) return null;
   return cmd;
 }
 
@@ -247,15 +249,23 @@ export function parseSlash(text: string): Command | null {
     case "buy":
     case "sell": {
       // /buy QQQ 10  or  /buy 10 QQQ  or  /buy $NVDA 1usdg  or  /buy pipotam
+      // Also /buy 0x… 5 — trade by contract address.
       // Strip $ from symbols, strip usdg/usd suffix from amounts.
       const parts = rest.filter(Boolean);
       const clean = parts.map((p) => p.replace(/^\$/, "").replace(/(usdg|usd)$/i, ""));
       const sym = clean.find((p) => /^[A-Za-z]{1,10}$/.test(p))?.toUpperCase();
-      const usdg = clean.map(Number).find((n) => Number.isFinite(n) && n > 0);
+      const addr = clean.find((p): p is `0x${string}` => ADDRESS_RE.test(p));
+      // Amount is a number, but NOT a hex address (Number("0x…") parses as hex).
+      const usdg = clean
+        .filter((p) => !ADDRESS_RE.test(p))
+        .map(Number)
+        .find((n) => Number.isFinite(n) && n > 0);
+      if (addr && usdg) return { kind: cmd, symbol: addr.slice(0, 10), usdg, address: addr };
+      if (addr && !usdg) return { kind: "ask-amount", symbol: addr.slice(0, 10), side: cmd, address: addr };
       if (sym && usdg) return { kind: cmd, symbol: sym, usdg };
       // Symbol with no amount: return ask-amount so the service can prompt.
       if (sym && !usdg) return { kind: "ask-amount", symbol: sym, side: cmd };
-      return { kind: "unknown", text: `usage: /${cmd} <SYMBOL> [usdg] — e.g. /buy NVDA 5` };
+      return { kind: "unknown", text: `usage: /${cmd} <SYMBOL> [usdg] — e.g. /buy NVDA 5, or /buy 0x… 5` };
     }
     case "transfer":
     case "send":

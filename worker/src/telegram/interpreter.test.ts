@@ -281,7 +281,7 @@ describe("executeCommand — code disposes", () => {
     assert.match(r, /trimmed to your 25 USDG/);
     assert.match(r, /\/confirm/);
     const done = await executeCommand({ kind: "confirm" }, d);
-    assert.deepEqual(d.calls, ["pend:buy", "trade:buy:QQQ:25"]); // 100 trimmed to 25
+    assert.deepEqual(d.calls, ["pend:buy", "confirmTrade:buy:QQQ:25"]); // 100 trimmed to 25 — routes through confirmTrade (skips first-tick gate)
     assert.match(done, /QQQ/);
   });
 

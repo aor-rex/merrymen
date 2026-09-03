@@ -123,7 +123,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let warnedUnreachable = false;
   // Ask-amount context: when the bot asks "how much to buy?", it remembers
   // { side, symbol } per chat so a follow-up like "5" creates the full trade.
-  const askAmountCtx = new Map<number, { side: "buy" | "sell"; symbol: string }>();
+  const askAmountCtx = new Map<number, { side: "buy" | "sell"; symbol: string; address?: `0x${string}` }>();
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
@@ -728,7 +728,9 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
       const cleaned = (msg.text ?? "").trim().replace(/^usdg|usd$/i, "").replace(/(usdg|usd)$/i, "");
       const num = Number(cleaned);
       if (Number.isFinite(num) && num > 0) {
-        cmd = { kind: ctx.side, symbol: ctx.symbol, usdg: Math.round(num) };
+        const base = { kind: ctx.side, symbol: ctx.symbol, usdg: Math.round(num) } as Command;
+        if (ctx.address) (base as any).address = ctx.address;
+        cmd = base;
         await pushHistory(msg.chatId, "user", msg.text);
       }
       askAmountCtx.delete(msg.chatId);
@@ -739,7 +741,7 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
       return;
     }
     if (cmd.kind === "ask-amount") {
-      askAmountCtx.set(msg.chatId, { side: cmd.side, symbol: cmd.symbol });
+      askAmountCtx.set(msg.chatId, { side: cmd.side, symbol: cmd.symbol, address: cmd.address });
       reply = `how much ${cmd.side === "buy" ? "to buy" : "to sell"}? e.g. <code>/${cmd.side === "buy" ? "buy" : "sell"} ${cmd.symbol} 5</code>`;
       await sendMessage({ token }, msg.chatId, reply);
       return;

@@ -42,8 +42,8 @@ export type PendingAction =
    * same re-vet at confirm time as every other parked action: a gate that
    * closed during the window must not fire a stale trade.
    */
-  | { kind: "buy"; symbol: string; usdg: number; expiresAt: number }
-  | { kind: "sell"; symbol: string; usdg: number; expiresAt: number };
+  | { kind: "buy"; symbol: string; usdg: number; expiresAt: number; address?: `0x${string}` }
+  | { kind: "sell"; symbol: string; usdg: number; expiresAt: number; address?: `0x${string}` };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -78,7 +78,7 @@ export interface CommandDeps {
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
   /** Execute a confirmed trade (parked → /confirm). Skips the first-tick check submitChatTrade does. */
-  confirmTrade: (side: "buy" | "sell", symbol: string, usdg: number) => Promise<string>;
+  confirmTrade: (side: "buy" | "sell", symbol: string, usdg: number, address?: `0x${string}`) => Promise<string>;
   /** Build a bounded transfer intent and route it through processIntent → policy wall. */
   transfer(to: `0x${string}`, usdg: number): Promise<string>;
   /** Pending-confirm store, bound to this chat by the service. */
@@ -201,7 +201,9 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       let usdg = cmd.usdg;
       const trimmed = usdg > deps.maxActionUsdg;
       if (trimmed) usdg = deps.maxActionUsdg;
-      deps.setPending({ kind: cmd.kind, symbol: cmd.symbol, usdg, expiresAt: now() + CONFIRM_TTL_SEC });
+      const pending = { kind: cmd.kind as "buy" | "sell", symbol: cmd.symbol, usdg, expiresAt: now() + CONFIRM_TTL_SEC };
+      if (cmd.address) (pending as any).address = cmd.address;
+      deps.setPending(pending);
       let head = "🏹 pending — <b>" + cmd.kind + " " + usdg + " USDG of " + cmd.symbol + "</b>";
       if (trimmed) head += " (trimmed to your " + deps.maxActionUsdg + " USDG chat ceiling)";
       return head + "\nnothing moves until you say so — /confirm to execute · /cancel to discard (" + CONFIRM_TTL_SEC + "s)";
@@ -275,7 +277,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.transfer(p.to, p.usdg);
         case "buy":
         case "sell":
-          return await deps.confirmTrade(p.kind, p.symbol, p.usdg);
+          return await deps.confirmTrade(p.kind, p.symbol, p.usdg, p.address);
         case "shell":
           return await deps.pc.runShell(p.cmd);
         case "getfile":
