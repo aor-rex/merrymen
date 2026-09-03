@@ -139,6 +139,12 @@ export const GAS_BOUNDS: GasBounds = {
  * validation. Measured, that is +7,059,814 verification gas over the same deploy
  * without the wall.
  *
+ * ONE-TIME PER SESSION KEY, NOT PER ACCOUNT. The operation that earns this is
+ * every key's first, not every account's first: a renewal on an account that has
+ * been live for months pays it again, because Kernel keys the install on
+ * (account, permissionId) and a renewed key is a new permissionId. See
+ * readEnableState in executor.ts, which is what decides that this applies.
+ *
  * THE ARITHMETIC, from measurement rather than from a round number:
  *
  *   measured, Pimlico on 4663, 2026-09-03, the full 18-permission wall:
@@ -155,16 +161,30 @@ export const GAS_BOUNDS: GasBounds = {
  *
  *   => 12,000,000
  *
- * That is 1.24x the base operation. It is deliberately NOT generous: at ~16
- * custom tokens the estimate exceeds it and the op is refused, and beyond ~40
- * the grant provably cannot validate at all (AA23, measured) — so refusing
- * early is the kinder failure. Capping the token count at signing time is a
- * separate change; this ceiling only declines to sign what it cannot justify.
+ * AND IT COVERS THE RENEWAL A FORTIORI. A renewal is the same enable minus the
+ * initCode and the CREATE2, so it is strictly CHEAPER. Measured on 4663 the same
+ * day, on two real deployed accounts and a synthesised third:
+ *     0x032Da6A0…  raw 7,530,220 -> bounded 9,450,410
+ *     0xa48cE91e…  raw 7,401,680 -> bounded 9,289,735
+ *     synthetic    raw 7,569,825 -> bounded 9,499,915
+ * All three sit under the 9,677,201 this constant was derived from, so the
+ * undeployed first arm remains the binding case and the margin below is intact.
  *
- * NOT REACHABLE BY BEING UNDEPLOYED. See isFirstEnable in executor.ts: the
- * operation has to PROVE it carries a permission-validator enable, out of its
- * own nonce, before this applies. An undeployed account running any other shape
- * gets GAS_BOUNDS.
+ * That is 1.24x the base operation, and it is deliberately NOT generous: each
+ * custom token adds ~512 bytes of enable blob and ~358,884 raw gas, so the
+ * estimate crosses 12,000,000 at SIX of them — matching the five-token margin
+ * above rather than contradicting it. (An earlier draft of this comment said
+ * "~16", which was wrong by roughly 3x and would have told a tenant a 16-token
+ * wall works. Measured: it is refused at six.) Beyond ~40 the grant provably
+ * cannot validate at all (AA23, measured), so refusing early is the kinder
+ * failure. Capping the token count at signing time is a separate change (#57);
+ * this ceiling only declines to sign what it cannot justify.
+ *
+ * NOT REACHABLE BY BEING UNDEPLOYED, AND NOT BY SHAPE ALONE. readEnableState in
+ * executor.ts requires the operation to name a permission id out of its own
+ * nonce, at sequence 0, that the CHAIN confirms is not installed — and refuses
+ * outright if it cannot ask. An undeployed account running any other shape gets
+ * GAS_BOUNDS.
  */
 export const FIRST_ENABLE_GAS_BOUNDS: GasBounds = {
   ...GAS_BOUNDS,

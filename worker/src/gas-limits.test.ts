@@ -8,7 +8,13 @@ import {
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
-import { isFirstEnable } from "./executor";
+import {
+  isFirstEnable,
+  nonceSequence,
+  noncePermissionId,
+  readEnableState,
+  type EnableState,
+} from "./executor";
 
 /**
  * The gap this closes was total: no floor, no ceiling, whatever the bundler
@@ -245,7 +251,7 @@ test("THE FIRST-ENABLE CEILING IS DERIVED, not chosen", () => {
   assert.equal(FIRST_ENABLE_GAS_BOUNDS.disagreementBps, GAS_BOUNDS.disagreementBps);
 });
 
-test("THE ORDINARY CEILING DID NOT MOVE. A deployed account cannot reach 12M.", () => {
+test("THE ORDINARY CEILING DID NOT MOVE. An op that is not an enable cannot reach 12M.", () => {
   assert.equal(GAS_BOUNDS.absoluteMax, 3_000_000n, "unchanged by Stage E");
   // The same measured wall, offered the ordinary bounds, is refused.
   const v = boundGas(MEASURED_WALL, MEASURED_WALL);
@@ -332,24 +338,161 @@ test("isFirstEnable reads the operation's own nonce, and needs BOTH bytes", () =
   assert.equal(isFirstEnable(walled + 7n), true, "the sequence is not consulted");
 });
 
-test("THE CALL SITE: undeployed alone does NOT buy the elevated ceiling", () => {
-  // A constant nothing reads is worth nothing, and this codebase has already
-  // shipped the bug where a correct fact had no consequence. Pin that BOTH
-  // conditions gate the ceiling and that the ordinary one is the fallback.
+// ── A RENEWAL IS AN ENABLE ON AN ACCOUNT THAT ALREADY HAS CODE ──────────────
+//
+// The gate was '!accountLive && isFirstEnable(nonce)', on the belief that a
+// validator enable is one-time per ACCOUNT. It is one-time per SESSION KEY.
+// Measured on 4663, 2026-09-03: a renewal on a deployed account costs 96-98% of
+// the undeployed first op, so every one-click renewal was routed through the
+// 3,000,000 ceiling and refused.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Measured nonces. Real ids, so no fixture can stand in for another. */
+const FIRST_ARM = 0x0102acff75890000000000000000000000000000000000000000000000000000n;
+const RENEWAL = 0x01023ca1cec80000000000000000000000000000000000000000000000000000n;
+const LANDED_ENABLE = 0x01023ca1cec80000000000000000000000000000000000000000000000000001n;
+const STEADY_STATE = 0x00023ca1cec80000000000000000000000000000000000000000000000000004n;
+
+/** Measured on the deployed accounts, in raw bundler figures. */
+const MEASURED_RENEWAL = est(50_180n, 7_279_603n, 240_042n);
+const MEASURED_RENEWAL_CHEAPEST = est(50_180n, 7_111_512n, 239_988n);
+
+const ADDR = "0x032Da6A0Ccf866474e45854E7fDEF9afd1509036" as `0x${string}`;
+
+/** A fake chain. word0 offset, word1 flag, word2 signer — the real layout. */
+function chain(opts: { code?: string; signer?: string; codeThrows?: boolean; callThrows?: boolean; short?: boolean }) {
+  return {
+    async getCode() {
+      if (opts.codeThrows) throw new Error("connection reset");
+      return (opts.code ?? "0x") as `0x${string}` | undefined;
+    },
+    async call() {
+      if (opts.callThrows) throw new Error("429 Rate Limit Hit");
+      if (opts.short) return { data: "0x1234" as `0x${string}` };
+      const signer = (opts.signer ?? "0x" + "0".repeat(40)).slice(2).padStart(64, "0");
+      return { data: ("0x" + "20".padStart(64, "0") + "2".padStart(64, "0") + signer) as `0x${string}` };
+    },
+  };
+}
+
+test("THE RENEWAL CASE: a deployed account enabling a NEW key gets the wide ceiling", async () => {
+  // The account has code and the id is absent — which is exactly a renewal.
+  const state = await readEnableState(chain({ code: "0x" + "ef".repeat(61) }), ADDR, RENEWAL);
+  assert.equal(state.kind, "fresh-enable");
+
+  // And the measured renewal fits. Under GAS_BOUNDS it would not have.
+  const wide = boundGas(MEASURED_RENEWAL, MEASURED_RENEWAL, FIRST_ENABLE_GAS_BOUNDS);
+  assert.equal(wide.ok, true, "a renewal must be signable");
+  assert.ok(wide.ok);
+  assert.equal(wide.total, 9_499_915n);
+  const narrow = boundGas(MEASURED_RENEWAL, MEASURED_RENEWAL);
+  assert.equal(narrow.ok, false, "the old gate sent it here");
+  assert.equal(narrow.ok === false ? narrow.rule : null, "gas-absurd");
+
+  // Both measured deployed accounts, not just the dearest.
+  const cheap = boundGas(MEASURED_RENEWAL_CHEAPEST, MEASURED_RENEWAL_CHEAPEST, FIRST_ENABLE_GAS_BOUNDS);
+  assert.equal(cheap.ok, true);
+});
+
+test("the renewal is CHEAPER than the first arm, so 12M still binds on the first arm", () => {
+  // The constant was derived from the undeployed case. This proves that is the
+  // larger of the two, which is why the derivation did not have to change.
+  const arm = boundGas(MEASURED_WALL, null, FIRST_ENABLE_GAS_BOUNDS);
+  const renew = boundGas(MEASURED_RENEWAL, null, FIRST_ENABLE_GAS_BOUNDS);
+  assert.ok(arm.ok && renew.ok);
+  assert.ok(renew.total < arm.total, "deployment is worth something, just not much");
+  assert.ok(arm.total - renew.total < 200_000n, "and what it is worth is a rounding error");
+  assert.equal(arm.total, 9_677_201n, "the number in the constant's comment");
+});
+
+test("THE STEADY STATE IS UNTOUCHED: an installed validator is not an enable", async () => {
+  // Mode 0x00. The wide ceiling is not even considered, which is the property
+  // that makes dropping '!accountLive' safe.
+  assert.equal(isFirstEnable(STEADY_STATE), false);
+  const state = await readEnableState(chain({ code: "0xef" }), ADDR, STEADY_STATE);
+  assert.equal(state.kind, "not-an-enable");
+});
+
+test("FAIL CLOSED: an enable we cannot verify is REFUSED, never widened", async () => {
+  // @zerodev's isPluginEnabled catches every read error to false, so one flaky
+  // eth_call produces an ENABLE-shaped op for an already-installed validator.
+  // On the nonce alone that would have been handed 12,000,000.
+  const installed = await readEnableState(
+    chain({ code: "0xef", signer: "0x6a6f069e2a08c2468e7724ab3250cdbfba14d4ff" }),
+    ADDR,
+    RENEWAL,
+  );
+  assert.equal(installed.kind, "already-installed");
+
+  // A read we could not make is its own answer, and it is not "fresh".
+  for (const broken of [chain({ code: "0xef", callThrows: true }), chain({ codeThrows: true }), chain({ code: "0xef", short: true })]) {
+    const state = await readEnableState(broken, ADDR, RENEWAL);
+    assert.equal(state.kind, "unreadable", "an unreadable chain must not widen a ceiling");
+  }
+
+  // This INVERTS isDeployed's rule, deliberately: there a failed read answers
+  // "not deployed" because that only ever narrowed. Here "no code" widens.
   const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
-  assert.match(src, /await isDeployed\(\)/, "the deploy state must be consulted");
-  assert.match(
-    src,
-    /!accountLive && isFirstEnable\(/,
-    "undeployed AND proven-enable, never undeployed alone",
-  );
-  assert.match(
-    src,
-    /firstEnable \? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS/,
-    "anything else gets the ordinary ceiling",
-  );
-  assert.match(src, /deployed = true;/, "a landed send must retire the first-enable ceiling");
-  assert.doesNotMatch(src, /DEPLOY_GAS_BOUNDS/, "the undeployed-only ceiling is gone");
+  assert.match(src, /INVERTS the rule isDeployed uses/, "and the inversion is explained where it happens");
+});
+
+test("an enable that already LANDED is refused, and the EntryPoint is the witness", async () => {
+  // The sequence is the one part of the nonce nothing local chooses — the
+  // EntryPoint increments it only on INCLUSION. Measured on 4663: a landed
+  // enable key reads 1 forever; one that never landed reads 0.
+  assert.equal(nonceSequence(LANDED_ENABLE), 1n);
+  assert.equal(nonceSequence(RENEWAL), 0n);
+  const state = await readEnableState(chain({ code: "0xef" }), ADDR, LANDED_ENABLE);
+  assert.equal(state.kind, "replayed-enable");
+  // So the wide ceiling admits at most ONE included operation per (account, id),
+  // without any ledger to go stale.
+});
+
+test("an UNDEPLOYED first arm still gets the wide ceiling — the fix did not trade one for the other", async () => {
+  const state = await readEnableState(chain({ code: "0x" }), ADDR, FIRST_ARM);
+  assert.equal(state.kind, "fresh-enable");
+  assert.equal(state.kind === "fresh-enable" ? state.permissionId : null, "0xacff7589");
+});
+
+test("THE PERMISSION ID IS BYTES 2..5, and the off-by-two would be a no-op gate", () => {
+  // Verified against a landed enable on 4663: nonce 0x01023ca1cec8…0001 is the
+  // operation that installed 0x3ca1cec8.
+  assert.equal(noncePermissionId(LANDED_ENABLE), "0x3ca1cec8");
+  // Shifting by 224 returns the mode and type bytes glued to half the id — an id
+  // no operation will ever present, so permissionConfig would answer "absent"
+  // for everything and the check would always pass. Pin the trap.
+  const trap = "0x" + (((LANDED_ENABLE >> 224n) & 0xffffffffn).toString(16).padStart(8, "0"));
+  assert.equal(trap, "0x01023ca1");
+  assert.notEqual(noncePermissionId(LANDED_ENABLE), trap);
+});
+
+test("THE CALL SITE: the ceiling is keyed on the OPERATION, and the deploy state does not vote", () => {
+  const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
+  assert.match(src, /const enable = await readEnableState\(/, "the chain is asked");
+  assert.match(src, /const firstEnable = enable\.kind === "fresh-enable";/, "and only one answer widens");
+  assert.match(src, /firstEnable \? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS/, "anything else gets the ordinary ceiling");
+  // Asserted against CODE, not prose. The comment above readEnableState names
+  // the old condition on purpose — a fix that erases the record of what it fixed
+  // invites the next person to reinstate it.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /!accountLive/, "the deploy state must not gate the ceiling");
+  assert.doesNotMatch(code, /accountLive &&|&& accountLive/, "nor in any conjunction");
+  assert.doesNotMatch(code, /DEPLOY_GAS_BOUNDS/, "the undeployed-only ceiling is gone");
+  assert.match(src, /!accountLive && isFirstEnable\(nonce\)/, "and the old gate is on the record");
+
+  // THE STRONG FORM: every READ of accountLive must be inside the log line.
+  // Counting occurrences would pin the wrong thing and break on a reword; this
+  // breaks only if the deploy state starts deciding something again.
+  const at = src.indexOf("[gas] account");
+  const log = src.slice(src.lastIndexOf("console.log(", at), src.indexOf(");", at) + 2);
+  const outside = src.replace(log, "");
+  assert.doesNotMatch(outside.slice(outside.indexOf("const accountLive")+20), /accountLive/, "accountLive is a label, not a guard");
+
+  // And each refusal exists by name, so a renewal never presents as an RPC fault.
+  for (const rule of ["enable-replayed", "enable-redundant", "enable-unverified"]) {
+    assert.ok(src.includes('"' + rule + '"'), rule + " must be a named refusal");
+  }
+  assert.match(src, /deployed = true;/, "a landed send must still retire the memo");
 });
 
 // ── THE OVERRIDE IS A PARAMETER OF ONE RPC CALL ─────────────────────────────
