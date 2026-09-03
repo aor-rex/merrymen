@@ -22,7 +22,14 @@ import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
-import { boundGas, FIRST_ENABLE_GAS_BOUNDS, GAS_BOUNDS, totalGas, type UserOpGas } from "./gas-limits";
+import {
+  boundGas,
+  checkPrefund,
+  FIRST_ENABLE_GAS_BOUNDS,
+  GAS_BOUNDS,
+  totalGas,
+  type UserOpGas,
+} from "./gas-limits";
 
 export interface Call {
   to: `0x${string}`;
@@ -292,6 +299,27 @@ export async function readEnableState(
   };
 }
 
+/**
+ * What the estimation override is priced at when the fee read fails.
+ *
+ * 5 gwei, about eleven times the ~0.45 gwei base fee observed on 4663. Generous
+ * ON PURPOSE and safe to be: it sizes an imaginary balance inside one simulation
+ * and can never reach a signature, a broadcast or a refusal. checkPrefund will
+ * not accept it — that path takes its fee from the prepared operation or refuses.
+ */
+const SIMULATION_FEE_FALLBACK = 5_000_000_000n;
+
+/** The one EntryPoint method this file reads: the sender's staked deposit. */
+const ENTRYPOINT_BALANCE_OF_ABI = [
+  {
+    inputs: [{ name: "account", type: "address" }],
+    name: "balanceOf",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
+
 /** How many times the RECEIPT is re-read. Never the send — see execute(). */
 const RECEIPT_ATTEMPTS = 3;
 
@@ -459,7 +487,7 @@ export async function createAgentExecutor(opts: {
             // Doubled because the bundler simulates with limits of its own
             // choosing, which are not ours to predict.
             stateOverride: [
-              { address: account.address, balance: bounds.absoluteMax * feeCeiling * 2n },
+              { address: account.address, balance: bounds.absoluteMax * simulationFee * 2n },
             ],
           })) as Partial<UserOpGas>;
           if (
@@ -505,14 +533,23 @@ export async function createAgentExecutor(opts: {
           return null;
         }
       };
-      // The fee the override is priced at. Read once, and generously: this
-      // number never reaches a signature — it only decides how much imaginary
-      // balance the simulation is handed — so erring high costs nothing and
-      // erring low reintroduces the AA21 this whole block exists to remove.
-      const feeCeiling = await publicClient
+      // THE SIMULATION'S FEE, AND NOTHING ELSE'S.
+      //
+      // This number never reaches a signature. Its only job is to decide how much
+      // imaginary balance the estimation override hands the bundler, so erring
+      // high costs nothing and erring low reintroduces the AA21 this block exists
+      // to remove — which is why the fallback is deliberately about eleven times
+      // the live rate on 4663.
+      //
+      // IT MUST NOT PRICE A REFUSAL. It used to do both jobs, and the fallback
+      // that makes it safe here would have demanded roughly ten times the ETH a
+      // real operation needs, reporting funded accounts as short. What the
+      // EntryPoint will actually require is priced further down, from the
+      // PREPARED operation's own maxFeePerGas — see checkPrefund.
+      const simulationFee = await publicClient
         .estimateFeesPerGas()
-        .then((f) => f.maxFeePerGas)
-        .catch(() => 5_000_000_000n); // 5 gwei, ~10x the observed 4663 rate
+        .then((fees) => fees.maxFeePerGas)
+        .catch(() => SIMULATION_FEE_FALLBACK);
 
       // WHICH CEILING, DECIDED BEFORE THE ESTIMATE because the override is sized
       // from it. That ordering is also why a refusal here cannot be salvaged by
@@ -568,31 +605,6 @@ export async function createAgentExecutor(opts: {
       // already a refusal, and asking again would just be slower.
       const second = first ? await estimate() : null;
       const bounded = boundGas(first, second, bounds, !!opts.sponsor);
-
-      // ── AND THE REAL BALANCE, WHICH THE OVERRIDE DID NOT CHANGE ──────────
-      //
-      // The simulation was handed an imaginary balance so it would produce a
-      // number instead of AA21. The chain will not be. So before anything is
-      // signed, ask what the account actually holds against what the EntryPoint
-      // will actually require, and say so in words if it is short.
-      //
-      // This is the check that keeps the override honest: without it, the patch
-      // would convert an opaque AA21 at estimation into an opaque AA21 at
-      // submission, having spent a signature on the way.
-      if (bounded.ok && !opts.sponsor) {
-        const required = bounded.total * feeCeiling;
-        const held = await publicClient.getBalance({ address: account.address }).catch(() => null);
-        if (held !== null && held < required) {
-          throw new GasRefused(
-            "prefund-short",
-            `this operation needs ${bounded.total} gas, which the EntryPoint requires the account to ` +
-              `HOLD as ${required} wei at ${feeCeiling} wei/gas. It holds ${held} wei — short by ` +
-              `${required - held}. Nothing was signed. The account is charged only for gas USED, but ` +
-              `it must hold the full amount up front, so this is a funding shortfall and not a refusal ` +
-              `by the chain.`,
-          );
-        }
-      }
 
       // SAY WHAT THE NUMBERS WERE.
       //
@@ -671,6 +683,49 @@ export async function createAgentExecutor(opts: {
       // It now runs against the operation we are ABOUT to send rather than a
       // second preparation of it, which is strictly the stronger claim.
       if (opts.sponsor) assertBoundsHeld(bounded.gas, prepared);
+
+      // ── AND THE REAL BALANCE, WHICH THE OVERRIDE DID NOT CHANGE ──────────
+      //
+      // The simulation was handed an imaginary balance so it would produce a
+      // number instead of AA21. The chain will not be. Without this, the override
+      // would only move an opaque AA21 from estimation to submission, having
+      // spent a signature on the way.
+      //
+      // HERE, AND NOT EARLIER, BECAUSE HERE THE FEE IS THE SIGNED FEE. `prepared`
+      // carries the maxFeePerGas this operation will actually be broadcast with —
+      // from the Pimlico oracle or gas.ts's chain fallback, whichever answered —
+      // so the requirement computed from it is the requirement, not an estimate
+      // of one made from a different reading a moment earlier. It also costs no
+      // extra fee call. Still before signUserOperation: nothing is signed by a
+      // check that refuses.
+      //
+      // Sponsored operations are skipped: the paymaster pays, and the account's
+      // own balance is not what the EntryPoint looks at.
+      if (!opts.sponsor) {
+        const preparedFee = prepared.maxFeePerGas;
+        const [balance, deposit] = await Promise.all([
+          publicClient.getBalance({ address: account.address }).catch(() => null),
+          // The deposit is half the answer. An account that has pre-deposited is
+          // not short, and a check that read only the balance would refuse an
+          // operation the EntryPoint would have accepted.
+          publicClient
+            .readContract({
+              address: entryPoint.address,
+              abi: ENTRYPOINT_BALANCE_OF_ABI,
+              functionName: "balanceOf",
+              args: [account.address],
+            })
+            .catch(() => null),
+        ]);
+
+        const prefund = checkPrefund({
+          gas: bounded.ok ? bounded.gas : null,
+          maxFeePerGas: typeof preparedFee === "bigint" ? preparedFee : null,
+          balance,
+          deposit: typeof deposit === "bigint" ? deposit : null,
+        });
+        if (!prefund.ok) throw new GasRefused(prefund.rule, prefund.detail);
+      }
 
       const signature = await account.signUserOperation(prepared as never);
       const signed = { ...prepared, signature };

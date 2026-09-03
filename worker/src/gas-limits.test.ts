@@ -5,6 +5,7 @@ import {
   FIRST_ENABLE_GAS_BOUNDS,
   GAS_BOUNDS,
   boundGas,
+  checkPrefund,
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
@@ -518,7 +519,7 @@ test("the balance override cannot reach the UserOperation, signed or otherwise",
   // a field of a UserOperation, so it cannot be signed, hashed or broadcast.
   // What is provable here is that our own code never lets the value travel.
   const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
-  assert.match(src, /balance: bounds\.absoluteMax \* feeCeiling \* 2n/, "computed in one place");
+  assert.match(src, /balance: bounds\.absoluteMax \* simulationFee \* 2n/, "computed in one place");
   assert.doesNotMatch(
     src,
     /const\s+\w*[Bb]alance\w*\s*=\s*bounds\.absoluteMax/,
@@ -527,22 +528,152 @@ test("the balance override cannot reach the UserOperation, signed or otherwise",
   // feeCeiling exists to size the override and to price the prefund CHECK. It
   // must never appear in what we sign.
   const send = src.slice(src.indexOf("sendUserOperation("));
-  assert.doesNotMatch(send, /feeCeiling/, "the override's fee never prices the real op");
+  assert.doesNotMatch(send, /simulationFee/, "the override's fee never prices the real op");
   assert.doesNotMatch(send, /bounds\.absoluteMax/, "nor does the ceiling");
 });
 
-test("an underfunded account is told so, in words, AFTER the estimate", () => {
-  // The override buys a number instead of an opaque AA21. It must not buy a
-  // signature on an operation the chain will reject for the same reason — so
-  // the REAL balance is checked against the bounded total before signing.
-  const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
-  const boundAt = src.indexOf("const bounded = boundGas(");
-  const checkAt = src.indexOf('"prefund-short"');
-  const signAt = src.indexOf("sendUserOperation(");
-  assert.ok(boundAt > 0 && checkAt > 0 && signAt > 0, "all three exist");
-  assert.ok(checkAt > boundAt, "the check is priced from the bounded total");
-  assert.ok(checkAt < signAt, "and happens before anything is signed");
-  assert.match(src, /getBalance\(\{ address: account\.address \}\)/, "the REAL balance");
-  assert.match(src, /short by/, "the message says how short, not merely that it failed");
-  assert.match(src, /Nothing was signed/, "and that nothing was spent");
+// ── THE PREFUND CHECK, AND THE FEE THAT PRICES IT ───────────────────────────
+//
+// One variable used to size the estimation override AND price this refusal. The
+// fallback that makes the override safe — 5 gwei, about 11x the live rate on
+// 4663 — would have demanded roughly ten times the ETH an operation needs, and
+// reported funded accounts as short.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Measured on 4663, 2026-09-03: base 0.4516 gwei, so a signed fee near 0.9033. */
+const REAL_FEE = 903_284_000n;
+const FALLBACK_FEE = 5_000_000_000n; // what the SIMULATION may use, and this may not
+const WALL_GAS = est(100_360n, 9_272_538n, 304_303n); // the bounded first enable
+const REQUIRED_AT_REAL = totalGas(WALL_GAS) * REAL_FEE;
+
+test("THE SPLIT: a funded account is not refused merely because the SIMULATION fee is generous", () => {
+  // The case that made this change necessary. The account holds enough for the
+  // fee its operation will actually carry, and nowhere near enough for the
+  // conservative fallback. Pricing the refusal from the fallback rejects it.
+  const held = REQUIRED_AT_REAL + 1n;
+
+  const honest = checkPrefund({ gas: WALL_GAS, maxFeePerGas: REAL_FEE, balance: held, deposit: 0n });
+  assert.equal(honest.ok, true, "the operation it is about to sign is affordable");
+
+  // And the arithmetic of what the old shared variable would have demanded.
+  const wouldHaveDemanded = totalGas(WALL_GAS) * FALLBACK_FEE;
+  assert.ok(wouldHaveDemanded > held * 5n, "the fallback demands over 5x what the account holds");
+  const cruel = checkPrefund({ gas: WALL_GAS, maxFeePerGas: FALLBACK_FEE, balance: held, deposit: 0n });
+  assert.equal(cruel.ok, false, "priced from the fallback, the same account is 'short'");
 });
+
+test("A FAILED FEE RPC DOES NOT PRODUCE A prefund-short", () => {
+  // The specific failure the split is for. When the fee cannot be known, the
+  // honest answer is that WE could not check — not that the ACCOUNT is short.
+  // A wealthy account must not be slandered by our own broken read.
+  const rich = checkPrefund({
+    gas: WALL_GAS,
+    maxFeePerGas: null,
+    balance: 10n ** 21n, // 1000 ETH
+    deposit: 0n,
+  });
+  assert.equal(rich.ok, false);
+  assert.equal(rich.ok === false ? rich.rule : null, "prefund-unverified");
+  assert.notEqual(rich.ok === false ? rich.rule : null, "prefund-short");
+  assert.match(rich.ok === false ? rich.detail : "", /could demand many times/);
+
+  // Zero is not a fee either — at 0 wei/gas everything is affordable.
+  const zero = checkPrefund({ gas: WALL_GAS, maxFeePerGas: 0n, balance: 0n, deposit: 0n });
+  assert.equal(zero.ok === false ? zero.rule : null, "prefund-unverified", "a zero fee is not free gas");
+});
+
+test("THE SIMULATION KEEPS ITS GENEROUS FALLBACK — the two fees are separate variables", () => {
+  const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
+  // The override is still sized generously, and still from its own number.
+  assert.match(src, /const SIMULATION_FEE_FALLBACK = 5_000_000_000n;/, "the conservative fallback stays");
+  assert.match(
+    src,
+    /balance: bounds\.absoluteMax \* simulationFee \* 2n/,
+    "and it is what sizes the override",
+  );
+  // The refusal is priced from the PREPARED operation, never from that number.
+  assert.match(src, /maxFeePerGas: typeof preparedFee === "bigint" \? preparedFee : null/);
+  assert.doesNotMatch(src, /feeCeiling/, "the shared variable is gone");
+  // The two must never be the same identifier again.
+  const check = src.slice(src.indexOf("const prefund = checkPrefund("), src.indexOf("const signature ="));
+  assert.doesNotMatch(check, /simulationFee|SIMULATION_FEE_FALLBACK/, "the simulation fee cannot price a refusal");
+});
+
+test("the check runs AFTER prepare and BEFORE any signature", () => {
+  // Its whole value is the fee being the signed fee, which only exists after
+  // prepareUserOperation — and its whole safety is running before signing.
+  const src = readFileSync(new URL("./executor.ts", import.meta.url), "utf8");
+  const prepareAt = src.indexOf("await client.prepareUserOperation(");
+  const checkAt = src.indexOf("const prefund = checkPrefund(");
+  const signAt = src.indexOf("await account.signUserOperation(");
+  const sendAt = src.indexOf("await client.sendUserOperation(");
+  assert.ok(prepareAt > 0 && checkAt > 0 && signAt > 0 && sendAt > 0, "all four exist");
+  assert.ok(checkAt > prepareAt, "priced from the prepared operation");
+  assert.ok(checkAt < signAt, "and nothing is signed by a check that refuses");
+  assert.ok(signAt < sendAt);
+});
+
+test("A DEPOSIT COUNTS. An account that pre-funded the EntryPoint is not short.", () => {
+  // The EntryPoint charges the sender's DEPOSIT and only pulls from the balance
+  // for the shortfall. Reading the balance alone would refuse an operation the
+  // chain would have accepted.
+  const onDeposit = checkPrefund({
+    gas: WALL_GAS,
+    maxFeePerGas: REAL_FEE,
+    balance: 0n,
+    deposit: REQUIRED_AT_REAL,
+  });
+  assert.equal(onDeposit.ok, true, "fully deposited, empty wallet, still fine");
+
+  const split = checkPrefund({
+    gas: WALL_GAS,
+    maxFeePerGas: REAL_FEE,
+    balance: REQUIRED_AT_REAL / 2n,
+    deposit: REQUIRED_AT_REAL - REQUIRED_AT_REAL / 2n,
+  });
+  assert.equal(split.ok, true, "and the two halves add up");
+});
+
+test("a genuinely short account is told BY HOW MUCH, and that it is liquidity not price", () => {
+  // 0.000445 ETH — what 0x032Da6A0… actually held on 2026-09-03.
+  const held = 445_000_000_000_000n;
+  const short = checkPrefund({ gas: WALL_GAS, maxFeePerGas: REAL_FEE, balance: held, deposit: 0n });
+  assert.ok(short.ok === false && short.rule === "prefund-short", "genuinely short");
+  assert.equal(short.required, REQUIRED_AT_REAL);
+  assert.equal(short.covered, held);
+  assert.ok(short.detail.includes(String(REQUIRED_AT_REAL - held)), "the exact shortfall, in wei");
+  assert.match(
+    short.detail,
+    /charged only for the gas it USES/,
+    "an owner must not read this as the cost of a trade",
+  );
+});
+
+test("AN UNREADABLE BALANCE OR DEPOSIT FAILS CLOSED, and says which it could not read", () => {
+  // "Could not read" is never "is zero" — a zero balance would be reported as a
+  // shortfall against an account that may be perfectly funded.
+  for (const [balance, deposit, word] of [
+    [null, 0n, /balance could not be read/],
+    [0n, null, /deposit could not be read/],
+    [null, null, /balance and deposit could not be read/],
+  ] as [bigint | null, bigint | null, RegExp][]) {
+    const v = checkPrefund({ gas: WALL_GAS, maxFeePerGas: REAL_FEE, balance, deposit });
+    assert.equal(v.ok, false);
+    assert.equal(v.ok === false ? v.rule : null, "prefund-unverified");
+    assert.match(v.ok === false ? v.detail : "", word);
+  }
+});
+
+test("no gas figures means nothing to price — refused, not waved through", () => {
+  const v = checkPrefund({ gas: null, maxFeePerGas: REAL_FEE, balance: 0n, deposit: 0n });
+  assert.equal(v.ok, false);
+  assert.equal(v.ok === false ? v.rule : null, "prefund-unverified");
+});
+
+test("the requirement counts the PAYMASTER fields too, because the EntryPoint does", () => {
+  const withPm: UserOpGas = { ...WALL_GAS, paymasterVerificationGasLimit: 500_000n, paymasterPostOpGasLimit: 500_000n };
+  const v = checkPrefund({ gas: withPm, maxFeePerGas: REAL_FEE, balance: REQUIRED_AT_REAL, deposit: 0n });
+  assert.ok(v.ok === false && v.rule === "prefund-short", "a million gas of sponsor limits is a million gas of prefund");
+  assert.equal(v.required, (totalGas(WALL_GAS) + 1_000_000n) * REAL_FEE);
+});
+

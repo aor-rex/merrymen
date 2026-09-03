@@ -351,3 +351,105 @@ export function boundGas(
   }
   return { ok: true, gas, total };
 }
+
+/**
+ * CAN THIS ACCOUNT ACTUALLY PAY FOR THE OPERATION IT IS ABOUT TO SIGN?
+ *
+ * Separate from every ceiling above. A ceiling asks "is this operation the one
+ * we think it is"; this asks "will the EntryPoint let it in". They fail for
+ * opposite reasons and must not share a message.
+ *
+ * WHAT THE ENTRYPOINT ACTUALLY REQUIRES, v0.7, unsponsored:
+ *
+ *   requiredPrefund = (verificationGasLimit + callGasLimit + preVerificationGas
+ *                      + paymasterVerificationGasLimit + paymasterPostOpGasLimit)
+ *                     × maxFeePerGas
+ *
+ * which is exactly totalGas() × the fee — and the account must COVER it from its
+ * EntryPoint deposit plus, for the shortfall, its own balance. The deposit half
+ * matters: an account that has pre-deposited is not short, and a check that
+ * ignored its deposit would refuse an operation the chain would have accepted.
+ *
+ * The account is CHARGED only for gas used, and the remainder is credited back
+ * to its deposit — so this is a liquidity requirement, not a price. Saying that
+ * in the refusal is the difference between an owner topping up ~0.009 ETH and an
+ * owner concluding that a trade costs it.
+ *
+ * TWO FEES, AND THEY ARE NOT THE SAME NUMBER. Sizing the estimation-time balance
+ * override wants a generous fee, because being generous there costs nothing — it
+ * is a parameter of a simulation that never reaches a signature. Deciding whether
+ * a real account is short wants the fee THE OPERATION WILL ACTUALLY CARRY,
+ * because being generous there refuses people who could have paid. They were
+ * briefly one variable, and the fallback that made the override safe — 5 gwei,
+ * about eleven times the live rate on 4663 — would have demanded roughly ten
+ * times the ETH an operation really needs.
+ *
+ * So this takes its fee from the PREPARED operation and from nowhere else, and
+ * when it cannot have one it says so rather than guessing in either direction.
+ * A "prefund-unverified" is not a "prefund-short": the first is a fact about us,
+ * the second is a fact about an account.
+ */
+export type PrefundVerdict =
+  | { ok: true; required: bigint; covered: bigint }
+  | { ok: false; rule: "prefund-short"; required: bigint; covered: bigint; detail: string }
+  | { ok: false; rule: "prefund-unverified"; detail: string };
+
+export function checkPrefund(args: {
+  /** The gas fields of the operation as PREPARED — what the EntryPoint will price. */
+  gas: UserOpGas | null;
+  /** maxFeePerGas off the prepared operation. Never a fee estimated separately. */
+  maxFeePerGas: bigint | null;
+  /** eth_getBalance(sender). null means the read FAILED, not that it is zero. */
+  balance: bigint | null;
+  /** EntryPoint.balanceOf(sender) — the deposit already staked. null means unread. */
+  deposit: bigint | null;
+}): PrefundVerdict {
+  // Every input is nullable because every input is a read that can fail, and the
+  // whole point of this function is that a failed read is not a small number.
+  if (args.gas === null) {
+    return {
+      ok: false,
+      rule: "prefund-unverified",
+      detail: "the operation carries no gas limits, so there is nothing to price.",
+    };
+  }
+  if (args.maxFeePerGas === null || args.maxFeePerGas <= 0n) {
+    return {
+      ok: false,
+      rule: "prefund-unverified",
+      detail:
+        "the prepared operation carries no usable maxFeePerGas, so what the EntryPoint would " +
+        "require cannot be computed. Refusing rather than pricing it from a fallback: a fee we " +
+        "invented could demand many times the ETH the operation actually needs, and would report " +
+        "a funded account as short. Nothing was signed.",
+    };
+  }
+  if (args.balance === null || args.deposit === null) {
+    const which =
+      args.balance === null ? (args.deposit === null ? "balance and deposit" : "balance") : "deposit";
+    return {
+      ok: false,
+      rule: "prefund-unverified",
+      detail:
+        `the account's ${which} could not be read, so whether it can cover this operation is ` +
+        "unknown. Refusing while it is unknown — the next tick will ask again, and nothing was signed.",
+    };
+  }
+
+  const required = totalGas(args.gas) * args.maxFeePerGas;
+  const covered = args.deposit + args.balance;
+  if (covered >= required) return { ok: true, required, covered };
+  return {
+    ok: false,
+    rule: "prefund-short",
+    required,
+    covered,
+    detail:
+      `the EntryPoint requires ${required} wei to be covered before it will run this operation ` +
+      `(${totalGas(args.gas)} gas at ${args.maxFeePerGas} wei/gas). The account holds ` +
+      `${args.balance} wei and has ${args.deposit} wei on deposit — ${covered} together, short by ` +
+      `${required - covered}. This is a liquidity requirement rather than a price: the account is ` +
+      "charged only for the gas it USES and the remainder returns to its deposit, but the whole " +
+      "amount has to be there first. Nothing was signed.",
+  };
+}
