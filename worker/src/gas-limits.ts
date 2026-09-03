@@ -43,20 +43,39 @@ export interface UserOpGas {
   callGasLimit: bigint;
   verificationGasLimit: bigint;
   preVerificationGas: bigint;
+  /**
+   * The paymaster's own two limits, when one is paying.
+   *
+   * Present so `totalGas` can count what the EntryPoint's prefund actually
+   * counts. NEVER multiplied by any headroom: they are the sponsor's numbers,
+   * bounded by paymaster.ts and asserted unchanged by `assertBoundsHeld`, and
+   * inflating somebody else's limits is not ours to do.
+   */
+  paymasterVerificationGasLimit?: bigint;
+  paymasterPostOpGasLimit?: bigint;
 }
 
 export interface GasBounds {
   /**
-   * Multiplier applied to the bundler's estimate, in basis points.
+   * Multiplier applied to the bundler's estimate for EACH FIELD, in basis points.
+   *
+   * The per-field values and the measurement behind them are on GAS_BOUNDS
+   * below. What follows is the original reasoning, which is sound for
+   * callGasLimit and is where the (mistaken) blanket 2x came from.
    *
    * 2x, matching Vex. Not tuning: it is the smallest headroom that survives the
    * spread they measured on an unchanged input, and the cost of being generous
-   * is nothing. A UserOp is charged for gas USED, not gas requested — the limit
+   * is LOW — though not nothing: the account must HOLD the prefund even though
+   * it only PAYS for gas used, and the unspent remainder is credited to its
+   * EntryPoint deposit rather than returned to its balance. A UserOp is charged
+   * for gas USED, not gas requested — the limit
    * only has to be large enough, and the EntryPoint refunds the difference.
    * The asymmetry is total: too high costs a slightly larger prefund, too low
    * costs the entire operation.
    */
-  headroomBps: number;
+  callHeadroomBps: number;
+  verificationHeadroomBps: number;
+  preVerificationHeadroomBps: number;
   /**
    * Refuse when the estimate exceeds this multiple of the FIRST estimate, bps.
    *
@@ -74,36 +93,84 @@ export interface GasBounds {
 }
 
 export const GAS_BOUNDS: GasBounds = {
-  headroomBps: 20_000, // 2x
+  // ── ONE HEADROOM PER FIELD, BECAUSE THE ASYMMETRY IS PER FIELD ──────────
+  //
+  // This was a single 2x applied to all three, and the reasoning above — "too
+  // high costs a slightly larger prefund, too low costs the entire operation" —
+  // is derived from callGasLimit and is FALSE for the other two:
+  //
+  //   callGasLimit too low        the EntryPoint runs the call, it OOGs,
+  //                               success=false, and THE ACCOUNT PAYS IN FULL.
+  //                               Silent and expensive. Headroom earns its keep.
+  //   verificationGasLimit low    validation reverts, FailedOp, the op never
+  //                               enters a bundle. THE ACCOUNT PAYS NOTHING.
+  //   preVerificationGas low      the bundler rejects it before inclusion.
+  //                               THE ACCOUNT PAYS NOTHING.
+  //
+  // Two of the three fail free and loud — which is the outcome boundGas already
+  // chooses deliberately everywhere else. Only one fails silently and charges.
+  //
+  // And the cost of getting it wrong was measured. A merrymen first operation
+  // estimates at verif 7,418,031 · preVerif 243,443 · call 50,180 (Pimlico,
+  // chain 4663, 2026-09-03). Under a blanket 2x that signs 15,423,308 and is
+  // refused as gas-absurd — while the RAW total, 7,711,654, clears the ceiling
+  // it was refused by. The doubling was the whole refusal.
+  callHeadroomBps: 20_000, // 2x — genuinely variable: pool state at inclusion
+  // 1.25x. Deterministic given fixed calldata against a fixed account: signature
+  // verification, a CREATE2 of fixed bytecode, and zero-to-nonzero SSTOREs. The
+  // only drift is warm storage, which makes it CHEAPER. The margin covers
+  // estimator revisions, not variance we can name.
+  verificationHeadroomBps: 12_500,
+  // 1.25x. A pure function of the bytes, which are fixed before the estimate is
+  // asked for, plus a bundler overhead constant. gasUsedForL1 is 0 on 4663, so
+  // there is no L1 data surcharge to move under it.
+  preVerificationHeadroomBps: 12_500,
   disagreementBps: 40_000, // 4x
   absoluteMax: 3_000_000n,
 };
 
 /**
- * THE FIRST OPERATION IS A DIFFERENT OPERATION.
+ * THE ONE-TIME CEILING, FOR THE ONE OPERATION THAT EARNS IT.
  *
- * `absoluteMax` above is reasoned about the steady state, and says so: "an
- * approve plus an `exactInputSingle` does not approach it". True — and the
- * first operation an account ever sends is not an approve plus a swap. It also
- * carries the Kernel factory initCode that deploys the account, the permission
- * validator's plugin-enable (whose enable data is ~960 bytes of ONE_OF lists
- * alone, per wall.ts), and the verification of the enable signature.
+ * A merrymen session key installs its permission validator LAZILY: the enable
+ * data rides in the signature of the first operation that key signs, so that one
+ * operation carries the whole wall — every policy, both ONE_OF lists, and the
+ * owner's EIP-712 enable signature — and Kernel installs all of it inside
+ * validation. Measured, that is +7,059,814 verification gas over the same deploy
+ * without the wall.
  *
- * That matters because `boundGas` REFUSES rather than clamps. A ceiling chosen
- * for the steady state, applied to the deploy, presents as a flat pre-sign
- * refusal on the one operation in an account's life that has to succeed — and
- * the refusal would read "the operation is not the one it is meant to be", which
- * would be exactly wrong.
+ * THE ARITHMETIC, from measurement rather than from a round number:
  *
- * 8M rather than 3M. Deliberately not unbounded: the check still has to catch an
- * operation that is not the one we think it is, and a deploy plus an enable plus
- * an approve plus a swap has a real upper bound. It applies ONLY while the
- * account has no code, and the executor stops using it the moment one op lands.
+ *   measured, Pimlico on 4663, 2026-09-03, the full 18-permission wall:
+ *     verificationGasLimit   7,418,031  × 1.25 =  9,272,538
+ *     preVerificationGas       243,443  × 1.25 =    304,303
+ *     callGasLimit              50,180  × 2.00 =    100,360
+ *                                       bounded =  9,677,201
+ *
+ *   SAFETY MARGIN, documented separately rather than folded in:
+ *     A tenant's own custom tokens widen both ONE_OF lists, and each one costs a
+ *     measured ~370,299 raw / ~462,874 bounded. The margin buys FIVE of them:
+ *       9,677,201 + (5 × 462,874) = 11,991,571
+ *     Rounded up to a flat number a person can hold in their head.
+ *
+ *   => 12,000,000
+ *
+ * That is 1.24x the base operation. It is deliberately NOT generous: at ~16
+ * custom tokens the estimate exceeds it and the op is refused, and beyond ~40
+ * the grant provably cannot validate at all (AA23, measured) — so refusing
+ * early is the kinder failure. Capping the token count at signing time is a
+ * separate change; this ceiling only declines to sign what it cannot justify.
+ *
+ * NOT REACHABLE BY BEING UNDEPLOYED. See isFirstEnable in executor.ts: the
+ * operation has to PROVE it carries a permission-validator enable, out of its
+ * own nonce, before this applies. An undeployed account running any other shape
+ * gets GAS_BOUNDS.
  */
-export const DEPLOY_GAS_BOUNDS: GasBounds = {
+export const FIRST_ENABLE_GAS_BOUNDS: GasBounds = {
   ...GAS_BOUNDS,
-  absoluteMax: 8_000_000n,
+  absoluteMax: 12_000_000n,
 };
+
 
 export type GasVerdict =
   | { ok: true; gas: UserOpGas; total: bigint }
@@ -111,13 +178,33 @@ export type GasVerdict =
    * Mirrors ImpactVerdict (impact.ts) rather than inventing a shape: a literal
    * `rule` a caller can branch on, and a `detail` written for the owner.
    */
-  | { ok: false; rule: "gas-absurd" | "gas-unstable" | "gas-unreadable"; detail: string };
+  | {
+      ok: false;
+      rule: "gas-absurd" | "gas-unstable" | "gas-unreadable" | "gas-paymaster-unexpected";
+      detail: string;
+    };
 
 const bps = (v: bigint, n: number) => (v * BigInt(n)) / 10_000n;
 
-/** callGasLimit + verificationGasLimit + preVerificationGas. */
+/**
+ * Everything the EntryPoint's prefund is computed from.
+ *
+ * THE PAYMASTER FIELDS ARE IN HERE NOW, and their absence was a hole. The
+ * EntryPoint requires the payer to hold
+ * `(callGasLimit + verificationGasLimit + preVerificationGas +
+ *   paymasterVerificationGasLimit + paymasterPostOpGasLimit) × maxFeePerGas`,
+ * and paymaster.ts allows up to 500,000 in EACH of the last two — so up to a
+ * million gas of prefund sat outside every bound this file applies. A ceiling
+ * that cannot see a fifth of what it is bounding is not a ceiling.
+ */
 export function totalGas(g: UserOpGas): bigint {
-  return g.callGasLimit + g.verificationGasLimit + g.preVerificationGas;
+  return (
+    g.callGasLimit +
+    g.verificationGasLimit +
+    g.preVerificationGas +
+    (g.paymasterVerificationGasLimit ?? 0n) +
+    (g.paymasterPostOpGasLimit ?? 0n)
+  );
 }
 
 /**
@@ -132,6 +219,11 @@ export function boundGas(
   first: UserOpGas | null,
   second: UserOpGas | null,
   bounds: GasBounds = GAS_BOUNDS,
+  /**
+   * Is a paymaster paying? Defaults to NO, so a caller that forgets to say gets
+   * the strict reading and a surprise paymaster is refused rather than admitted.
+   */
+  sponsored = false,
 ): GasVerdict {
   if (!first) {
     return {
@@ -197,19 +289,44 @@ export function boundGas(
     first = a >= b ? first : second;
   }
 
+  // A PAYMASTER WE DID NOT ASK FOR IS NOT A ROUNDING ERROR. Unsponsored, both
+  // of these must be absent or zero; anything else means the operation being
+  // estimated is not the operation we think we are sending, and it would add up
+  // to a million gas of prefund that no bound here can see.
+  const pmVer = first.paymasterVerificationGasLimit ?? 0n;
+  const pmPost = first.paymasterPostOpGasLimit ?? 0n;
+  if (!sponsored && (pmVer > 0n || pmPost > 0n)) {
+    return {
+      ok: false,
+      rule: "gas-paymaster-unexpected",
+      detail:
+        `this operation is self-paying, but the estimate came back with paymaster gas ` +
+        `(verification ${pmVer}, postOp ${pmPost}). Nobody asked a sponsor to pay, so the ` +
+        "operation being priced is not the one about to be signed. Refused before signing.",
+    };
+  }
+
   const gas: UserOpGas = {
-    callGasLimit: bps(first.callGasLimit, bounds.headroomBps),
-    verificationGasLimit: bps(first.verificationGasLimit, bounds.headroomBps),
-    preVerificationGas: bps(first.preVerificationGas, bounds.headroomBps),
+    // ONE HEADROOM PER FIELD. See GAS_BOUNDS for why a single multiplier was
+    // wrong: two of these three fail free and loud when they are too low.
+    callGasLimit: bps(first.callGasLimit, bounds.callHeadroomBps),
+    verificationGasLimit: bps(first.verificationGasLimit, bounds.verificationHeadroomBps),
+    preVerificationGas: bps(first.preVerificationGas, bounds.preVerificationHeadroomBps),
+    // Carried, never multiplied — the sponsor's numbers, not ours.
+    ...(pmVer > 0n ? { paymasterVerificationGasLimit: pmVer } : {}),
+    ...(pmPost > 0n ? { paymasterPostOpGasLimit: pmPost } : {}),
   };
+  // Counts the paymaster fields too, because the prefund does.
   const total = totalGas(gas);
   if (total > bounds.absoluteMax) {
     return {
       ok: false,
       rule: "gas-absurd",
       detail:
-        `this operation wants ${total} gas, past the ${bounds.absoluteMax} ceiling. An approve plus a swap does not ` +
-        "approach that, so the operation is not the one it is meant to be. Refused before signing — nothing was spent.",
+        `this operation wants ${total} gas, past the ${bounds.absoluteMax} ceiling. Refused before ` +
+        "signing — nothing was spent. A ceiling is crossed either because the operation is not the " +
+        "one it is meant to be, or because it genuinely needs more than we are willing to sign for; " +
+        "both are reasons to stop rather than to sign.",
     };
   }
   return { ok: true, gas, total };

@@ -22,7 +22,7 @@ import { deserializeFlaggedPermissionAccount } from "./session-account";
 import { WALL_POLICY_FLAG } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 import { getUserOperationHash } from "viem/account-abstraction";
-import { boundGas, DEPLOY_GAS_BOUNDS, GAS_BOUNDS, totalGas, type UserOpGas } from "./gas-limits";
+import { boundGas, FIRST_ENABLE_GAS_BOUNDS, GAS_BOUNDS, totalGas, type UserOpGas } from "./gas-limits";
 
 export interface Call {
   to: `0x${string}`;
@@ -130,6 +130,33 @@ export class GasRefused extends Error {
   }
 }
 
+/**
+ * DOES THIS OPERATION CARRY A PERMISSION-VALIDATOR ENABLE?
+ *
+ * Asked of the operation itself, not of the account. "The account has no code"
+ * is a fact about an address and admits every shape an undeployed account could
+ * send; the elevated first-enable ceiling must be reachable only by the one
+ * shape that earns it.
+ *
+ * Kernel v3 packs the answer into the nonce. The 32-byte nonce is
+ * `key(24) ‖ seq(8)`, and the key is `mode(1) ‖ vType(1) ‖ validator(20) ‖ id(2)`
+ * — so the top two bytes of the nonce are the mode and the validator type.
+ * @zerodev/sdk sets VALIDATOR_MODE.ENABLE (0x01) exactly when the regular
+ * validator is not yet enabled on-chain, and VALIDATOR_TYPE.PERMISSION is 0x02.
+ *
+ * Measured on 4663, 2026-09-03:
+ *   sudo-only account   0x0000845adb2c…  mode 0x00 (DEFAULT)  -> not an enable
+ *   walled account      0x0102630974640…  mode 0x01, type 0x02 -> IS an enable
+ *
+ * Both bytes are required. Mode alone would also admit an enable of some other
+ * validator type, which is not the operation this ceiling was measured for.
+ */
+export function isFirstEnable(nonce: bigint): boolean {
+  const mode = (nonce >> 248n) & 0xffn;
+  const vType = (nonce >> 240n) & 0xffn;
+  return mode === 0x01n && vType === 0x02n;
+}
+
 /** How many times the RECEIPT is re-read. Never the send — see execute(). */
 const RECEIPT_ATTEMPTS = 3;
 
@@ -215,14 +242,20 @@ export async function createAgentExecutor(opts: {
    * Asked here rather than passed in, because the answer CHANGES and the caller
    * reads it once at arm: an `accountDeployed: false` threaded down from arm
    * time would still say false for every later op of that arm, leaving them all
-   * under the wide deploy ceiling. That is a guard turning itself off silently.
+   * under the wide first-enable ceiling. That is a guard turning itself off
+   * silently.
    *
    * One read, memoised, and only on the first execute of a process that has an
    * executor at all. A FAILED READ ANSWERS "not deployed", which is the safe
    * direction here and the opposite of the rule elsewhere in this repo: being
    * wrong that way widens a pre-sign ceiling for one operation, while being
-   * wrong the other way refuses the operation outright. The bound still holds —
-   * DEPLOY_GAS_BOUNDS is a ceiling, not an exemption.
+   * wrong the other way refuses the operation outright.
+   *
+   * And since Stage E this answer is no longer sufficient on its own. The wide
+   * ceiling needs BOTH this and isFirstEnable(nonce) — so a failed read cannot
+   * widen anything by itself; the operation still has to prove out of its own
+   * nonce that it carries a permission-validator enable. FIRST_ENABLE_GAS_BOUNDS
+   * remains a ceiling either way, not an exemption.
    */
   let deployed: boolean | null = null;
   const isDeployed = async (): Promise<boolean> => {
@@ -264,6 +297,36 @@ export async function createAgentExecutor(opts: {
             // gas, so the three limits we bound would be measured against a
             // different operation than the one that gets signed.
             ...(opts.sponsor ? { paymaster: opts.sponsor.estimateOnly } : {}),
+            // ── A BALANCE THAT EXISTS ONLY INSIDE THIS SIMULATION ──────────
+            //
+            // viem sends the estimate with no gas limits at all, so the bundler
+            // substitutes its own for the simulation — and the EntryPoint's
+            // prefund check then runs against the account's REAL balance,
+            // against limits nobody chose. On 4663, where the block gas limit is
+            // 1.125e15, that produced "AA21 didn't pay prefund" on twenty-four
+            // consecutive live attempts and no gas figure at all: boundGas never
+            // received a number, so every refusal was "gas-unreadable".
+            //
+            // Proven, 2026-09-03: without this the same operation is AA21; with
+            // it the simulation runs through validation into execution; and
+            // overriding an UNRELATED address is AA21 again, so the override is
+            // genuinely applied rather than ignored. The estimate is identical
+            // at 0.01, 0.05, 0.2 and 1 ETH, so it is not a search artefact.
+            //
+            // WHAT THIS CANNOT DO. It is a parameter of one RPC call.
+            // A state override is not part of a UserOperation, so it cannot reach
+            // what is signed, what is broadcast, the calldata, the prefund the
+            // EntryPoint actually charges, any policy check, or any on-chain
+            // state. The account's real balance is checked separately below, and
+            // a genuinely underfunded account is still refused.
+            //
+            // Sized from OUR OWN CEILING rather than a round number, so the
+            // simulation is never handed more room than we would ever sign for.
+            // Doubled because the bundler simulates with limits of its own
+            // choosing, which are not ours to predict.
+            stateOverride: [
+              { address: account.address, balance: bounds.absoluteMax * feeCeiling * 2n },
+            ],
           })) as Partial<UserOpGas>;
           if (
             typeof g.callGasLimit !== "bigint" ||
@@ -276,6 +339,15 @@ export async function createAgentExecutor(opts: {
             callGasLimit: g.callGasLimit,
             verificationGasLimit: g.verificationGasLimit,
             preVerificationGas: g.preVerificationGas,
+            // Carried so boundGas can count them against the ceiling — the
+            // EntryPoint's prefund does — and so an unexpected paymaster on a
+            // self-paying operation is refused rather than invisible.
+            ...(typeof g.paymasterVerificationGasLimit === "bigint"
+              ? { paymasterVerificationGasLimit: g.paymasterVerificationGasLimit }
+              : {}),
+            ...(typeof g.paymasterPostOpGasLimit === "bigint"
+              ? { paymasterPostOpGasLimit: g.paymasterPostOpGasLimit }
+              : {}),
           };
         } catch (e) {
           // A refusal to quote, NOT a quote of zero — boundGas is told null and
@@ -299,16 +371,56 @@ export async function createAgentExecutor(opts: {
           return null;
         }
       };
+      // The fee the override is priced at. Read once, and generously: this
+      // number never reaches a signature — it only decides how much imaginary
+      // balance the simulation is handed — so erring high costs nothing and
+      // erring low reintroduces the AA21 this whole block exists to remove.
+      const feeCeiling = await publicClient
+        .estimateFeesPerGas()
+        .then((f) => f.maxFeePerGas)
+        .catch(() => 5_000_000_000n); // 5 gwei, ~10x the observed 4663 rate
+
+      // WHICH CEILING, DECIDED BEFORE THE ESTIMATE because the override is sized
+      // from it. Both conditions are required: the account has never operated,
+      // AND the operation proves out of its own nonce that it carries a
+      // permission-validator enable. Undeployed alone is not enough — that is a
+      // fact about an address, and every other shape an undeployed account could
+      // send gets the ordinary ceiling.
+      const accountLive = await isDeployed();
+      const nonce = await account.getNonce();
+      const firstEnable = !accountLive && isFirstEnable(nonce);
+      const bounds = firstEnable ? FIRST_ENABLE_GAS_BOUNDS : GAS_BOUNDS;
+
       const first = await estimate();
       // Only probe a second time when the first succeeded: a null first is
       // already a refusal, and asking again would just be slower.
       const second = first ? await estimate() : null;
-      // WHICH CEILING APPLIES DEPENDS ON WHETHER THIS ACCOUNT EXISTS YET.
-      // See DEPLOY_GAS_BOUNDS: the first op also deploys the account and enables
-      // the permission validator, and the steady-state ceiling would refuse it.
-      const accountLive = await isDeployed();
-      const bounds = accountLive ? GAS_BOUNDS : DEPLOY_GAS_BOUNDS;
-      const bounded = boundGas(first, second, bounds);
+      const bounded = boundGas(first, second, bounds, !!opts.sponsor);
+
+      // ── AND THE REAL BALANCE, WHICH THE OVERRIDE DID NOT CHANGE ──────────
+      //
+      // The simulation was handed an imaginary balance so it would produce a
+      // number instead of AA21. The chain will not be. So before anything is
+      // signed, ask what the account actually holds against what the EntryPoint
+      // will actually require, and say so in words if it is short.
+      //
+      // This is the check that keeps the override honest: without it, the patch
+      // would convert an opaque AA21 at estimation into an opaque AA21 at
+      // submission, having spent a signature on the way.
+      if (bounded.ok && !opts.sponsor) {
+        const required = bounded.total * feeCeiling;
+        const held = await publicClient.getBalance({ address: account.address }).catch(() => null);
+        if (held !== null && held < required) {
+          throw new GasRefused(
+            "prefund-short",
+            `this operation needs ${bounded.total} gas, which the EntryPoint requires the account to ` +
+              `HOLD as ${required} wei at ${feeCeiling} wei/gas. It holds ${held} wei — short by ` +
+              `${required - held}. Nothing was signed. The account is charged only for gas USED, but ` +
+              `it must hold the full amount up front, so this is a funding shortfall and not a refusal ` +
+              `by the chain.`,
+          );
+        }
+      }
 
       // SAY WHAT THE NUMBERS WERE.
       //
@@ -326,7 +438,8 @@ export async function createAgentExecutor(opts: {
           ? "unreadable"
           : `call ${g.callGasLimit} + verif ${g.verificationGasLimit} + preVerif ${g.preVerificationGas} = ${totalGas(g)}`;
       console.log(
-        `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ceiling ${bounds.absoluteMax} · ` +
+        `[gas] account ${accountLive ? "deployed" : "NOT deployed"} · ` +
+          `${firstEnable ? "FIRST-ENABLE" : "ordinary"} ceiling ${bounds.absoluteMax} · ` +
           `estimate1 ${fmt(first)} · estimate2 ${fmt(second)} · ` +
           `signed ${bounded.ok ? totalGas(bounded.gas) : "refused"}` +
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,
