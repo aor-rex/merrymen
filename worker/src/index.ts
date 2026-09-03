@@ -2582,7 +2582,7 @@ async function main() {
    *
    * Returns undefined for non-swaps, so vault moves and transfers are untouched.
    */
-  async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
+  async function scoutContextFor(intent: TradeIntent, skipDrawdown = false): Promise<ScoutContext | undefined> {
     if (!active) return undefined;
     if (intent.kind === "swap") {
       const symbol = symbolOfToken(intent.buyToken);
@@ -2606,6 +2606,7 @@ async function main() {
             : 0n,
         quarantinedUsdg: lastQuarantinedUsdg,
         ...(ponsVerified ? { verifiedPonsTokens: ponsVerified } : {}),
+        skipDrawdown,
       };
     }
     // For curve-trade intents, also check the Pons factory
@@ -2648,10 +2649,10 @@ async function main() {
    * poison every later one — which is how a lock like this usually fails.
    */
   let intentChain: Promise<unknown> = Promise.resolve();
-  function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true): Promise<void> {
+  function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true, skipDrawdown = false): Promise<void> {
     const run = intentChain.then(
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
+      () => processIntentLocked(intent, equityUsdg, equityKnown, skipDrawdown),
+      () => processIntentLocked(intent, equityUsdg, equityKnown, skipDrawdown),
     );
     // The chain must never hold a rejection, or the next waiter inherits it.
     intentChain = run.catch(() => {});
@@ -2662,6 +2663,7 @@ async function main() {
     intent: TradeIntent,
     equityUsdg: bigint,
     equityKnown = true,
+    skipDrawdown = false,
   ): Promise<void> {
     if (!active) return;
     const { agentId, limits, executor, client: chainClient } = active;
@@ -2751,7 +2753,7 @@ async function main() {
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
     };
-    const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
+    const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent, skipDrawdown));
     const notional =
       intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
         ? intent.notionalUsdg
@@ -4900,7 +4902,7 @@ async function main() {
       "chat",
       `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     );
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown, true);
     return `🏹 submitted ${side} ${symbol} on its curve — watch /trades for the result (it still passes the policy wall).`;
   }
 
@@ -4945,7 +4947,7 @@ async function main() {
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
     await ensureDecision(intent, "chat", `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown, true);
     const outcome = lastTradeOutcome;
     if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
     if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
@@ -4970,7 +4972,7 @@ async function main() {
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
     await ensureDecision(intent, "chat", `owner confirmed ${side} ${usdgAmount} USDG ${symbol} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown, true);
     const outcome = lastTradeOutcome;
     if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
     if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
@@ -5014,7 +5016,7 @@ async function main() {
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
     await ensureDecision(intent, "chat", `owner confirmed ${side} ${usdgAmount} USDG ${symbol} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown, true);
     const outcome = lastTradeOutcome;
     if (outcome?.status === "landed") return `✅ ${side} ${usdgAmount} USDG ${symbol} landed — check /trades or /you`;
     if (outcome?.status === "rejected") return `🚫 ${side} ${usdgAmount} USDG ${symbol} rejected${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}.`;
@@ -5038,7 +5040,7 @@ async function main() {
       amountUsdg: usdg(usdgAmount),
     };
     await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, lastEquityUsdg, lastEquityKnown, true);
     return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
   }
 

@@ -264,6 +264,12 @@ export interface ScoutContext {
    * Undefined = no on-chain fallback, which is correct for backtests/fixtures.
    */
   verifiedPonsTokens?: string[];
+  /**
+   * When true, skip the drawdown breaker check. Set for user-initiated chat
+   * trades — the owner knows what they're doing and the breaker should only
+   * constrain the automated strategy.
+   */
+  skipDrawdown?: boolean;
 }
 
 export function checkPolicy(
@@ -562,7 +568,7 @@ export function checkPolicy(
       ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
         (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
 
-  if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
+  if (!isExit && !scout?.skipDrawdown && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(
       ((state.highWaterMarkUsdg - state.equityUsdg) * 10_000n) / state.highWaterMarkUsdg,
     );
