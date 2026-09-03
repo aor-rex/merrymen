@@ -270,9 +270,33 @@ export function boundGas(
   // Checked BEFORE the disagreement test on purpose — a zero field also skews
   // the total that test compares, so validating first makes that math
   // trustworthy as well.
+  /**
+   * THE THREE LIMITS THAT MUST BE POSITIVE — and only those three.
+   *
+   * This iterated every field of UserOpGas, which was right when UserOpGas had
+   * exactly three. Stage E added the two paymaster fields so the ceiling could
+   * see what the EntryPoint's prefund sees, and this guard then rejected them:
+   * an UNSPONSORED operation has no paymaster, so the bundler returns
+   * `paymasterVerificationGasLimit: 0`, and zero there is THE TRUE ANSWER rather
+   * than a missing estimate.
+   *
+   * Measured live on 4663, 2026-09-03: the canary's first enable estimated
+   * cleanly at call 203,258 + verif 7,447,694 + preVerif 247,647 and was refused
+   * `gas-unreadable` — "the bundler returned 0 for paymasterVerificationGasLimit"
+   * — on an operation whose numbers were perfectly readable.
+   *
+   * The guard keeps its full strength where it earns it. A zero callGasLimit
+   * still guarantees the OOG this file exists to prevent, and a zero in either
+   * of the other two is still an estimator that did not answer. The paymaster
+   * fields have their own rule already: `gas-paymaster-unexpected` refuses a
+   * NONZERO paymaster on a self-paying operation, which is the direction that
+   * can actually hide a million gas of prefund.
+   */
+  const REQUIRED_LIMITS = ["callGasLimit", "verificationGasLimit", "preVerificationGas"] as const;
   const badField = (g: UserOpGas): [string, bigint] | null => {
-    for (const [name, v] of Object.entries(g) as [keyof UserOpGas, bigint][]) {
-      if (v <= 0n) return [name, v];
+    for (const name of REQUIRED_LIMITS) {
+      const v = g[name];
+      if (typeof v !== "bigint" || v <= 0n) return [name, typeof v === "bigint" ? v : 0n];
     }
     return null;
   };
