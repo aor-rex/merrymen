@@ -57,6 +57,7 @@ import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair"
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
+import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -923,7 +924,7 @@ async function runBrainDatasetIfAsked(): Promise<void> {
     const rows = (await shared
       .prepare(
         `SELECT d.agent_id, COALESCE(a.name, '') AS name, d.at, d.symbol, d.action, d.size_usdg,
-                d.reason, d.signals_json
+                d.id, d.reason, d.signals_json
            FROM decisions d
            LEFT JOIN agents a ON a.smart_account = d.agent_id
           WHERE d.source = 'brain-shadow'
