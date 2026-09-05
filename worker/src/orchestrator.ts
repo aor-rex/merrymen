@@ -744,7 +744,7 @@ async function runGasAuditIfAsked(): Promise<void> {
       const rows = (await shared
         .prepare(
           `SELECT id, kind, target, amount_usdg, status, user_op_hash, tx_hash,
-                  gas_wei, sponsored_gas_wei, gas_usdg, epoch, created_at
+                  gas_wei, sponsored_gas_wei, gas_usdg, gas_units, epoch, created_at
              FROM trades
             WHERE LOWER(agent_id) = ? AND epoch = ?
             ORDER BY created_at ASC, id ASC`,
@@ -760,6 +760,7 @@ async function runGasAuditIfAsked(): Promise<void> {
         userOpHash: r.user_op_hash === null || r.user_op_hash === undefined ? null : String(r.user_op_hash),
         txHash: r.tx_hash === null || r.tx_hash === undefined ? null : String(r.tx_hash),
         gasWei: r.gas_wei === null || r.gas_wei === undefined ? null : String(r.gas_wei),
+        gasUnits: r.gas_units === null || r.gas_units === undefined ? null : String(r.gas_units),
         sponsoredGasWei:
           r.sponsored_gas_wei === null || r.sponsored_gas_wei === undefined ? null : String(r.sponsored_gas_wei),
         gasUsdg: r.gas_usdg === null || r.gas_usdg === undefined ? null : Number(r.gas_usdg),

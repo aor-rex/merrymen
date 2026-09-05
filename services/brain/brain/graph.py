@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 from .analyst import AnalystView, STRUCTURED_SUFFIX, disagreement, parse_view
 from .budget import BudgetExceeded, RunBudget, TIERS
-from .escalation import EscalationVerdict, assess as assess_escalation
+from .escalation import EscalationVerdict, assess as assess_escalation, judge_economics
 from .gate import GateResult, assess
 from .llm import Llm, ProviderError, extract_json
 from .schemas import (
@@ -178,6 +178,36 @@ class BrainGraph:
         )
         caveats = "\n".join(f"- {c}" for c in gate.caveats) or "- none"
 
+        # ── WHAT THE NEXT TRADE COSTS ───────────────────────────────────────
+        #
+        # MARGINAL, AND SAID AS SUCH. The canary's first UserOperation carried
+        # the account deployment and the session-key permission wall — 5.51M of
+        # its 6.02M gas. That is spent, and no decision made now can unspend it.
+        # Telling a manager "gas has averaged 1.74 USDG a trade" on trades of
+        # 1.67 would talk it out of every future trade over a cost it will never
+        # pay again; telling it the recurring ~0.76 lets it weigh an edge
+        # against a cost, which is the only version of the question that has an
+        # answer.
+        #
+        # UNKNOWN IS STATED, NEVER ZEROED. A cost nobody could price is not a
+        # free trade, and the instruction says what to do about it rather than
+        # leaving the model to assume.
+        gas = req.market.expected_trade_gas_usdg
+        if gas is None:
+            cost_note = (
+                "THE COST OF TRADING COULD NOT BE PRICED this run. Do not assume it is zero. "
+                "Treat a marginal-looking edge as insufficient, because you cannot check it."
+            )
+        else:
+            cost_note = (
+                f"THE NEXT TRADE WILL COST ABOUT {gas} micro-USDG ({gas / 1e6:.6f} USDG) in gas, "
+                f"whatever its size. This is the MARGINAL cost — the one-time cost of opening this "
+                f"account and installing its permissions is already paid and is NOT part of it, so "
+                f"do not reason about money that is already spent. A trade is only worth making if "
+                f"you expect it to earn meaningfully more than this. State that expectation in "
+                f"`expected_edge_usdg` so the judgement can be checked against what actually happens."
+            )
+
         raw = await self.llm.complete(
             node="portfolio-manager",
             budget=budget,
@@ -188,12 +218,13 @@ class BrainGraph:
             ),
             user=(
                 f"{dossier}\n\n"
-                f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n"
+                f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n{cost_note}\n\n"
                 "Reply with exactly this JSON shape:\n"
                 "{\n"
                 '  "action": "buy" | "sell" | "hold",\n'
                 '  "confidence": 0.0-1.0,\n'
                 '  "suggested_delta_usdg": integer micro-USDG, POSITIVE to buy, NEGATIVE to sell, 0 to hold,\n'
+                '  "expected_edge_usdg": integer micro-USDG you expect this trade to MAKE, 0 for a hold,\n'
                 '  "thesis": "the public post, 2-4 sentences, no addresses",\n'
                 '  "evidence": [{"source": "...", "ref": "...", "claim": "..."}],\n'
                 '  "bull_case": "...", "bear_case": "...",\n'
@@ -379,6 +410,14 @@ class BrainGraph:
             held = next((p for p in req.portfolio.positions if p.instrument_id == req.market.instrument_id), None)
             delta = -max(1, min(abs(delta), held.value_usdg if held else 1))
 
+        # THE ECONOMICS VERDICT, computed and recorded, enforcing nothing.
+        # See escalation.ENFORCE_TRADE_ECONOMICS for why it does not bite yet.
+        edge = max(0, int(data.get("expected_edge_usdg") or 0))
+        economics = judge_economics(
+            expected_edge_usdg=edge if action != "hold" else None,
+            expected_gas_usdg=req.market.expected_trade_gas_usdg,
+        )
+
         evidence = []
         for e in (data.get("evidence") or [])[:8]:
             if isinstance(e, dict):
@@ -434,6 +473,9 @@ class BrainGraph:
                 )
                 for v in views
             ],
+            expected_edge_usdg=edge,
+            economics=economics,
+            expected_trade_gas_usdg=req.market.expected_trade_gas_usdg,
             cost=budget.cost(),
             models=budget.models,
         )

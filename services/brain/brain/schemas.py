@@ -206,6 +206,18 @@ class BrainDecision(BaseModel):
     #: what the question needs — a direction and two floats are. The prose stays
     #: in the thesis, which passes the address backstop before anyone reads it.
     analyst_views: list[AnalystSignal] = Field(default_factory=list)
+    #: WHAT THIS TRADE WAS EXPECTED TO MAKE, micro-USDG, as the manager stated it.
+    #:
+    #: Recorded so the economics can be checked against what actually happened
+    #: rather than argued about. It is a model-written number and is treated as
+    #: one: nothing sizes from it, and `economics` below is the verdict a
+    #: deterministic rule reached by comparing it to the measured cost.
+    expected_edge_usdg: int = 0
+    #: Would this trade have paid for itself? "unknown" whenever either side of
+    #: the comparison is missing — never quietly "viable".
+    economics: Literal["viable", "marginal", "uneconomic", "unknown"] = "unknown"
+    #: The marginal gas this verdict was reached against, micro-USDG.
+    expected_trade_gas_usdg: int | None = None
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 
@@ -320,6 +332,19 @@ class MarketState(BaseModel):
     # Free-form per-source material. Everything in here is UNTRUSTED: it is
     # scraped or vendor-supplied text that an attacker may have written.
     signals: dict[str, str] = Field(default_factory=dict)
+    #: WHAT THE NEXT TRADE COSTS, micro-USDG. None when it could not be priced.
+    #:
+    #: MARGINAL, not average. The canary's first UserOperation carried the
+    #: account deployment and the session-key permission wall — 5.51M of its
+    #: 6.02M gas — and that money is spent. The historical average across its
+    #: four operations is 1.74 USDG against trades of 1.67, which would talk any
+    #: reasoner out of every future trade over a cost it will never pay again.
+    #: The recurring figure is ~0.76 USDG, and that is the one a decision can
+    #: actually weigh an edge against.
+    #:
+    #: None is stated as unknown in the prompt rather than defaulted to zero: a
+    #: cost nobody could price is not a free trade.
+    expected_trade_gas_usdg: int | None = None
 
 
 class DecideRequest(BaseModel):

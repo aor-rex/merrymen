@@ -64,6 +64,20 @@ export interface BrainDecision {
   escalation_reasons: string[];
   candidate_action: string | null;
   /**
+   * Micro-USDG the manager expected this trade to MAKE. Model-written, and
+   * treated as such: nothing sizes from it, and it exists so the economics can
+   * be checked against what actually happened rather than argued about.
+   */
+  expected_edge_usdg?: number;
+  /**
+   * Would this trade have paid for itself? Advisory — nothing enforces it while
+   * shadow mode is still observing. "unknown" whenever either side of the
+   * comparison was missing, and unknown is never read as permission.
+   */
+  economics?: "viable" | "marginal" | "uneconomic" | "unknown";
+  /** The marginal gas that verdict was reached against, micro-USDG. */
+  expected_trade_gas_usdg?: number | null;
+  /**
    * Where each lens landed, on every run rather than only escalated ones.
    *
    * Structure only — no `note`, no prose. The service drops the model's words
@@ -142,6 +156,8 @@ export interface DecideArgs {
     instrument_class: "equity-token" | "crypto-native" | "memecoin" | "stablecoin";
     price_usd: string | null;
     signals: Record<string, string>;
+    /** Marginal cost of the next trade, micro-USDG. Null = could not price it. */
+    expected_trade_gas_usdg: number | null;
   };
   persona?: string;
   memory?: string[];

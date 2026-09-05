@@ -52,6 +52,16 @@ export interface GasOp {
   txHash: string | null;
   /** Wei this owner paid. Null when the op never reached a receipt. */
   gasWei: string | null;
+  /**
+   * Gas UNITS charged. Null on rows written before it was captured.
+   *
+   * The stable half of the cost. Measured on the canary: op #1 used 6,019,786
+   * units and ops #2-#4 used 526,934 / 509,850 / 510,760 — a clean 11.8x — while
+   * the gas PRICE over the same four ops ranged 0.330 to 0.610 gwei. Splitting
+   * on wei alone would have credited that price swing to the operations rather
+   * than to the chain.
+   */
+  gasUnits: string | null;
   /** Wei somebody ELSE paid. Never the owner's cost — see the store's comment. */
   sponsoredGasWei: string | null;
   /** The valued cost, USDG. NULL means could-not-price, which is not zero. */
@@ -101,6 +111,16 @@ export interface GasDecomposition {
   setupPremiumUsdg: number | null;
   /** Only a caller that checked the chain may set this. */
   deploymentConfirmed: boolean | null;
+  /**
+   * Which quantity the premium was split on.
+   *
+   * "usdg" means gas units were not recorded, so the figure carries whatever
+   * the base fee did between the first operation and the later ones — stated
+   * rather than hidden, so nobody quotes it as though it were exact.
+   */
+  premiumBasis: "units" | "usdg" | "none";
+  /** Steady-state gas UNITS per operation, when they were recorded. */
+  steadyMedianUnits: number | null;
 
   /** What the NEXT trade should be expected to cost. */
   marginalGasUsdg: number | null;
@@ -167,13 +187,45 @@ export function decomposeGas(account: string, epoch: number, ops: readonly GasOp
   const steadyMeanUsdg = rest.length ? rest.reduce((a, b) => a + b, 0) / rest.length : null;
   const steadyMaxUsdg = rest.length ? Math.max(...rest) : null;
 
+  // ── THE PREMIUM, IN UNITS WHERE UNITS EXIST ───────────────────────────────
+  //
   // A PREMIUM NEEDS SOMETHING TO BE A PREMIUM OVER. With one landed op there is
   // no steady state to compare against, and calling the whole of it "setup"
   // would be a guess dressed as a decomposition.
-  const setupPremiumUsdg =
-    first !== null && steadyMedianUsdg !== null && (first.gasUsdg ?? 0) > steadyMedianUsdg
-      ? (first.gasUsdg ?? 0) - steadyMedianUsdg
-      : null;
+  //
+  // WHEN GAS UNITS ARE RECORDED the split is done on them and converted at the
+  // FIRST OP'S OWN gas price, because that is the price at which the setup work
+  // was actually bought. Doing it on USDG instead credits the chain's base fee
+  // to the operation: the canary's four ops ranged 0.330-0.610 gwei, and a
+  // USDG-median split put setup at 4.224 USDG where the unit split puts it at
+  // 4.565 — an 8% error on a number that will be subtracted from a user's
+  // return and handed to a model as the cost of doing business.
+  const unitsOf = (o: GasOp | null): number | null => {
+    const raw = o?.gasUnits;
+    if (raw === null || raw === undefined || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const firstUnits = unitsOf(first);
+  const laterUnits = subsequent.map(unitsOf).filter((n): n is number => n !== null);
+  const steadyMedianUnits = median(laterUnits);
+
+  let setupPremiumUsdg: number | null = null;
+  let premiumBasis: "units" | "usdg" | "none" = "none";
+  if (
+    first !== null &&
+    firstUnits !== null &&
+    steadyMedianUnits !== null &&
+    firstUnits > steadyMedianUnits &&
+    (first.gasUsdg ?? 0) > 0
+  ) {
+    const pricePerUnit = (first.gasUsdg ?? 0) / firstUnits;
+    setupPremiumUsdg = (firstUnits - steadyMedianUnits) * pricePerUnit;
+    premiumBasis = "units";
+  } else if (first !== null && steadyMedianUsdg !== null && (first.gasUsdg ?? 0) > steadyMedianUsdg) {
+    setupPremiumUsdg = (first.gasUsdg ?? 0) - steadyMedianUsdg;
+    premiumBasis = "usdg";
+  }
 
   // WHAT THE NEXT TRADE COSTS. The median of the ops after the first — not the
   // mean, which one deployment-inflated outlier drags upward, and not the
@@ -207,6 +259,8 @@ export function decomposeGas(account: string, epoch: number, ops: readonly GasOp
     steadyMaxUsdg,
     setupPremiumUsdg,
     deploymentConfirmed: null,
+    premiumBasis,
+    steadyMedianUnits,
     marginalGasUsdg,
     marginalShareOfTradePct,
     typicalTradeUsdg,
@@ -274,9 +328,12 @@ export function gasAuditLines(d: GasDecomposition): string[] {
     `  setup premium         ${usd(d.setupPremiumUsdg)} USDG  ` +
       (d.setupPremiumUsdg === null
         ? "(not derivable — no later op to compare against)"
-        : d.deploymentConfirmed === true
-          ? "(EntryPoint AccountDeployed confirmed on the first op)"
-          : "(excess of the first op over the steady rate; deployment NOT yet confirmed on-chain)"),
+        : d.premiumBasis === "units"
+          ? `(split on GAS UNITS: ${d.first?.gasUnits ?? "?"} vs a steady ${d.steadyMedianUnits ?? "?"}, ` +
+            `valued at the first op's own gas price)`
+          : "(split on USDG — gas units were not recorded, so this figure carries the base-fee " +
+            "movement between the first op and the later ones)") +
+      (d.deploymentConfirmed === true ? " · EntryPoint AccountDeployed CONFIRMED" : ""),
   );
   out.push(
     `  MARGINAL next trade   ${usd(d.marginalGasUsdg)} USDG` +

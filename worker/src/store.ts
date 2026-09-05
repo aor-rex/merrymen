@@ -384,6 +384,12 @@ const SQLITE_ALTERS: string[] = [
     // NET of it. NULL means the ETH price was refused at the time — unpriced,
     // which is a different fact from free, and reported as such.
     "ALTER TABLE trades ADD COLUMN gas_usdg REAL",
+    // Gas UNITS the EntryPoint charged. wei = units x price, and the two move
+    // for different reasons: an op costs more because it did more work, or
+    // because the block was busy. The canary saw 0.330-0.610 gwei across four
+    // ops, so a setup-vs-steady split derived from wei alone would read a
+    // doubling of the base fee as an expensive operation. Units are stable.
+    "ALTER TABLE trades ADD COLUMN gas_units TEXT",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -763,6 +769,12 @@ export interface TradeRow {
   basis_source?: "receipt" | "paper" | "quote";
   /** Gas actually paid, wei, as a decimal string. Real cost; not in equity_usdg. */
   gas_wei?: string;
+  /**
+   * Gas UNITS charged, as a decimal string — the price-independent half of the
+   * cost. Absent on rows written before it was captured, which is why every
+   * reader treats it as optional rather than defaulting it to zero.
+   */
+  gas_units?: string;
   /** That gas in USDG at the price when it was burned. NULL = unpriced, NOT free. */
   gas_usdg?: number;
   /** Measured execution quality: how far the fill landed from the quote, in bps (+ is worse). */
@@ -1872,7 +1884,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     status = ?, reject_rule = ?, sim_quote_out = ?, sim_min_out = ?, sim_fee_tier = ?,
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
-                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?
+                    gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
           )
           .run(
@@ -1900,6 +1912,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.fill_slippage_bps ?? null,
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
+            row.gas_units ?? null,
             row.agent_id,
             row.user_op_hash,
           );
@@ -1913,8 +1926,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, tx_hash, status, reject_rule,
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -1944,6 +1957,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         epoch,
         row.fill_cash_usdg ?? null,
         row.gas_usdg ?? null,
+        row.gas_units ?? null,
       );
     };
     if (!moved) {

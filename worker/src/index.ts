@@ -93,6 +93,7 @@ import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, sentimentLine, technicalLine } from "./brain-material";
+import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -1525,6 +1526,34 @@ async function main() {
    */
   let ethPriceCache: { price8: bigint; atSec: number } | null = null;
   const ETH_PRICE_TTL_SEC = 300;
+  /**
+   * What a unit of gas costs right now, in wei. Null when the chain would not say.
+   *
+   * FORWARD-LOOKING ON PURPOSE. The alternative is averaging what past
+   * operations paid, and the canary's four landed ops ranged 0.330–0.610 gwei —
+   * so a historical average mostly measures which blocks happened to be busy.
+   * The question a decision actually has is what the NEXT trade will cost.
+   *
+   * Cached on the same TTL as the ETH price, because the two are multiplied
+   * together and a fresh reading of one against a stale reading of the other is
+   * a number that was never true at any moment.
+   */
+  let gasPriceCache: { wei: bigint; atSec: number } | null = null;
+  async function currentGasPriceWei(): Promise<bigint | null> {
+    const now = Math.floor(Date.now() / 1000);
+    if (gasPriceCache && now - gasPriceCache.atSec < ETH_PRICE_TTL_SEC) return gasPriceCache.wei;
+    try {
+      const wei = await mainnetClient().getGasPrice();
+      if (wei <= 0n) return null;
+      gasPriceCache = { wei, atSec: now };
+      return wei;
+    } catch {
+      // An unreadable gas price is UNKNOWN, and unknown must not reach a
+      // decision wearing a zero — a zero would read as "trading is free".
+      return null;
+    }
+  }
+
   async function ethPrice8(): Promise<{ price8: bigint | null; reason?: string }> {
     const now = Math.floor(Date.now() / 1000);
     if (ethPriceCache && now - ethPriceCache.atSec < ETH_PRICE_TTL_SEC) {
@@ -4256,6 +4285,11 @@ async function main() {
               // cost was incurred then, and re-valuing it later would make a past
               // trade's P&L drift with the ETH price.
               ...(gasCost.usdg === null ? {} : { gas_usdg: usdgNum(gasCost.usdg) }),
+              // THE PRICE-INDEPENDENT HALF. Omitted rather than zeroed when the
+              // bundler reported nothing: 0 units reads as a free operation, and
+              // this decomposition exists precisely because a plausible wrong
+              // number does more damage than a missing one.
+              ...(exec.gasUnits > 0n ? { gas_units: exec.gasUnits.toString() } : {}),
             }),
         ...(slippageBps === null ? {} : { fill_slippage_bps: slippageBps }),
         status: "landed",
@@ -5263,6 +5297,21 @@ async function main() {
         const gasNow = await getGasPaidUsdg(agentId, epochNow);
         // Asked once per run, from the ledger this agent actually has.
         const historyAuditable = await accountingHistoryAuditable(agentId, epochNow);
+        // WHAT THE NEXT TRADE COSTS — not what the last ones did.
+        //
+        // 5.51M of the canary's first operation's 6.02M gas was the account
+        // deployment and the session-key permission wall: paid once, already
+        // paid, SUNK. Handing Brain the historical average (1.74 USDG a trade,
+        // on trades of 1.67) would talk it out of every future trade over a
+        // cost it will never pay again. Handing it the marginal figure lets it
+        // weigh an edge against a cost, which is the only version of the
+        // question that can be answered.
+        const [gasPriceWei, ethNow] = await Promise.all([currentGasPriceWei(), ethPrice8()]);
+        const expectedTradeGasMicro = expectedTradeGasUsdg({
+          gasUnits: STEADY_SWAP_GAS_UNITS,
+          gasPriceWei: gasPriceWei ?? 0n,
+          ethPrice8: ethNow.price8,
+        });
         // THE BIGGEST HOLDING IS WHAT THIS RUN IS ABOUT. One instrument per run
         // keeps the question answerable and the bill bounded; a Brain asked
         // about a whole book at once produces a paragraph, not a decision.
@@ -5359,6 +5408,7 @@ async function main() {
                 ...(sentiment ? { sentiment } : {}),
               },
             },
+            expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
             persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
             // ITS OWN PUBLISHED THESES, and what came of them. Read from the
             // peer file rather than the child's `decisions` table because that

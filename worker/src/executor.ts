@@ -57,6 +57,20 @@ export interface ExecutionResult {
    * cash + vault + positions, and ETH is not in it.
    */
   gasWei: bigint;
+  /**
+   * Gas UNITS the EntryPoint charged (`actualGasUsed`). 0n when the bundler
+   * omitted it.
+   *
+   * WHY BOTH, when wei already carries the cost. wei = units × price, and the
+   * two move for entirely different reasons: an operation costs more because it
+   * did more work, or because the block was busy. Measured across the canary's
+   * four landed ops the gas price ranged 0.330–0.610 gwei, so a cost split
+   * derived from wei alone attributes a doubling of the base fee to "this
+   * operation was expensive" — which is exactly the mistake the setup-versus-
+   * steady decomposition exists to avoid. Units are the stable quantity; the
+   * price belongs to the day.
+   */
+  gasUnits: bigint;
   /** Block the operation landed in — an anchor for anyone re-deriving this later. */
   blockNumber: bigint;
 }
@@ -805,6 +819,14 @@ export async function createAgentExecutor(opts: {
         userOpHash,
         logs: receipt.logs ?? [],
         gasWei,
+        // Same preference order as gasWei, for the same reason and with the
+        // error running the other way: `actualGasUsed` is our operation's
+        // share, while the bundled transaction's `gasUsed` contains other
+        // senders' work and would OVER-count us. A fallback, never a default.
+        gasUnits:
+          typeof (receipt as { actualGasUsed?: bigint }).actualGasUsed === "bigint"
+            ? (receipt as { actualGasUsed: bigint }).actualGasUsed
+            : (receipt.receipt.gasUsed ?? 0n),
         blockNumber: receipt.receipt.blockNumber ?? 0n,
       };
     },

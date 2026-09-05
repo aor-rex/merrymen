@@ -77,6 +77,10 @@ const LOG_TABLES = [
       // fill as unpriceable, so `gasQualifier` stamped 'this is not the full
       // cost' on every book — a warning about our own missing column.
       "gas_usdg",
+      // THE PRICE-INDEPENDENT HALF of the cost. Without it a hosted split of
+      // setup versus steady-state gas has to infer units from wei, and inherits
+      // every base-fee move as if it were extra work done.
+      "gas_units",
       "fill_cash_usdg",
       // WHICH RUN this row belongs to. Everything below depends on it; see the
       // note on the agents upsert.
@@ -388,7 +392,7 @@ export async function mirrorTenant(args: {
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, fill_cash_usdg
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
           ORDER BY id DESC LIMIT ?`,
@@ -401,7 +405,7 @@ export async function mirrorTenant(args: {
           `UPDATE trades SET tx_hash = ?, status = ?, reject_rule = ?, decision_id = ?,
                              fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                              realized_pnl_usdg = ?, basis_source = ?, gas_wei = ?,
-                             sponsored_gas_wei = ?, gas_usdg = ?, fill_cash_usdg = ?
+                             sponsored_gas_wei = ?, gas_usdg = ?, gas_units = ?, fill_cash_usdg = ?
             WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -409,7 +413,7 @@ export async function mirrorTenant(args: {
             r.tx_hash ?? null, r.status, r.reject_rule ?? null, r.decision_id ?? null,
             r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
-            r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.fill_cash_usdg ?? null,
+            r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
             r.agent_id, r.user_op_hash,
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports

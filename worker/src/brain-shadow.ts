@@ -75,6 +75,13 @@ export interface ShadowInputs {
     priceUsd: string | null;
     signals: Record<string, string>;
   };
+  /**
+   * What the NEXT trade is expected to cost in gas, micro-USDG. Null when it
+   * could not be priced, which Brain is told plainly rather than reading as
+   * free. EXCLUDES the one-time account deployment and permission-wall install
+   * — that money is spent and no future decision can unspend it.
+   */
+  expectedTradeGasUsdg: number | null;
   persona?: string;
   memory?: string[];
   /** Set when a person asked. Bypasses the movement thresholds, not the budget. */
@@ -207,6 +214,8 @@ export async function runShadow(
       instrument_class: i.market.instrumentClass,
       price_usd: i.market.priceUsd,
       signals: i.market.signals,
+      // The MARGINAL cost, sunk setup excluded. See ShadowInputs.
+      expected_trade_gas_usdg: i.expectedTradeGasUsdg,
     },
     persona: i.persona,
     memory: i.memory,
@@ -350,6 +359,12 @@ async function persist(
       // an empty list say that equally well while the empty list keeps every
       // row the same shape for whatever reads them later.
       analyst_views: d.analyst_views ?? [],
+      // THE ECONOMICS OF WHAT IT PROPOSED, on every decision — so "would this
+      // have paid for itself?" is answerable from the tape rather than
+      // recomputed later against a gas price that has since moved.
+      expected_edge_usdg: d.expected_edge_usdg ?? null,
+      economics: d.economics ?? "unknown",
+      expected_trade_gas_usdg: d.expected_trade_gas_usdg ?? null,
       cost: d.cost,
       models: d.models,
       latency_seconds: result.seconds,

@@ -94,6 +94,54 @@ LARGE_TRADE_FRACTION = 0.25
 #: why it never escalates alone — see `assess`.
 LOW_CONFIDENCE = 0.45
 
+#: The margin a trade must clear over its own gas to be worth making.
+#:
+#: A trade whose expected edge merely equals its cost is a coin-flip that pays
+#: the chain either way. 2x is the smallest multiple that is not self-defeating;
+#: it is a starting point, not a calibrated value — honest calibration needs
+#: realised outcomes, which shadow mode is collecting.
+MIN_EDGE_OVER_GAS = 2
+
+#: ENFORCEMENT IS OFF, and the constant is the reminder of why.
+#:
+#: Measured on the canary: a steady-state operation costs ~0.76 USDG on trades
+#: of 1.67 — 45.9%. A rule demanding 2x cover would refuse essentially every
+#: trade the fleet currently sizes, which is very probably CORRECT and is
+#: exactly why it must not be switched on silently during shadow. Shadow exists
+#: to observe what Brain decides when it is told the truth about costs; a filter
+#: in front of it would replace that observation with the filter's output.
+#:
+#: So the verdict is COMPUTED AND RECORDED on every decision and enforced by
+#: nothing. This flips before Brain is given execution authority — or a minimum
+#: trade size lands, or both. A technically correct trade that is economically a
+#: guaranteed loser is still a loser.
+ENFORCE_TRADE_ECONOMICS = False
+
+
+def judge_economics(*, expected_edge_usdg: int | None, expected_gas_usdg: int | None) -> str:
+    """
+    Would this trade pay for itself? PURE, and advisory.
+
+    Mirrors `worker/src/execution-cost.ts::judgeTradeEconomics` exactly, and the
+    duplication is deliberate rather than shared: the worker needs it to reason
+    about intents it has not sent yet, Brain needs it to label a decision it is
+    returning, and neither can import the other. A test pins the two thresholds
+    against each other so they cannot drift.
+
+    UNKNOWN whenever either side is missing, and unknown is never read as
+    permission.
+    """
+    if expected_gas_usdg is None:
+        return "unknown"
+    if expected_edge_usdg is None:
+        return "unknown"
+    if expected_edge_usdg <= expected_gas_usdg:
+        return "uneconomic"
+    if expected_edge_usdg < expected_gas_usdg * MIN_EDGE_OVER_GAS:
+        return "marginal"
+    return "viable"
+
+
 def assess(
     *,
     action: str,

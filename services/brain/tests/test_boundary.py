@@ -399,3 +399,122 @@ def test_memory_is_fenced_like_everything_else_we_did_not_write():
     # somewhere else in the method.
     assert "_fence(" in src[i : i + 400], "the memory block must be fenced"
     assert "own-memory" in src[i : i + 400], "and labelled as what it is"
+
+def test_a_clean_epoch_one_book_can_actually_be_sized():
+    """
+    THE POINT OF THE WHOLE GATE CHANGE, proved without spending a token.
+
+    `_assemble` applies the gate AFTER parsing, on purpose: a model told it may
+    not size will still sometimes size, and the difference between "asked
+    nicely" and "cannot" is the whole design. So the question "can the canary
+    produce a genuine BUY with a non-zero delta?" is answerable here — it is a
+    property of the gate and the assembler, not of what a model happens to feel
+    about TSLA on a given afternoon.
+
+    Both directions are asserted. A clean epoch-1 book must let a buy through
+    with its size intact; a legacy book must still flatten it to a hold. If only
+    the first were checked, deleting the gate would pass.
+    """
+    import asyncio
+
+    from brain.analyst import AnalystView
+    from brain.budget import RunBudget, TIERS
+    from brain.escalation import EscalationVerdict
+    from brain.graph import BrainGraph
+    from brain.schemas import DecideRequest, MarketState, PortfolioQuality, PortfolioState
+
+    def book(auditable):
+        return PortfolioState(
+            snapshot_id="s", as_of=1, cash_usdg=10_000_000, equity_usdg=10_000_000,
+            net_contributions_usdg=10_000_000,
+            quality=PortfolioQuality(
+                audit_passed=True, epoch=1, current_accounting_history_auditable=auditable,
+                contributions_known=True, equity_complete=True, gas_basis="net",
+                position_history_available=True,
+            ),
+        )
+
+    def assemble(auditable):
+        req = DecideRequest(
+            schema_version="1.0.0", run_id="r", agent_id="0xa", trigger_id="t",
+            portfolio=book(auditable),
+            market=MarketState(
+                snapshot_id="m", as_of=1, instrument_id="merrymen:tsla", symbol="TSLA",
+                instrument_class="equity-token", price_usd="412.50", signals={},
+            ),
+        )
+        graph = BrainGraph(llm=None)  # never called — _assemble does no I/O
+        return graph._assemble(
+            req,
+            RunBudget(run_id="r", agent_id="0xa", tier="research", limits=TIERS["research"]),
+            gate_assess(book(auditable)),
+            # What a bullish analyst pass would hand the assembler.
+            {"action": "buy", "confidence": 0.72, "suggested_delta_usdg": 2_000_000,
+             "thesis": "the breakout held on volume"},
+            bull="", bear="", depth_used="analysts",
+            escalation=EscalationVerdict(False, [], "no condition met"),
+            candidate_action="buy",
+            views=[AnalystView(lens="technical", direction="buy", confidence=0.72,
+                               evidence_strength=0.6, note="")],
+        )
+
+    # A CLEAN EPOCH-1 BOOK — every live account is one of these.
+    clean = assemble(True)
+    assert clean.action == "buy", "a clean epoch-1 book must be able to buy"
+    assert clean.suggested_delta_usdg == 2_000_000, "and keep the size it proposed"
+
+    # THE OTHER DIRECTION, so deleting the gate cannot pass this test.
+    legacy = assemble(False)
+    assert legacy.action == "hold"
+    assert legacy.suggested_delta_usdg == 0, "a book we cannot audit is flattened, not merely warned"
+
+
+def test_the_two_economics_rules_cannot_drift():
+    """
+    The judgement exists twice — `worker/src/execution-cost.ts` and
+    `brain/escalation.py` — because the worker needs it for intents it has not
+    sent and Brain needs it to label a decision it is returning, and neither can
+    import the other. Duplication is the right call there; SILENT duplication is
+    not, so the thresholds are pinned against each other.
+    """
+    import re
+    from pathlib import Path
+
+    from brain.escalation import ENFORCE_TRADE_ECONOMICS, MIN_EDGE_OVER_GAS, judge_economics
+
+    ts = (Path(__file__).resolve().parents[3] / "worker" / "src" / "execution-cost.ts").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(rf"MIN_EDGE_OVER_GAS = {MIN_EDGE_OVER_GAS}\b", ts), "the margins must match"
+    assert re.search(
+        rf"ENFORCE_TRADE_ECONOMICS = {str(ENFORCE_TRADE_ECONOMICS).lower()}\b", ts
+    ), "and so must whether either side enforces"
+
+    # The verdicts themselves, on the canary's own numbers: a 0.764720 USDG cost.
+    gas = 764_720
+    assert judge_economics(expected_edge_usdg=100_000, expected_gas_usdg=gas) == "uneconomic"
+    assert judge_economics(expected_edge_usdg=900_000, expected_gas_usdg=gas) == "marginal"
+    assert judge_economics(expected_edge_usdg=gas * 2, expected_gas_usdg=gas) == "viable"
+    # UNKNOWN when either side is missing — never the permissive answer.
+    assert judge_economics(expected_edge_usdg=None, expected_gas_usdg=gas) == "unknown"
+    assert judge_economics(expected_edge_usdg=5_000_000, expected_gas_usdg=None) == "unknown"
+
+
+def test_the_manager_is_told_the_marginal_cost_and_that_setup_is_sunk():
+    """
+    A manager told "gas has averaged 1.74 USDG a trade" on trades of 1.67 would
+    correctly stop trading, about a number that is wrong: 5.51M of the canary's
+    first operation's 6.02M gas was the account deployment and the permission
+    wall, and no future decision can unspend it.
+    """
+    import inspect
+
+    from brain import graph as graph_mod
+
+    src = inspect.getsource(graph_mod.BrainGraph._decide)
+    assert "expected_trade_gas_usdg" in src, "the manager must be told what the next trade costs"
+    assert "already paid" in src and "already spent" in src, "and that the setup cost is sunk"
+    assert "cost_note" in src and "{cost_note}" in src, "and the note must actually reach the prompt"
+    # UNKNOWN IS STATED, NOT ZEROED. A cost nobody could price is not a free trade.
+    assert "COULD NOT BE PRICED" in src
+    assert "Do not assume it is zero" in src

@@ -26,6 +26,7 @@ const op = (over: Partial<GasOp> = {}): GasOp => ({
   userOpHash: "0xaaaa000000000000000000000000000000000000000000000000000000000001",
   txHash: "0xbbbb000000000000000000000000000000000000000000000000000000000001",
   gasWei: "1000000000000000",
+  gasUnits: null,
   sponsoredGasWei: null,
   gasUsdg: 0.05,
   epoch: 1,
@@ -91,8 +92,13 @@ describe("one-time cost is not marginal cost", () => {
     const d = decomposeGas("0xacct", 1, deployedThenTraded());
     assert.equal(d.deploymentConfirmed, null);
     const text = gasAuditLines(d).join("\n");
-    assert.match(text, /deployment NOT yet confirmed on-chain/);
-    assert.ok(!/AccountDeployed confirmed/.test(text));
+    assert.ok(
+      !/AccountDeployed CONFIRMED/i.test(text),
+      "the module must not claim a chain fact it has not checked",
+    );
+    // It still reports the premium and says how it was derived — the claim it
+    // withholds is WHY the first op cost more, not THAT it did.
+    assert.match(text, /setup premium\s+6\.740054 USDG/);
   });
 });
 
@@ -207,5 +213,58 @@ describe("ordering and purity", () => {
     assert.equal(d.first, null);
     assert.equal(d.marginalGasUsdg, null);
     assert.doesNotThrow(() => gasAuditLines(d));
+  });
+});
+
+describe("units are the stable quantity; USDG carries the base fee", () => {
+  /** The canary's four operations, exactly as the chain reported them. */
+  const canary = (): GasOp[] => [
+    op({ id: 1, gasUsdg: 4.988562, gasWei: "1986770309895078", gasUnits: "6019786" }),
+    op({ id: 2, gasUsdg: 0.437126, gasWei: "174092174020172", gasUnits: "526934", createdAt: 1_788_000_100 }),
+    op({ id: 3, gasUsdg: 0.779371, gasWei: "310897376153100", gasUnits: "509850", createdAt: 1_788_000_200 }),
+    op({ id: 4, gasUsdg: 0.764720, gasWei: "305053139433360", gasUnits: "510760", createdAt: 1_788_000_300 }),
+  ];
+
+  it("splits on gas units when they are recorded, and says so", () => {
+    // Verified against the EntryPoint: op #1 used 6,019,786 units and emitted
+    // AccountDeployed; the later three used ~510,000. The gas PRICE over the
+    // same window ranged 0.330 to 0.610 gwei, and a USDG split hands that swing
+    // to the operations instead of to the chain.
+    const d = decomposeGas("0xacct", 1, canary());
+    assert.equal(d.premiumBasis, "units");
+    assert.equal(d.steadyMedianUnits, 510760);
+    assert.equal(d.setupPremiumUsdg!.toFixed(3), "4.565", "the unit-based figure");
+    assert.match(gasAuditLines(d).join("\n"), /split on GAS UNITS: 6019786 vs a steady 510760/);
+  });
+
+  it("the USDG split it replaces is measurably wrong, in a knowable direction", () => {
+    // Same operations, units stripped — which is every row written before the
+    // column existed. 4.224 against 4.565 is an 8% understatement of setup, and
+    // therefore an 8% OVERSTATEMENT of what the next trade will cost. That is
+    // the direction that talks a desk out of economic trades.
+    const stripped = canary().map((o) => ({ ...o, gasUnits: null }));
+    const d = decomposeGas("0xacct", 1, stripped);
+    assert.equal(d.premiumBasis, "usdg");
+    assert.equal(d.setupPremiumUsdg!.toFixed(3), "4.224");
+    assert.match(gasAuditLines(d).join("\n"), /carries the base-fee movement/);
+  });
+
+  it("falls back rather than failing when only some rows carry units", () => {
+    // A ledger mid-migration: the old rows have no units, the new ones do. The
+    // first op is the old one, so there is no unit pair to compare and the USDG
+    // path takes over — degraded, and labelled degraded.
+    const mixed = canary().map((o, i) => (i === 0 ? { ...o, gasUnits: null } : o));
+    const d = decomposeGas("0xacct", 1, mixed);
+    assert.equal(d.premiumBasis, "usdg");
+    assert.notEqual(d.setupPremiumUsdg, null);
+  });
+
+  it("reports the marginal cost as a share of a real trade", () => {
+    const d = decomposeGas("0xacct", 1, canary());
+    assert.equal(d.marginalGasUsdg, 0.764720);
+    assert.equal(d.marginalShareOfTradePct!.toFixed(1), "45.9");
+    // 45.9% of a 1.6665 USDG trade. Stated plainly because it is the number
+    // that decides whether trading at this size is economic at all.
+    assert.match(gasAuditLines(d).join("\n"), /45\.9% of a typical 1\.666500 USDG trade/);
   });
 });
