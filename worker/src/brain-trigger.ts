@@ -54,17 +54,37 @@ export interface TriggerConfig {
   cooldownSec: Partial<Record<TriggerReason, number>>;
 }
 
+/**
+ * How long Brain may sleep with nothing happening, in seconds.
+ *
+ * FOUR HOURS BY DEFAULT — long enough that a quiet market costs six runs a day
+ * rather than 360, short enough that an agent is never silent for a session.
+ *
+ * Configurable because SHADOW EVALUATION wants a tighter cadence than
+ * production does: gathering ten real decisions at four hours apart takes a day
+ * and a half, and the whole point of shadow mode is learning what the thing
+ * does before it matters. Bounded on both sides — under a minute is refused,
+ * because a scheduled review firing faster than the tick cannot mean anything,
+ * and the per-reason cooldowns and the per-run budget still apply underneath.
+ */
+export function scheduledInterval(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number((env.MERRYMEN_BRAIN_INTERVAL_SEC ?? "").trim());
+  if (!Number.isFinite(raw) || raw < 60) return 4 * 3600;
+  return Math.floor(raw);
+}
+
 export const DEFAULT_TRIGGERS: TriggerConfig = {
-  // Four hours. Long enough that a quiet market costs six runs a day rather
-  // than 360; short enough that an agent is never silent for a session.
-  scheduledIntervalSec: 4 * 3600,
+  scheduledIntervalSec: scheduledInterval(),
   priceMovePct: 0.03,
   equityMovePct: 0.05,
   cooldownSec: {
     "price-move": 1800,
     "portfolio-change": 1800,
     "news-event": 900,
-    "scheduled-review": 3600,
+    // Never longer than the interval itself — a cooldown above it would silence
+    // the very review it is meant to space out, which is how a configurable
+    // cadence quietly becomes no cadence.
+    "scheduled-review": Math.min(3600, Math.max(30, Math.floor(scheduledInterval() / 2))),
     // A person asking is not rate-limited to half an hour, but it is still
     // bounded — a stuck client must not become a spend loop.
     "user-request": 60,

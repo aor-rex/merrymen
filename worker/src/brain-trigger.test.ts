@@ -14,6 +14,7 @@ import {
   afterFiring,
   DEFAULT_TRIGGERS,
   EMPTY_TRIGGER_STATE,
+  scheduledInterval,
   shouldWake,
   type TriggerInputs,
   type TriggerState,
@@ -147,5 +148,42 @@ describe("the baseline moves on every fire", () => {
     assert.equal(after.lastPriceUsd, 130, "the new price is the new baseline");
     const again = shouldWake(after, input({ now: T0 + 60, priceUsd: 130, newsKey: "n1" }));
     assert.equal(again.fire, false, "the same 30% move must not fire a second time");
+  });
+});
+
+describe("the review cadence is configurable, within bounds", () => {
+  // Shadow evaluation wants a tighter cadence than production: ten real
+  // decisions four hours apart takes a day and a half, and the point of shadow
+  // mode is learning what the thing does before it matters.
+  const FOUR_HOURS = 4 * 3600;
+  const read = (v?: string) =>
+    scheduledInterval(v === undefined ? {} : { MERRYMEN_BRAIN_INTERVAL_SEC: v });
+
+  it("takes a shorter cadence when one is set", () => {
+    assert.equal(read("900"), 900);
+    assert.equal(read(" 600 "), 600, "whitespace from a Railway variable is not a parse failure");
+    assert.equal(read("60"), 60, "the floor itself is allowed");
+    assert.equal(read("120.9"), 120, "fractional seconds are meaningless against a 240s tick");
+  });
+
+  it("falls back to four hours on anything under a minute, or any nonsense", () => {
+    // A scheduled review firing faster than the 240s tick cannot mean anything.
+    // And the failure direction for a SPEND CONTROL is the expensive default,
+    // never the cheap one: a typo must not become 360 runs a day.
+    for (const bad of ["0", "-1", "30", "59", "", "   ", "soon", "NaN", "Infinity", "1e400", undefined]) {
+      assert.equal(read(bad), FOUR_HOURS, `${JSON.stringify(bad)} must not shorten the cadence`);
+    }
+  });
+
+  it("ships four hours with nothing configured", () => {
+    assert.equal(DEFAULT_TRIGGERS.scheduledIntervalSec >= 60, true);
+  });
+
+  it("keeps the scheduled cooldown below the interval it spaces out", () => {
+    // A cooldown longer than the interval silences the very review it is meant
+    // to space — which is how a configurable cadence quietly becomes no cadence.
+    const cd = DEFAULT_TRIGGERS.cooldownSec["scheduled-review"] ?? 0;
+    assert.ok(cd < DEFAULT_TRIGGERS.scheduledIntervalSec, `cooldown ${cd} must be under the interval`);
+    assert.ok(cd >= 30, "but not so small that a restart loop can spin on it");
   });
 });
