@@ -68,6 +68,15 @@ import { drainCommandResults, writeCommand } from "./command-files";
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
 /**
+ * Mirror passes to wait before the cohort report runs.
+ *
+ * A child restarted by this deploy needs one tick (240s) to repopulate its
+ * positions and one mirror cycle to push them up. At 15s a pass this is a
+ * little over five minutes, comfortably past both.
+ */
+const COHORT_VET_AFTER_PASSES = 22;
+let cohortPasses = 0;
+/**
  * FLOOR for the staleness threshold. The real one is DERIVED per child — see
  * `staleThresholdSec`.
  *
@@ -1291,7 +1300,10 @@ export async function runOrchestrator(): Promise<void> {
   await runAccountingDiagnosisIfAsked();
   await runReconstructionDryRunIfAsked();
   await runGasAuditIfAsked();
-  await runCohortVettingIfAsked();
+  // The cohort report is NOT here. It reads `positions`, which the mirror
+  // empties and refills per agent, so at startup it would be reading a table
+  // this very deploy just cleared. It runs from the loop instead — see
+  // COHORT_VET_AFTER_PASSES.
 
   const stop = () => {
     stopping = true;
@@ -1321,6 +1333,15 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
+      //
+      // The mirror REPLACES positions per agent, so between a child restarting
+      // and its first tick the shared table is empty for an agent that plainly
+      // has holdings. Run at startup — where this used to be — every reading
+      // was of a table the mirror had just emptied, and the report announced
+      // that the fleet held nothing. It is worth more late than wrong early.
+      cohortPasses += 1;
+      if (cohortPasses === COHORT_VET_AFTER_PASSES) await runCohortVettingIfAsked();
       await ferryCommands2();
       await fleetHealth();
     }
