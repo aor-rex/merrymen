@@ -56,6 +56,7 @@ import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
+import { datasetLines, viewRun } from "./brain-dataset";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -902,6 +903,60 @@ async function runCohortVettingIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * THE SHADOW DATASET. READ ONLY. `MERRYMEN_BRAIN_DATASET=1`.
+ *
+ * Every field is already persisted; this is the only way to read it back.
+ * Shared Postgres is private-network-only and `railway logs` is a 503-line
+ * snapshot a 24-child fleet fills in about a minute, so a cohort collected over
+ * an afternoon is durable in the database and invisible to anyone looking.
+ */
+async function runBrainDatasetIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_BRAIN_DATASET ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("brain dataset asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const rows = (await shared
+      .prepare(
+        `SELECT d.agent_id, COALESCE(a.name, '') AS name, d.at, d.symbol, d.action, d.size_usdg,
+                d.reason, d.signals_json
+           FROM decisions d
+           LEFT JOIN agents a ON a.smart_account = d.agent_id
+          WHERE d.source = 'brain-shadow'
+          ORDER BY d.at ASC`,
+      )
+      .all()) as unknown as Record<string, unknown>[];
+
+    const views = rows.map((r) => {
+      let signals: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(r.signals_json ?? "{}")) as unknown;
+        if (parsed && typeof parsed === "object") signals = parsed as Record<string, unknown>;
+      } catch {
+        // A row whose blob will not parse is still a decision that happened.
+        // Dropping it would quietly shrink the denominator of every rate below.
+      }
+      return viewRun({
+        agentId: String(r.agent_id ?? ""),
+        agentName: String(r.name ?? ""),
+        at: Number(r.at ?? 0),
+        symbol: r.symbol === null || r.symbol === undefined ? null : String(r.symbol),
+        action: r.action === null || r.action === undefined ? null : String(r.action),
+        sizeUsdg: r.size_usdg === null || r.size_usdg === undefined ? null : Number(r.size_usdg),
+        thesis: r.reason === null || r.reason === undefined ? null : String(r.reason),
+        signals,
+      });
+    });
+    for (const line of datasetLines(views)) log(`data| ${line}`);
+  } catch (e) {
+    log(`brain dataset failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -1341,7 +1396,10 @@ export async function runOrchestrator(): Promise<void> {
       // was of a table the mirror had just emptied, and the report announced
       // that the fleet held nothing. It is worth more late than wrong early.
       cohortPasses += 1;
-      if (cohortPasses === COHORT_VET_AFTER_PASSES) await runCohortVettingIfAsked();
+      if (cohortPasses === COHORT_VET_AFTER_PASSES) {
+        await runCohortVettingIfAsked();
+        await runBrainDatasetIfAsked();
+      }
       await ferryCommands2();
       await fleetHealth();
     }
