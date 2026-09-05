@@ -75,7 +75,7 @@ const RECONCILE_MS = 15_000;
  * positions and one mirror cycle to push them up. At 15s a pass this is a
  * little over five minutes, comfortably past both.
  */
-const COHORT_VET_AFTER_PASSES = 22;
+const COHORT_VET_AFTER_PASSES = 20;
 let cohortPasses = 0;
 /**
  * FLOOR for the staleness threshold. The real one is DERIVED per child — see
