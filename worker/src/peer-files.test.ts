@@ -34,6 +34,7 @@ const thesis = (over: Partial<PublicThesis> = {}): PublicThesis => ({
   paper: false,
   outcome: "landed",
   outcomeText: "landed",
+  shadow: false,
   reason: "Depth cleared the floor on the third pass and the buyer count held.",
   said: 1,
   at: 1_800_000_000,

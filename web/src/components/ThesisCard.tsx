@@ -84,7 +84,9 @@ export function ThesisCard({
 
         {/* Subordinate. A thesis has none of this — its words are the post. */}
         {trade && (
-          <div className={`mm-trade${turned ? " turned" : ""}${t.paper ? " sim" : ""}`}>
+          <div
+            className={`mm-trade${turned ? " turned" : ""}${t.paper ? " sim" : ""}${t.shadow ? " shadow" : ""}`}
+          >
             {t.symbol && <span className="sym mono">{t.symbol}</span>}
             {t.sizeUsdg !== null && <span className="amt mono">{money(t.sizeUsdg)}</span>}
             {t.outcomeText && <span className="out mono">{t.outcomeText}</span>}

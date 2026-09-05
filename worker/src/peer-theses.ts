@@ -24,7 +24,7 @@
 import type { Db } from "./db";
 import { getIdentityStore } from "./identity-store";
 import {
-  PUBLISHABLE_STRATEGIES,
+  PUBLISHABLE_SOURCES,
   publishableThesis,
   type PublicThesis,
   type ThesisRow,
@@ -41,7 +41,10 @@ export const PEER_WINDOW_SEC = 24 * 3600;
  * a source that publishableThesis is perfectly happy to publish, so a peer would
  * quietly go quiet. Built from the same constant thesis-policy gates on.
  */
-const SOURCES: readonly string[] = ["strategist", ...PUBLISHABLE_STRATEGIES.map((s) => `strategy:${s}`)];
+// The same list the public feed uses, from the same module. "A peer file can
+// only contain what the public feed publishes" is a property only while these
+// two readers are incapable of disagreeing about what that is.
+const SOURCES: readonly string[] = PUBLISHABLE_SOURCES;
 
 /** At most this many theses reach one child, newest first. A prompt has a budget. */
 export const PEER_THESIS_LIMIT = 24;

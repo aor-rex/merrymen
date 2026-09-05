@@ -18,7 +18,9 @@
  * exact asymmetry the move was made to prevent.
  */
 export {
+  PUBLISHABLE_SOURCES,
   PUBLISHABLE_STRATEGIES,
+  SHADOW_SOURCES,
   REJECT_RULES,
   classifyDrop,
   outcomeOf,
