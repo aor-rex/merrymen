@@ -63,6 +63,21 @@ export interface BrainDecision {
   depth_used: string;
   escalation_reasons: string[];
   candidate_action: string | null;
+  /**
+   * Where each lens landed, on every run rather than only escalated ones.
+   *
+   * Structure only — no `note`, no prose. The service drops the model's words
+   * before sending, so nothing here needs the address backstop that `thesis`
+   * needs, and nothing here grows with what a news source decided to write.
+   * Optional because an older Brain build does not send it, and a decision that
+   * arrives without the measurement is still a decision.
+   */
+  analyst_views?: {
+    lens: string;
+    direction: "buy" | "sell" | "hold" | "no-data";
+    confidence: number;
+    evidence_strength: number;
+  }[];
   cost: BrainCost;
   models: { node: string; provider: string; model: string }[];
 }

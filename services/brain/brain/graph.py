@@ -42,6 +42,7 @@ from .escalation import EscalationVerdict, assess as assess_escalation
 from .gate import GateResult, assess
 from .llm import Llm, ProviderError, extract_json
 from .schemas import (
+    AnalystSignal,
     BrainDecision,
     Cost,
     DecideRequest,
@@ -305,6 +306,7 @@ class BrainGraph:
                 return self._assemble(
                     req, budget, gate, candidate, bull="", bear="",
                     depth_used="analysts", escalation=escalation, candidate_action=candidate_action,
+                    views=views,
                 )
             stages = "full"
 
@@ -328,7 +330,7 @@ class BrainGraph:
         return self._assemble(
             req, budget, gate, data, bull=bull, bear=bear,
             depth_used="full" if stages == "full" else "analysts+debate",
-            escalation=escalation, candidate_action=candidate_action,
+            escalation=escalation, candidate_action=candidate_action, views=views,
         )
 
     def _assemble(
@@ -343,6 +345,7 @@ class BrainGraph:
         depth_used: str,
         escalation: EscalationVerdict,
         candidate_action: str | None,
+        views: list[AnalystView],
     ) -> BrainDecision:
         # ── THE GATE WINS, whatever the model said ──────────────────────────
         #
@@ -400,6 +403,23 @@ class BrainGraph:
             candidate_action=(
                 candidate_action if (candidate_action and depth_used != "analysts") else None
             ),  # type: ignore[arg-type]
+            # Recorded on EVERY run, escalated or not. `escalation_reasons` can
+            # only describe the runs that escalated, and in production almost
+            # none do — the size and opening rules are off on measured evidence,
+            # a hold never escalates by design, and every production decision so
+            # far has been a hold. Without this the live data says "no
+            # escalation" over and over and cannot say whether that was right.
+            # No extra model call: the analysts were already asked, and already
+            # answered in fields.
+            analyst_views=[
+                AnalystSignal(
+                    lens=v.lens[:40],
+                    direction=v.direction,
+                    confidence=v.confidence,
+                    evidence_strength=v.evidence_strength,
+                )
+                for v in views
+            ],
             cost=budget.cost(),
             models=budget.models,
         )

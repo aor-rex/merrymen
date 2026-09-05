@@ -112,6 +112,28 @@ class ChangedView(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
+class AnalystSignal(BaseModel):
+    """
+    One lens's verdict, as numbers.
+
+    A flattened `AnalystView` with the prose left behind — see the comment on
+    `BrainDecision.analyst_views`. There is no free-text field here at all,
+    which is what makes it safe to persist verbatim: `lens` is one of our own
+    names, `direction` is a closed set, and the two floats are clamped to [0,1]
+    by `parse_view` before they arrive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lens: str = Field(max_length=40)
+    direction: Literal["buy", "sell", "hold", "no-data"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    #: How much the lens had to work with, as distinct from how sure it is. A
+    #: confident read of thin evidence and a confident read of thick evidence
+    #: are different things, and only one of them is worth escalating over.
+    evidence_strength: float = Field(ge=0.0, le=1.0)
+
+
 class BrainDecision(BaseModel):
     """
     The one object a Merryman's thinking produces.
@@ -164,6 +186,26 @@ class BrainDecision(BaseModel):
     #: The action the analysts alone arrived at, when a deeper pass then ran.
     #: This is the whole measurement: escalation only matters where these differ.
     candidate_action: Action | None = None
+    #: WHERE THE LENSES ACTUALLY LANDED, on every run — not only escalated ones.
+    #:
+    #: `escalation_reasons` records why a run escalated. It cannot record what a
+    #: run that did NOT escalate looked like, and in production almost none do:
+    #: the size and opening rules are off on measured evidence, a hold never
+    #: escalates by design, and every production decision so far has been a
+    #: hold. So the live data says "no escalation" over and over and cannot say
+    #: whether that was right.
+    #:
+    #: These are the fields the analysts already returned and the escalation
+    #: gate already compared. Carrying them costs no extra model call and makes
+    #: "how often did the lenses actually split, and should we have escalated?"
+    #: answerable from production rather than only from the fixture suite.
+    #:
+    #: STRUCTURE ONLY, NEVER THE NOTE. Each view also carries up to 400
+    #: characters of model prose derived from news and social text. That is an
+    #: injection surface, it is the largest thing in the record, and it is not
+    #: what the question needs — a direction and two floats are. The prose stays
+    #: in the thesis, which passes the address backstop before anyone reads it.
+    analyst_views: list[AnalystSignal] = Field(default_factory=list)
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 

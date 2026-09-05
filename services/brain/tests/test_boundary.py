@@ -226,3 +226,86 @@ def test_brains_epoch_floor_agrees_with_core():
     g = gate_assess(epoch_one)
     assert g.verdict == "refuse"
     assert not g.may_size, "epoch 1 is forensic; nothing may be sized against it"
+
+
+# ── the measurement boundary ────────────────────────────────────────────────
+#
+# A rule that fires almost never in production is indistinguishable, from the
+# data, from a rule that is broken. Escalation is now exactly that: the size and
+# opening rules are off on measured evidence, a hold never escalates by design,
+# and every production decision so far has been a hold. `escalation_reasons`
+# describes only the runs that escalated, so the live record says "no
+# escalation" over and over and cannot say whether that was right.
+
+
+def test_every_run_records_where_the_lenses_landed():
+    """The analysts already answered in fields. Nothing throws that away."""
+    import inspect
+
+    from brain import graph as graph_mod
+
+    src = inspect.getsource(graph_mod.BrainGraph._assemble)
+    assert "analyst_views=" in src, "the decision must carry the lens verdicts"
+    assert "views" in inspect.signature(graph_mod.BrainGraph._assemble).parameters, (
+        "_assemble cannot record what it is not given"
+    )
+    # Both exits — the cheap one that stops at analyst depth and the deep one —
+    # have to pass them. The cheap exit is the common case in production, so a
+    # miss there is a miss everywhere that matters.
+    think = inspect.getsource(graph_mod.BrainGraph._think)
+    assert think.count("views=views") == 2, "both _assemble call sites must pass the views"
+
+
+def test_the_recorded_signal_carries_no_model_prose():
+    """
+    STRUCTURE ONLY. `AnalystView.note` is up to 400 characters derived from news
+    and social text — an injection surface, the largest thing in the record, and
+    not what the question needs. A direction and two floats are.
+    """
+    from brain.schemas import AnalystSignal
+
+    assert "note" not in AnalystSignal.model_fields
+    assert set(AnalystSignal.model_fields) == {
+        "lens",
+        "direction",
+        "confidence",
+        "evidence_strength",
+    }
+    # extra="forbid", so a note cannot be smuggled in by a caller either.
+    with pytest.raises(Exception):
+        AnalystSignal(lens="news", direction="buy", confidence=0.5, evidence_strength=0.5, note="x")
+
+
+def test_a_recorded_signal_is_bounded_on_every_field():
+    from brain.schemas import AnalystSignal
+
+    for bad in (
+        {"confidence": 1.4},
+        {"confidence": -0.1},
+        {"evidence_strength": 2.0},
+        {"direction": "moon"},
+        {"lens": "x" * 41},
+    ):
+        kw = {"lens": "news", "direction": "buy", "confidence": 0.5, "evidence_strength": 0.5}
+        kw.update(bad)
+        with pytest.raises(Exception):
+            AnalystSignal(**kw)
+
+
+def test_the_signal_survives_a_lens_that_said_nothing():
+    """
+    `no-data` is a real answer and the one most worth recording — a run where
+    three lenses had nothing is a run whose hold means something different from
+    a run where three lenses agreed. It must not be dropped for being empty.
+    """
+    from brain.schemas import AnalystSignal
+
+    view = parse_view("news", "the model returned prose instead of json")
+    assert view.direction == "no-data"
+    s = AnalystSignal(
+        lens=view.lens,
+        direction=view.direction,
+        confidence=view.confidence,
+        evidence_strength=view.evidence_strength,
+    )
+    assert s.direction == "no-data" and s.confidence == 0.0

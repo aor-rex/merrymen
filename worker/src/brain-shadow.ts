@@ -342,6 +342,14 @@ async function persist(
       depth_used: d.depth_used,
       escalation_reasons: d.escalation_reasons,
       candidate_action: d.candidate_action,
+      // WHERE THE LENSES LANDED. `escalation_reasons` can only describe a run
+      // that escalated, and in production almost none do — so without this the
+      // tape says "no escalation" every time and cannot say whether that was
+      // right. `?? []` rather than omitted: a decision from a Brain build that
+      // predates the field should read as "not recorded", and an absent key and
+      // an empty list say that equally well while the empty list keeps every
+      // row the same shape for whatever reads them later.
+      analyst_views: d.analyst_views ?? [],
       cost: d.cost,
       models: d.models,
       latency_seconds: result.seconds,
