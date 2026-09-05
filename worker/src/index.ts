@@ -5515,7 +5515,19 @@ async function main() {
           // WHICH QUESTION WAS ASKED. "Should I trim what I hold" and "is this
           // worth opening" produce the same words in a decision row and are
           // entirely different observations, so the trace has to say which.
-          else console.log(`[${short(agentId)}] [brain] about ${focusLabel(focus)}`);
+          else {
+            // WHAT IT WAS ASKED, AND WHAT IT HAD TO ANSWER WITH. A run that
+            // reports no-data because the oracle refused and one that reports
+            // it because nobody asked look identical in a decision row, and
+            // they are the two states this whole exercise exists to separate.
+            const series = technicalSeries
+              ? `${technicalSeries.series.points} rounds over ` +
+                `${Math.round(technicalSeries.series.spanSec / 3600)}h`
+              : history.read
+                ? "no rounds published for this feed"
+                : "the feed history could not be read";
+            console.log(`[${short(agentId)}] [brain] about ${focusLabel(focus)} · technical: ${series}`);
+          }
         }
       } catch (e) {
         // NEVER TAKES A TICK DOWN. Shadow thinking is the least important thing
