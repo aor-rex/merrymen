@@ -54,6 +54,7 @@ import { planReconstruction, reconstructionLines } from "./accounting-reconstruc
 import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
+import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -699,6 +700,84 @@ async function runAccountingDiagnosisIfAsked(): Promise<void> {
  * private network — and because this half additionally needs the RPC, which the
  * orchestrator already has configured.
  */
+/**
+ * WHERE THE GAS WENT, for one or more named accounts. READ ONLY.
+ *
+ * `MERRYMEN_GAS_AUDIT=0xabc,0xdef` (or `all`). Only SELECTs, and the module it
+ * calls has no database handle at all — it is handed rows and returns strings,
+ * which is the same shape `accounting-preview` uses and for the same reason:
+ * a reporting path that cannot write cannot be argued with.
+ *
+ * Named accounts rather than a fleet default because this prints per-operation
+ * evidence, and `railway logs` is a 503-line snapshot shared with a mirror that
+ * writes ~200 lines a minute. A report that does not fit is not a report.
+ */
+async function runGasAuditIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_GAS_AUDIT ?? "").trim();
+  if (!want) return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("gas audit asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const wanted = want
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const all = wanted.includes("all");
+
+    const agents = (await shared
+      .prepare("SELECT smart_account, COALESCE(epoch, 1) AS epoch FROM agents")
+      .all()) as unknown as { smart_account: string; epoch: number }[];
+
+    for (const a of agents) {
+      const account = String(a.smart_account ?? "");
+      const key = account.toLowerCase();
+      if (!all && !wanted.some((w) => key.startsWith(w))) continue;
+      const epoch = Number(a.epoch ?? 1);
+
+      // OLDEST FIRST, and that ordering is load-bearing: "the first landed op"
+      // is where any account-deployment cost lands, and a descending sort would
+      // attribute it to the most recent trade instead.
+      const rows = (await shared
+        .prepare(
+          `SELECT id, kind, target, amount_usdg, status, user_op_hash, tx_hash,
+                  gas_wei, sponsored_gas_wei, gas_usdg, epoch, created_at
+             FROM trades
+            WHERE LOWER(agent_id) = ? AND epoch = ?
+            ORDER BY created_at ASC, id ASC`,
+        )
+        .all(key, epoch)) as unknown as Record<string, unknown>[];
+
+      const ops: GasOp[] = rows.map((r) => ({
+        id: Number(r.id ?? 0),
+        kind: String(r.kind ?? ""),
+        target: String(r.target ?? ""),
+        amountUsdg: Number(r.amount_usdg ?? 0),
+        status: String(r.status ?? ""),
+        userOpHash: r.user_op_hash === null || r.user_op_hash === undefined ? null : String(r.user_op_hash),
+        txHash: r.tx_hash === null || r.tx_hash === undefined ? null : String(r.tx_hash),
+        gasWei: r.gas_wei === null || r.gas_wei === undefined ? null : String(r.gas_wei),
+        sponsoredGasWei:
+          r.sponsored_gas_wei === null || r.sponsored_gas_wei === undefined ? null : String(r.sponsored_gas_wei),
+        gasUsdg: r.gas_usdg === null || r.gas_usdg === undefined ? null : Number(r.gas_usdg),
+        epoch: Number(r.epoch ?? 1),
+        createdAt: Number(r.created_at ?? 0),
+      }));
+
+      if (ops.length === 0) {
+        log(`gas| ${account} epoch ${epoch} — no operations recorded`);
+        continue;
+      }
+      for (const line of gasAuditLines(decomposeGas(account, epoch, ops))) log(`gas| ${line}`);
+    }
+  } catch (e) {
+    log(`gas audit failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -1096,6 +1175,7 @@ export async function runOrchestrator(): Promise<void> {
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
   await runReconstructionDryRunIfAsked();
+  await runGasAuditIfAsked();
 
   const stop = () => {
     stopping = true;
