@@ -877,6 +877,7 @@ async function runCohortVettingIfAsked(): Promise<void> {
     const rank: Record<string, number> = {
       READY: 0,
       "READY-WHEN-MARKET-OPENS": 1,
+      "READY-CANDIDATE-ONLY": 2,
     };
     verdicts.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9) || y.equityUsdg - x.equityUsdg);
     for (const line of cohortLines(verdicts)) log(`cohort| ${line}`);

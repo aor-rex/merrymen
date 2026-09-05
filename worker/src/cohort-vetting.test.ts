@@ -70,9 +70,9 @@ describe("a candidate has to clear the gate before it is worth a model call", ()
     assert.equal(vetCandidate(cand({ beatAt: null }), NOW).verdict, "BLOCKED-IDLE");
   });
 
-  it("rejects an empty book — no position, no question", () => {
-    assert.equal(vetCandidate(cand({ positions: [] }), NOW).verdict, "BLOCKED-NO-POSITION");
-    assert.equal(vetCandidate(cand({ positions: [pos({ valueUsdg: 0 })] }), NOW).verdict, "BLOCKED-NO-POSITION");
+  it("an empty book is now a CANDIDATE question, not a rejection", () => {
+    assert.equal(vetCandidate(cand({ positions: [] }), NOW).verdict, "READY-CANDIDATE-ONLY");
+    assert.equal(vetCandidate(cand({ positions: [pos({ valueUsdg: 0 })] }), NOW).verdict, "READY-CANDIDATE-ONLY");
   });
 
   it("checks the reasons in the order they actually bite", () => {

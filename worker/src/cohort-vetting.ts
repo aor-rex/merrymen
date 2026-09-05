@@ -95,7 +95,7 @@ export type CandidateVerdict =
   | "BLOCKED-CONTRIBUTIONS-UNKNOWN"
   | "BLOCKED-NO-CAPITAL"
   | "BLOCKED-LEGACY-HISTORY"
-  | "BLOCKED-NO-POSITION";
+  | "READY-CANDIDATE-ONLY";
 
 export interface CandidateVerdictDetail {
   account: string;
@@ -197,7 +197,20 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
 
   // ── 3. SOMETHING TO REASON ABOUT ──────────────────────────────────────────
   if (!focus || focus.valueUsdg <= 0) {
-    return verdict("BLOCKED-NO-POSITION", "holds nothing, so there is no question in front of it");
+    // NOT A BLOCKER ANY MORE. An all-cash agent used to be unaskable, because
+    // the focus was the largest holding and it had none. It is now offered a
+    // CANDIDATE from its own configured universe, so the question it gets is
+    // "is anything worth opening?" — the one whose answer is a BUY, and the one
+    // an empty book is actually facing.
+    //
+    // Qualified rather than plain READY: this report reads shared Postgres,
+    // which carries positions but not the settings that define an agent's
+    // universe, so whether a priceable candidate exists cannot be confirmed
+    // from here. The run itself says.
+    return verdict(
+      "READY-CANDIDATE-ONLY",
+      "holds nothing, so it will be asked whether to OPEN something from its own universe",
+    );
   }
 
   // ── 4. THE MARKET IS LEGIBLE ──────────────────────────────────────────────
