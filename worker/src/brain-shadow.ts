@@ -73,6 +73,8 @@ export interface ShadowInputs {
     symbol: string;
     instrumentClass: "equity-token" | "crypto-native" | "memecoin" | "stablecoin";
     priceUsd: string | null;
+    /** Was that mark stale when the decision was made? Replay has to know. */
+    priceStale: boolean;
     signals: Record<string, string>;
   };
   /**
@@ -222,7 +224,7 @@ export async function runShadow(
     tier: "research",
   });
 
-  await persist(i.agentId, runId, triggerId, trigger, snapshot, result, log);
+  await persist(i.agentId, runId, triggerId, trigger, snapshot, result, i.market, log);
   return { ran: true, trigger, snapshot, result };
 }
 
@@ -269,6 +271,8 @@ async function persist(
   trigger: TriggerVerdict,
   snapshot: PortfolioSnapshot,
   result: BrainResult,
+  /** The mark the decision was made against — replay cannot work without it. */
+  market: { priceUsd: string | null; priceStale: boolean },
   log: (m: string) => void,
 ): Promise<void> {
   if (!result.ok) {
@@ -354,6 +358,13 @@ async function persist(
       trigger_reason: trigger.reason,
       trigger_detail: trigger.detail,
       instrument_id: d.instrument_id,
+      // THE PRICE IT DECIDED AT. Without this a decision cannot be replayed at
+      // all: "was this call right?" is a question about what happened next, and
+      // answering it needs the mark the call was made against. Nothing else in
+      // the row carries it, and reconstructing it later from an equity series
+      // would be guessing at a mark from a total.
+      price_usd: market.priceUsd,
+      price_stale: market.priceStale,
       confidence: d.confidence,
       suggested_delta_usdg: d.suggested_delta_usdg,
       target_position_usdg: d.target_position_usdg,

@@ -5422,6 +5422,7 @@ async function main() {
               // like evidence.
               instrumentClass: instrumentClassOf(focus.token),
               priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+              priceStale: focus.priceStale,
               // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
               // no data is OMITTED rather than filled with a plausible sentence
               // — Brain answers NO DATA AVAILABLE for what is missing, which is
