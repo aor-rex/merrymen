@@ -108,7 +108,17 @@ export function viewRun(r: ShadowRun): RunView {
     symbol: r.symbol ?? "?",
     instrumentId: str(s.instrument_id, "?"),
     trigger: str(s.trigger_reason, "?"),
-    action: (r.action ?? "?").toLowerCase(),
+    // REFUSED IS NOT A TRADE, and it is not a hold either.
+    //
+    // A run that produced no decision writes a row with NO action field at all
+    // — deliberately, so that "decided nothing" and "decided, with no size" are
+    // different row shapes. Mapping that absence to a placeholder and then
+    // testing `!== "hold"` counted every refusal as a BUY/SELL: the first live
+    // report announced "1 BUY/SELL, size 0.000000 USDG", which was a refusal
+    // wearing a trade's clothes. A report that invents a trade is worse than no
+    // report, because this one exists to answer whether Brain ever proposes one.
+    action:
+      r.action === null || r.action === undefined || r.action === "" ? "refused" : r.action.toLowerCase(),
     confidence: num(s.confidence),
     deltaUsdg: delta,
     lenses,
@@ -164,7 +174,7 @@ export function datasetLines(runs: readonly RunView[]): string[] {
           `· ${r.calls}c ${r.tokens}t $${r.usd.toFixed(4)} ${r.seconds.toFixed(1)}s`,
       );
       out.push(`      lenses ${r.lenses.map((l) => `${l.lens}:${l.direction}`).join(" ") || "none recorded"}`);
-      if (r.action !== "hold") {
+      if (r.action === "buy" || r.action === "sell") {
         out.push(
           `      economics ${r.economics} · edge ${r.expectedEdgeUsdg ?? "—"} vs gas ${r.expectedGasUsdg ?? "—"} ` +
             `micro-USDG` +
@@ -185,8 +195,11 @@ export function datasetLines(runs: readonly RunView[]): string[] {
 
   const actions = count((r) => r.action);
   const vis = count((r) => r.visibility);
-  const econ = count((r) => (r.action === "hold" ? "n/a (hold)" : r.economics));
-  const trades = runs.filter((r) => r.action !== "hold");
+  const econ = count((r) => (r.action === "buy" || r.action === "sell" ? r.economics : `n/a (${r.action})`));
+  // ONLY AN EXPLICIT BUY OR SELL IS A TRADE. A hold is not, a refusal is not,
+  // and an action nobody recognises is certainly not.
+  const trades = runs.filter((r) => r.action === "buy" || r.action === "sell");
+  const refused = runs.filter((r) => r.action === "refused").length;
   const escalated = runs.filter((r) => r.escalated).length;
 
   const conf = runs.map((r) => r.confidence).sort((a, b) => a - b);
@@ -205,6 +218,7 @@ export function datasetLines(runs: readonly RunView[]): string[] {
     `confidence     median ${median.toFixed(2)} · min ${(conf[0] ?? 0).toFixed(2)} · max ${(conf[conf.length - 1] ?? 0).toFixed(2)}`,
   );
   out.push(`escalated      ${escalated} of ${n} (${pct(escalated, n)})`);
+  out.push(`refused        ${refused} — runs that produced no decision at all`);
   out.push(`economics      ${JSON.stringify(econ)}`);
   out.push(
     `cost           ${(runs.reduce((s, r) => s + r.usd, 0)).toFixed(4)} USD total · ` +

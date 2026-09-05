@@ -168,3 +168,46 @@ describe("the report answers the questions the cohort exists to ask", () => {
     assert.deepEqual(datasetLines([]), ["no shadow decisions recorded yet"]);
   });
 });
+
+describe("a refusal is not a trade, and the report must not invent one", () => {
+  // A run that produced no decision writes a row with NO action field at all —
+  // deliberately, so "decided nothing" and "decided, with no size" are
+  // different row shapes. The first live report read that absence as a
+  // placeholder, tested `!== "hold"`, and announced "1 BUY/SELL, size 0.000000
+  // USDG". There was no trade. This report exists to answer whether Brain ever
+  // proposes one, so inventing one is the worst thing it can do.
+  const refusal = () =>
+    viewRun({
+      agentId: "0x3E34",
+      agentName: "tester",
+      at: 1_788_600_000,
+      symbol: null,
+      action: null,
+      sizeUsdg: null,
+      thesis: "no decision (refused): portfolio-quality-insufficient",
+      signals: { trigger_reason: "scheduled-review", cost: null },
+    });
+
+  it("classifies a row with no action as refused", () => {
+    assert.equal(refusal().action, "refused");
+  });
+
+  it("counts it as neither a trade nor a hold", () => {
+    const text = datasetLines([refusal(), viewRun(run())]).join("\n");
+    assert.match(text, /BUY\/SELL\s+none yet/);
+    assert.match(text, /holds\s+1 —/, "the hold count is the real holds only");
+    assert.match(text, /refused\s+1 — runs that produced no decision at all/);
+  });
+
+  it("does not put a refusal in the economics table as a judged trade", () => {
+    assert.match(datasetLines([refusal()]).join("\n"), /"n\/a \(refused\)":1/);
+  });
+
+  it("still counts a genuine buy", () => {
+    const text = datasetLines([
+      refusal(),
+      viewRun(run({ action: "buy" }, { suggested_delta_usdg: 2_000_000, expected_trade_gas_usdg: 764_720 })),
+    ]).join("\n");
+    assert.match(text, /BUY\/SELL\s+1 — sizes 2\.000000 USDG/);
+  });
+});
