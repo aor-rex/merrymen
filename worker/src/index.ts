@@ -93,7 +93,9 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
-import { memoryLines, sentimentLine, technicalLine } from "./brain-material";
+import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { readFeedHistory } from "./read-feed-history";
+import { buildTechnical, renderTechnical } from "./research/technical";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
@@ -5334,6 +5336,18 @@ async function main() {
         // shadowable, three more with evidenced capital and no holdings sitting
         // silent. The question whose answer is a BUY is exactly the one an
         // empty book poses.
+        // THE ORACLE'S OWN HISTORY, for whatever this run is about.
+        //
+        // 400 published rounds in ONE multicall — about two months for a stock
+        // or ETF token, and the only price history this product can honestly
+        // draw. `read: false` means the chain would not answer, which is a
+        // different fact from a feed with no history, and neither becomes a
+        // series of invented points.
+        //
+        // Best-effort: a research read must never be the reason a tick fails.
+        const feedFor = (token: string): `0x${string}` | null =>
+          STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
+
         const focus = chooseFocus({
           agentId,
           positions: positions.map((p) => ({
@@ -5354,6 +5368,36 @@ async function main() {
           // `readPeers` never throws: absent, unreadable and malformed all mean
           // "nothing this window", which is a correct state and not a fault.
           const wire = readPeers(merrymenHome());
+
+          const focusView = {
+            symbol: focus.symbol,
+            priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+            priceSource: focus.priceSource,
+            priceStale: focus.priceStale,
+            valueUsdg: focus.heldUsdg,
+            held: focus.held,
+            equityUsdg: Number(equityUsdg),
+            cashUsdg: Number(balances.cashUsdg),
+            positionCount: positions.length,
+          };
+
+          // The series, or null when this instrument has no feed to walk and
+          // the one-sentence fallback is the honest answer.
+          const history = await readFeedHistory(feedFor(focus.token), mainnetClient()).catch(() => ({
+            points: [],
+            read: false,
+          }));
+          const technicalSeries =
+            history.read && history.points.length > 0
+              ? buildTechnical({
+                  symbol: focus.symbol,
+                  asOf: Math.floor(Date.now() / 1000),
+                  price: Number(focus.price8) / 1e8,
+                  priceSource: focus.priceSource,
+                  stale: focus.priceStale,
+                  points: history.points.map((p) => ({ at: p.at, priceUsd: p.px })),
+                })
+              : null;
           const brainPeers = wire.theses;
           const brainOwn = wire.own ?? [];
           const sentiment = sentimentLine(brainPeers, focus.symbol);
@@ -5433,17 +5477,20 @@ async function main() {
               // production decision said so in its own words, and the answer to
               // that is a real source, not a filler sentence.
               signals: {
-                technical: technicalLine({
-                  symbol: focus.symbol,
-                  priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
-                  priceSource: focus.priceSource,
-                  priceStale: focus.priceStale,
-                  valueUsdg: focus.heldUsdg,
-                  held: focus.held,
-                  equityUsdg: Number(equityUsdg),
-                  cashUsdg: Number(balances.cashUsdg),
-                  positionCount: positions.length,
-                }),
+                // A REAL SERIES, not one sentence about one price.
+                //
+                // 106 of 120 analyst readings came back no-data and the
+                // analysts were right: the technical lens was handed a single
+                // spot price, usually stale, and correctly reported that it had
+                // nothing. The oracle keeps every round it ever wrote, so 400
+                // of them — one multicall, measured at ~710ms — is roughly two
+                // months of real observations for any stock or ETF token.
+                //
+                // `technicalLine` remains the fallback for an instrument with
+                // no feed to walk, and it says so rather than going quiet.
+                technical: technicalSeries
+                  ? `${renderTechnical(technicalSeries)}\n${positionContext(focusView)}`
+                  : technicalLine(focusView),
                 // The only genuine sentiment this fleet has: what other
                 // Merrymen actually published. OMITTED ENTIRELY when nobody
                 // said anything — an empty section reads as "we looked and

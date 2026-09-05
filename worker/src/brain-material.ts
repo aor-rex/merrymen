@@ -81,6 +81,29 @@ const usdg = (micro: number): string => (micro / 1e6).toFixed(2);
  * discounts it — and the first production run proves it does, because that is
  * exactly what it did with the one line it had.
  */
+/**
+ * Where this instrument sits in THIS book — separate from what the market did.
+ *
+ * Split out because the two travel together but come from different places: the
+ * market series is the oracle's, the book is ours. When a real price series is
+ * available the series renderer states the price and the history, and this
+ * states the exposure; without one, `technicalLine` states both. Neither path
+ * may drop the book, because "should I trim this" and "should I open this" are
+ * different questions and the answer depends on which one it is.
+ */
+export function positionContext(f: FocusView): string {
+  const share = f.equityUsdg > 0 ? (f.valueUsdg / f.equityUsdg) * 100 : 0;
+  const position = f.held
+    ? `The book holds ${usdg(f.valueUsdg)} USDG of ${f.symbol}, which is ` +
+      `${share.toFixed(1)}% of ${usdg(f.equityUsdg)} USDG total equity, ` +
+      `across ${f.positionCount} position${f.positionCount === 1 ? "" : "s"}.`
+    : `The book holds NONE of ${f.symbol}. This is a candidate to open, not a ` +
+      `position to manage, and the only actions available are to buy it or to stay out. ` +
+      `Total equity is ${usdg(f.equityUsdg)} USDG across ` +
+      `${f.positionCount} position${f.positionCount === 1 ? "" : "s"}.`;
+  return `${position} Uncommitted cash is ${usdg(f.cashUsdg)} USDG.`;
+}
+
 export function technicalLine(f: FocusView): string {
   const share = f.equityUsdg > 0 ? (f.valueUsdg / f.equityUsdg) * 100 : 0;
   // HELD AND UNHELD ARE DIFFERENT QUESTIONS, and the sentence has to say which.
