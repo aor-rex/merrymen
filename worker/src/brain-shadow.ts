@@ -303,12 +303,28 @@ async function persist(
   }
 
   const d: BrainDecision = result.decision;
+  // WHERE THE LENSES LANDED, on the line rather than only in signals_json.
+  //
+  // The tape is the durable record and carries everything; this is the only
+  // view an operator has while a run is happening, and "it held" without "and
+  // every lens said no-data" is a trace that cannot be acted on. It is the
+  // difference between a hold that means the market is quiet and a hold that
+  // means the agent is blind — which is the distinction the whole shadow
+  // evaluation turns on.
+  const lenses = (d.analyst_views ?? [])
+    .map((v) => `${v.lens}:${v.direction}${v.direction === "no-data" ? "" : `/${v.confidence.toFixed(2)}`}`)
+    .join(" ");
   log(
     `[brain] ${d.action.toUpperCase()} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
       `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}`,
+  );
+  if (lenses) log(`[brain] lenses ${lenses}`);
+  log(
+    `[brain] economics ${d.economics ?? "unknown"} · edge ${d.expected_edge_usdg ?? "—"} vs gas ` +
+      `${d.expected_trade_gas_usdg ?? "unpriced"} micro-USDG (advisory; nothing enforces it yet)`,
   );
 
   await addDecision({
