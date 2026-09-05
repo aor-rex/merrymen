@@ -231,11 +231,17 @@ export function gasAuditLines(d: GasDecomposition): string[] {
   );
 
   for (const [i, o] of d.priced.entries()) {
+    // FULL HASHES on the per-operation lines. The summary below can abbreviate
+    // because it is a pointer; these are the evidence, and a truncated hash
+    // cannot be looked up — which makes it a decoration rather than a citation.
+    // NOTE `tx_hash` is the BUNDLED transaction and is shared with other
+    // people's operations; `user_op_hash` is the one that identifies ours.
     out.push(
       `  #${i + 1} ${o.kind.padEnd(14)} ${usd(o.gasUsdg)} USDG gas · ` +
-        `${o.amountUsdg.toFixed(4)} USDG notional · op ${short(o.userOpHash)} tx ${short(o.txHash)} ` +
-        `· wei ${o.gasWei ?? "—"}`,
+        `${o.amountUsdg.toFixed(4)} USDG notional · wei ${o.gasWei ?? "—"}`,
     );
+    out.push(`      op ${o.userOpHash ?? "—"}`);
+    out.push(`      tx ${o.txHash ?? "—"} (bundled — shared with other senders)`);
   }
   for (const o of d.unpriced) {
     // NAMED, never dropped. An op whose gas could not be valued is not free,
