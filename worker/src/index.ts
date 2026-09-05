@@ -5335,6 +5335,7 @@ async function main() {
         // silent. The question whose answer is a BUY is exactly the one an
         // empty book poses.
         const focus = chooseFocus({
+          agentId,
           positions: positions.map((p) => ({
             symbol: p.symbol,
             token: p.token,

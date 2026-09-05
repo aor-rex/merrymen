@@ -83,6 +83,20 @@ export interface BrainFocus {
 const CANNOT_OPEN_ON = new Set(["curve"]);
 
 /**
+ * A stable index in [0, n) from an agent id. FNV-1a, the same hash the snapshot
+ * id uses — deterministic, and nothing here needs it to be cryptographic.
+ */
+function stableIndex(agentId: string, n: number): number {
+  if (n <= 1) return 0;
+  let h = 0x811c9dc5;
+  for (const ch of agentId.toLowerCase()) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % n;
+}
+
+/**
  * Pick the instrument this run is about. PURE.
  *
  * Held positions win outright: an existing exposure is a live risk and a
@@ -90,6 +104,8 @@ const CANNOT_OPEN_ON = new Set(["curve"]);
  * ever displace a real one.
  */
 export function chooseFocus(args: {
+  /** Stable seed for the tiebreak. Different agents, different questions. */
+  agentId: string;
   positions: readonly HeldPosition[];
   universe: readonly UniverseToken[];
   prices: ReadonlyMap<string, QuotedPrice>;
@@ -123,9 +139,8 @@ export function chooseFocus(args: {
   // ticks would make the decision tape impossible to read: two runs would
   // differ for a reason that is not in the evidence.
   //
-  // Fresh before stale, continuous before market-hours — an instrument we can
-  // ask about at any hour is more useful to observe — and then alphabetical, so
-  // the answer is stable rather than merely deterministic-by-accident.
+  // Fresh before stale, then continuous before market-hours — an instrument we
+  // can ask about at any hour is more useful to observe.
   eligible.sort((a, b) => {
     if (a.q.stale !== b.q.stale) return a.q.stale ? 1 : -1;
     const ac = tradesAroundTheClock(a.t.address);
@@ -134,7 +149,23 @@ export function chooseFocus(args: {
     return a.t.symbol.localeCompare(b.t.symbol);
   });
 
-  const pick = eligible[0]!;
+  // ── AND THEN, AMONG EQUALS, A DIFFERENT ONE PER AGENT ────────────────────
+  //
+  // Alphabetical alone would hand every agent sharing the default basket the
+  // same symbol. Three agents in a cohort all reasoning about NVDA answers none
+  // of the questions the cohort exists to ask — whether Brain forms
+  // DIFFERENTIATED opinions across agents and assets, and whether confidence
+  // moves with evidence rather than with the model's mood.
+  //
+  // So the tiebreak is seeded by the agent id: stable for one agent across
+  // every tick, and different between agents. Deterministic, not random — the
+  // same agent asked twice about the same eligible set gets the same question.
+  const best = eligible.filter(
+    (x) =>
+      x.q.stale === eligible[0]!.q.stale &&
+      tradesAroundTheClock(x.t.address) === tradesAroundTheClock(eligible[0]!.t.address),
+  );
+  const pick = best[stableIndex(args.agentId, best.length)]!;
   return {
     symbol: pick.t.symbol,
     token: pick.t.address,
