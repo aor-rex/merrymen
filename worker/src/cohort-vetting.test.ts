@@ -96,14 +96,20 @@ describe("a stale price means two different things", () => {
     assert.match(v.why, /sound agent, wrong hour/);
   });
 
-  it("a stale pool IS a fault, because that market never closes", () => {
+  it("does NOT read a pool row's stale flag, because it is a hardcoded literal", () => {
+    // Every non-Chainlink source hardcodes `stale: false`, and says why: a TWAP
+    // is time-averaged by construction and "flagging it stale would make every
+    // memecoin look broken on a weekend for no reason". A rule that read that
+    // as "this market is live" would be reading a constant. So even set true it
+    // must not decide anything — a pool that stopped being readable loses the
+    // POSITION, which the previous check already catches.
     const v = vetCandidate(
       cand({ positions: [pos({ token: POOL_TOKEN, symbol: "PONS", priceSource: "pool", priceStale: true })] }),
       NOW,
     );
-    assert.equal(v.verdict, "BLOCKED-STALE-POOL");
+    assert.equal(v.verdict, "READY", "judged by the position's presence, not by that flag");
     assert.equal(v.focusIsContinuous, true);
-    assert.match(v.why, /stopped being readable/);
+    assert.match(v.why, /removed the position rather than flagged it/);
   });
 
   it("marks a fresh pool-priced agent as the one that can be observed at any hour", () => {

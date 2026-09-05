@@ -18,13 +18,27 @@
  *      REASON ABOUT           question in front of it
  *   4. IS THE MARKET LEGIBLE  a stale price is not a signal
  *
- * THE FOURTH ONE HAS TWO MEANINGS AND THEY MUST NOT BE CONFLATED. A tokenised
- * equity tracks a 24/5 Chainlink feed: outside US market hours its price is
- * legitimately hours old, and an agent holding one simply cannot be observed
- * until the market opens. A pool-priced token trades continuously, so a stale
- * reading there means the pool stopped being readable — a fault. Same flag,
- * opposite conclusions, and a cohort picked without that distinction would
- * either exclude every equity forever or accept a broken pool as a live market.
+ * THE FOURTH ONE IS THE SUBTLE ONE, AND THE FLAG DOES NOT MEAN WHAT IT LOOKS
+ * LIKE IT MEANS.
+ *
+ * `price_stale` is written by ONE source. `snapshot.ts` sets it when a Chainlink
+ * feed's `updatedAt` is more than two hours old; every other price source —
+ * pool, curve, broker — hardcodes it to `false` and says why: a TWAP is
+ * time-averaged by construction and "flagging it stale would make every
+ * memecoin look broken on a weekend for no reason".
+ *
+ * So on a pool-priced row `price_stale: false` is a CONSTANT, not an
+ * observation, and a vetting rule that read it as "this market is live" would
+ * be reading a hardcoded literal. Pool freshness is enforced somewhere else
+ * entirely and by a different mechanism: a route unreadable for more than
+ * `MAX_ROUTE_AGE_SEC` is REFUSED, the token drops out of the price map, and the
+ * position stops existing rather than appearing with a flag on it. Absence is
+ * the signal there, and the check above — "is there anything to reason about" —
+ * is already the one that catches it.
+ *
+ * Which leaves `price_stale` meaning exactly one thing: a 24/5 equity feed
+ * outside its market's hours. That is not a broken agent, it is the wrong hour,
+ * and collapsing it into "blocked" would exclude most of the fleet permanently.
  *
  * PURE. It is handed rows and returns verdicts; the orchestrator does the I/O.
  * Same shape as `accounting-preview` and for the same reason — a selection tool
@@ -74,8 +88,7 @@ export type CandidateVerdict =
   | "BLOCKED-CONTRIBUTIONS-UNKNOWN"
   | "BLOCKED-NO-CAPITAL"
   | "BLOCKED-LEGACY-HISTORY"
-  | "BLOCKED-NO-POSITION"
-  | "BLOCKED-STALE-POOL";
+  | "BLOCKED-NO-POSITION";
 
 export interface CandidateVerdictDetail {
   account: string;
@@ -91,6 +104,15 @@ export interface CandidateVerdictDetail {
   netContributionsUsdg: number | null;
   landedTrades: number;
   decisions: number;
+  /**
+   * Things that do not block selection but change what a run will look like.
+   *
+   * Kept separate from the verdict on purpose: a warning that is promoted to a
+   * blocker excludes an agent nobody meant to exclude, and a blocker demoted to
+   * a warning gets scrolled past. These are the ones worth reading before
+   * choosing, not the ones that decide.
+   */
+  warnings: string[];
 }
 
 /** Heartbeat older than this and the agent is not running. */
@@ -110,6 +132,23 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
   const focusIsContinuous = focus ? tradesAroundTheClock(focus.token) : false;
   const equityUsdg = c.positions.reduce((n, p) => n + p.valueUsdg, 0);
 
+  // ── WHAT WILL MAKE THE RUN ODD, without stopping it being chosen ──────────
+  const warnings: string[] = [];
+  // A Stock Token whose Chainlink feed has not been published yet cannot be
+  // priced at all: pool pricing is restricted to feedless MEMECOINS, because an
+  // ERC-8056 equity scales with its multiplier while a pool quotes the whole
+  // token. Such a holding is quarantined, and if its cost basis is zero it sets
+  // `bookIncomplete` — which is the very flag the Brain call site refuses on.
+  // So this is not a certain disqualification, but it is the first thing to
+  // check when a chosen agent mysteriously never runs.
+  const unpriceable = c.positions.filter((p) => instrumentClassOf(p.token) === "equity-token" && p.valueUsdg <= 0);
+  for (const p of unpriceable) {
+    warnings.push(`holds ${p.symbol} at zero value — an unpriceable equity can set bookIncomplete and skip Brain`);
+  }
+  if (c.decisions === 0) {
+    warnings.push("no decisions on record, so its first runs will have no memory to reason from");
+  }
+
   const base = {
     account: c.account,
     name: c.name,
@@ -120,6 +159,7 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
     netContributionsUsdg: c.netContributionsUsdg,
     landedTrades: c.landedTrades,
     decisions: c.decisions,
+    warnings,
   };
   const verdict = (v: CandidateVerdict, why: string): CandidateVerdictDetail => ({ ...base, verdict: v, why });
 
@@ -154,24 +194,29 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
   }
 
   // ── 4. THE MARKET IS LEGIBLE ──────────────────────────────────────────────
-  if (focus.priceStale) {
-    if (focusIsContinuous) {
-      // A pool-priced token trades around the clock. Stale here is a FAULT.
-      return verdict(
-        "BLOCKED-STALE-POOL",
-        `${focus.symbol} is pool-priced and trades continuously, so a stale mark means the pool stopped being readable`,
-      );
-    }
+  //
+  // ONLY A CHAINLINK ROW CAN BE STALE. See the module comment: every other
+  // source hardcodes the flag to false, so trusting it on a pool row would be
+  // reading a literal. A pool that stopped being readable does not raise this
+  // flag — it loses the position entirely, which check 3 already catches.
+  const staleIsMeaningful = focus.priceSource === "chainlink";
+  if (focus.priceStale && staleIsMeaningful) {
     return verdict(
       "READY-WHEN-MARKET-OPENS",
       `${focus.symbol} is a tokenised equity on a 24/5 feed and the market is shut — sound agent, wrong hour`,
     );
   }
 
+  if (focusIsContinuous) {
+    return verdict(
+      "READY",
+      `${focus.symbol} is priced from ${focus.priceSource} and trades around the clock — ` +
+        `observable at any hour, and an unreadable pool would have removed the position rather than flagged it`,
+    );
+  }
   return verdict(
     "READY",
-    `${focus.symbol} priced fresh from ${focus.priceSource}` +
-      (focusIsContinuous ? ", and it trades around the clock" : ", and its market is open"),
+    `${focus.symbol} priced fresh from ${focus.priceSource}, and its market is open`,
   );
 }
 
@@ -193,7 +238,8 @@ export function cohortLines(all: readonly CandidateVerdictDetail[]): string[] {
           `${c.focus.priceSource}${c.focus.priceStale ? " STALE" : " fresh"}`,
       );
     }
-    out.push(`    ${c.why}`);
+    out.push(`    `);
+    for (const w of c.warnings) out.push(`    ! `);
   }
 
   const ready = all.filter((c) => c.verdict === "READY");
