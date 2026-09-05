@@ -95,6 +95,7 @@ import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, sentimentLine, technicalLine } from "./brain-material";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
+import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -5323,10 +5324,29 @@ async function main() {
           gasPriceWei: gasPriceWei ?? 0n,
           ethPrice8: ethNow.price8,
         });
-        // THE BIGGEST HOLDING IS WHAT THIS RUN IS ABOUT. One instrument per run
-        // keeps the question answerable and the bill bounded; a Brain asked
-        // about a whole book at once produces a paragraph, not a decision.
-        const focus = [...positions].sort((a, b) => Number(b.valueUsdg - a.valueUsdg))[0];
+        // ONE INSTRUMENT PER RUN — a Brain asked about a whole book at once
+        // produces a paragraph, not a decision — but not necessarily a HELD one.
+        //
+        // This was "the biggest holding", which quietly meant Brain was only
+        // ever asked whether to keep or trim what it already had. An all-cash
+        // agent has no biggest holding, so the sort returned undefined and the
+        // agent was never asked anything. Measured on the fleet: 24 agents, one
+        // shadowable, three more with evidenced capital and no holdings sitting
+        // silent. The question whose answer is a BUY is exactly the one an
+        // empty book poses.
+        const focus = chooseFocus({
+          positions: positions.map((p) => ({
+            symbol: p.symbol,
+            token: p.token,
+            valueUsdg: Number(p.valueUsdg),
+            price8: p.price8,
+            priceStale: p.priceStale,
+            priceSource: p.priceSource,
+          })),
+          universe: watchTokens.map((t) => ({ symbol: t.symbol, address: t.address })),
+          prices: market.prices,
+          paused: market.pausedTokens,
+        });
         if (focus) {
           // The orchestrator materialises both of these from shared Postgres,
           // through the publication gate, into a file this child can read.
@@ -5416,7 +5436,8 @@ async function main() {
                   priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
                   priceSource: focus.priceSource,
                   priceStale: focus.priceStale,
-                  valueUsdg: Number(focus.valueUsdg),
+                  valueUsdg: focus.heldUsdg,
+                  held: focus.held,
                   equityUsdg: Number(equityUsdg),
                   cashUsdg: Number(balances.cashUsdg),
                   positionCount: positions.length,
@@ -5442,6 +5463,10 @@ async function main() {
             (m) => console.log(`[${short(agentId)}] ${m}`),
           );
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
+          // WHICH QUESTION WAS ASKED. "Should I trim what I hold" and "is this
+          // worth opening" produce the same words in a decision row and are
+          // entirely different observations, so the trace has to say which.
+          else console.log(`[${short(agentId)}] [brain] about ${focusLabel(focus)}`);
         }
       } catch (e) {
         // NEVER TAKES A TICK DOWN. Shadow thinking is the least important thing

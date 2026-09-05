@@ -44,6 +44,7 @@ describe("the technical lens says what the worker knows", () => {
     priceSource: "pool",
     priceStale: false,
     valueUsdg: 5_000_000,
+    held: true,
     equityUsdg: 20_000_000,
     cashUsdg: 3_000_000,
     positionCount: 2,
@@ -80,6 +81,19 @@ describe("the technical lens says what the worker knows", () => {
   it("survives an empty book without dividing by zero", () => {
     const s = technicalLine({ ...f, valueUsdg: 0, equityUsdg: 0, positionCount: 1 });
     assert.match(s, /0\.0% of 0\.00 USDG/);
+    assert.ok(!/NaN|Infinity/.test(s));
+  });
+
+  it("says the book holds NONE of a candidate, rather than describing a phantom", () => {
+    // An all-cash agent told "the book holds 0.00 USDG of NVDA, which is 0.0%
+    // of 0.00 USDG total equity" gets a sentence that is technically true and
+    // invites reasoning about trimming something it does not own. The whole
+    // point of asking an empty book anything is that BUY is on the table.
+    const s = technicalLine({ ...f, symbol: "NVDA", valueUsdg: 0, held: false, equityUsdg: 0, positionCount: 0 });
+    assert.match(s, /The book holds NONE of NVDA/);
+    assert.match(s, /candidate to open, not a position to manage/);
+    assert.match(s, /buy it or to stay out/);
+    assert.ok(!/0\.0% of/.test(s), "no share of a position that does not exist");
     assert.ok(!/NaN|Infinity/.test(s));
   });
 });

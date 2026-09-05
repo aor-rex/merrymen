@@ -54,11 +54,20 @@ export interface FocusView {
   priceUsd: string;
   priceSource: string;
   priceStale: boolean;
-  /** Micro-USDG. */
+  /** Micro-USDG held in this instrument. Zero when it is a candidate to open. */
   valueUsdg: number;
+  /**
+   * Does the book already hold this?
+   *
+   * "You hold 65% of the book in this" and "you hold none of this" are
+   * different questions, and a run that did not say which was which would let a
+   * model narrate a position that does not exist — then publish a thesis about
+   * trimming something it never owned.
+   */
+  held: boolean;
   equityUsdg: number;
   cashUsdg: number;
-  /** How many names the book holds, this one included. */
+  /** How many names the book holds, this one included when it is held. */
   positionCount: number;
 }
 
@@ -74,13 +83,24 @@ const usdg = (micro: number): string => (micro / 1e6).toFixed(2);
  */
 export function technicalLine(f: FocusView): string {
   const share = f.equityUsdg > 0 ? (f.valueUsdg / f.equityUsdg) * 100 : 0;
+  // HELD AND UNHELD ARE DIFFERENT QUESTIONS, and the sentence has to say which.
+  // A book with nothing in it that was told "the book holds 0.00 USDG of NVDA,
+  // which is 0.0% of 0.00 USDG total equity" would be technically true and
+  // useless; worse, it invites a model to reason about trimming a position that
+  // does not exist.
+  const position = f.held
+    ? `The book holds ${usdg(f.valueUsdg)} USDG of ${f.symbol}, which is ` +
+      `${share.toFixed(1)}% of ${usdg(f.equityUsdg)} USDG total equity, ` +
+      `across ${f.positionCount} position${f.positionCount === 1 ? "" : "s"}.`
+    : `The book holds NONE of ${f.symbol}. This is a candidate to open, not a ` +
+      `position to manage, and the only actions available are to buy it or to stay out. ` +
+      `Total equity is ${usdg(f.equityUsdg)} USDG across ` +
+      `${f.positionCount} position${f.positionCount === 1 ? "" : "s"}.`;
   const parts = [
     `${f.symbol} marked at ${f.priceUsd} USD from ${f.priceSource}` +
       (f.priceStale ? " — STALE, treat this price as unreliable" : "") +
       ".",
-    `The book holds ${usdg(f.valueUsdg)} USDG of ${f.symbol}, which is ` +
-      `${share.toFixed(1)}% of ${usdg(f.equityUsdg)} USDG total equity, ` +
-      `across ${f.positionCount} position${f.positionCount === 1 ? "" : "s"}.`,
+    position,
     `Uncommitted cash is ${usdg(f.cashUsdg)} USDG.`,
   ];
   // WHY CONCENTRATION IS STATED AND NOT SCORED. "84% of the book is in one
