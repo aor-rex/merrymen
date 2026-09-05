@@ -64,7 +64,14 @@ export interface CandidateInput {
   mode: string | null;
   /** Unix seconds of the last heartbeat, or null. */
   beatAt: number | null;
-  /** Net of flows for this epoch, micro-USDG. Null when the table could not be read. */
+  /**
+   * Net of flows for this epoch, in WHOLE USDG — the unit the ledger stores.
+   *
+   * `flows.amount_usdg` and `positions.value_usdg` are REAL columns holding
+   * whole USDG, not micro; the tick multiplies by 1e6 on its way into a
+   * snapshot. Reading them as micro made a 10 USDG book render as 0.00 and an
+   * entire cohort report unreadable. Null when the table could not be read.
+   */
   netContributionsUsdg: number | null;
   /** Rows in this epoch older than the accounting cutover. */
   legacyRows: number;
@@ -220,7 +227,9 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
   );
 }
 
-const usd = (micro: number): string => (micro / 1e6).toFixed(2);
+// ALREADY WHOLE USDG. See CandidateInput.netContributionsUsdg — dividing here
+// is what turned every figure in the first report into 0.00.
+const usd = (usdg: number): string => usdg.toFixed(2);
 
 /** One line per candidate, plus a summary. Sized for a 503-line log window. */
 export function cohortLines(all: readonly CandidateVerdictDetail[]): string[] {
@@ -238,8 +247,8 @@ export function cohortLines(all: readonly CandidateVerdictDetail[]): string[] {
           `${c.focus.priceSource}${c.focus.priceStale ? " STALE" : " fresh"}`,
       );
     }
-    out.push(`    `);
-    for (const w of c.warnings) out.push(`    ! `);
+    out.push(`    ${c.why}`);
+    for (const w of c.warnings) out.push(`    ! ${w}`);
   }
 
   const ready = all.filter((c) => c.verdict === "READY");

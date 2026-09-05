@@ -19,7 +19,7 @@ const POOL_TOKEN = "0x1111111111111111111111111111111111111111";
 const pos = (over: Partial<CandidatePosition> = {}): CandidatePosition => ({
   symbol: EQUITY_TOKEN.symbol,
   token: EQUITY_TOKEN.address,
-  valueUsdg: 6_500_000,
+  valueUsdg: 6.5,
   priceStale: false,
   priceSource: "chainlink",
   updatedAt: NOW - 60,
@@ -32,7 +32,7 @@ const cand = (over: Partial<CandidateInput> = {}): CandidateInput => ({
   epoch: 1,
   mode: "live",
   beatAt: NOW - 30,
-  netContributionsUsdg: 10_000_000,
+  netContributionsUsdg: 10,
   legacyRows: 0,
   positions: [pos()],
   landedTrades: 4,
@@ -129,14 +129,14 @@ describe("the focus is the position a run would actually be about", () => {
     const v = vetCandidate(
       cand({
         positions: [
-          pos({ symbol: "SMALL", valueUsdg: 1_000_000 }),
-          pos({ symbol: "BIG", valueUsdg: 9_000_000 }),
+          pos({ symbol: "SMALL", valueUsdg: 1 }),
+          pos({ symbol: "BIG", valueUsdg: 9 }),
         ],
       }),
       NOW,
     );
     assert.equal(v.focus!.symbol, "BIG");
-    assert.equal(v.equityUsdg, 10_000_000, "but equity is the whole book");
+    assert.equal(v.equityUsdg, 10, "but equity is the whole book");
   });
 });
 
@@ -156,5 +156,35 @@ describe("the report says when a cohort cannot be observed after hours", () => {
     const text = cohortLines(all).join("\n");
     assert.match(text, /1 of those trade 24\/7/);
     assert.ok(!/idle outside market hours/.test(text));
+  });
+});
+
+describe("the report speaks the ledger's units", () => {
+  it("renders whole USDG, because that is what the columns hold", () => {
+    // `flows.amount_usdg` and `positions.value_usdg` are REAL columns of WHOLE
+    // USDG; the tick multiplies by 1e6 on its way into a snapshot. Dividing
+    // here made the canary's 10 USDG book render as 0.00 and turned an entire
+    // 24-agent cohort report into a page of zeroes.
+    const text = cohortLines([vetCandidate(cand({ netContributionsUsdg: 10, positions: [pos({ valueUsdg: 6.5 })] }), NOW)]).join("\n");
+    assert.match(text, /equity\s+6\.50/);
+    assert.match(text, /contrib\s+10\.00/);
+    assert.match(text, /6\.50 USDG/, "and the focus line too");
+  });
+});
+
+describe("the report actually says why", () => {
+  it("renders the reason, not an empty indent", () => {
+    // The first live run printed a blank line under every agent. A shell
+    // substitution had eaten the template interpolation, so 24 agents were
+    // reported with no reason attached — a report that says a verdict and not
+    // its evidence is a report nobody can act on.
+    const text = cohortLines([vetCandidate(cand({ netContributionsUsdg: 0 }), NOW)]).join("\n");
+    assert.match(text, /nothing can be sized against it/);
+    assert.ok(!/\n\s+$/.test(text), "no line may be bare indentation");
+  });
+
+  it("renders warning text, not a bare marker", () => {
+    const text = cohortLines([vetCandidate(cand({ decisions: 0 }), NOW)]).join("\n");
+    assert.match(text, /! no decisions on record/);
   });
 });
