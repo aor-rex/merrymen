@@ -564,11 +564,13 @@ export default function SettingsPage() {
               </span>
               <span className="field-hint">
                 Send ETH — we&apos;ll swap surplus to USDG and keep a gas reserve. Off by default. Also accepts USDG directly on the same address.
+                Fires once per deposit: the same funds never convert twice, even across a restart. Prefer to convert by hand?{" "}
+                <Link href="/swap">Swap ETH → USDG</Link>.
               </span>
             </label>
             <Field
               label="gas reserve"
-              hint="Percent of the ETH balance kept as gas; the rest converts to USDG. The bot always keeps at least one trade's worth of gas, even at 1%. Maximum one conversion per hour."
+              hint="Percent of the ETH balance kept as gas; the rest converts to USDG. The bot always keeps at least one trade's worth of gas, even at 1%. One conversion per deposit, at most one per hour."
             >
               <input
                 type="number"

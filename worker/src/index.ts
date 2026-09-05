@@ -127,6 +127,7 @@ import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type
 import {
   bundlerChainMismatch,
   connectionKey,
+  patchSettingsFile,
   resolveConfig,
   strategyKey,
   type ResolvedConfig,
@@ -143,6 +144,18 @@ import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool, readExecutionPoolPrice, readPoolPrice } from "./venues/pool-price";
+import {
+  AUTO_CONVERT_COOLDOWN_MS,
+  convertReserve,
+  latchAllowsFire,
+  loadLatch,
+  parseManualSwap,
+  ratchetMarkerDown,
+  recordFire,
+  recordSwapId,
+  saveLatch,
+  swapIdCompleted,
+} from "./auto-convert-state";
 import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
@@ -1482,13 +1495,25 @@ async function main() {
   let lastTierId = holderTier.id;
   let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
   let lastSequencerUp = true;
-  // Auto-convert rate limit: at most one convert op per hour. Three bounds in
-  // total govern the flow — this cooldown, the toggle itself, and the surplus
+  // Auto-convert rate limit: at most one convert op per hour, AND only on new
+  // money — the once-per-deposit latch in auto-convert-state.ts. The in-memory
+  // timestamp used to reset on every restart, so a terminal stop/start
+  // re-converted the SAME funds; the latch persists the last fire (time + the
+  // balance left behind) in ~/.merrymen/auto-convert.json, and a tick may fire
+  // only when the balance EXCEEDS that marker. Three bounds in total govern
+  // the flow — this cooldown+latch, the toggle itself, and the surplus
   // arithmetic in the tick (reserve + dynamic gas floor). The wall adds the
   // fourth: a sealed per-op valueLimit no setting can lift.
-  const AUTO_CONVERT_COOLDOWN_MS = 3_600_000;
   const AUTO_CONVERT_EXECUTION_TIMEOUT_MS = 120_000;
-  let lastAutoConvertAt = 0;
+  let autoConvertLatch = loadLatch(homePaths.autoConvert());
+  const persistLatch = () => {
+    try {
+      saveLatch(homePaths.autoConvert(), autoConvertLatch);
+    } catch {
+      // A lost write only means the next tick re-derives from the chain —
+      // the cooldown + marker both still gate, so nothing double-spends.
+    }
+  };
   // The executor may still be waiting on a bundler receipt after this tick
   // returns. Keep this guard set until that underlying promise settles so a
   // later tick cannot submit a second operation with the same account nonce.
@@ -1526,6 +1551,140 @@ async function main() {
         ),
       ),
     ]);
+  };
+  // Quote → submit → record, shared by auto-convert and manual swaps so the
+  // two paths cannot drift: same TWAP-preferred/spot-fallback execution quote,
+  // same slippage, same wall-pinned call, same ledger shape.
+  //
+  // Returns null WITHOUT throwing when there is no on-chain price or the
+  // amount prices to dust — the caller logs the skip. Throws when the submit
+  // itself fails. `tag` prefixes every log/event line: "auto-convert" keeps
+  // its exact historical text; manual swaps use `manual-swap <id>` so the
+  // /swap page can match the outcome in the event feed.
+  const submitConvertLeg = async (args: {
+    client: PublicClient;
+    executor: AgentExecutor;
+    agentId: string;
+    amountEth: bigint;
+    slippageBps: number;
+    tag: string;
+  }): Promise<{ expect6: bigint; minOut: bigint; userOpHash: string } | null> => {
+    // Expected USDG out, derived from the ON-CHAIN pool price (TWAP, the
+    // same manipulation-resistant number readPoolPrice uses to value the
+    // whole book). The Uniswap QuoterV2 reverts on this pair on this
+    // chain, so the quoter path (bestRoute) is unusable here — but the
+    // pool itself is real and liquid (verified live), so we size minOut
+    // off the TWAP with slippage, which is exactly the guard a quoter
+    // would provide. The actual swap still goes through SwapRouter02.
+    console.log(`[${args.tag}] fetching WETH/USDG execution quote`);
+    const price = await readExecutionPoolPrice(args.client, {
+      token: CASH.WETH as `0x${string}`,
+      tokenDecimals: 18, // native ETH / WETH raw units
+      cash: CASH.USDG as `0x${string}`,
+      cashDecimals: USDG_DECIMALS,
+    });
+    console.log(`[${args.tag}] quote ${price ? `ready (fee ${price.fee})` : "unavailable"}`);
+    if (!price || price.price8 <= 0n) return null;
+    // price8 is USDG-per-whole-WETH at 8dp; amountEth is raw wei (18dp).
+    // USDG out (6dp) = price8/1e8 × wei/1e18 × 1e6 = price8×wei/1e20.
+    const expect6 = (price.price8 * args.amountEth) / 1_000_000_000_000_000_000_00n; // ÷1e20
+    const minOut = minOutWithSlippage(expect6, args.slippageBps);
+    if (expect6 <= 0n || minOut <= 0n) return null;
+    console.log(
+      `[${args.tag}] submitting: amountIn=${args.amountEth} expectedOut=${expect6} minOut=${minOut}`,
+    );
+    const exec = await autoConvertExecute(args.executor, [
+      buildConvertCall({
+        surplusEth: args.amountEth,
+        fee: price.fee,
+        minAmountOut: minOut,
+        recipient: args.executor.address as `0x${string}`,
+      }),
+    ]);
+    console.log(`[${args.tag}] ${formatUnits(args.amountEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}) · op ${exec.userOpHash}`);
+    await addEvent(
+      args.agentId,
+      "ok",
+      `${args.tag} ✓ ${formatUnits(args.amountEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}, fee ${price.fee / 10_000}%) — gas reserve kept`,
+    );
+    await addTrade({
+      agent_id: args.agentId,
+      kind: "swap",
+      target: CASH.WETH,
+      sell_token: "ETH",
+      buy_token: CASH.USDG,
+      amount_usdg: usdgNum(expect6),
+      status: "landed",
+      user_op_hash: exec.userOpHash,
+      tx_hash: exec.txHash,
+    });
+    return { expect6, minOut, userOpHash: exec.userOpHash };
+  };
+  // Deploy-first probe shared by auto-convert and manual swaps. A first
+  // operation from an UNDEPLOYED account pays Kernel deployment AND has its
+  // verification gas counted ×3 by the EntryPoint — a compound cost that left
+  // every convert attempt short of prefund (AA21) no matter how the floor was
+  // tuned. So DEPLOY FIRST with a policy-legal dust op — approve 0.000001 USDG
+  // to the router, the same no-op the selftest uses — and then run the convert
+  // as a normal deployed-account operation.
+  //
+  // `{ blocked: true }` (DO NOT attempt the convert) when the balance cannot
+  // cover the one-time setup and gas is not sponsored — the caller must tell
+  // the owner the top-up number, not submit. Throws when the probe itself
+  // fails; the caller applies the backoff. `{ deployed, blocked: false }`
+  // otherwise — including "no live executor" (the callers no-op downstream
+  // without one, exactly as the auto path always has) and "probe ran but the
+  // account still reads undeployed" (the caller proceeds with the undeployed
+  // fallback floor, as the auto path always has).
+  const ensureDeployedForConvert = async (args: {
+    agentId: string;
+    balanceWei: bigint;
+    gasPrice: bigint;
+    tag: string;
+  }): Promise<{ deployed: boolean; blocked: boolean }> => {
+    if (!active?.executor) return { deployed: true, blocked: false };
+    const deployed =
+      ((await active.client.getCode({ address: active.executor.address })) ?? "0x") !== "0x";
+    if (deployed) return { deployed: true, blocked: false };
+    // The deployment op is a FIXED one-time cost, independent of deposit
+    // size. If the balance cannot prefund it, do not attempt — the
+    // bundler would refuse (AA21) and the event would read like a bug.
+    const deployFloor = args.gasPrice * 9_500_000n; // bounded deploy op ≈ 7.8M raw × 1.2 headroom
+    if (gasSponsored()) {
+      // Sponsored: the paymaster covers the deployment gas, so the
+      // account's own balance is irrelevant here — AA21 never fires.
+      console.log(`[${args.tag}] account undeployed — deployment is gas-sponsored, deploying at any balance`);
+    } else if (args.gasPrice > 0n && args.balanceWei < deployFloor) {
+      if (!autoConvertDeployNoteShown) {
+        autoConvertDeployNoteShown = true;
+        await addEvent(
+          args.agentId,
+          "warn",
+          `[${args.tag}] waiting — the account needs a one-time setup fee of about ${formatUnits(deployFloor, 18)} ETH to go live (it has ${formatUnits(args.balanceWei, 18)}). Top up the smart account by about ${formatUnits(deployFloor - args.balanceWei, 18)} more ETH; the setup runs once, and every deposit after that converts normally.`,
+        );
+      }
+      console.log(`[${args.tag}] NOT deploying: balance ${formatUnits(args.balanceWei, 18)} ETH is below the one-time setup cost ${formatUnits(deployFloor, 18)} ETH — waiting for a top-up`);
+      return { deployed: false, blocked: true };
+    }
+    console.log(`[${args.tag}] account undeployed — sending a dust approve first to deploy it`);
+    await autoConvertExecute(active.executor, [
+      {
+        to: CASH.USDG as `0x${string}`,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
+        }),
+      },
+    ]);
+    // No explicit gas bounds: the executor sizes the ceiling itself from the
+    // operation's shape (readEnableState widens fresh enables to
+    // FIRST_ENABLE_GAS_BOUNDS) — the per-call bounds option is gone.
+    const nowDeployed =
+      ((await active.client.getCode({ address: active.executor.address })) ?? "0x") !== "0x";
+    console.log(`[${args.tag}] account deployed=${nowDeployed} — proceeding with the convert`);
+    return { deployed: nowDeployed, blocked: false };
   };
   // One re-sign notice per arm, not per tick — a warn event every minute is
   // noise, and the event log is the owner's record.
@@ -5676,6 +5835,12 @@ async function main() {
     // Same rule the cash balance already follows: unknown is not zero, so leave
     // it null and let the pre-flight decline to judge.
     if (!paper) lastGasWei = balances.ethWei;
+    // Ratchet the latch marker down when funds leave without a fire (gas,
+    // trades, an off-worker withdrawal) — otherwise a spend followed by a
+    // smaller deposit would sit forever under a stale-high marker. A rise is
+    // never ratcheted: only an excess over the marker may fire. Live ticks
+    // only: the paper tick's hardcoded zero is not a balance.
+    if (!paper && ratchetMarkerDown(autoConvertLatch, balances.ethWei)) persistLatch();
     // Open the auto-convert diagnostic window on a balance change (the moment
     // a deposit lands) so any silent skip is explained rather than a mystery.
     const balKey = `${balances.ethWei}:${balances.cashUsdg}`;
@@ -5689,10 +5854,115 @@ async function main() {
     // carries the WETH tokenIn pin and the wall's ONLY non-zero valueLimit; a
     // grant signed before that change must be re-signed for this to fire.
     //
+    // Manual one-shot swap from the /swap page (settings handoff fields
+    // manualSwapWei/manualSwapId). Same wall, same reserve, same latch as
+    // auto-convert — and a manual fire IS a fire: it sets the latch
+    // marker+clock so auto-convert cannot re-eat the leftover later.
+    //
+    // Fail-fast and at-most-once: every terminal outcome (success, skip,
+    // error) clears the request and records the id. A failed spend is an
+    // event the owner reads and a button they press again — never a silent
+    // retry of an explicit instruction, and never a replay of a resurrected
+    // settings file.
+    const manualSwap = parseManualSwap(cfg);
+    if (manualSwap && active && chainCanTrade() && !paperActive() && lastGasWei !== null && !autoConvertInFlight) {
+      const manualTag = `manual-swap ${manualSwap.id}`;
+      const clearManualSwap = () => {
+        try {
+          patchSettingsFile({ manualSwapWei: undefined, manualSwapId: undefined });
+        } catch {
+          // The next tick retries the clear; the completed-id record already
+          // guards against a double execute.
+        }
+      };
+      const settleManualSwap = (line: string) => {
+        recordSwapId(autoConvertLatch, manualSwap.id);
+        persistLatch();
+        clearManualSwap();
+        return addEvent(agentId, "warn", line).catch(() => {});
+      };
+      if (swapIdCompleted(autoConvertLatch, manualSwap.id)) {
+        clearManualSwap();
+      } else if (!active.executor) {
+        await settleManualSwap(
+          `${manualTag} cancelled — no live executor (no bundler key), so nothing can be signed.`,
+        );
+      } else if (!grantHasNativeSwap(active.grant)) {
+        await settleManualSwap(
+          `${manualTag} cancelled — this key was signed before the ETH→USDG permission existed. Re-sign at /grant, then submit again.`,
+        );
+      } else {
+        try {
+          console.log(`[${manualTag}] fetching gas price`);
+          const manualGasPrice = await mainnetClient().getGasPrice().catch(() => 0n);
+          const manualReady = await ensureDeployedForConvert({
+            agentId,
+            balanceWei: lastGasWei,
+            gasPrice: manualGasPrice,
+            tag: manualTag,
+          });
+          if (manualReady.blocked) {
+            // Below the one-time setup cost — the probe already told the
+            // owner the top-up number. Fail the request, don't park it.
+            await settleManualSwap(
+              `${manualTag} cancelled — balance is below the one-time account setup cost. Top up first, then submit again.`,
+            );
+          } else {
+            const { reserve: manualReserve, surplus: manualSurplus } = convertReserve(
+              lastGasWei,
+              manualGasPrice,
+              manualReady.deployed,
+              cfg.autoConvertReservePct,
+              gasSponsored(),
+            );
+            console.log(
+              `[${manualTag}] economics: sponsored=${gasSponsored()} reserve=${manualReserve} ` +
+                `balance=${lastGasWei} surplus=${manualSurplus} requested=${manualSwap.wei}`,
+            );
+            const manualAmount = manualSwap.wei < manualSurplus ? manualSwap.wei : manualSurplus;
+            if (manualAmount <= 0n) {
+              await settleManualSwap(
+                `${manualTag} cancelled — ${formatUnits(manualSwap.wei, 18)} ETH leaves nothing above the gas reserve (${formatUnits(manualReserve, 18)} ETH kept). Lower the amount or top up.`,
+              );
+            } else {
+              const leg = await submitConvertLeg({
+                client: active.client,
+                executor: active.executor,
+                agentId,
+                amountEth: manualAmount,
+                slippageBps: cfg.slippageBps,
+                tag: manualTag,
+              });
+              recordSwapId(autoConvertLatch, manualSwap.id);
+              if (leg) recordFire(autoConvertLatch, Date.now(), lastGasWei - manualAmount);
+              persistLatch();
+              clearManualSwap();
+              if (!leg) {
+                await addEvent(
+                  agentId,
+                  "warn",
+                  `${manualTag} failed — no WETH→USDG on-chain price for ${formatUnits(manualAmount, 18)} ETH right now. Nothing was spent; submit again later.`,
+                ).catch(() => {});
+              }
+            }
+          }
+        } catch (err) {
+          await settleManualSwap(
+            `${manualTag} failed — ${err instanceof Error ? err.message : String(err)}. Nothing else will retry it; submit again when ready.`,
+          );
+        }
+      }
+    }
     // Deliberately NOT routed through the strategy budget reservation: this is
-    // funding, not trading. Its bounds are the toggle, the hourly cooldown, the
-    // reserve/floor arithmetic below, and the wall's sealed valueLimit.
-    const autoConvertReady = Date.now() - lastAutoConvertAt >= AUTO_CONVERT_COOLDOWN_MS;
+    // funding, not trading. Its bounds are the toggle, the latch (fresh money
+    // + hourly cooldown, persisted across restarts), the reserve/floor
+    // arithmetic below, and the wall's sealed valueLimit.
+    const autoConvertReady = Date.now() - autoConvertLatch.firedAtMs >= AUTO_CONVERT_COOLDOWN_MS;
+    // Once per deposit: the same funds must never refire, even across a
+    // terminal stop/start. The marker is the balance left behind by the last
+    // fire; only an excess over it counts as a deposit.
+    const autoConvertFreshMoney =
+      lastGasWei !== null && latchAllowsFire(autoConvertLatch, lastGasWei, Date.now());
     if (cfg.autoConvertEnabled || autoConvertDebugUntil > Date.now()) {
       console.log(
         `[auto-convert] state: enabled=${cfg.autoConvertEnabled} active=${!!active} ` +
@@ -5701,7 +5971,7 @@ async function main() {
           `cooldownReady=${autoConvertReady}`,
       );
     }
-    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && autoConvertReady && !autoConvertInFlight) {
+    if (cfg.autoConvertEnabled && active && chainCanTrade() && !paperActive() && lastGasWei !== null && autoConvertReady && autoConvertFreshMoney && !autoConvertInFlight) {
       // The marker is minted BY the wall that can do this. A grant signed
       // before nativeSwapValueLimitWei existed would only fail at the chain —
       // say so once, clearly, instead of burning gas reading a revert.
@@ -5719,78 +5989,34 @@ async function main() {
       try {
         console.log(`[auto-convert] fetching gas price`);
         const gasPrice = await mainnetClient().getGasPrice().catch(() => 0n);
-        // The owner's split, as a percent of the balance — but the floor beneath
-        // it is NOT configurable: enough for one operating swap's gas at the
-        // live price. This chain's gas is dimes-and-up-per-dollar thin, so the
-        // floor is a REAL single-swap UserOp (~400k gas), deliberately nothing
-        // like recover.ts's 900k×2 SWEEP budget — applying that to the reserve
-        // ate the whole of a small deposit and silently blocked its convert. A
-        // 1% setting on a small balance can never strand the agent either way.
-        const pct = BigInt(Math.min(Math.max(Math.round(cfg.autoConvertReservePct), 1), 50));
-        const pctReserve = (lastGasWei * pct) / 100n;
-        // A first operation from an UNDEPLOYED account pays Kernel deployment
-        // AND has its verification gas counted ×3 by the EntryPoint — a
-        // compound cost that left every convert attempt short of prefund
-        // (AA21 "didn't pay prefund") no matter how the floor was tuned.
-        // So DEPLOY FIRST with a policy-legal dust op — approve 0.000001 USDG
-        // to the router, the same no-op the selftest uses — and then run the
-        // convert as a normal deployed-account operation. The undeployed
-        // floor below is only the fallback if the probe cannot run.
-        let deployed = ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
-        if (!deployed && active.executor) {
-          // The deployment op is a FIXED one-time cost, independent of deposit
-          // size. If the balance cannot prefund it, do not attempt — the
-          // bundler would refuse (AA21) and the event would read like a bug.
-          // Say exactly what to do instead. Verified live: a 0.00449 ETH
-          // balance sat just under the ~6.2M-gas requirement at 0.71 gwei.
-          const deployFloor = gasPrice * 9_500_000n; // bounded deploy op ≈ 7.8M raw × 1.2 headroom
-          if (gasSponsored()) {
-            // Sponsored: the paymaster covers the deployment gas, so the
-            // account's own balance is irrelevant here — AA21 never fires.
-            console.log(`[auto-convert] account undeployed — deployment is gas-sponsored, deploying at any balance`);
-          } else if (gasPrice > 0n && lastGasWei < deployFloor) {
-            if (!autoConvertDeployNoteShown) {
-              autoConvertDeployNoteShown = true;
-              await addEvent(
-                agentId,
-                "warn",
-                `auto-convert is waiting — the account needs a one-time setup fee of about ${formatUnits(deployFloor, 18)} ETH to go live (it has ${formatUnits(lastGasWei, 18)}). Top up the smart account by about ${formatUnits(deployFloor - lastGasWei, 18)} more ETH; the setup runs once, and every deposit after that converts normally.`,
-              );
-            }
-            console.log(`[auto-convert] NOT deploying: balance ${formatUnits(lastGasWei, 18)} ETH is below the one-time setup cost ${formatUnits(deployFloor, 18)} ETH — waiting for a top-up`);
-            lastAutoConvertAt = Date.now(); // re-check hourly, not every tick
+        // Deploy-first probe (shared with manual swaps — see its header for
+        // why the convert never runs on a counterfactual account directly).
+        let deployed: boolean;
+        try {
+          const ready = await ensureDeployedForConvert({
+            agentId,
+            balanceWei: lastGasWei,
+            gasPrice,
+            tag: "auto-convert",
+          });
+          if (ready.blocked) {
+            // Below the one-time setup cost: mark THESE funds considered
+            // WITHOUT starting the clock — a later top-up exceeds the marker
+            // and fires at once, instead of waiting out an hour it did
+            // nothing to earn. (This replaces the old "re-check hourly" hack.)
+            autoConvertLatch.consideredWei = lastGasWei.toString();
+            persistLatch();
             break autoConvertAttempt; // skip this tick's convert; nothing was attempted
           }
-          console.log(`[auto-convert] account undeployed — sending a dust approve first to deploy it`);
-          try {
-            await autoConvertExecute(
-              active.executor,
-              [
-                {
-                  to: CASH.USDG as `0x${string}`,
-                  value: 0n,
-                  data: encodeFunctionData({
-                    abi: erc20Abi,
-                    functionName: "approve",
-                    args: [UNISWAP.swapRouter02 as `0x${string}`, 1n],
-                  }),
-                },
-              ],
-              // No explicit gas bounds: the executor sizes the ceiling itself
-              // from the operation's shape (readEnableState widens fresh
-              // enables to FIRST_ENABLE_GAS_BOUNDS). The old per-call bounds
-              // this probe used to carry were removed in the gas-limits
-              // refactor because a wrongly-narrowed ceiling fails silent.
-            );
-            deployed =
-              ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
-            console.log(`[auto-convert] account deployed=${deployed} — proceeding with the convert`);
-          } catch (probeErr) {
-            // One attempt per cooldown window: a failing deploy retried every
-            // tick would spam the event log with the same refusal.
-            lastAutoConvertAt = Date.now();
-            throw probeErr;
-          }
+          deployed = ready.deployed;
+        } catch (probeErr) {
+          // One attempt per cooldown window: a failing deploy retried every
+          // tick would spam the event log with the same refusal. The marker
+          // is untouched, so a genuinely new deposit still counts as new —
+          // only the clock holds the retry off.
+          autoConvertLatch.firedAtMs = Date.now();
+          persistLatch();
+          throw probeErr;
         }
         // Prefund sizing, ON TOP OF the swap's msg.value — both leave the
         // account in the SAME operation, at the executor's 2x headroom.
@@ -5798,70 +6024,34 @@ async function main() {
         // the account only needs to cover the msg.value itself — the floor is
         // a small drift margin, not a UserOp cost. UNSPONSORED: the account
         // self-pays — deployed ≈ 2M gas; undeployed fallback (the probe
-        // could not run) ≈ 5M gas.
-        const opFloor = gasSponsored()
-          ? gasPrice * 100_000n
-          : gasPrice * (deployed ? 2_000_000n : 5_000_000n);
-        const reserve = pctReserve > opFloor ? pctReserve : opFloor;
-        const surplusEth = lastGasWei > reserve ? lastGasWei - reserve : 0n;
+        // could not run) ≈ 5M gas. Shared with manual swaps via
+        // convertReserve so the two paths cannot disagree on "gas kept".
+        const { reserve, surplus: surplusEth } = convertReserve(
+          lastGasWei,
+          gasPrice,
+          deployed,
+          cfg.autoConvertReservePct,
+          gasSponsored(),
+        );
         console.log(
           `[auto-convert] economics: sponsored=${gasSponsored()} gasPrice=${gasPrice} reserve=${reserve} ` +
             `balance=${lastGasWei} surplus=${surplusEth}`,
         );
         if (surplusEth > 0n && active.executor) {
-          // Expected USDG out, derived from the ON-CHAIN pool price (TWAP, the
-          // same manipulation-resistant number readPoolPrice uses to value the
-          // whole book). The Uniswap QuoterV2 reverts on this pair on this
-          // chain, so the quoter path (bestRoute) is unusable here — but the
-          // pool itself is real and liquid (verified live), so we size minOut
-          // off the TWAP with slippage, which is exactly the guard a quoter
-          // would provide. The actual swap still goes through SwapRouter02.
-          console.log(`[auto-convert] fetching WETH/USDG execution quote`);
-          const price = await readExecutionPoolPrice(active.client, {
-            token: CASH.WETH as `0x${string}`,
-            tokenDecimals: 18, // native ETH / WETH raw units
-            cash: CASH.USDG as `0x${string}`,
-            cashDecimals: USDG_DECIMALS,
+          const leg = await submitConvertLeg({
+            client: active.client,
+            executor: active.executor,
+            agentId,
+            amountEth: surplusEth,
+            slippageBps: cfg.slippageBps,
+            tag: "auto-convert",
           });
-          console.log(`[auto-convert] quote ${price ? `ready (fee ${price.fee})` : "unavailable"}`);
-          if (price && price.price8 > 0n) {
-            // price8 is USDG-per-whole-WETH at 8dp; surplusEth is raw wei (18dp).
-            // USDG out (6dp) = price8/1e8 × surplusEth/1e18 × 1e6 = price8×wei/1e20.
-            const expect6 = (price.price8 * surplusEth) / 1_000_000_000_000_000_000_00n; // ÷1e20
-            const minOut = minOutWithSlippage(expect6, cfg.slippageBps);
-            if (expect6 > 0n && minOut > 0n) {
-              console.log(
-                `[auto-convert] submitting: amountIn=${surplusEth} expectedOut=${expect6} minOut=${minOut}`,
-              );
-              const exec = await autoConvertExecute(active.executor!, [
-                buildConvertCall({
-                  surplusEth,
-                  fee: price.fee,
-                  minAmountOut: minOut,
-                  recipient: active.executor.address as `0x${string}`,
-                }),
-              ]);
-              lastAutoConvertAt = Date.now();
-              console.log(`[auto-convert] ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}) · op ${exec.userOpHash}`);
-              await addEvent(
-                agentId,
-                "ok",
-                `auto-convert ✓ ${formatUnits(surplusEth, 18)} ETH → ~${usdgNum(expect6)} USDG (min ${usdgNum(minOut)}, fee ${price.fee / 10_000}%) — gas reserve kept`,
-              );
-              await addTrade({
-                agent_id: agentId,
-                kind: "swap",
-                target: CASH.WETH,
-                sell_token: "ETH",
-                buy_token: CASH.USDG,
-                amount_usdg: usdgNum(expect6),
-                status: "landed",
-                user_op_hash: exec.userOpHash,
-                tx_hash: exec.txHash,
-              });
-            } else if (autoConvertDebugUntil > Date.now()) {
-              console.log(`[auto-convert] NOT converting: ${formatUnits(surplusEth, 18)} ETH prices to ${expect6} USDG — below a meaningful minOut`);
-            }
+          if (leg) {
+            // THE LATCH: the marker becomes what was left behind, so these
+            // exact funds can never refire — not next tick, not after a
+            // restart. Only a balance ABOVE this fires again (a deposit).
+            recordFire(autoConvertLatch, Date.now(), lastGasWei - surplusEth);
+            persistLatch();
           } else if (autoConvertDebugUntil > Date.now()) {
             console.log(`[auto-convert] NOT converting: no WETH→USDG on-chain price for ${formatUnits(surplusEth, 18)} ETH`);
           }
@@ -5873,8 +6063,9 @@ async function main() {
       } catch (err) {
         // Never into the tick's own path: a failed convert (no quote, wall
         // refusal, bundler error, re-sign needed) must not stall trading.
-        // The cooldown is NOT set on failure — retry next hour, or sooner if
-        // the balances line up again.
+        // Neither clock nor marker moves on failure — the same funds retry
+        // next tick, and a probe failure additionally carries the hourly
+        // backoff set above.
         await addEvent(
           agentId,
           "warn",
