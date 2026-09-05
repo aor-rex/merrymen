@@ -257,7 +257,17 @@ class PortfolioQuality(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     audit_passed: bool = False
+    #: A ROW-SCOPING KEY, carried for the record and for log lines. It decides
+    #: nothing — see `current_accounting_history_auditable`.
     epoch: int = 1
+    #: DOES THIS EPOCH HOLD ONLY ROWS WE CAN VOUCH FOR? True / False / None,
+    #: where None means nobody could establish it.
+    #:
+    #: DEFAULTS TO None so a snapshot from a worker that predates the field is
+    #: refused rather than assumed clean. The failure direction for a money gate
+    #: is silence, and a missing field is exactly the case where the old code
+    #: would otherwise have quietly started sizing.
+    current_accounting_history_auditable: bool | None = None
     contributions_known: bool = False
     equity_complete: bool = False
     gas_basis: Literal["gross", "net", "unknown"] = "unknown"

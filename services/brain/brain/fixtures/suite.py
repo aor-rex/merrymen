@@ -73,6 +73,7 @@ DEPEG = {
 _DEGRADED = PortfolioQuality(
     audit_passed=False,
     epoch=2,
+    current_accounting_history_auditable=True,
     contributions_known=True,
     equity_complete=False,
     gas_basis="gross",
@@ -247,16 +248,34 @@ def extended_scenarios() -> list[Scenario]:
             quality=_DEGRADED, expect_hold=True,
         ),
         _case(
-            "epoch_one",
-            "epoch 1 is forensic by construction, whatever the signals say",
+            "legacy_history",
+            "a history holding pre-cutover rows cannot be measured, whatever the signals say",
             symbol="NVDA", klass="equity-token", price="212.40", signals=BULLISH,
             cash=300.0, equity=300.0, contributions=300.0,
-            quality=PortfolioQuality(**{**GOOD_QUALITY.model_dump(), "epoch": 1}),
-            # REFUSAL, not hold. Epoch 1 is forensic by construction, so there
-            # is no book to reason about at all — and a refusal costs nothing,
-            # which a hold does not. The fixture said hold while the gate said
-            # refuse, and the gate was right.
+            # WAS `epoch_one`, and the rename is the finding. The old fixture
+            # asserted that epoch 1 is "forensic by construction" — which is
+            # false for every agent minted after the accounting cutover, and was
+            # the rule that left all 24 live accounts permanently unsizeable.
+            # What actually makes a book unmeasurable is rows we cannot vouch
+            # for, so that is what the fixture now says.
+            quality=PortfolioQuality(
+                **{**GOOD_QUALITY.model_dump(), "current_accounting_history_auditable": False}
+            ),
+            # REFUSAL, not hold. There is no book to reason about at all — and a
+            # refusal costs nothing, which a hold does not. The fixture said
+            # hold while the gate said refuse, and the gate was right.
             expect_refusal=True,
+        ),
+        _case(
+            "clean_epoch_one",
+            "a brand-new agent at epoch 1 with nothing to quarantine is fully measurable",
+            symbol="NVDA", klass="equity-token", price="212.40", signals=BULLISH,
+            cash=300.0, equity=300.0, contributions=300.0,
+            # THE CASE THE OLD PROXY GOT WRONG, now pinned as a scenario rather
+            # than only as a unit test: this is every agent created after
+            # 2026-08-26, and it must be able to reach a real decision.
+            quality=PortfolioQuality(**{**GOOD_QUALITY.model_dump(), "epoch": 1}),
+            expect_hold=False,
         ),
         _case(
             "contributions_unknown_but_bullish",

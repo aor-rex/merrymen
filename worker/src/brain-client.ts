@@ -252,6 +252,9 @@ function snapshotToRequest(s: PortfolioSnapshot) {
     quality: {
       audit_passed: s.quality.auditPassed,
       epoch: s.quality.epoch,
+      // The auditability VERDICT, carried the way `pnl_publishable` is. Brain
+      // consumes it and keeps no second implementation to disagree with.
+      current_accounting_history_auditable: s.quality.currentAccountingHistoryAuditable,
       contributions_known: s.quality.contributionsKnown,
       equity_complete: s.quality.equityComplete,
       gas_basis: s.quality.gasBasis,

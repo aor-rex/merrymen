@@ -52,8 +52,38 @@ export const microToString = (m: MicroUsdg): string => {
 export interface PortfolioQuality {
   /** The ledger recomputed from fills/flows/marks and matched. */
   auditPassed: boolean;
-  /** Accounting epoch. Epoch 1 predates auditable flows and is forensic only. */
+  /**
+   * Accounting epoch. A ROW-SCOPING KEY, and nothing more.
+   *
+   * It used to decide whether a P&L could be published, via `epoch < 2`. That
+   * was a proxy for "this history predates the accounting fix", and it was
+   * wrong for every agent minted after the fix: `hasEpochOneHistory` only opens
+   * epoch 2 for an account that HAS pre-cutover rows, so a brand-new agent
+   * writing perfectly good rows stays in epoch 1 for ever and could never
+   * publish a return. The whole fleet — all 24 accounts — was epoch 1.
+   *
+   * The question the proxy was standing in for is now asked directly. See
+   * `currentAccountingHistoryAuditable`.
+   */
   epoch: number;
+  /**
+   * DOES THIS EPOCH'S HISTORY CONSIST ONLY OF ROWS WE CAN VOUCH FOR?
+   *
+   * The real property, tested rather than inferred from an integer:
+   *
+   *   true   no rows in the current epoch predate the accounting cutover
+   *   false  legacy rows are present — flows were not tracked, fills were
+   *          booked from a slippage floor, equity rows can hold a phantom
+   *          crater from a failed balance read
+   *   null   could not be determined
+   *
+   * NULL FAILS CLOSED, and that is a different failure direction from the one
+   * the epoch-bump decision uses. Deciding whether to OPEN a new epoch on an
+   * unreadable ledger should do nothing; deciding whether to PUBLISH a return
+   * on an unreadable ledger should refuse. Same evidence, opposite defaults,
+   * because the cost of being wrong points the other way.
+   */
+  currentAccountingHistoryAuditable: boolean | null;
   /** Contributed capital rests on receipts, not on inference. */
   contributionsKnown: boolean;
   /** The equity series has no gaps in the window this snapshot covers. */
@@ -96,7 +126,10 @@ export type PnlUnavailable =
   | "contributions-unknown"
   | "no-capital-contributed"
   | "equity-incomplete"
-  | "epoch-unauditable";
+  /** Rows in this epoch predate the accounting fix and cannot be audited. */
+  | "legacy-accounting-history"
+  /** Nobody could establish whether they do. Refused, not assumed clean. */
+  | "history-auditability-unknown";
 
 export interface SnapshotPnl {
   /** equity − contributions − gas, in micro-USDG. Null when not publishable. */
@@ -224,10 +257,28 @@ export function computePnl(args: {
   if (args.netContributionsUsdg === null || !args.quality.contributionsKnown) {
     return { usdgSinceContribution: null, publishable: false, unavailable: "contributions-unknown", gasBasis: basis };
   }
-  if (args.quality.epoch < 2) {
-    // Epoch 1 predates auditable flows by construction. Its rows are kept for
-    // forensics and must never be presented as measured.
-    return { usdgSinceContribution: null, publishable: false, unavailable: "epoch-unauditable", gasBasis: basis };
+  if (args.quality.currentAccountingHistoryAuditable !== true) {
+    // THE PROPERTY, NOT THE PROXY.
+    //
+    // This was `epoch < 2`, on the reasoning that "epoch 1 predates auditable
+    // flows by construction". That reasoning was false for every agent created
+    // after the cutover: the epoch boundary only opens for an account that HAS
+    // pre-cutover rows, so a brand-new agent writing perfectly good rows stays
+    // at epoch 1 permanently — and was permanently forbidden from publishing a
+    // return, or from being sized by anything that defers to this gate.
+    //
+    // Unknown is refused alongside legacy, and separately named, because "we
+    // found bad rows" and "we could not look" send whoever reads it to two
+    // different places.
+    return {
+      usdgSinceContribution: null,
+      publishable: false,
+      unavailable:
+        args.quality.currentAccountingHistoryAuditable === false
+          ? "legacy-accounting-history"
+          : "history-auditability-unknown",
+      gasBasis: basis,
+    };
   }
   if (args.netContributionsUsdg <= 0) {
     // KNOWN, and zero. That is knowledge — no real capital is at stake — but it

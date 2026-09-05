@@ -1106,22 +1106,58 @@ export async function getAgentEpoch(agentId: string): Promise<number> {
 export const ACCOUNTING_FIXED_AT = 1_787_704_075;
 
 /**
+ * Does this agent's CURRENT epoch contain rows written before the accounting
+ * was fixed? The evidence behind `PortfolioQuality.currentAccountingHistoryAuditable`.
+ *
+ * NULL MEANS COULD-NOT-ASK, and it is a distinct answer from `false`. A caller
+ * deciding whether a return may be published must refuse on null; a caller
+ * deciding whether to open a new epoch must do nothing on it. Same evidence,
+ * opposite defaults — see the two wrappers below.
+ */
+export async function legacyRowsInEpoch(agentId: string, epoch: number): Promise<boolean | null> {
+  try {
+    const row = (await getDb()
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = ? AND created_at < ?)
+              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = ? AND at < ?) AS n`,
+      )
+      .get(agentId, epoch, ACCOUNTING_FIXED_AT, agentId, epoch, ACCOUNTING_FIXED_AT)) as
+      | { n: number }
+      | undefined;
+    if (row === undefined) return null;
+    return Number(row.n ?? 0) > 0;
+  } catch {
+    // A ledger with no `trades` table yet is a read we could not make, not an
+    // account we have cleared.
+    return null;
+  }
+}
+
+/**
+ * CAN THIS EPOCH'S HISTORY BE AUDITED? The property, for the publication gate.
+ *
+ * Replaces `epoch >= 2`, which was a proxy for exactly this and gave the wrong
+ * answer for every agent minted after the cutover — those write good rows into
+ * epoch 1, never trip the boundary, and were therefore permanently unpublishable.
+ *
+ * FAILS CLOSED: null propagates, and `computePnl` refuses on it.
+ */
+export async function accountingHistoryAuditable(agentId: string, epoch: number): Promise<boolean | null> {
+  const legacy = await legacyRowsInEpoch(agentId, epoch);
+  return legacy === null ? null : !legacy;
+}
+
+/**
  * Does this agent have rows from BEFORE the audit work? Used once, at the first
  * arm, to decide whether an epoch boundary is needed. A brand-new agent has
  * nothing to quarantine and stays in epoch 1.
+ *
+ * FAILS OPEN, deliberately and differently from `accountingHistoryAuditable`:
+ * a read failure here must not manufacture an epoch boundary, because opening
+ * one writes an opening-balance flow and is not something to do on a guess.
  */
 export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
-  try {
-    const row = await getDb()
-      .prepare(
-        `SELECT (SELECT COUNT(*) FROM trades WHERE agent_id = ? AND epoch = 1 AND created_at < ?)
-              + (SELECT COUNT(*) FROM equity WHERE agent_id = ? AND epoch = 1 AND at < ?) AS n`,
-      )
-      .get(agentId, ACCOUNTING_FIXED_AT, agentId, ACCOUNTING_FIXED_AT) as { n: number } | undefined;
-    return (row?.n ?? 0) > 0;
-  } catch {
-    return false;
-  }
+  return (await legacyRowsInEpoch(agentId, 1)) === true;
 }
 
 /**

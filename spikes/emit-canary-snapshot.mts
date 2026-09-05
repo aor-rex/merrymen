@@ -21,7 +21,7 @@ const snap = buildPortfolioSnapshot({
     costBasisUsdg: toMicro(6.666), priceSource: "chainlink", quarantined: false,
   }],
   quality: {
-    auditPassed: false, epoch: 1, contributionsKnown: true, equityComplete: false,
+    auditPassed: false, epoch: 1, currentAccountingHistoryAuditable: true, contributionsKnown: true, equityComplete: false,
     gasBasis: "unknown", positionHistoryAvailable: false,
     quarantinedAssetsPresent: false, assessedAt: 1788600000,
   },

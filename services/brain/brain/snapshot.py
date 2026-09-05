@@ -58,6 +58,16 @@ def from_canonical(payload: dict[str, Any]) -> PortfolioState:
     quality = PortfolioQuality(
         audit_passed=bool(q.get("auditPassed", False)),
         epoch=int(q.get("epoch", 1)),
+        # CARRIED, NEVER COERCED. `bool(None)` is False, and False here means
+        # "we found legacy rows" while None means "we could not look" — both
+        # refuse, but they are different facts and the refusal says which. A
+        # missing key stays None, so a snapshot from an older worker is refused
+        # rather than read as a clean history.
+        current_accounting_history_auditable=(
+            None
+            if q.get("currentAccountingHistoryAuditable") is None
+            else bool(q["currentAccountingHistoryAuditable"])
+        ),
         contributions_known=bool(q.get("contributionsKnown", False)),
         equity_complete=bool(q.get("equityComplete", False)),
         gas_basis=q.get("gasBasis", "unknown"),

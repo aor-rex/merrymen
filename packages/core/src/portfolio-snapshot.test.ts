@@ -21,6 +21,7 @@ import {
 const GOOD: PortfolioQuality = {
   auditPassed: true,
   epoch: 2,
+  currentAccountingHistoryAuditable: true,
   contributionsKnown: true,
   equityComplete: true,
   gasBasis: "net",
@@ -132,9 +133,9 @@ describe("P&L refuses rather than fabricating", () => {
     assert.equal(pnlPercent(s), null);
   });
 
-  it("REFUSES in epoch 1, which is forensic by construction", () => {
-    const s = build({ quality: { ...GOOD, epoch: 1 } });
-    assert.equal(s.pnl.unavailable, "epoch-unauditable");
+  it("REFUSES when the epoch holds rows from before the accounting fix", () => {
+    const s = build({ quality: { ...GOOD, currentAccountingHistoryAuditable: false } });
+    assert.equal(s.pnl.unavailable, "legacy-accounting-history");
   });
 
   it("REFUSES on a gappy equity series", () => {
@@ -143,10 +144,13 @@ describe("P&L refuses rather than fabricating", () => {
   });
 
   it("reports the reasons in the order they actually bite", () => {
-    // Unknown contributions and epoch 1 together must report UNKNOWN, not
-    // EPOCH: they send whoever reads it to different places, and the
+    // Unknown contributions and a legacy history together must report UNKNOWN,
+    // not LEGACY: they send whoever reads it to different places, and the
     // denominator is the more fundamental problem.
-    const s = build({ netContributionsUsdg: null, quality: { ...GOOD, epoch: 1, contributionsKnown: false } });
+    const s = build({
+      netContributionsUsdg: null,
+      quality: { ...GOOD, currentAccountingHistoryAuditable: false, contributionsKnown: false },
+    });
     assert.equal(s.pnl.unavailable, "contributions-unknown");
   });
 });
@@ -210,5 +214,115 @@ describe("computePnl is the only gate", () => {
       quality: s.quality,
     });
     assert.deepEqual(direct, s.pnl, "one implementation, not two that drift");
+  });
+});
+
+/**
+ * THE PROXY THAT FORBADE EVERY NEW AGENT FROM EVER BEING MEASURED.
+ *
+ * `epoch < 2` stood in for "this history predates the accounting fix". The
+ * substitution was false in one direction and permanent: the epoch boundary
+ * only ever opens for an account that HAS pre-cutover rows, so an agent minted
+ * after the fix writes perfectly good rows into epoch 1, never trips the
+ * boundary, and could never publish a return — nor be sized by anything that
+ * defers to this gate. Measured on the live fleet: 24 of 24 accounts at epoch 1.
+ *
+ * The property is now asked directly, and THE NUMBER 1 OR 2 DECIDES NOTHING.
+ * The case that matters most is the first one below.
+ */
+describe("auditability is a property, not an epoch number", () => {
+  it("a clean agent created after the cutover is measurable, at epoch 1", () => {
+    // THE TEST THAT MATTERS. This agent is brand new, running current code,
+    // with evidenced contributions and complete marks. Its epoch happens to be
+    // 1 because nothing has ever needed to quarantine anything for it. That
+    // must not forbid it from being measured — which is exactly what it did.
+    const s = build({ quality: { ...GOOD, epoch: 1, currentAccountingHistoryAuditable: true } });
+    assert.equal(s.pnl.publishable, true, "epoch 1 with a clean history is publishable");
+    assert.equal(s.pnl.unavailable, null);
+    assert.notEqual(s.pnl.usdgSinceContribution, null);
+  });
+
+  it("a legacy agent at epoch 1 with pre-cutover history is still refused", () => {
+    // The case the old proxy got right, and which must keep working. Nothing
+    // here is a weakening of the accounting requirement.
+    const s = build({ quality: { ...GOOD, epoch: 1, currentAccountingHistoryAuditable: false } });
+    assert.equal(s.pnl.publishable, false);
+    assert.equal(s.pnl.unavailable, "legacy-accounting-history");
+  });
+
+  it("an epoch-2 agent past a legitimate boundary is measurable", () => {
+    const s = build({ quality: { ...GOOD, epoch: 2, currentAccountingHistoryAuditable: true } });
+    assert.equal(s.pnl.publishable, true);
+  });
+
+  it("an epoch-2 agent whose new epoch somehow holds legacy rows is REFUSED", () => {
+    // The number 2 is not a licence either. If a bad row ever lands in a fresh
+    // epoch — a backfill, a mirror replaying an old cursor — the gate must
+    // still catch it, and under the old rule it could not have.
+    const s = build({ quality: { ...GOOD, epoch: 2, currentAccountingHistoryAuditable: false } });
+    assert.equal(s.pnl.publishable, false);
+    assert.equal(s.pnl.unavailable, "legacy-accounting-history");
+  });
+
+  it("REFUSES when nobody could establish whether the history is clean", () => {
+    // FAILS CLOSED, and says which failure it was. "We found rows we cannot
+    // vouch for" and "we could not look" send an operator to different places,
+    // so they are different arms rather than one shrug.
+    const s = build({ quality: { ...GOOD, currentAccountingHistoryAuditable: null } });
+    assert.equal(s.pnl.publishable, false);
+    assert.equal(s.pnl.unavailable, "history-auditability-unknown");
+  });
+
+  it("a repaired account with evidence-backed contributions is measurable", () => {
+    // The fleet repair's whole output: contributions that rest on receipts. An
+    // account that has been through it, at epoch 1, with its phantom rows
+    // quarantined out of the current epoch, is exactly the clean case.
+    const s = build({
+      netContributionsUsdg: toMicro(10),
+      quality: { ...GOOD, epoch: 1, currentAccountingHistoryAuditable: true, contributionsKnown: true },
+    });
+    assert.equal(s.pnl.publishable, true);
+  });
+
+  it("still refuses on unknown contributions, whatever the history says", () => {
+    // The denominator is the more fundamental fact and is checked first — a
+    // clean history is not permission to divide by an unknown.
+    const s = build({
+      netContributionsUsdg: null,
+      quality: { ...GOOD, currentAccountingHistoryAuditable: true, contributionsKnown: false },
+    });
+    assert.equal(s.pnl.unavailable, "contributions-unknown");
+  });
+
+  it("still refuses on incomplete marks, whatever the history says", () => {
+    const s = build({ quality: { ...GOOD, currentAccountingHistoryAuditable: true, equityComplete: false } });
+    assert.equal(s.pnl.unavailable, "equity-incomplete");
+  });
+
+  it("publishes with a gross or unknown gas basis, but carries the qualifier", () => {
+    // Gas accounting downgrades the FIGURE's meaning, it does not withhold it —
+    // and the basis travels WITH the number so it cannot be quoted bare.
+    for (const gasBasis of ["gross", "unknown"] as const) {
+      const s = build({ quality: { ...GOOD, epoch: 1, currentAccountingHistoryAuditable: true, gasBasis } });
+      assert.equal(s.pnl.publishable, true, `${gasBasis} basis still publishes`);
+      assert.equal(s.pnl.gasBasis, gasBasis, "and says which basis it is");
+    }
+  });
+
+  it("the epoch number alone changes no verdict, in either direction", () => {
+    // The load-bearing statement of the whole change: hold the property fixed,
+    // vary the number, and nothing moves.
+    for (const epoch of [1, 2, 7]) {
+      assert.equal(
+        build({ quality: { ...GOOD, epoch, currentAccountingHistoryAuditable: true } }).pnl.publishable,
+        true,
+        `epoch ${epoch} with a clean history`,
+      );
+      assert.equal(
+        build({ quality: { ...GOOD, epoch, currentAccountingHistoryAuditable: false } }).pnl.publishable,
+        false,
+        `epoch ${epoch} with a legacy history`,
+      );
+    }
   });
 });

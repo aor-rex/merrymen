@@ -36,6 +36,7 @@ USDG = 1_000_000  # micro-USDG in one USDG
 GOOD_QUALITY = PortfolioQuality(
     audit_passed=True,
     epoch=2,
+    current_accounting_history_auditable=True,
     contributions_known=True,
     equity_complete=True,
     gas_basis="net",
@@ -246,7 +247,17 @@ def all_scenarios() -> list[Scenario]:
                     50.0,
                     999.48,
                     None,
-                    quality=PortfolioQuality(contributions_known=False, epoch=1, gas_basis="unknown"),
+                    # Auditability is stated TRUE on purpose, so this scenario
+                    # tests the thing it is named for — an unknown denominator —
+                    # rather than passing because a defaulted field refused
+                    # first. A fixture that succeeds for the wrong reason is a
+                    # fixture that stops testing anything.
+                    quality=PortfolioQuality(
+                        contributions_known=False,
+                        epoch=1,
+                        current_accounting_history_auditable=True,
+                        gas_basis="unknown",
+                    ),
                 ),
                 _market("TSLA", "equity-token", "1481.20", {"technical": "Uptrend."}),
             ),

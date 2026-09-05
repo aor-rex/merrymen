@@ -34,7 +34,23 @@ Verdict = Literal["proceed", "downgrade-to-hold", "refuse"]
 #: flows by construction; its rows are kept for forensics and are never presented
 #: as measured. If core changes this, this changes — it is one rule with two
 #: homes, and the homes must not drift.
-MIN_AUDITABLE_EPOCH = 2
+#: THE EPOCH FLOOR IS GONE, and its absence is the point.
+#:
+#: This was `MIN_AUDITABLE_EPOCH = 2`, mirroring the same constant in core. One
+#: rule with two homes — and the homes did not drift, they were both wrong
+#: together. `epoch >= 2` was a proxy for "this history predates the accounting
+#: fix", and the epoch boundary only ever opens for an account that HAS
+#: pre-cutover rows. Every agent minted after the fix writes good rows into
+#: epoch 1, never trips the boundary, and was permanently unsizeable: the whole
+#: fleet, 24 of 24 accounts, sat at epoch 1, so every Brain decision was a
+#: forced hold no matter what the analysts concluded.
+#:
+#: Brain now CONSUMES the verdict rather than recomputing it. The property is
+#: `quality.current_accounting_history_auditable`, decided in packages/core from
+#: evidence the worker gathered, and there is no second implementation here to
+#: disagree with it — the same reason `pnl_publishable` is carried rather than
+#: re-derived. Accounting has one home.
+_EPOCH_FLOOR_REMOVED = True
 
 
 @dataclass(frozen=True)
@@ -49,19 +65,21 @@ class GateResult:
         return self.verdict == "proceed"
 
 
-def assess(portfolio: PortfolioState, *, min_epoch: int = MIN_AUDITABLE_EPOCH) -> GateResult:
+def assess(portfolio: PortfolioState) -> GateResult:
     """
     Decide what this book supports. PURE.
 
-    `min_epoch` MATCHES CORE. It defaulted to 1 while the accounting repair was
-    still running, and the 36-scenario ablation caught what that cost:
-    `epoch_one` returned BUY on a book that packages/core reports as
-    unpublishable. Two epoch rules is exactly the second accounting
-    implementation the canonical snapshot exists to prevent — and the local one
-    was the LENIENT half, which is the dangerous direction to drift in.
+    THERE IS NO LOCAL FLOOR LEFT TO TUNE. `min_epoch` used to be a parameter so
+    a caller could "state a different floor deliberately"; it defaulted to 1
+    while the accounting repair ran, and the 36-scenario ablation caught what
+    that cost — `epoch_one` returned BUY on a book core reports as
+    unpublishable. The fix at the time was to make the default agree with core.
 
-    It stays a parameter so a caller can state a different floor deliberately,
-    but the default now agrees with `computePnl`.
+    The real fix is that there is nothing here to agree or disagree WITH: the
+    auditability verdict arrives on the snapshot, decided once in
+    packages/core from evidence the worker gathered. A knob that can be set to
+    the lenient value is a knob that will be, and the second implementation is
+    exactly what the canonical snapshot exists to prevent.
     """
     q = portfolio.quality
     caveats: list[str] = []
@@ -102,10 +120,19 @@ def assess(portfolio: PortfolioState, *, min_epoch: int = MIN_AUDITABLE_EPOCH) -
             caveats=[],
         )
 
-    if q.epoch < min_epoch:
+    if q.current_accounting_history_auditable is not True:
+        # THE PROPERTY, NOT THE EPOCH NUMBER — and not re-derived here either.
+        # `false` and `None` are refused alike but named apart: "we found rows
+        # we cannot vouch for" and "we could not look" send an operator to two
+        # different places.
         return GateResult(
             verdict="refuse",
-            why=f"epoch {q.epoch} is below the auditable floor of {min_epoch}",
+            why=(
+                f"this epoch's accounting history contains rows from before the accounting fix, "
+                f"so no figure over it can be audited (epoch {q.epoch})"
+                if q.current_accounting_history_auditable is False
+                else "whether this epoch's accounting history can be audited could not be established"
+            ),
             caveats=[],
         )
 

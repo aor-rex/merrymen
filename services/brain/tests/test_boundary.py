@@ -204,28 +204,95 @@ def test_an_ordinary_add_to_a_working_position_does_not_escalate():
     assert v.primary == "no-escalation"
 
 
-def test_brains_epoch_floor_agrees_with_core():
-    # The 36-scenario ablation caught this: the local gate defaulted to an epoch
-    # floor of 1 while packages/core reports anything below 2 as unpublishable,
-    # so `epoch_one` returned BUY on a book core calls unmeasurable. Two epoch
-    # rules is a second accounting implementation, and the local one was the
-    # LENIENT half — the dangerous direction to drift in.
-    from brain.gate import MIN_AUDITABLE_EPOCH
+def test_brain_consumes_cores_auditability_verdict_and_keeps_no_floor():
+    """
+    THERE IS NO SECOND ACCOUNTING IMPLEMENTATION HERE.
+
+    The 36-scenario ablation once caught a local epoch floor defaulting to 1
+    while packages/core refused anything below 2 — `epoch_one` returned BUY on a
+    book core called unmeasurable, and the local rule was the LENIENT half. The
+    fix at the time was to make the two constants agree.
+
+    Both constants were wrong together. `epoch >= 2` was a proxy for "this
+    history predates the accounting fix", and the epoch boundary only opens for
+    an account that HAS pre-cutover rows — so every agent minted after the fix
+    sat at epoch 1 for ever and could never be sized. Measured on the live
+    fleet: 24 of 24 accounts.
+
+    So the floor is gone rather than corrected, and the verdict arrives on the
+    snapshot. A knob that can be set to the lenient value is a knob that will be.
+    """
+    import inspect
+
+    from brain import gate as gate_mod
     from brain.schemas import PortfolioQuality, PortfolioState
 
-    assert MIN_AUDITABLE_EPOCH == 2, "must match computePnl in packages/core"
-
-    epoch_one = PortfolioState(
-        snapshot_id="s", as_of=1, cash_usdg=300_000_000, equity_usdg=300_000_000,
-        net_contributions_usdg=300_000_000,
-        quality=PortfolioQuality(
-            audit_passed=True, epoch=1, contributions_known=True, equity_complete=True,
-            gas_basis="net", position_history_available=True,
-        ),
+    assert not hasattr(gate_mod, "MIN_AUDITABLE_EPOCH"), "the local floor must be gone, not renamed"
+    assert "min_epoch" not in inspect.signature(gate_mod.assess).parameters, (
+        "and not survive as a tunable parameter"
     )
-    g = gate_assess(epoch_one)
-    assert g.verdict == "refuse"
-    assert not g.may_size, "epoch 1 is forensic; nothing may be sized against it"
+
+    def book(**q):
+        return PortfolioState(
+            snapshot_id="s", as_of=1, cash_usdg=300_000_000, equity_usdg=300_000_000,
+            net_contributions_usdg=300_000_000,
+            quality=PortfolioQuality(
+                audit_passed=True, contributions_known=True, equity_complete=True,
+                gas_basis="net", position_history_available=True, **q,
+            ),
+        )
+
+    # THE CASE THAT MATTERS: a clean agent created after the cutover, still at
+    # epoch 1 because nothing ever needed quarantining for it, may be sized.
+    clean_new = gate_assess(book(epoch=1, current_accounting_history_auditable=True))
+    assert clean_new.may_size, "a clean epoch-1 book must be sizeable"
+
+    # The case the old proxy got right, which must keep working.
+    legacy = gate_assess(book(epoch=1, current_accounting_history_auditable=False))
+    assert legacy.verdict == "refuse"
+    assert not legacy.may_size
+    assert "before the accounting fix" in legacy.why
+
+    # A fresh epoch is not a licence either.
+    dirty_two = gate_assess(book(epoch=2, current_accounting_history_auditable=False))
+    assert not dirty_two.may_size, "the number 2 does not clear a legacy row"
+
+    # FAILS CLOSED on could-not-ask, and says so distinctly.
+    unknown = gate_assess(book(epoch=2, current_accounting_history_auditable=None))
+    assert unknown.verdict == "refuse"
+    assert "could not be established" in unknown.why
+
+    # And a snapshot from a worker that predates the field defaults to None,
+    # so it is refused rather than read as clean.
+    assert PortfolioQuality().current_accounting_history_auditable is None
+
+    # The number alone moves nothing, in either direction.
+    for epoch in (1, 2, 7):
+        assert gate_assess(book(epoch=epoch, current_accounting_history_auditable=True)).may_size
+        assert not gate_assess(book(epoch=epoch, current_accounting_history_auditable=False)).may_size
+
+
+def test_the_auditability_verdict_survives_the_wire():
+    """A parser that coerced None to False would turn "could not look" into a
+    finding, and lose the distinction the refusal message rests on."""
+    from brain.snapshot import from_canonical
+
+    base = {
+        "schemaVersion": "1.0.0", "snapshotId": "s", "agentId": "0xa", "asOf": 1, "epoch": 1,
+        "cashUsdg": 1, "vaultUsdg": 0, "positionsUsdg": 0, "quarantinedUsdg": 0, "equityUsdg": 1,
+        "netContributionsUsdg": 1, "gasUsdg": 0, "positions": [],
+        "pnl": {"usdgSinceContribution": 0, "publishable": True, "unavailable": None, "gasBasis": "net"},
+    }
+    q = {"auditPassed": True, "epoch": 1, "contributionsKnown": True, "equityComplete": True,
+         "gasBasis": "net", "positionHistoryAvailable": True, "quarantinedAssetsPresent": False}
+
+    for sent, expected in ((True, True), (False, False), (None, None)):
+        snap = from_canonical({**base, "quality": {**q, "currentAccountingHistoryAuditable": sent}})
+        assert snap.quality.current_accounting_history_auditable is expected, f"sent {sent!r}"
+
+    # Absent means unknown, not clean.
+    snap = from_canonical({**base, "quality": q})
+    assert snap.quality.current_accounting_history_auditable is None
 
 
 # ── the measurement boundary ────────────────────────────────────────────────

@@ -214,6 +214,7 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
   lastKnownCashUsdg,
@@ -5260,6 +5261,8 @@ async function main() {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
         const gasNow = await getGasPaidUsdg(agentId, epochNow);
+        // Asked once per run, from the ledger this agent actually has.
+        const historyAuditable = await accountingHistoryAuditable(agentId, epochNow);
         // THE BIGGEST HOLDING IS WHAT THIS RUN IS ABOUT. One instrument per run
         // keeps the question answerable and the bill bounded; a Brain asked
         // about a whole book at once produces a paragraph, not a decision.
@@ -5303,17 +5306,27 @@ async function main() {
             grossContributionsUsdg: null,
             grossWithdrawalsUsdg: null,
             gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
+            // NO `as never`. It used to carry one, which made this literal
+            // completely unchecked against core's interface — it even held a
+            // `gasAccounting` field that exists on the WORKER's unrelated
+            // PortfolioQuality and not on this one. A snapshot's quality object
+            // is the thing every downstream refusal is decided from; typing it
+            // as `never` meant core could add, rename or remove a field and
+            // nothing here would fail to compile.
             quality: {
               auditPassed: false,
               epoch: epochNow,
+              // THE PROPERTY, ASKED DIRECTLY, replacing the `epoch >= 2` proxy.
+              // Null when the ledger could not be read, and core refuses on
+              // null rather than assuming a clean history.
+              currentAccountingHistoryAuditable: historyAuditable,
               contributionsKnown: accounting.contributionsKnown,
               equityComplete: !bookIncomplete,
-              gasAccounting: undefined,
               gasBasis: gasNow.unpricedTrades > 0 ? "gross" : gasNow.usdg > 0 ? "net" : "unknown",
               positionHistoryAvailable: false,
               quarantinedAssetsPresent: quarantine.totalCostUsdg > 0n,
               assessedAt: Math.floor(Date.now() / 1000),
-            } as never,
+            },
             market: {
               instrumentId: `merrymen:${focus.symbol.toLowerCase()}`,
               symbol: focus.symbol,
