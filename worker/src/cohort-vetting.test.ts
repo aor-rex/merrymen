@@ -35,6 +35,7 @@ const cand = (over: Partial<CandidateInput> = {}): CandidateInput => ({
   netContributionsUsdg: 10,
   legacyRows: 0,
   positions: [pos()],
+  lastEquityPositionsUsdg: 6.5,
   landedTrades: 4,
   decisions: 12,
   ...over,
@@ -70,9 +71,23 @@ describe("a candidate has to clear the gate before it is worth a model call", ()
     assert.equal(vetCandidate(cand({ beatAt: null }), NOW).verdict, "BLOCKED-IDLE");
   });
 
+  it("tells an empty book from one the mirror has not repopulated yet", () => {
+    // The mirror REPLACES positions per agent — DELETE then INSERT — so between
+    // a child restarting and its first tick, shared Postgres holds zero rows
+    // for an agent that plainly has holdings. This report runs at orchestrator
+    // startup, which is exactly that window: its first live run said the canary
+    // held nothing while it held 6.26 USDG of TSLA.
+    const v = vetCandidate(cand({ positions: [], lastEquityPositionsUsdg: 6.26 }), NOW);
+    assert.equal(v.verdict, "UNKNOWN-POSITIONS-NOT-MIRRORED");
+    assert.match(v.why, /ask again after a tick/);
+  });
+
   it("an empty book is now a CANDIDATE question, not a rejection", () => {
-    assert.equal(vetCandidate(cand({ positions: [] }), NOW).verdict, "READY-CANDIDATE-ONLY");
-    assert.equal(vetCandidate(cand({ positions: [pos({ valueUsdg: 0 })] }), NOW).verdict, "READY-CANDIDATE-ONLY");
+    assert.equal(vetCandidate(cand({ positions: [], lastEquityPositionsUsdg: 0 }), NOW).verdict, "READY-CANDIDATE-ONLY");
+    assert.equal(
+      vetCandidate(cand({ positions: [pos({ valueUsdg: 0 })], lastEquityPositionsUsdg: 0 }), NOW).verdict,
+      "READY-CANDIDATE-ONLY",
+    );
   });
 
   it("checks the reasons in the order they actually bite", () => {

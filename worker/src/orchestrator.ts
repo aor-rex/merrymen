@@ -833,6 +833,12 @@ async function runCohortVettingIfAsked(): Promise<void> {
         )
         .all(key)) as unknown as Record<string, unknown>[];
 
+      // The newest equity row still carries the positions total, so an empty
+      // book can be told from one the mirror has not repopulated yet.
+      const eq = (await shared
+        .prepare(`SELECT positions_usdg FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC LIMIT 1`)
+        .get(key)) as { positions_usdg: number } | undefined;
+
       const fills = (await shared
         .prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ? AND status = 'landed'`)
         .get(key)) as { n: number } | undefined;
@@ -865,6 +871,7 @@ async function runCohortVettingIfAsked(): Promise<void> {
               priceSource: String(p.price_source ?? "unknown"),
               updatedAt: Number(p.updated_at ?? 0),
             })),
+            lastEquityPositionsUsdg: eq === undefined ? null : Number(eq.positions_usdg ?? 0),
             landedTrades: Number(fills?.n ?? 0),
             decisions: Number(decisions?.n ?? 0),
           },

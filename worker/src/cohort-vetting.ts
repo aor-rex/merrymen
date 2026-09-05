@@ -76,6 +76,23 @@ export interface CandidateInput {
   /** Rows in this epoch older than the accounting cutover. */
   legacyRows: number;
   positions: CandidatePosition[];
+  /**
+   * The positions total from the newest equity row, WHOLE USDG.
+   *
+   * EXISTS TO TELL AN EMPTY BOOK FROM AN UNMIRRORED ONE. The mirror replaces
+   * positions per agent — DELETE then INSERT — because a closed position is
+   * gone at the source and an upsert would leave it on the dashboard forever.
+   * So between a child restarting (which wipes its sqlite) and its first tick
+   * repopulating the table, shared Postgres holds ZERO position rows for an
+   * agent that plainly has holdings.
+   *
+   * This report runs at orchestrator startup, which is exactly that window. Its
+   * first live run said the canary held nothing while it held 6.26 USDG of
+   * TSLA, and "the fleet holds nothing" is not a conclusion to reach from a
+   * race. When there are no position rows but this figure is positive, the
+   * honest answer is that we do not know yet.
+   */
+  lastEquityPositionsUsdg: number | null;
   landedTrades: number;
   /** How many decisions this agent has ever recorded — its memory depth. */
   decisions: number;
@@ -95,7 +112,9 @@ export type CandidateVerdict =
   | "BLOCKED-CONTRIBUTIONS-UNKNOWN"
   | "BLOCKED-NO-CAPITAL"
   | "BLOCKED-LEGACY-HISTORY"
-  | "READY-CANDIDATE-ONLY";
+  | "READY-CANDIDATE-ONLY"
+  /** Positions have not been mirrored yet this boot. We do not know the book. */
+  | "UNKNOWN-POSITIONS-NOT-MIRRORED";
 
 export interface CandidateVerdictDetail {
   account: string;
@@ -121,6 +140,10 @@ export interface CandidateVerdictDetail {
    */
   warnings: string[];
 }
+
+// ALREADY WHOLE USDG. See CandidateInput.netContributionsUsdg — dividing here
+// is what turned every figure in the first report into 0.00.
+const usd = (usdg: number): string => usdg.toFixed(2);
 
 /** Heartbeat older than this and the agent is not running. */
 const IDLE_AFTER_SEC = 900;
@@ -197,6 +220,24 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
 
   // ── 3. SOMETHING TO REASON ABOUT ──────────────────────────────────────────
   if (!focus || focus.valueUsdg <= 0) {
+    // AN EMPTY BOOK AND AN UNREAD ONE ARE DIFFERENT ANSWERS.
+    //
+    // The mirror replaces positions per agent — DELETE then INSERT — so between
+    // a child restarting and its first tick repopulating them, shared Postgres
+    // holds zero rows for an agent that plainly has holdings. This report runs
+    // at orchestrator startup, which is exactly that window: its first live run
+    // said the canary held nothing while it held 6.26 USDG of TSLA.
+    //
+    // The newest equity row still carries the positions total, so the two cases
+    // are distinguishable — and "the fleet holds nothing" is not a conclusion to
+    // reach from a race.
+    if ((c.lastEquityPositionsUsdg ?? 0) > 0) {
+      return verdict(
+        "UNKNOWN-POSITIONS-NOT-MIRRORED",
+        `the last equity row says ${usd(c.lastEquityPositionsUsdg ?? 0)} USDG of positions but none have ` +
+          `been mirrored since the child restarted — ask again after a tick`,
+      );
+    }
     // NOT A BLOCKER ANY MORE. An all-cash agent used to be unaskable, because
     // the focus was the largest holding and it had none. It is now offered a
     // CANDIDATE from its own configured universe, so the question it gets is
@@ -242,7 +283,6 @@ export function vetCandidate(c: CandidateInput, nowSec: number): CandidateVerdic
 
 // ALREADY WHOLE USDG. See CandidateInput.netContributionsUsdg — dividing here
 // is what turned every figure in the first report into 0.00.
-const usd = (usdg: number): string => usdg.toFixed(2);
 
 /** One line per candidate, plus a summary. Sized for a 503-line log window. */
 export function cohortLines(all: readonly CandidateVerdictDetail[]): string[] {
