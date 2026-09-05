@@ -122,8 +122,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const stateRef = deps.stateRef;
   let warnedUnreachable = false;
   // Ask-amount context: when the bot asks "how much to buy?", it remembers
-  // { side, symbol } per chat so a follow-up like "5" creates the full trade.
-  const askAmountCtx = new Map<number, { side: "buy" | "sell"; symbol: string; address?: `0x${string}` }>();
+  // { side, symbol } per user so a follow-up like "5" creates the full trade.
+  // Keyed by chat:from (like pending) so one member can't hijack another's in a group.
+  // TTL 120s so a stale "5" an hour later doesn't fire a trade.
+  const askAmountCtx = new Map<string, { side: "buy" | "sell"; symbol: string; address?: `0x${string}`; expiresAt: number }>();
+  const askKey = (chatId: number, fromId: number) => `${chatId}:${fromId}`;
+  const ASK_TTL_SEC = 120;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
@@ -726,18 +730,25 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
 
     // A failed command must still answer — silence reads as a dead bot.
     let reply: string;
-    // Handle bare number replies to "how much to buy?" prompts
-    if (!cmd && askAmountCtx.has(msg.chatId)) {
-      const ctx = askAmountCtx.get(msg.chatId)!;
-      const cleaned = (msg.text ?? "").trim().replace(/^usdg|usd$/i, "").replace(/(usdg|usd)$/i, "");
-      const num = Number(cleaned);
-      if (Number.isFinite(num) && num > 0) {
-        const base = { kind: ctx.side, symbol: ctx.symbol, usdg: Math.round(num) } as Command;
-        if (ctx.address) (base as any).address = ctx.address;
-        cmd = base;
-        await pushHistory(msg.chatId, "user", msg.text);
+    let needsKeyboard = false;
+    // Handle bare number replies to "how much to buy?" prompts — scoped per user with TTL
+    const askCtx = askAmountCtx.get(askKey(msg.chatId, msg.fromId));
+    if (!cmd && askCtx) {
+      if (now() > askCtx.expiresAt) {
+        askAmountCtx.delete(askKey(msg.chatId, msg.fromId));
+      } else {
+        const cleaned = (msg.text ?? "").trim().replace(/^usdg|usd$/i, "").replace(/(usdg|usd)$/i, "");
+        const num = Number(cleaned);
+        if (Number.isFinite(num) && num > 0 && !Number.isNaN(Number(cleaned))) {
+          // Guard: Number("0x12") parses hex — but bareMatch here is already numeric-only path,
+          // and address follow-ups carry ctx.address separately, never via amount.
+          const base = { kind: askCtx.side, symbol: askCtx.symbol, usdg: Math.round(num) } as Command;
+          if (askCtx.address) (base as any).address = askCtx.address;
+          cmd = base;
+          await pushHistory(msg.chatId, "user", msg.text);
+        }
+        askAmountCtx.delete(askKey(msg.chatId, msg.fromId));
       }
-      askAmountCtx.delete(msg.chatId);
     }
     if (!cmd) {
       reply = "not sure what you want to do — try /buy, /sell, /status, or /help";
@@ -745,22 +756,25 @@ Reply with ONLY the matching symbol (uppercase) if any, or "UNKNOWN" if none mat
       return;
     }
     if (cmd.kind === "ask-amount") {
-      askAmountCtx.set(msg.chatId, { side: cmd.side, symbol: cmd.symbol, address: cmd.address });
+      askAmountCtx.set(askKey(msg.chatId, msg.fromId), { side: cmd.side, symbol: cmd.symbol, address: cmd.address, expiresAt: now() + ASK_TTL_SEC });
       reply = `how much ${cmd.side === "buy" ? "to buy" : "to sell"}? e.g. <code>/${cmd.side === "buy" ? "buy" : "sell"} ${cmd.symbol} 5</code>`;
       await sendMessage({ token }, msg.chatId, reply);
       return;
     }
     try {
       reply = await executeCommand(cmd, cmdDeps);
+      // needsKeyboard is explicit from parked pending — not substring on reply text,
+      // so an LLM chat reply containing "pending/confirm" never gets buttons.
+      needsKeyboard = pending.get(`${msg.chatId}:${msg.fromId}`) != null;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
     // Clear any leftover ask-amount context — a non-numeric message ends it.
-    if (cmd.kind !== "confirm" && cmd.kind !== "cancel") askAmountCtx.delete(msg.chatId);
-    // Use keyboard buttons when the reply contains "pending" (trade/transfer/kill cards).
-    const useKeyboard = reply.includes("pending") || reply.includes("confirm");
+    if (cmd.kind !== "confirm" && cmd.kind !== "cancel") askAmountCtx.delete(askKey(msg.chatId, msg.fromId));
+    // Use keyboard buttons when a pending card was just parked for this user.
+    const useKeyboard = needsKeyboard;
     if (!slash) await pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
     if (useKeyboard) {
       await sendMessageWithKeyboard({ token }, msg.chatId, reply, [
