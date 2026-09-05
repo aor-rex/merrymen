@@ -80,7 +80,6 @@ import {
   type AgentExecutor,
   type Call,
   type ExecuteHooks,
-  type ExecuteOptions,
   type ExecutionResult,
 } from "./executor";
 import { createSponsor, type Sponsor } from "./paymaster";
@@ -1501,13 +1500,12 @@ async function main() {
   const autoConvertExecute = async (
     executor: AgentExecutor,
     calls: Call[],
-    options?: ExecuteOptions,
   ): Promise<ExecutionResult> => {
     const execution = executor.execute(calls, {
       onSubmitted: async (userOpHash) => {
         console.log(`[auto-convert] submitted: ${userOpHash}`);
       },
-    }, options);
+    });
     const tracked = execution
       .then(() => undefined, () => undefined)
       .finally(() => {
@@ -5778,13 +5776,11 @@ async function main() {
                   }),
                 },
               ],
-              // Deployment is a FIXED factory computation, not a swap: the
-              // estimate does not jitter, so 1.2x headroom is enough and the
-              // swap-tuned 3M ceiling would refuse the honest number (measured
-              // 15.5M bounded at 2x). The EntryPoint prefunds the BOUNDED
-              // limits, so light headroom is also what keeps AA21 reachable —
-              // 2x inflation alone pushed the prefund past a 0.010 ETH balance.
-              { bounds: { headroomBps: 12_000, disagreementBps: 40_000, absoluteMax: 20_000_000n } },
+              // No explicit gas bounds: the executor sizes the ceiling itself
+              // from the operation's shape (readEnableState widens fresh
+              // enables to FIRST_ENABLE_GAS_BOUNDS). The old per-call bounds
+              // this probe used to carry were removed in the gas-limits
+              // refactor because a wrongly-narrowed ceiling fails silent.
             );
             deployed =
               ((await active.client.getCode({ address: active.executor!.address })) ?? "0x") !== "0x";
