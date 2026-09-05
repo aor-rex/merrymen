@@ -324,7 +324,21 @@ class BrainGraph:
                 dossier += f"\n\nRISK ({stance})\n{r.text}"
 
         if req.memory:
-            dossier += "\n\nWHAT THIS AGENT THOUGHT BEFORE\n" + "\n".join(f"- {m}" for m in req.memory[:6])
+            # FENCED, like every other block that is not ours.
+            #
+            # Memory reads as the agent's own past words, which makes it feel
+            # like trusted context. It is not: a remembered thesis is model
+            # prose that was itself written while reading scraped news and
+            # social text, so anything that steered the agent last week arrives
+            # here wearing its own voice. That is the "permanent foothold" case
+            # — an injection that survives into every later prompt because it
+            # was written down — and it is worse than the live one, not better.
+            #
+            # It was unfenced while `memory` was always empty. It is being
+            # populated now, which is exactly when the gap stops being dormant.
+            dossier += "\n\nWHAT THIS AGENT THOUGHT BEFORE\n" + _fence(
+                "own-memory", "\n".join(f"- {m}" for m in req.memory[:6])
+            )
 
         data = await self._decide(req, budget, gate, dossier)
         return self._assemble(

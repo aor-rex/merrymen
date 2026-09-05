@@ -309,3 +309,26 @@ def test_the_signal_survives_a_lens_that_said_nothing():
         evidence_strength=view.evidence_strength,
     )
     assert s.direction == "no-data" and s.confidence == 0.0
+
+
+def test_memory_is_fenced_like_everything_else_we_did_not_write():
+    """
+    Memory reads as the agent's own past words, which is what makes it feel
+    trusted. It is not: a remembered thesis is model prose written while reading
+    scraped news and social text, so anything that steered the agent last week
+    arrives wearing its own voice. That is the permanent-foothold case — an
+    injection that survives into every later prompt because it was written down.
+
+    It was unfenced for as long as `memory` was always empty. The worker now
+    populates it, which is exactly when the gap stops being dormant.
+    """
+    import inspect
+
+    from brain import graph as graph_mod
+
+    src = inspect.getsource(graph_mod.BrainGraph._think)
+    i = src.index("WHAT THIS AGENT THOUGHT BEFORE")
+    # The fence must be applied to the memory block itself, not merely present
+    # somewhere else in the method.
+    assert "_fence(" in src[i : i + 400], "the memory block must be fenced"
+    assert "own-memory" in src[i : i + 400], "and labelled as what it is"

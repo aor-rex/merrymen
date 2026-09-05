@@ -92,6 +92,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, writeCommandResult } from "./command-files";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { memoryLines, sentimentLine, technicalLine } from "./brain-material";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
@@ -5264,6 +5265,14 @@ async function main() {
         // about a whole book at once produces a paragraph, not a decision.
         const focus = [...positions].sort((a, b) => Number(b.valueUsdg - a.valueUsdg))[0];
         if (focus) {
+          // The orchestrator materialises both of these from shared Postgres,
+          // through the publication gate, into a file this child can read.
+          // `readPeers` never throws: absent, unreadable and malformed all mean
+          // "nothing this window", which is a correct state and not a fault.
+          const wire = readPeers(merrymenHome());
+          const brainPeers = wire.theses;
+          const brainOwn = wire.own ?? [];
+          const sentiment = sentimentLine(brainPeers, focus.symbol);
           const inputs: ShadowInputs = {
             agentId,
             now: Math.floor(Date.now() / 1000),
@@ -5314,15 +5323,35 @@ async function main() {
               // no data is OMITTED rather than filled with a plausible sentence
               // — Brain answers NO DATA AVAILABLE for what is missing, which is
               // the truthful input and the one the fixtures were built against.
+              //
+              // `news` and `fundamentals` are absent for exactly that reason:
+              // this chain has no honest source for either yet. Every early
+              // production decision said so in its own words, and the answer to
+              // that is a real source, not a filler sentence.
               signals: {
-                technical:
-                  `Price ${(Number(focus.price8) / 1e8).toFixed(4)} USD from ${focus.priceSource}` +
-                  `${focus.priceStale ? " (STALE)" : ""}. Position value ` +
-                  `${usdgNum(focus.valueUsdg).toFixed(6)} USDG of a ${usdgNum(equityUsdg).toFixed(6)} USDG book.`,
+                technical: technicalLine({
+                  symbol: focus.symbol,
+                  priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+                  priceSource: focus.priceSource,
+                  priceStale: focus.priceStale,
+                  valueUsdg: Number(focus.valueUsdg),
+                  equityUsdg: Number(equityUsdg),
+                  cashUsdg: Number(balances.cashUsdg),
+                  positionCount: positions.length,
+                }),
+                // The only genuine sentiment this fleet has: what other
+                // Merrymen actually published. OMITTED ENTIRELY when nobody
+                // said anything — an empty section reads as "we looked and
+                // there was nothing", and the truth is that nobody spoke.
+                ...(sentiment ? { sentiment } : {}),
               },
             },
             persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
-            memory: [],
+            // ITS OWN PUBLISHED THESES, and what came of them. Read from the
+            // peer file rather than the child's `decisions` table because that
+            // table is wiped by every redeploy — an agent reading memory from
+            // it would permanently be having its first thought.
+            memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
           };
           const outcome = await runShadow(
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },

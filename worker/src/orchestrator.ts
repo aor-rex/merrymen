@@ -58,7 +58,8 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
-import { peerThesesForSlugs } from "./peer-theses";
+import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
+import type { PublicThesis } from "./thesis-policy";
 import { applyLedgerSchema } from "./store";
 import { drainCommandResults, writeCommand } from "./command-files";
 
@@ -1019,8 +1020,34 @@ async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
       shared,
       edges.slice(0, MAX_FOLLOWS).map((e) => e.target),
     );
-    writePeersForChild(childHome(tenant), { at: Math.floor(Date.now() / 1000), theses });
-    if (theses.length > 0) log(`wire: ${tenant} +${theses.length} peer thesis/theses from ${edges.length} follow(s)`);
+
+    // THE AGENT'S OWN THESES, from the durable copy.
+    //
+    // The child holds a `decisions` table and could read this itself. It must
+    // not: that sqlite is wiped by every redeploy, so an agent reading its own
+    // memory from it is permanently having its first thought. Shared Postgres
+    // is the durable copy and the child cannot reach it — `CHILD_SECRET_STRIP`
+    // removes `DATABASE_URL` on purpose — so it is materialised here, through
+    // the same gate, the same file and the same atomic write as the peers.
+    //
+    // `readPeerTheses` is reused rather than re-queried: memory and publication
+    // must not be able to disagree about what this agent said.
+    let own: PublicThesis[] = [];
+    try {
+      const id = await getIdentityStore().get(tenant);
+      if (id?.accounts.length) own = await readPeerTheses(shared, id.accounts);
+    } catch {
+      // An agent with no identity yet has no published theses to remember, and
+      // a peer file is still worth writing without them.
+    }
+
+    writePeersForChild(childHome(tenant), { at: Math.floor(Date.now() / 1000), theses, own });
+    if (theses.length > 0 || own.length > 0) {
+      log(
+        `wire: ${tenant} +${theses.length} peer thesis/theses from ${edges.length} follow(s), ` +
+          `+${own.length} of its own`,
+      );
+    }
   } catch (e) {
     // Never fatal. The wire is additional evidence; a child with a stale or
     // absent peer file trades exactly as it did before the feature existed.

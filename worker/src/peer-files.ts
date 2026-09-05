@@ -40,6 +40,22 @@ export interface PeerFile {
   at: number;
   /** Published theses from the agents this owner wired in, newest first. */
   theses: PublicThesis[];
+  /**
+   * THIS AGENT'S OWN PUBLISHED THESES, newest first — its durable memory.
+   *
+   * The child already has a `decisions` table and could read its own rows from
+   * it. It must not: the child's sqlite is WIPED BY EVERY REDEPLOY, so memory
+   * read from there resets to nothing several times a day and an agent would
+   * permanently be having its first thought. The durable copy lives in shared
+   * Postgres, which the child cannot reach by design (`CHILD_SECRET_STRIP`
+   * removes `DATABASE_URL`), so the orchestrator materialises it here — the
+   * same transport, the same atomic write, and the same publication gate the
+   * peer theses above already travel through.
+   *
+   * Optional because a peer file written by an older orchestrator does not have
+   * it, and an agent with no remembered theses is a correct state, not a fault.
+   */
+  own?: PublicThesis[];
 }
 
 export function peerFilePath(home: string): string {
@@ -71,13 +87,17 @@ export function writePeersForChild(home: string, file: PeerFile): void {
  * trade in every direction.
  */
 export function readPeers(home: string): PeerFile {
-  const empty: PeerFile = { at: 0, theses: [] };
+  const empty: PeerFile = { at: 0, theses: [], own: [] };
   try {
     const raw = JSON.parse(readFileSync(peerFilePath(home), "utf8")) as unknown;
     if (!raw || typeof raw !== "object") return empty;
     const f = raw as Partial<PeerFile>;
     if (!Array.isArray(f.theses)) return empty;
-    return { at: Number(f.at) || 0, theses: f.theses };
+    // `own` is checked separately rather than folded into the guard above: a
+    // file from an orchestrator that predates the field is VALID and its peers
+    // are still worth reading. Failing the whole file over a missing optional
+    // would silently take the wire down on the deploy that added it.
+    return { at: Number(f.at) || 0, theses: f.theses, own: Array.isArray(f.own) ? f.own : [] };
   } catch {
     return empty;
   }

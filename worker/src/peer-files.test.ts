@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -62,13 +62,13 @@ describe("the peer file", () => {
   it("NEVER THROWS — absent, malformed and wrong-shaped all read as nothing", async () => {
     // It is read on the tick, so a throw here stops an agent trading over a
     // feature that is meant to be additional evidence.
-    assert.deepEqual(readPeers(home), { at: 0, theses: [] });
+    assert.deepEqual(readPeers(home), { at: 0, theses: [], own: [] });
     await writeFile(peerFilePath(home), "{ not json", "utf8");
-    assert.deepEqual(readPeers(home), { at: 0, theses: [] });
+    assert.deepEqual(readPeers(home), { at: 0, theses: [], own: [] });
     await writeFile(peerFilePath(home), JSON.stringify({ at: 1 }), "utf8");
-    assert.deepEqual(readPeers(home), { at: 0, theses: [] });
+    assert.deepEqual(readPeers(home), { at: 0, theses: [], own: [] });
     await writeFile(peerFilePath(home), JSON.stringify([1, 2, 3]), "utf8");
-    assert.deepEqual(readPeers(home), { at: 0, theses: [] });
+    assert.deepEqual(readPeers(home), { at: 0, theses: [], own: [] });
   });
 
   it("AN EMPTY FILE AND NO FILE ARE DIFFERENT THINGS on disk", async () => {
@@ -195,5 +195,31 @@ describe("the tool the model actually gets", () => {
     assert.match(DESK, /weakest evidence\s+here — weaker than a curve mark/);
     assert.match(DESK, /correlation between models given similar data, not\s+confirmation/);
     assert.match(DESK, /Never size off\s+one/);
+  });
+});
+
+describe("the agent's own theses ride the same wire", () => {
+  it("round-trips `own` beside the peers", async () => {
+    const own = [thesis({ name: "Self", head: "hold TSLA 0.00 USDG", outcome: "shadow", shadow: true })];
+    writePeersForChild(home, { at: 5, theses: [thesis()], own });
+    const back = readPeers(home);
+    assert.equal(back.own?.length, 1);
+    assert.equal(back.own![0]!.head, "hold TSLA 0.00 USDG");
+    assert.equal(back.theses.length, 1, "and does not disturb the peers");
+  });
+
+  it("reads a file written before `own` existed, rather than failing it", () => {
+    // A peer file from an older orchestrator is VALID and its peers are still
+    // worth having. Failing the whole file over a missing optional would take
+    // the wire down on the very deploy that added the field.
+    writeFileSync(peerFilePath(home), JSON.stringify({ at: 5, theses: [thesis()] }), "utf8");
+    const back = readPeers(home);
+    assert.equal(back.theses.length, 1);
+    assert.deepEqual(back.own, [], "absent reads as nothing remembered, not as a fault");
+  });
+
+  it("treats a malformed `own` as nothing remembered", () => {
+    writeFileSync(peerFilePath(home), JSON.stringify({ at: 5, theses: [], own: "everything" }), "utf8");
+    assert.deepEqual(readPeers(home).own, []);
   });
 });
