@@ -1449,9 +1449,30 @@ export async function closingEquityOfEpoch(agentId: string, epoch: number): Prom
  * Joined to the trade the decision caused, because 'I proposed a buy' and 'the
  * wall turned it back' are different memories and only the second is useful.
  */
+/**
+ * What this agent decided lately.
+ *
+ * `excludeSources` EXISTS BECAUSE TWO REASONERS SHARE ONE TABLE AND ONE
+ * agent_id. Brain writes its shadow decisions into `decisions` under exactly
+ * the same `agent_id` the strategist uses, so an unfiltered read hands one
+ * reasoner the other's thinking as its own — and the desk's `recall` tool
+ * frames what it returns as "what you proposed, what the wall did with it".
+ *
+ * On the canary, where both are enabled, that produced:
+ *
+ *     - buy TSLA 5 USDG: no trade came of it — you said: <Brain's thesis>
+ *
+ * Three separate lies in one line. Nothing was proposed by the strategist;
+ * "no trade came of it" says something tried and failed rather than that
+ * nothing was ever wired to try; and the strategist could then publish a
+ * `strategist`-sourced thesis about a buy it believed it had made — which
+ * passes the publication gate with no shadow marking at all, because by then
+ * the row genuinely is a strategist row. A laundering path, not a display bug.
+ */
 export async function recentDecisions(
   agentId: string,
   limit = 6,
+  excludeSources: readonly string[] = [],
 ): Promise<
   {
     at: number;
@@ -1465,6 +1486,7 @@ export async function recentDecisions(
   }[]
 > {
   try {
+    const holes = excludeSources.map(() => "?").join(", ");
     return (await getDb()
       .prepare(
         `SELECT d.at AS at, d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
@@ -1472,11 +1494,11 @@ export async function recentDecisions(
                 t.status AS status, t.reject_rule AS reject_rule
            FROM decisions d
            LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
-          WHERE d.agent_id = ?
+          WHERE d.agent_id = ?${excludeSources.length ? ` AND d.source NOT IN (${holes})` : ""}
           ORDER BY d.at DESC
           LIMIT ?`,
       )
-      .all(agentId, limit)) as never;
+      .all(agentId, ...excludeSources, limit)) as never;
   } catch {
     // A ledger without the decisions table yet is an agent with no memory,
     // which is the honest answer for its first window.

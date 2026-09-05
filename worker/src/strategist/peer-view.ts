@@ -18,6 +18,18 @@
  * this one as quoted data. That is the same split `read_link` makes between
  * computed signals and an excerpt, for the same reason.
  *
+ * EXCEPT WHEN THEY DID NOTHING, WHICH THAT PARAGRAPH USED TO GET WRONG. A peer
+ * running Brain in shadow emits an action and a size and executes neither, so
+ * "a fact about a trade" is precisely what it is not. This module rebuilt the
+ * line from `t.action` — the only consumer in the codebase that did — and
+ * produced:
+ *
+ *     what they did about it: buy TSLA 5 USDG — a stated intention — not traded
+ *
+ * The words "what they did" plus a bare imperative verb assert an execution,
+ * and the correction arrives after an em-dash, in a line a model may summarise
+ * from its first clause. `t.head` already carries the conditional.
+ *
  * THE CLOSING LINE ASKS FOR ATTRIBUTION, which is what makes the wire auditable
  * from the public feed alone: if a peer changed a decision, the thesis that
  * comes out of it should say so.
@@ -38,12 +50,20 @@ export function peerView(t: PublicThesis): string {
   const when = t.said > 1 ? `, and said it ${t.said} times in the window` : "";
   lines.push(`  they said this ${t.at ? "recently" : "at some point"}${when}`);
 
-  // What they DID. Outside the fence: this came from a ledger, not from prose.
-  const did = [t.action, t.symbol, t.sizeUsdg == null ? null : `${t.sizeUsdg} USDG`]
-    .filter(Boolean)
-    .join(" ");
-  if (did) {
-    lines.push(`  what they did about it: ${did}${t.outcomeText ? ` — ${t.outcomeText}` : ""}`);
+  // What they DID — or, for a shadow desk, what they only said they would.
+  //
+  // `t.head` rather than a rebuild from `t.action`. The head already reads
+  // "would buy TSLA 5.00 USDG" for a shadow decision, because `publishableThesis`
+  // bakes the conditional in for exactly the surfaces that are not React
+  // components. This was the one consumer in the codebase that rebuilt it, and
+  // rebuilding it is what dropped the conditional.
+  if (t.shadow) {
+    lines.push(
+      `  what they SAID THEY WOULD DO: ${t.head || "nothing"} — ` +
+        `this desk is not connected to trading and executed nothing`,
+    );
+  } else if (t.head) {
+    lines.push(`  what they did about it: ${t.head}${t.outcomeText ? ` — ${t.outcomeText}` : ""}`);
   } else {
     lines.push(`  what they did about it: nothing — this is a view, not a trade`);
   }

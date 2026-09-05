@@ -124,7 +124,10 @@ describe("how a peer is shown to a model", () => {
     // A model shown a P&L-flavoured claim from a pretend book has to know it is
     // pretend before it reads the number. Afterwards is too late: by then it has
     // been weighed. paperTradingEnabled defaults TRUE, so this is the common case.
-    const t = thesis({ paper: true, sizeUsdg: 999 });
+    // The size now reaches the model through `head`, which is where
+    // publishableThesis bakes it — so the fixture states it there. Rebuilding
+    // the line from `sizeUsdg` is exactly what dropped the shadow conditional.
+    const t = thesis({ paper: true, sizeUsdg: 999, head: "bought PEPE 999 USDG" });
     const label = peerLabel(t);
     assert.match(label, /PAPER MONEY/);
     const view = peerView(t);
@@ -159,7 +162,10 @@ describe("how a peer is shown to a model", () => {
   });
 
   it("a view with no trade says so rather than rendering a blank", () => {
-    const view = peerView(thesis({ action: null, symbol: null, sizeUsdg: null, outcome: "view" }));
+    // A real view row has an EMPTY head: `headOf` returns "" when there is no
+    // action, symbol or size to state. The fixture nulls the parts, so it has
+    // to null the head too — otherwise it describes a row that cannot exist.
+    const view = peerView(thesis({ action: null, symbol: null, sizeUsdg: null, head: "", outcome: "view" }));
     assert.match(view, /nothing — this is a view, not a trade/);
   });
 
@@ -221,5 +227,47 @@ describe("the agent's own theses ride the same wire", () => {
   it("treats a malformed `own` as nothing remembered", () => {
     writeFileSync(peerFilePath(home), JSON.stringify({ at: 5, theses: [], own: "everything" }), "utf8");
     assert.deepEqual(readPeers(home).own, []);
+  });
+});
+
+describe("a peer that only THOUGHT about a trade is never reported as having made one", () => {
+  const shadowPeer = () =>
+    thesis({
+      shadow: true,
+      outcome: "shadow",
+      head: "would buy TSLA 5.00 USDG",
+      action: "buy",
+      symbol: "TSLA",
+      sizeUsdg: 5,
+      outcomeText: "a stated intention — not traded",
+    });
+
+  it("does not say 'what they did' about something nobody did", () => {
+    // This module rebuilt the line from `t.action` — the only consumer in the
+    // codebase that did — and produced "what they did about it: buy TSLA 5
+    // USDG". The words "what they did" plus a bare imperative verb assert an
+    // execution, and the correction arrived after an em-dash, in a line a model
+    // may summarise from its first clause.
+    const view = peerView(shadowPeer());
+    assert.ok(!/what they did about it/.test(view), "that framing is a claim about a trade");
+    assert.match(view, /what they SAID THEY WOULD DO/);
+    assert.match(view, /executed nothing/);
+  });
+
+  it("uses the pre-baked conditional rather than the bare verb", () => {
+    // `publishableThesis` puts "would buy" into `head` precisely for the
+    // surfaces that are not React components. This is one of them.
+    const view = peerView(shadowPeer());
+    assert.match(view, /would buy TSLA 5\.00 USDG/);
+    assert.ok(!/\bbuy TSLA 5 USDG\b/.test(view), "the rebuilt-from-action string must be gone");
+  });
+
+  it("leaves a real executed peer exactly as it was", () => {
+    const view = peerView(thesis({ head: "buy NVDA 16.66 USDG", outcomeText: "landed" }));
+    assert.match(view, /what they did about it: buy NVDA 16\.66 USDG — landed/);
+  });
+
+  it("still says 'a view, not a trade' when there is no head at all", () => {
+    assert.match(peerView(thesis({ head: "", action: null, symbol: null, sizeUsdg: null })), /a view, not a trade/);
   });
 });

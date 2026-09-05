@@ -67,7 +67,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import type { PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -499,7 +499,17 @@ async function main() {
                 // all day and never know.
                 recall: async () => {
                   if (!active) return "nothing yet — this is your first look at the book";
-                  const rows = await recentDecisions(active.agentId, 6);
+                  // ANOTHER REASONER'S THINKING IS NOT THIS ONE'S MEMORY.
+                  //
+                  // Brain writes shadow decisions into the same table under the
+                  // same agent_id, and this tool tells the strategist it is
+                  // looking at "what you proposed, what the wall did with it".
+                  // Unfiltered, the canary's desk read Brain's buy as its own
+                  // and could then publish a strategist-sourced thesis about a
+                  // trade nobody made — which passes the publication gate with
+                  // no shadow marking, because by then the row really is a
+                  // strategist row.
+                  const rows = await recentDecisions(active.agentId, 6, SHADOW_SOURCES);
                   if (rows.length === 0) return "nothing yet — this is your first look at the book";
                   return rows
                     .map((d) => {

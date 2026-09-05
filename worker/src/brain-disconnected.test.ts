@@ -72,3 +72,43 @@ describe("the shadow path cannot reach execution", () => {
     }
   });
 });
+
+/**
+ * ONE LEDGER TABLE, TWO REASONERS, AND ONLY ONE OF THEM MAY CLAIM A ROW.
+ *
+ * Brain writes shadow decisions into `decisions` under the SAME `agent_id` the
+ * strategist uses. The desk's `recall` tool tells the strategist it is looking
+ * at "what you proposed, what the wall did with it" — so an unfiltered read
+ * hands one reasoner the other's thinking as its own history.
+ *
+ * On the canary, where both are enabled, that produced:
+ *
+ *     - buy TSLA 5 USDG: no trade came of it — you said: <Brain's thesis>
+ *
+ * Three lies in one line: the strategist proposed nothing; "no trade came of
+ * it" says something tried and failed rather than that nothing was ever wired
+ * to try; and the strategist could then publish a `strategist`-sourced thesis
+ * about a buy it believed it had made — which passes the publication gate with
+ * no shadow marking at all, because by then the row genuinely is a strategist
+ * row. That is a laundering path, not a rendering bug.
+ */
+describe("one reasoner never inherits another's decisions", () => {
+  it("recall excludes every shadow source", () => {
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const i = src.indexOf("recall: async () =>");
+    assert.ok(i > 0, "the recall tool must still exist for this test to mean anything");
+    const body = src.slice(i, i + 1400);
+    assert.match(body, /recentDecisions\([^)]*SHADOW_SOURCES\)/, "recall must filter shadow sources out");
+  });
+
+  it("the store can actually exclude them, and does not when asked not to", () => {
+    // The filter has to be real SQL, not a comment. Checked on the source
+    // because exercising it needs a database.
+    const store = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+    const i = store.indexOf("export async function recentDecisions");
+    const body = store.slice(i, i + 1800);
+    assert.match(body, /excludeSources/, "the parameter exists");
+    assert.match(body, /d\.source NOT IN/, "and reaches the WHERE clause");
+    assert.match(body, /excludeSources\.length \?/, "and is skipped entirely when nothing is excluded");
+  });
+});
