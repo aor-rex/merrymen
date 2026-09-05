@@ -35,6 +35,7 @@ import {
 } from "viem";
 import {
   isHostedMode,
+  instrumentClassOf,
   CASH,
   CIRCLE_TIERS,
   MORPHO,
@@ -5379,7 +5380,16 @@ async function main() {
             market: {
               instrumentId: `merrymen:${focus.symbol.toLowerCase()}`,
               symbol: focus.symbol,
-              instrumentClass: "equity-token",
+              // FROM THE TOKEN, not from an assumption.
+              //
+              // This was hardcoded `"equity-token"`, which was true only because
+              // the shadow cohort was one agent holding TSLA. Any agent holding a
+              // discovered token would have been handed the equity desk —
+              // technical, news, sentiment and FUNDAMENTALS — and a fundamentals
+              // analyst asked about a launchpad memecoin produces confident text
+              // about nothing, which is worse than no analyst: it arrives looking
+              // like evidence.
+              instrumentClass: instrumentClassOf(focus.token),
               priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
               // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
               // no data is OMITTED rather than filled with a plausible sentence

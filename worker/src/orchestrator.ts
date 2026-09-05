@@ -55,13 +55,14 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
+import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { writePeersForChild } from "./peer-files";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
-import { applyLedgerSchema } from "./store";
+import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
@@ -779,6 +780,111 @@ async function runGasAuditIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * WHICH AGENTS ARE WORTH SHADOWING. READ ONLY.
+ *
+ * `MERRYMEN_COHORT_VET=1`. Prints one block per agent so a cohort is chosen
+ * from evidence rather than from balances — see cohort-vetting.ts for why the
+ * balance is the wrong signal.
+ */
+async function runCohortVettingIfAsked(): Promise<void> {
+  if ((process.env.MERRYMEN_COHORT_VET ?? "").trim() !== "1") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("cohort vetting asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const shared = await makePgDb(url);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const agents = (await shared
+      .prepare(
+        `SELECT smart_account, name, COALESCE(epoch, 1) AS epoch, mode, beat_at, contributions_known
+           FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
+      )
+      .all()) as unknown as Record<string, unknown>[];
+
+    const verdicts: CandidateVerdictDetail[] = [];
+    for (const a of agents) {
+      const account = String(a.smart_account ?? "");
+      const key = account.toLowerCase();
+      const epoch = Number(a.epoch ?? 1);
+
+      const flows = (await shared
+        .prepare(
+          `SELECT COUNT(*) AS n,
+                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+             FROM flows WHERE LOWER(agent_id) = ? AND epoch = ?`,
+        )
+        .get(key, epoch)) as { n: number; net: number } | undefined;
+
+      // The same evidence `legacyRowsInEpoch` uses, asked of the shared copy.
+      const legacy = (await shared
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND epoch = ? AND created_at < ?)
+                + (SELECT COUNT(*) FROM equity WHERE LOWER(agent_id) = ? AND epoch = ? AND at < ?) AS n`,
+        )
+        .get(key, epoch, ACCOUNTING_FIXED_AT, key, epoch, ACCOUNTING_FIXED_AT)) as { n: number } | undefined;
+
+      const pos = (await shared
+        .prepare(
+          `SELECT symbol, token, value_usdg, price_stale, price_source, updated_at
+             FROM positions WHERE LOWER(agent_id) = ?`,
+        )
+        .all(key)) as unknown as Record<string, unknown>[];
+
+      const fills = (await shared
+        .prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id) = ? AND status = 'landed'`)
+        .get(key)) as { n: number } | undefined;
+      const decisions = (await shared
+        .prepare(`SELECT COUNT(*) AS n FROM decisions WHERE LOWER(agent_id) = ?`)
+        .get(key)) as { n: number } | undefined;
+
+      verdicts.push(
+        vetCandidate(
+          {
+            account,
+            name: String(a.name ?? ""),
+            epoch,
+            mode: a.mode === null || a.mode === undefined ? null : String(a.mode),
+            beatAt: a.beat_at === null || a.beat_at === undefined ? null : Number(a.beat_at),
+            // NO ROWS IS ZERO; NO ANSWER IS NULL. An agent nobody funded has
+            // contributed nothing, which is knowledge. A query that came back
+            // with nothing at all is a question we failed to ask, and the two
+            // must not collapse — one blocks the candidate, the other says we
+            // do not know whether to.
+            netContributionsUsdg: flows === undefined ? null : Number(flows.net ?? 0),
+            legacyRows: Number(legacy?.n ?? 0),
+            positions: pos.map((p) => ({
+              symbol: String(p.symbol ?? ""),
+              token: String(p.token ?? ""),
+              valueUsdg: Number(p.value_usdg ?? 0),
+              // Postgres gives a boolean, sqlite an integer. Both are truthy the
+              // same way, and neither may be read as "fresh" by accident.
+              priceStale: p.price_stale === true || Number(p.price_stale ?? 0) === 1,
+              priceSource: String(p.price_source ?? "unknown"),
+              updatedAt: Number(p.updated_at ?? 0),
+            })),
+            landedTrades: Number(fills?.n ?? 0),
+            decisions: Number(decisions?.n ?? 0),
+          },
+          nowSec,
+        ),
+      );
+    }
+
+    // Best candidates first, so the top of the report is the answer.
+    const rank: Record<string, number> = {
+      READY: 0,
+      "READY-WHEN-MARKET-OPENS": 1,
+    };
+    verdicts.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9) || y.equityUsdg - x.equityUsdg);
+    for (const line of cohortLines(verdicts)) log(`cohort| ${line}`);
+  } catch (e) {
+    log(`cohort vetting failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -1177,6 +1283,7 @@ export async function runOrchestrator(): Promise<void> {
   await runAccountingDiagnosisIfAsked();
   await runReconstructionDryRunIfAsked();
   await runGasAuditIfAsked();
+  await runCohortVettingIfAsked();
 
   const stop = () => {
     stopping = true;
