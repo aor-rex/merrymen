@@ -152,6 +152,7 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
+    // 17 since the auto-convert toggle (swap settings PR): a boolean that
     // cannot ride the string draft, hence its own state hook.
     assert.equal(count(/type="checkbox"/g), 17, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
