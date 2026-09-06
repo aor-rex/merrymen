@@ -118,6 +118,8 @@ describe("every control survives the restyle", () => {
   it("keeps the measured control census", () => {
     // A number that moves is not necessarily wrong — but it must be noticed,
     // and a class rename is never the reason for one.
+    // 11→12 checkboxes, 12→13 numbers: the auto-convert toggle + gas reserve
+    // (swap settings PR).
     const count = (re: RegExp) => (SRC.match(re) ?? []).length;
     // 12 since "research before deciding". deskEnabled was in core and read by
     // the worker while missing from BOTH the settings route's field list and
@@ -150,12 +152,14 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
+    // cannot ride the string draft, hence its own state hook.
     assert.equal(count(/type="checkbox"/g), 17, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
     // 14 includes the owner-configurable class-position exit timer.
+    // (the only exit steady-basket has — counted in the census below too).
     assert.equal(count(/type="number"/g), 14, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
