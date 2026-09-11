@@ -18,7 +18,8 @@
     "check:runtime": "node check-runtime.mjs"
   },
   "dependencies": {
-    "merrymen": "file:.."
+    "merrymen": "file:..",
+    "electron-updater": "^6.6.2"
   },
   "devDependencies": {
     "electron": "^44.4.2",
