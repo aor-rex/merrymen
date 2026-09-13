@@ -568,6 +568,26 @@ export async function PUT(req: Request) {
     else errors.push("telegramTranscribeBase: must be an http(s) URL");
   }
 
+  /**
+   * ── asset mode ────────────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, because it is a string enum and fits neither `BOOL_FIELDS`
+   * nor `NUM_FIELDS`. A field missing from every branch here is "silently
+   * dropped while the PUT returns {ok:true}" — this file's own warning, earned
+   * three times already — and this is the one where the owner would be told
+   * their agent had changed what it trades when it had not.
+   *
+   * Deliberately NOT in `HOSTED_FORBIDDEN_SETTING_FIELDS`: which kinds of thing
+   * to trade is the owner's decision about the owner's money, unlike the house
+   * keys and the sponsorship flag that list exists to protect.
+   */
+  if ("assetMode" in body) {
+    const v = body.assetMode;
+    if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
+    else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
+    else errors.push("assetMode: must be all, stocks or crypto");
+  }
+
   // ── booleans (telegram toggles) ─────────────────────────────────────────
   for (const key of BOOL_FIELDS) {
     if (!(key in body)) continue;

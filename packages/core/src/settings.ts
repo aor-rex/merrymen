@@ -156,6 +156,24 @@ export interface MerrymenSettings {
   /** Starting paper cash, USDG. */
   paperStartUsdg?: number;
   /**
+   * WHICH KINDS OF THING THE AGENT MAY BUY — "all" | "stocks" | "crypto".
+   *
+   * A FILTER OVER TRADE LEGS, NOT OVER THE WATCH SET, and the distinction is
+   * the whole safety of the feature. See `assetModeAllows` in tokens.ts: the
+   * watch set is what `snap.holdings` is built from, and every stop-loss and
+   * take-profit iterates that. A class switched off stays watched, priced,
+   * valued and sellable — only new buys of it stop.
+   *
+   * SETTINGS-ONLY, NO RE-SIGNATURE. Narrowing off-chain is always safe —
+   * policy.ts: "a mirror STRICTER than the chain, which is the one direction
+   * that is always safe." The shipped precedent is `officialCoinsEnabled`,
+   * which filters a token set that is sealed into every grant. Note the
+   * corollary: "crypto" cannot make the wall stop covering the stock tokens
+   * without a re-sign, and does not need to — nothing on-chain initiates a
+   * trade, so refusing off-chain is sufficient.
+   */
+  assetMode?: "all" | "stocks" | "crypto";
+  /**
    * THE OWNER'S CONSENT TO SPEND REAL MONEY. Off until they say otherwise.
    *
    * Separate from `paperTradingEnabled` because they answer different
@@ -746,6 +764,12 @@ export type PcCapability = (typeof PC_CAPABILITIES)[number];
 export const SLIPPAGE_BPS_MAX = 1_000;
 
 export const SETTINGS_DEFAULTS = {
+  /**
+   * EVERYTHING THE GRANT COVERS. The only default that changes nothing for
+   * anybody who never touches it — which is the bar a filter added to a live
+   * fleet has to clear.
+   */
+  assetMode: "all" as const,
   paperTradingEnabled: true,
   paperStartUsdg: 1000,
   /**

@@ -64,6 +64,8 @@ export interface ResolvedConfig {
   ponsAdapterAddress: `0x${string}` | undefined;
   /** The PonsClassVaultFactory. A HINT for signing; the grant is the authority. */
   ponsClassVaultFactory: `0x${string}` | undefined;
+  /** Which kinds of thing may be BOUGHT. Never filters the watch set. */
+  assetMode: "all" | "stocks" | "crypto";
   paperTradingEnabled: boolean;
   /** The owner's explicit consent to put real orders on chain. Default false. */
   liveTradingEnabled: boolean;
@@ -328,6 +330,7 @@ export function mergeSettings(
     v4AdapterAddress,
     ponsAdapterAddress,
     ponsClassVaultFactory,
+    assetMode: oneOf(file.assetMode, env.MERRYMEN_ASSET_MODE, ["all", "stocks", "crypto"] as const, d.assetMode),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
     // NO ENVIRONMENT OVERRIDE, and the omission is the point.
     //
@@ -539,6 +542,16 @@ export function strategyKey(cfg: ResolvedConfig): string {
     // rebuild it — otherwise a token added mid-run is never read or priced until
     // the next restart, and the owner sees nothing happen.
     cfg.customTokens.map((t) => `${t.symbol}:${t.address.toLowerCase()}:${t.decimals}`).join(","),
+    // WITHOUT THIS THE SETTING IS INERT. `watchTokens` and the strategy are only
+    // rebuilt when this key changes, so a mode the owner flips would do nothing
+    // until some other strategy field happened to move.
+    cfg.assetMode,
+    // AND `officialCoinsEnabled` WAS ALREADY IN THAT STATE — a pre-existing bug
+    // found while adding the line above. Its own doc promises that turning it
+    // off "removes the listings from the watch set entirely", and the rebuild
+    // that would do so sits behind this key. Masked only because
+    // OFFICIAL_COINS[4663] is empty, so there has been nothing to remove.
+    cfg.officialCoinsEnabled,
     cfg.buyPerTickUsdg,
     cfg.idleFloorUsdg,
     cfg.gapEnterBudgetUsdg,

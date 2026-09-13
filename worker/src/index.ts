@@ -36,6 +36,7 @@ import {
 import {
   isHostedMode,
   instrumentClassOf,
+  assetModeAllows,
   CASH,
   CIRCLE_TIERS,
   MORPHO,
@@ -771,6 +772,10 @@ async function main() {
     // what a simulator cannot model, on the one venue where the tape is written
     // by the adversary.
     if (paperActive()) return [];
+    // A class entry is a launchpad coin by construction, so stocks-only excludes
+    // the whole route. No symbol set to sift, and therefore no drift surface —
+    // this is a gate, not a filter.
+    if (cfg.assetMode === "stocks") return [];
     if (!cfg.classSnipeEnabled) return [];
     if (cfg.classPerEntryUsdg <= 0) return [];
     if (!active) return [];
@@ -1272,6 +1277,10 @@ async function main() {
       if (!selected.has(symbol)) continue;
       const token = watchTokens.find((t) => t.symbol === symbol)?.address;
       if (!token || !sellable.has(token.toLowerCase())) continue;
+      // THE SAME PREDICATE `legsForUniverse` USES, called from the second of the
+      // two basket filters this comment block warns must agree. One rule, two
+      // call sites — so the SITES stay two and the RULE cannot drift.
+      if (!assetModeAllows(cfg.assetMode, token)) continue;
       legs.set(symbol, { curve: leg.curve, quoteToken: leg.quoteToken, adapter, reserves: leg.reserves });
       tokens.set(symbol, token as `0x${string}`);
     }
@@ -1473,6 +1482,10 @@ async function main() {
       // resolving the universe from a different config than the legs is how a
       // strategy ends up naming a symbol its own universe does not contain.
       alwaysSymbols: officialCoinsIn(c).map((o) => o.symbol),
+      // Read from `c` for the same reason as the line above: resolving the mode
+      // from a different config than the universe is how a strategy ends up
+      // filtered against a setting the owner has since changed.
+      assetMode: c.assetMode,
       trench: {
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
@@ -2997,6 +3010,8 @@ async function main() {
    */
   // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
   let trencherRailAnnounced = false;
+  /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
+  let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
     // THE RAIL, MADE EXPLICIT rather than removed.
     //
@@ -3009,6 +3024,30 @@ async function main() {
     // replaces every other bound — the scout budget still gates a buy into a
     // token nobody can independently value, the per-trade cap still holds, and
     // the wall still refuses any asset the signature does not name.
+    /**
+     * STOCKS ONLY MEANS NO CANDIDATES AT ALL. A launchpad candidate is crypto
+     * by construction, so there is nothing here for `assetModeAllows` to sift —
+     * the whole feed is excluded.
+     *
+     * ANNOUNCED ONCE PER ARM, for exactly the reason the block below exists: a
+     * feed that empties silently is how an owner ends up reporting "it didn't
+     * take any trades yet" with no evidence but the absence of trades.
+     */
+    if (cfg.assetMode === "stocks") {
+      if (!trencherStocksAnnounced) {
+        trencherStocksAnnounced = true;
+        console.log("[trencher] asset mode is stocks only, so the candidate feed is empty.");
+        if (active) {
+          void addEvent(
+            active.agentId,
+            "ok",
+            "trencher is running but your asset mode is Stocks only, so it sees no candidates. " +
+              "Switch to All assets or Crypto only in Settings if you want it hunting coins.",
+          );
+        }
+      }
+      return [];
+    }
     if (!paperActive() && !cfg.trencherLiveEnabled) {
       // SAY IT. The rail was made explicit in the config and stayed invisible in
       // operation: an owner who picked trencher and armed a real key got an empty

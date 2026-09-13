@@ -163,7 +163,11 @@ describe("every control survives the restyle", () => {
     // save is how ponsAdapterAddress spent a release being undocumentedly dead.
     assert.equal(count(/type="text"/g), 13, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
-    assert.equal(count(/<select/g), 5, "selects");
+    // 6 since ASSET MODE — All assets / Stocks only / Crypto only. Several
+    // owners asked for it at once ("there should be an option mode for stocks
+    // only, crypto only..."), and it is a filter over what may be BOUGHT, never
+    // over what is watched: a class switched off stays priced and sellable.
+    assert.equal(count(/<select/g), 6, "selects");
   });
 
   it("sends exactly the 21 fields save() guards", () => {
@@ -185,7 +189,11 @@ describe("every control survives the restyle", () => {
     // consent flag — either switching a live agent to paper mid-position, or
     // granting permission to spend real money. No other field here can do the
     // second thing.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 21);
+    // 22 since assetMode. Unguarded, an owner who opened this screen and saved
+    // anything at all would send whatever the form happened to hold and could
+    // silently narrow what their agent trades — the same class of failure as the
+    // consent flag above, one step less dangerous.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 22);
   });
 });
 

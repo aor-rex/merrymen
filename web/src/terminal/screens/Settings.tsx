@@ -82,6 +82,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
   /** The owner's consent to spend real money. Null = untouched this session. */
   const [liveTrading, setLiveTrading] = useState<boolean | null>(null);
+  /** Which kinds of thing the agent may BUY. Null = untouched this session. */
+  const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
@@ -287,6 +289,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
     if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
+    if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -398,6 +401,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const classSnipeVal = classSnipe ?? view.values.classSnipeEnabled ?? d.classSnipeEnabled;
   const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
+  const assetModeVal = assetMode ?? view.values.assetMode ?? d.assetMode;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
@@ -525,6 +529,57 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <b>This spends real money.</b> Once you save, your agent can open positions with the
               funds in its account, up to the per-trade and daily caps in the permission you signed.
               It will not exceed those caps, and you can switch back to Paper at any time.
+            </p>
+          )}
+
+          {/* ── WHAT IT TRADES ──────────────────────────────────────────────
+              Asked for by several owners at once: "there should be an option
+              mode for stocks only, crypto only, combo, or meme coin only", and
+              "it's great to toggle between stocks and crypto mode — sometimes
+              trading stocks is better when crypto bear is here".
+
+              FOUR CARDS, THREE MODES. `instrumentClassOf` can only tell an
+              equity from everything else, so shipping "crypto" and "meme coins"
+              as separate modes would be two names for one filter. The fourth
+              card writes `crypto` plus the switches that already govern buying
+              things nobody can price, and says so on the card rather than
+              implying a classification that does not exist.
+
+              A FILTER OVER WHAT MAY BE BOUGHT, never over what is watched. A
+              class you switch off stays priced, valued and sellable — see
+              assetModeAllows in core for why the other way round would brick a
+              live account. */}
+          <div className="mm-section">What it trades</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">asset mode</span>
+              <span className="mm-input">
+                <select
+                  value={assetModeVal}
+                  onChange={(e) => setAssetMode(e.target.value as "all" | "stocks" | "crypto")}
+                >
+                  <option value="all">All assets</option>
+                  <option value="stocks">Stocks only</option>
+                  <option value="crypto">Crypto only</option>
+                </select>
+              </span>
+              <span className="mm-hint">
+                {assetModeVal === "stocks"
+                  ? "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket."
+                  : assetModeVal === "crypto"
+                    ? "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought."
+                    : "Everything your basket and your signed permission allow."}
+              </span>
+            </label>
+          </div>
+          {assetModeVal !== "all" && (
+            /* SAID BEFORE IT BITES. Narrowing the pool re-splits every surviving
+               leg's weight, and even-keel acts on a 500bps band — so this is a
+               dropdown that moves real money for some owners. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              Anything you already hold stays priced, valued and sellable — including its
+              stop-loss and take-profit. This only changes what your agent may <b>buy</b>.
+              {activeSymbols.length > 0 && " If it leaves you with nothing to buy, your agent will say so rather than going quiet."}
             </p>
           )}
 
