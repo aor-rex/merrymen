@@ -719,23 +719,46 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </p>
           )}
           <div className="mm-section">Trading basket</div>
-          <div className="mm-chips">
-            {/* Owner-added tokens sit alongside the registry ones. Selecting is
-                still an explicit act: adding a token means "know about this",
-                putting it in the basket means "trade it". */}
-            {[...view.knownSymbols, ...activeTokens.map((t) => t.symbol)].map((sym) => (
-              <button
-                key={sym}
-                type="button"
-                className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
-                /* In the basket or not, said rather than only shaded. */
-                aria-pressed={activeSymbols.includes(sym)}
-                onClick={() => toggleSymbol(sym)}
-              >
-                {sym}
-              </button>
-            ))}
-          </div>
+          {/* GROUPED, because one undifferentiated run of chips is what an owner
+              meant by "trading basket in settings is full of all stocks". It was
+              twenty-five registry symbols with his own coin unselected at the
+              end, and nothing said the two kinds were different or that the last
+              one was his. Two headed groups cost nothing and answer that. */}
+          {(
+            [
+              ["Stocks & ETFs", view.knownSymbols],
+              ["Coins", activeTokens.map((t) => t.symbol)],
+            ] as const
+          ).map(([heading, syms]) => (
+            <div key={heading}>
+              <div className="mm-subtle mono" style={{ marginTop: 10 }}>
+                {heading.toLowerCase()}
+              </div>
+              {syms.length === 0 ? (
+                /* An empty group rendered as nothing is how an owner concludes
+                   the feature does not exist. Say it is empty and where to
+                   start. */
+                <div className="mm-hint">
+                  None yet — add one below, or take a suggestion from your agent.
+                </div>
+              ) : (
+                <div className="mm-chips">
+                  {syms.map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
+                      /* In the basket or not, said rather than only shaded. */
+                      aria-pressed={activeSymbols.includes(sym)}
+                      onClick={() => toggleSymbol(sym)}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
           <div className="mm-hint">
             {activeSymbols.length === 0
               ? "select at least one symbol (empty falls back to the default basket)"
