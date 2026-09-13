@@ -94,6 +94,8 @@ export interface AnnounceRecipient {
   token: string;
   /** `agents.live_blocker` for this tenant, when known. */
   blocker: string | null;
+  /** `agents.name` — what the OWNER called it. Null when the join found none. */
+  name: string | null;
 }
 
 export interface AnnounceOutcome {
@@ -105,6 +107,10 @@ export interface AnnounceOutcome {
   /** Telegram on, but notifications explicitly turned off. Their answer stands. */
   skippedNotifyOff: number;
   skippedAlreadySent: number;
+  /** Eligible, but outside this campaign's tenant allowlist. */
+  skippedNotSelected: number;
+  /** Selected for a per-agent campaign with no prepared body. Never defaulted. */
+  skippedNoBody: number;
   sent: number;
   /** How many messages will carry this agent's own reason. The rest are generic. */
   personalised: number;
@@ -128,6 +134,17 @@ export interface AnnounceOutcome {
    */
   blockerJoinError: string | null;
   dryRun: boolean;
+  /**
+   * WHAT A DRY RUN ACTUALLY SHOWS, per recipient.
+   *
+   * Counters answer "how many" and a per-agent campaign has to be approved on
+   * "which text, to whom" — the operator is signing off on three different
+   * claims about three different people money. Populated ONLY on a dry run,
+   * and deliberately carries no token: the chat is redacted to its last four
+   * digits, which is enough to tell two recipients apart and not enough to
+   * message anybody.
+   */
+  preview: { tenant: string; name: string | null; blocker: string | null; chatRedacted: string; chars: number; body: string }[];
 }
 
 export const ANNOUNCE_DDL = `
@@ -182,14 +199,27 @@ export async function resolveRecipients(
   // and drops out of the join, which is also the right answer for whether to
   // message them at all.
   const blockers = new Map<string, string>();
+  // THE AGENT'S NAME, from the same join and for the same reason.
+  //
+  // A message addressed to "your agent" reads like a mailshot; one that names
+  // the agent its owner named reads like it is about them. Resolved SERVER-SIDE
+  // here rather than typed into a campaign file, because a name typed by hand is
+  // a name that can be wrong, and being wrong about which agent you are
+  // describing is worse than not naming it.
+  const names = new Map<string, string>();
   try {
     const b = await client.query(
-      `SELECT g.tenant AS tenant, a.live_blocker AS live_blocker
+      `SELECT g.tenant AS tenant, a.live_blocker AS live_blocker, a.name AS name
          FROM grants g
-         JOIN agents a ON LOWER(a.smart_account) = LOWER(g.grant_json->>'smartAccount')
-        WHERE a.live_blocker IS NOT NULL`,
+         JOIN agents a ON LOWER(a.smart_account) = LOWER(g.grant_json->>'smartAccount')`,
     );
-    for (const r of b.rows) blockers.set(String(r.tenant).toLowerCase(), String(r.live_blocker));
+    for (const r of b.rows) {
+      const key = String(r.tenant).toLowerCase();
+      if (r.live_blocker !== null && r.live_blocker !== undefined) {
+        blockers.set(key, String(r.live_blocker));
+      }
+      if (r.name) names.set(key, String(r.name));
+    }
   } catch (e) {
     // NOT swallowed. A failed join and an unblocked fleet produce the same
     // empty map, and the operator must be able to tell them apart BEFORE
@@ -238,6 +268,7 @@ export async function resolveRecipients(
       chatId,
       token: s.telegramBotToken,
       blocker: blockers.get(key) ?? null,
+      name: names.get(key) ?? null,
     });
   }
   out.eligible = recipients.length;
@@ -265,6 +296,30 @@ export async function runAnnouncement(opts: {
   announceId: string;
   body: string;
   confirmed: boolean;
+  /**
+   * ONE FULLY-RESOLVED MESSAGE PER TENANT, keyed by lowercased tenant.
+   *
+   * A campaign that tells three owners three different things cannot be one
+   * body plus a canned line — "your agent has no trading money" and "your agent
+   * is fine, the market is shut" are not variations of a sentence. So the
+   * caller may hand over the finished text per recipient instead.
+   *
+   * DIAGNOSIS DOES NOT LIVE HERE. Whatever is in these strings — balances,
+   * statuses, next steps — was computed by the caller before this ran. This
+   * module talks to Postgres and Telegram and to nothing else; it has no RPC,
+   * no chain, and no opinion about what an agent's problem is. Keeping that
+   * boundary is why a bad diagnosis can never become a bad send.
+   *
+   * A SELECTED TENANT WITH NO ENTRY IS SKIPPED, never defaulted. Falling back
+   * to `body` would mail one owner another owner's circumstances, which on a
+   * per-agent campaign is worse than silence.
+   */
+  bodies?: Record<string, string>;
+  /**
+   * Restrict this campaign to these tenants. Absent means everyone eligible,
+   * which is the existing behaviour.
+   */
+  tenants?: string[];
   /** Injected in tests; the real sender otherwise. */
   send?: typeof sendMessage;
   /** Injected in tests; the sealed per-tenant store otherwise. */
@@ -279,6 +334,8 @@ export async function runAnnouncement(opts: {
     skippedDisabled: 0,
     skippedNotifyOff: 0,
     skippedAlreadySent: 0,
+    skippedNotSelected: 0,
+    skippedNoBody: 0,
     sent: 0,
     personalised: 0,
     withAllowlist: 0,
@@ -286,6 +343,7 @@ export async function runAnnouncement(opts: {
     failed: [],
     blockerJoinError: null,
     dryRun: !opts.confirmed,
+    preview: [],
   };
   await opts.client.query(ANNOUNCE_DDL);
   const already = new Set<string>();
@@ -299,15 +357,45 @@ export async function runAnnouncement(opts: {
   const send = opts.send ?? sendMessage;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
+  // The campaign allowlist, applied AFTER resolution so the skip counters above
+  // still describe the whole fleet — "3 eligible" would otherwise read as "the
+  // fleet has 3 linked owners", which is a different and alarming claim.
+  const only = opts.tenants ? new Set(opts.tenants.map((t) => t.toLowerCase())) : null;
+
   for (const r of recipients) {
+    if (only && !only.has(r.tenant)) {
+      out.skippedNotSelected += 1;
+      continue;
+    }
     if (already.has(r.tenant)) {
       out.skippedAlreadySent += 1;
       continue;
     }
-    const text = opts.body + personalLine(r.blocker);
-    if (r.blocker) out.personalised += 1;
+    // A PREPARED BODY WINS, AND ITS ABSENCE IS A REFUSAL.
+    //
+    // `opts.bodies` present means this is a per-agent campaign, so every
+    // selected recipient must have their own text. Falling through to
+    // `opts.body` here would send one owner a message written about somebody
+    // else's agent — the one failure this whole feature exists to avoid.
+    const prepared = opts.bodies ? opts.bodies[r.tenant] : undefined;
+    if (opts.bodies && !prepared) {
+      out.skippedNoBody += 1;
+      continue;
+    }
+    const text = prepared ?? opts.body + personalLine(r.blocker);
+    // A prepared body already carries its own reason; the canned line would
+    // only repeat it, worse.
+    if (!prepared && r.blocker) out.personalised += 1;
     if (out.dryRun) {
       out.sent += 1;
+      out.preview.push({
+        tenant: r.tenant,
+        name: r.name,
+        blocker: r.blocker,
+        chatRedacted: `…${String(r.chatId).slice(-4)}`,
+        chars: text.length,
+        body: text,
+      });
       continue;
     }
     const res = await send({ token: r.token }, r.chatId, text);

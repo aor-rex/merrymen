@@ -76,7 +76,10 @@ const makeClient = (opts: { chats: [string, number][]; blockers?: [string, strin
       if (sql.includes("FROM tenant_telegram")) {
         return { rows: opts.chats.map(([tenant, owner_id]) => ({ tenant, owner_id })) };
       }
-      if (sql.includes("live_blocker IS NOT NULL")) {
+      // Matches on FROM grants, not on a WHERE clause: the join no longer
+      // filters to blocked agents, because an UNBLOCKED agent still has a name
+      // and a per-agent campaign needs it.
+      if (sql.includes("FROM grants")) {
         return { rows: (opts.blockers ?? []).map(([tenant, live_blocker]) => ({ tenant, live_blocker })) };
       }
       if (sql.includes("SELECT tenant FROM announcements")) {
@@ -211,7 +214,7 @@ describe("the blocker join, against the real schema", () => {
       "agents has no tenant column — pin it, so the join cannot regress",
     );
 
-    const join = code.slice(code.indexOf("FROM grants g"), code.indexOf("WHERE a.live_blocker"));
+    const join = code.slice(code.indexOf("FROM grants g"), code.indexOf("`,", code.indexOf("FROM grants g")));
     // A literal, not a regex: the parentheses and dots in this SQL are all
     // regex metacharacters, and an unescaped version silently matches nothing
     // it was meant to pin.

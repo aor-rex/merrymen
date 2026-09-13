@@ -1779,20 +1779,46 @@ async function runAnnouncementIfAsked(): Promise<void> {
     return;
   }
   try {
-    const { readFileSync } = await import("node:fs");
+    const { readFileSync, existsSync, readdirSync } = await import("node:fs");
     const { illegalTags, runAnnouncement } = await import("./announce");
-    const body = readFileSync(
-      path.resolve(ROOT, "docs/announcements", `${id}.html`),
-      "utf8",
-    ).trim();
-    const bad = illegalTags(body);
-    if (bad.length > 0) {
-      log(`announcement ${id}: body uses tags Telegram rejects (${bad.join(", ")}) — refusing`);
-      return;
+    // ── A PER-AGENT CAMPAIGN IS A DIRECTORY, A BROADCAST IS A FILE ─────────
+    //
+    // `docs/announcements/<id>.html`            one body for everyone
+    // `docs/announcements/<id>/<tenant>.html`   one body per named owner
+    //
+    // The directory form makes the recipient list and the prepared-text list
+    // THE SAME LIST, so it is structurally impossible to select somebody whose
+    // message was never written — the failure that would mail one owner another
+    // owner's circumstances.
+    const dir = path.resolve(ROOT, "docs/announcements", id);
+    const perAgent = existsSync(dir);
+    const bodies: Record<string, string> = {};
+    let body = "";
+    if (perAgent) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".html")) continue;
+        bodies[f.slice(0, -5).toLowerCase()] = readFileSync(path.join(dir, f), "utf8").trim();
+      }
+      if (Object.keys(bodies).length === 0) {
+        log(`announcement ${id}: ${dir} has no .html bodies — refusing`);
+        return;
+      }
+    } else {
+      body = readFileSync(path.resolve(ROOT, "docs/announcements", `${id}.html`), "utf8").trim();
     }
-    if (body.length > 3600) {
-      log(`announcement ${id}: body is ${body.length} chars, over the 3600 budget — refusing`);
-      return;
+    // Every body is checked, not just the first: one bad tag anywhere would be
+    // silently flattened to plain text by telegram/api.ts and reported as a
+    // clean delivery.
+    for (const [who, text] of perAgent ? Object.entries(bodies) : [["all", body] as const]) {
+      const bad = illegalTags(text);
+      if (bad.length > 0) {
+        log(`announcement ${id}: ${who} uses tags Telegram rejects (${bad.join(", ")}) — refusing`);
+        return;
+      }
+      if (text.length > 3600) {
+        log(`announcement ${id}: ${who} is ${text.length} chars, over the 3600 budget — refusing`);
+        return;
+      }
     }
     // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
     const pg = (await import("pg")) as unknown as {
@@ -1806,7 +1832,24 @@ async function runAnnouncementIfAsked(): Promise<void> {
     await client.connect();
     try {
       const confirmed = (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim() === id;
-      const out = await runAnnouncement({ client, announceId: id, body, confirmed });
+      const out = await runAnnouncement({
+        client,
+        announceId: id,
+        body,
+        confirmed,
+        ...(perAgent ? { bodies, tenants: Object.keys(bodies) } : {}),
+      });
+      // THE DRY RUN HAS TO SHOW THE TEXT, not a count. An operator approving a
+      // per-agent campaign is approving three different claims about three
+      // different people's money; "3 would receive" is not something anybody
+      // can check. No token is printed — the chat is its last four digits.
+      for (const p of out.preview) {
+        log(
+          `announcement ${id}:   ${p.tenant} · ${p.name ?? "(no name)"} · chat ${p.chatRedacted} · ` +
+            `${p.blocker ?? "no blocker"} · ${p.chars} chars`,
+        );
+        for (const line of p.body.split("\n")) log(`announcement ${id}:     | ${line}`);
+      }
       log(
         `announcement ${id}: ${out.dryRun ? "DRY RUN, nothing sent" : "SENT"} — ` +
           `${out.considered} tenants, ${out.eligible} eligible, ${out.sent} ${out.dryRun ? "would receive" : "delivered"}, ` +
