@@ -165,7 +165,10 @@ describe("what the refactor must not have loosened", () => {
   it("the two-operation shape survives: sweep the vault, re-read, then transfer", () => {
     const fn = RECOVER_CODE.slice(RECOVER_CODE.indexOf("export async function recoverFunds"));
     const sweepAt = fn.indexOf('functionName: "sweep"');
-    const rereadAt = fn.indexOf('functionName: "balanceOf"');
+        // AFTER the sweep, deliberately. There is now also a balanceOf BEFORE it —
+    // the fresh vault read that revalidates an approved class leg — so the
+    // first occurrence is no longer the post-sweep re-read.
+    const rereadAt = fn.indexOf('functionName: "balanceOf"', sweepAt);
     const transferAt = fn.indexOf('functionName: "transfer"');
     assert.ok(sweepAt >= 0, "UserOp #1 empties the class vault");
     assert.ok(rereadAt > sweepAt, "then the ACTUAL landed balance is re-read");

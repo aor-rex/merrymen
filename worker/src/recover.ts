@@ -50,6 +50,15 @@ const VAULT_READS = parseAbi(["function convertToAssets(uint256 shares) view ret
 const CLASS_VAULT_SWEEP = parseAbi(["function sweep(address token) returns (uint256)"]);
 
 /**
+ * The vault owner, read to prove the account can actually sweep it.
+ *
+ * A PonsClassVault is owned by the SMART ACCOUNT, not by the human — measured
+ * on chain, and it is why recovery must arrive as a UserOp. Checking it before
+ * signing turns a NotOwner() revert into a refusal that costs nothing.
+ */
+const CLASS_VAULT_OWNER = parseAbi(["function owner() view returns (address)"]);
+
+/**
  * How far back recovery reads a vault's history. ~7 days at 0.101 s/block.
  *
  * Bounded because an owner running this is waiting at a prompt. A holding older
@@ -627,6 +636,39 @@ export async function recoverFunds(opts: {
   to: Address;
   expectedSmartAccount?: Address;
   extraTokens?: readonly unknown[];
+  /**
+   * THE CLASS RECOVERY THE OWNER ACTUALLY APPROVED.
+   *
+   * Recovery re-plans internally, so without this the text on the confirmation
+   * and the operation that runs are derived from two different reads. Measured
+   * 2026-09-13: an owner approved a sweep naming 1,063,408.141815 DOGGOS, the
+   * re-plan enumerated no class holdings, the vault leg was quietly skipped and
+   * the account sweep went ahead — 20 USDG and the ETH left, the DOGGOS did
+   * not, and the operation reported success.
+   *
+   * Passing this pins WHAT was approved. It is not trusted as a BALANCE: the
+   * amount comes from a fresh `balanceOf(vault)` immediately before signing.
+   * What it pins is the vault, the token and the destination — identity, not
+   * quantity.
+   */
+  approvedClass?: {
+    vault: Address;
+    tokens: readonly Address[];
+    destination: Address;
+  };
+  /**
+   * A DISCLOSED CLASS SWEEP THAT CANNOT RUN IS FATAL, not a skipped line item.
+   *
+   * Default false, which preserves the existing best-effort contract for the
+   * CLI and for any caller that approved no class leg: a vault that will not
+   * give up its tokens must not strand the USDG and ETH an owner can see.
+   *
+   * True for a browser-confirmed class plan, where the opposite is required —
+   * if the thing the owner was shown cannot happen, nothing should happen,
+   * because the alternative is an operation that succeeds while quietly
+   * omitting the largest holding in it.
+   */
+  requireApprovedClassSweep?: boolean;
 }): Promise<RecoverResult> {
   // REFUSED BEFORE ANYTHING ELSE. An address-only owner can reconstruct the
   // account but cannot authorise a transfer, and finding that out at signing
@@ -741,15 +783,95 @@ export async function recoverFunds(opts: {
   // Failures here are REPORTED AND SURVIVED. A vault that will not give up its
   // tokens must not stop an owner recovering the USDG and ETH they can see.
   let classSweepTx: `0x${string}` | null = null;
-  if (plan.classVault && plan.classHoldings.length > 0) {
-    const sweepable = planClassSweep(
-      plan.classHoldings.map((h) => ({ token: h.token, symbol: h.symbol, raw: h.raw })),
-    );
+  // ── WHAT THE OWNER APPROVED IS WHAT GETS ATTEMPTED ──────────────────────
+  //
+  // The approved intent overrides the re-plan for IDENTITY — which vault, which
+  // tokens, where to. The re-plan is still what it always was for everything
+  // else, and the AMOUNT never comes from either: it comes from a fresh
+  // balanceOf(vault) a moment before signing, below.
+  const approved = opts.approvedClass ?? null;
+  const requireClass = opts.requireApprovedClassSweep === true && approved !== null;
+  const classVault = approved?.vault ?? plan.classVault;
+  // FATAL, BEFORE THE ACCOUNT SWEEP. Each of these says the operation about to
+  // be signed is not the one that was shown, and on a withdrawal that is a
+  // reason to stop rather than to proceed with the part that still works.
+  if (requireClass && approved) {
+    const fail = (why: string): never => {
+      throw new Error(
+        `refusing to recover: ${why}. Nothing has been signed, and your funds are where they were. ` +
+          "Re-open recovery so the confirmation is rebuilt from current state.",
+      );
+    };
+    if (approved.destination.toLowerCase() !== opts.to.toLowerCase()) {
+      fail(`the approved destination was ${approved.destination}, but this call would send to ${opts.to}`);
+    }
+    if (!plan.classVault || plan.classVault.toLowerCase() !== approved.vault.toLowerCase()) {
+      // The vault is a CREATE2 prediction from the account, so a disagreement
+      // here means the two sides derived different accounts.
+      fail(
+        `the approved class vault was ${approved.vault}, but this account derives ` +
+          `${plan.classVault ?? "none"}`,
+      );
+    }
+    const vaultOwner = (await publicClient
+      .readContract({ address: approved.vault, abi: CLASS_VAULT_OWNER, functionName: "owner" })
+      .catch(() => null)) as Address | null;
+    if (!vaultOwner) fail("the class vault would not say who owns it");
+    if (vaultOwner!.toLowerCase() !== account.address.toLowerCase()) {
+      fail(`the class vault is owned by ${vaultOwner}, not by this account (${account.address})`);
+    }
+  }
+
+  if (classVault && (requireClass || plan.classHoldings.length > 0)) {
+    // THE AMOUNT IS READ FRESH, ALWAYS. The approved intent names the tokens;
+    // the chain says how many there are, at this moment, so a stale UI figure
+    // can never become a transfer amount.
+    const wanted = approved
+      ? approved.tokens
+      : plan.classHoldings.map((h) => h.token);
+    const live: { token: Address; symbol: string; raw: bigint }[] = [];
+    for (const token of wanted) {
+      const raw = (await publicClient
+        .readContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [classVault],
+        })
+        .catch(() => null)) as bigint | null;
+      if (raw === null) {
+        if (requireClass) {
+          throw new Error(
+            `refusing to recover: could not read the class vault balance of ${token}. ` +
+              "That is not a zero balance, and signing against an unread holding is how one gets stranded. " +
+              "Nothing has been signed.",
+          );
+        }
+        continue;
+      }
+      if (raw === 0n) {
+        if (requireClass) {
+          throw new Error(
+            `refusing to recover: the class vault holds no ${token}, but the confirmation you approved said it did. ` +
+              "Nothing has been signed — re-open recovery so the figures are rebuilt from current state.",
+          );
+        }
+        continue;
+      }
+      const known = plan.classHoldings.find((h) => h.token.toLowerCase() === token.toLowerCase());
+      live.push({ token, symbol: known?.symbol ?? `${token.slice(0, 6)}…${token.slice(-4)}`, raw });
+    }
+    const sweepable = planClassSweep(live);
+    if (requireClass && sweepable.length === 0) {
+      throw new Error(
+        "refusing to recover: the class sweep you approved has nothing it can move. Nothing has been signed.",
+      );
+    }
     if (sweepable.length > 0) {
       try {
         classSweepTx = await client.sendUserOperation({
           calls: sweepable.map((h) => ({
-            to: plan.classVault!,
+            to: classVault,
             value: 0n,
             data: encodeFunctionData({
               abi: CLASS_VAULT_SWEEP,
@@ -782,9 +904,20 @@ export async function recoverFunds(opts: {
           }
         }
       } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        // FATAL WHEN IT WAS APPROVED. Continuing here is what produced an
+        // operation that moved the USDG and the ETH, left 1,063,408 DOGGOS in
+        // the vault, and reported success — the owner having approved a
+        // confirmation that named them.
+        if (requireClass) {
+          throw new Error(
+            `refusing to continue: the class vault sweep you approved failed (${why}). ` +
+              "The account sweep has NOT been attempted, so nothing has moved. Your tokens are still in the vault.",
+          );
+        }
         skipped.push({
           symbol: `class vault (${sweepable.length} token(s))`,
-          reason: `the vault sweep did not go through: ${e instanceof Error ? e.message : String(e)}. Your tokens are still in the vault — rerun this command.`,
+          reason: `the vault sweep did not go through: ${why}. Your tokens are still in the vault — rerun this command.`,
         });
       }
     }

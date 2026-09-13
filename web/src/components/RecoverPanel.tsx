@@ -292,7 +292,20 @@ export function RecoverPanelView({
     }
     setBusy("sweeping");
     try {
-      const r = await sweepFromBrowser(w, normalizeAddr(to) as `0x${string}`);
+      // WHAT WAS DISCLOSED IS WHAT IS ATTEMPTED. The engine re-plans
+      // internally; handing it the class leg from the plan the owner just
+      // approved is what stops the two diverging. Identity only — the engine
+      // re-reads the vault balance before signing — and its failure is fatal
+      // rather than a skipped line, so the account sweep cannot proceed
+      // without the holding the confirmation named.
+      const approvedClass =
+        classVault && classHoldings.length > 0
+          ? {
+              vault: classVault as `0x${string}`,
+              tokens: classHoldings.map((h) => h.token as `0x${string}`),
+            }
+          : undefined;
+      const r = await sweepFromBrowser(w, normalizeAddr(to) as `0x${string}`, approvedClass);
       setResult(r as unknown as SweepRes);
     } catch (e) {
       setError(redact(e, w.ownerKey));
