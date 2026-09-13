@@ -77,6 +77,28 @@ the switch instead of after.
 > screen to explain it. That is not a consent fix; it is a fleet outage wearing
 > one.
 
+> **On an already-migrated deployment, skip step 0 and never set it again.**
+> Standing down has nobody left to protect once consent is recorded, and
+> everybody to expose.
+
+### 0. Stand down — ONLY on a deployment that has never run this migration
+
+```
+MERRYMEN_LIVE_INTENT_STAND_DOWN=1
+```
+
+This switches enforcement off so the fleet behaves exactly as it did before the
+gate existed, for the length of the migration. It is a **separate variable from
+the backfill on purpose.** It used to be implied by `=report`, which was correct
+exactly once — while the field was absent fleet-wide. After the migration that
+coupling inverts into a hazard: re-running the report to check a detail would
+un-gate every tenant whose consent is now recorded, for the length of a
+read-only question. **A dry run must not change behaviour.**
+
+Remove it in the same session as step 3. It is the one variable here that can
+put real money at risk, because while it is set, funding implies consent again
+— which is the original defect.
+
 ### 1. Report
 
 Deploy with:
@@ -114,11 +136,35 @@ Same plan, then the writes. Confirm the log line:
 [live-intent] APPLIED — N granted, K skipped
 ```
 
-### 3. Remove the variable
+### 3. Remove the variables
 
-Unset `MERRYMEN_BACKFILL_LIVE_INTENT` and redeploy. The backfill is idempotent —
-re-running it produces an empty plan — but leaving a migration armed is how it
-fires again later against a fleet it was not written for.
+Unset `MERRYMEN_BACKFILL_LIVE_INTENT` (and `MERRYMEN_LIVE_INTENT_STAND_DOWN` if
+you set it) and redeploy. The backfill is idempotent — re-running it produces an
+empty plan — but leaving a migration armed is how it fires again later against a
+fleet it was not written for.
+
+---
+
+## What this migration counts as a real order — and what it does not
+
+`TradeRow.status` (`worker/src/store.ts`) is five wide, and the line between the
+middle two is drawn by `index.ts` as `status: onChain ? "reverted" : "rejected"`:
+
+| status | meaning | consent? |
+|---|---|---|
+| `landed` | submitted, mined, succeeded | **yes** |
+| `submitted` | in flight, not yet settled | **yes** |
+| `reverted` | reached the chain and failed there — gas was spent | **yes** |
+| `rejected` | never left the box; a pre-flight refusal | no |
+| `paper` | the simulator | no |
+
+`reverted` was **missed by the first apply** on 2026-09-13, which asked for
+`('landed', 'submitted')` only. That reads an owner whose orders all reverted as
+one who never traded — and an agent whose swaps keep reverting is precisely the
+one whose owner is watching real gas burn for nothing. A failing live trader is
+still a live trader. `backfill-live-intent.test.ts` now carries a drift guard
+that fails if a sixth status is ever added to the ledger without being
+classified here.
 
 ---
 

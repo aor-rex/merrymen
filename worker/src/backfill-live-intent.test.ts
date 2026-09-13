@@ -381,3 +381,82 @@ describe("a tenant with a grant but no settings row is still migrated", () => {
     assert.match(orch, /grantTenants: \[\.\.\.ids\.keys\(\)\]/);
   });
 });
+
+/**
+ * A FAILING LIVE TRADER IS STILL A LIVE TRADER.
+ *
+ * The first apply ran with `IN ('landed', 'submitted')`, which reads an owner
+ * whose orders all REVERTED as one who never traded. `index.ts:6803` draws the
+ * line on `onChain`, not on success — a reverted op reached the chain and spent
+ * gas — so that owner had consented in the only way the migration accepts, and
+ * would have been moved to paper for the crime of having bad luck.
+ */
+describe("a real order that failed is still a real order", () => {
+  it("A REVERTED ORDER IS CONSENT — it reached the chain and spent gas", () => {
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: { paperTradingEnabled: true } }),
+      db: db([[ALICE, "reverted"]]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, [{ tenant: ALICE, reason: "has-traded-for-real" }]);
+      assert.deepEqual(plan.leaveDefault, [], "a reverted trader must not be left on paper");
+    });
+  });
+
+  it("but a REJECTED order is not — it never left the box", () => {
+    // The other half, and the reason this is not just "widen the filter":
+    // `rejected` is a pre-flight refusal. Counting it would fabricate consent
+    // from an order we ourselves declined to send, which is the original defect
+    // rebuilt inside its own fix.
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: {} }),
+      db: db([[BOB, "rejected"]]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.deepEqual(plan.leaveDefault, [BOB]);
+    });
+  });
+
+  it("and every status the ledger declares is classified on purpose", () => {
+    /**
+     * THE DRIFT GUARD. `TradeRow.status` is a closed union in store.ts, and this
+     * module's WHERE clause is a hand-written subset of it. Nothing connects the
+     * two, so a sixth status added later — one that means "real money moved" —
+     * would join the ledger and silently fail to count as consent, which is the
+     * exact bug this describe block exists because of.
+     *
+     * So: read the union from store.ts, read the IN-list from the query, and
+     * require every member to be in one or the other. A new status lands in
+     * neither and fails here, with the author forced to say which it is.
+     */
+    const src = readFileSync(path.join(__dirname, "store.ts"), "utf8");
+    const union = src.match(/status: ("(?:landed|reverted|rejected|paper|submitted)"(?:\s*\|\s*"[a-z-]+")*);/);
+    assert.ok(union, "could not find TradeRow.status in store.ts — the guard cannot run");
+    const declared = [...union[1]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
+    assert.ok(declared.length >= 5, `expected the full ledger union, got ${declared.join(", ")}`);
+
+    const mod = readFileSync(path.join(__dirname, "backfill-live-intent.ts"), "utf8");
+    const where = mod.match(/WHERE status IN \(([^)]*)\)/);
+    assert.ok(where, "the evidence query must still filter on status");
+    const counted = [...where[1]!.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]!);
+
+    /** Deliberately NOT evidence, each with the reason it is not. */
+    const excluded: Record<string, string> = {
+      paper: "the simulator — counting it would grant the whole fleet consent",
+      rejected: "a pre-flight refusal; index.ts:6803 writes it when !onChain",
+    };
+
+    for (const status of declared) {
+      const isCounted = counted.includes(status);
+      const isExcluded = status in excluded;
+      assert.ok(
+        isCounted !== isExcluded,
+        `trade status '${status}' is neither counted as consent nor explicitly excluded. ` +
+          `Decide which it is: add it to the WHERE clause in backfill-live-intent.ts, ` +
+          `or to 'excluded' here with the reason it does not mean real money moved.`,
+      );
+    }
+    assert.deepEqual(counted.sort(), ["landed", "reverted", "submitted"]);
+  });
+});

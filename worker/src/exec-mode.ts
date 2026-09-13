@@ -205,15 +205,26 @@ export interface ExecInputs {
    *
    * The orchestrator spawns children BEFORE the backfill runs, so even a
    * report-only run would open that window. This closes it: while
-   * `MERRYMEN_BACKFILL_LIVE_INTENT=report` is set, the rail behaves exactly as
-   * it did before the gate existed.
+   * `MERRYMEN_LIVE_INTENT_STAND_DOWN=1` is set, the rail behaves exactly as it
+   * did before the gate existed.
    *
    * NOT AN ESCAPE HATCH, and the difference matters. It grants nothing new — it
-   * restores the PREVIOUS behaviour for the length of one migration, and it is
-   * tied to the migration's own variable, which step three of the rollout
-   * removes. There is deliberately no way to switch consent off on its own; see
+   * restores the PREVIOUS behaviour for the length of one migration. There is
+   * deliberately no way to switch consent off on its own; see
    * `liveTradingEnabled` above for why an env override of THAT would be the
    * house consenting on every owner's behalf.
+   *
+   * ON ITS OWN VARIABLE, deliberately, and no longer on the backfill's.
+   * Standing down used to be a side effect of asking the migration to REPORT,
+   * which was correct while the field was absent fleet-wide and became a hazard
+   * the moment it was not: once consent is recorded, re-running the report to
+   * check a detail would un-gate the whole fleet for the length of a read-only
+   * question. A dry run must not change behaviour.
+   *
+   * So this is set ONLY on a deployment whose owners have no `liveTradingEnabled`
+   * recorded yet, and removed in the same session. On an already-migrated fleet
+   * it must never be set again — there is nobody left for it to protect, and
+   * everybody for it to expose.
    */
   enforceLiveIntent?: boolean;
 }

@@ -95,10 +95,30 @@ export interface BackfillPlan {
  * that was submitted and never mined still means the owner was trading for
  * real — and it is the column the execution fork sets deliberately, one literal
  * per rail, rather than a field that happens to be null on one path.
+ *
+ * THE ENUM IS FIVE WIDE AND THE LINE BETWEEN THEM IS `onChain`, NOT SUCCESS.
+ * `store.ts:894` declares "landed" | "reverted" | "rejected" | "paper" |
+ * "submitted", and `index.ts:6803` picks between the middle two with
+ * `status: onChain ? "reverted" : "rejected"` under a comment that settles the
+ * question outright: "REVERTED MEANS THE CHAIN REVERTED IT… `rejected` is the
+ * vocabulary for 'we did not send it'."
+ *
+ *   landed    — submitted, mined, succeeded.                REAL
+ *   submitted — in flight, not yet settled.                 REAL
+ *   reverted  — reached the chain and failed there.         REAL — gas was spent
+ *   rejected  — never left the box; a pre-flight refusal.   not real
+ *   paper     — the simulator.                              not real
+ *
+ * The first version of this query asked for `('landed', 'submitted')` and so
+ * read a REVERTED tenant as one who had never traded. That is precisely the
+ * owner most likely to exist: an agent whose swaps keep reverting is one the
+ * owner is watching spend real gas and get nothing, and the migration would
+ * have answered their misfortune by silently moving them to paper. A failing
+ * live trader is still a live trader.
  */
 async function accountsThatTradedForReal(db: TradesReader): Promise<Set<string>> {
   const { rows } = await db.query(
-    `SELECT DISTINCT agent_id FROM trades WHERE status IN ('landed', 'submitted')`,
+    `SELECT DISTINCT agent_id FROM trades WHERE status IN ('landed', 'submitted', 'reverted')`,
   );
   return new Set(
     rows

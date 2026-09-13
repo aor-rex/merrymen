@@ -353,9 +353,25 @@ export function mergeSettings(
     // field falls to the default (false) rather than to anything ambient.
     liveTradingEnabled: bool(file.liveTradingEnabled, undefined, d.liveTradingEnabled),
     // NOT a tenant setting and not in the file: this is an operator-controlled
-    // migration state, and it is read from the SAME variable that drives the
-    // backfill so the two cannot disagree about whether the migration has run.
-    enforceLiveIntent: (env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim() !== "report",
+    // migration state.
+    //
+    // IT USED TO READ `MERRYMEN_BACKFILL_LIVE_INTENT !== "report"`, so that
+    // asking the migration to REPORT also switched the gate off. That was right
+    // exactly once — before the migration had run, when the field was absent
+    // fleet-wide and enforcing it would have moved every live agent to paper.
+    //
+    // After the migration it inverts into a hazard: the fleet now has 46 grant
+    // tenants whose consent IS recorded, and re-running the report to check a
+    // detail would quietly un-gate every one of them for the length of the run
+    // — reopening the original bug (funding implying consent) as a side effect
+    // of asking a read-only question. A dry run must not change behaviour; that
+    // is the entire meaning of the word.
+    //
+    // So standing down is now its own deliberate act, on its own variable, and
+    // `=report` is inert. Set this ONLY on a deployment whose owners have no
+    // `liveTradingEnabled` recorded yet — a fresh self-hosted upgrade — and
+    // remove it in the same session, as docs/live-trading-consent.md sets out.
+    enforceLiveIntent: (env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest

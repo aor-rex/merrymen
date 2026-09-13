@@ -377,13 +377,49 @@ describe("the consent gate stands down while its migration is still running", ()
     assert.equal(canTradeForReal(a), false);
   });
 
-  it("IT IS TIED TO THE MIGRATION'S OWN VARIABLE, not to one of its own", () => {
-    // A separate switch could be left on for ever and nobody would notice. This
-    // one is only false while the backfill is mid-rollout, and the last step of
-    // that rollout is removing the variable.
-    const settings = readFileSync(path.join(__dirname, "settings.ts"), "utf8");
-    assert.match(settings, /enforceLiveIntent:\s*\(env\.MERRYMEN_BACKFILL_LIVE_INTENT[^)]*\)\.trim\(\) !== "report"/);
-    assert.doesNotMatch(settings, /MERRYMEN_ENFORCE_LIVE/, "no switch of its own");
+  it("A DRY RUN MUST NOT CHANGE BEHAVIOUR — the report cannot un-gate the fleet", () => {
+    /**
+     * This used to assert the OPPOSITE, and was right at the time: standing
+     * down was tied to `MERRYMEN_BACKFILL_LIVE_INTENT=report` so the two could
+     * not disagree about whether the migration had run.
+     *
+     * That reasoning expired the moment the migration ran. With consent now
+     * recorded for the fleet, re-running the report to check a detail would
+     * have switched enforcement off for every tenant for the length of a
+     * read-only question — reopening "funding implies consent" as a side effect
+     * of asking. The coupling that once prevented an outage had become the way
+     * to cause one.
+     *
+     * Comments are stripped before matching because the replacement comment in
+     * settings.ts QUOTES the retired expression to explain why it went.
+     */
+    const raw = readFileSync(path.join(__dirname, "settings.ts"), "utf8");
+    const settings = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+    // The RESOLUTION, not the interface declaration a few lines above it —
+    // `enforceLiveIntent: boolean;` matches a naive search first and would make
+    // every assertion below vacuous.
+    const line = [...settings.matchAll(/enforceLiveIntent:[^\n]*/g)]
+      .map((m) => m[0])
+      .find((l) => !/:\s*boolean;/.test(l));
+    assert.ok(line, "enforceLiveIntent must still be resolved in settings.ts");
+    assert.doesNotMatch(
+      line,
+      /MERRYMEN_BACKFILL_LIVE_INTENT/,
+      "asking the migration to report must not decide whether the gate is enforced",
+    );
+    assert.match(line, /env\.MERRYMEN_LIVE_INTENT_STAND_DOWN/);
+  });
+
+  it("and consent itself still has no env override", () => {
+    // The stand-down restores PREVIOUS behaviour for one migration. Setting the
+    // owner's answer from a shell would be the house consenting on their
+    // behalf, which is the defect this whole gate exists to remove.
+    const raw = readFileSync(path.join(__dirname, "settings.ts"), "utf8");
+    const settings = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const line = settings.match(/liveTradingEnabled: bool\([^\n]*/);
+    assert.ok(line, "liveTradingEnabled must still be resolved from the tenant's own file");
+    assert.doesNotMatch(line[0], /env\./, "no environment variable may set an owner's consent");
   });
 
   it("and the backfill runs BEFORE children are spawned", () => {
