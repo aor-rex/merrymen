@@ -139,7 +139,18 @@ describe("every control survives the restyle", () => {
     // canTradeForReal there was nothing to bind it to, so a funded agent traded
     // real money whatever its owner had chosen. First on the page, because it
     // outranks every control below it.
-    assert.equal(count(/type="checkbox"/g), 15, "checkboxes");
+    // 16 since "Trade this one too", beside the add-token form. Adding a token
+    // and trading it are two different writes — `customTokens` says "know about
+    // this", `basketSymbols` says "trade it" — and only the first was ever
+    // offered here. The second existed as an unselected chip at the end of
+    // twenty-five stock chips and as a JSX comment, so an owner pasted an
+    // address, saved, re-signed, and asked the group why his agent still traded
+    // only stocks. Deliberately a control rather than an automatic write: the
+    // rule it respects (strategies/registry.ts, "a token added to be tracked
+    // must not start being bought on its own") protects owners from the
+    // PLATFORM widening what gets bought, and a person typing an address is not
+    // the platform — so the choice is theirs, visible, and defaulted on.
+    assert.equal(count(/type="checkbox"/g), 16, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and

@@ -654,6 +654,21 @@ export default function GrantPage() {
       ]
     : [];
 
+  /**
+   * TOKENS THE OWNER ADDED AND NEVER PUT IN THE BASKET.
+   *
+   * A different problem from `uncoveredNames`, with a different remedy, and the
+   * panel below promised the wrong one for it: "Re-signing fixes it: same
+   * wallet, same funds, same caps, free and instant." For a token that is not in
+   * the basket, re-signing fixes NOTHING — the grant will cover it and no
+   * strategy will ever propose it, because `legsForUniverse` intersects the
+   * watch set with `basketSymbols`. An owner who followed that sentence signed,
+   * waited, and came back to ask why his agent still only traded stocks.
+   */
+  const watchedNotTraded = customTokens
+    .map((t) => t.symbol)
+    .filter((sym) => !basketSymbols.includes(sym));
+
   const isMainnet = chainId === MAINNET;
   // Mainnet is real money — the create button stays locked until the user
   // explicitly owns that (keys are plaintext-local; caps are the seatbelt).
@@ -1529,6 +1544,22 @@ export default function GrantPage() {
                 position with no way out, and no cap protects you from that.
                 <br />
                 Re-signing fixes it: same wallet, same funds, same caps, free and instant.
+                {watchedNotTraded.length > 0 && (
+                  /* AND WHAT RE-SIGNING WILL NOT FIX. Coverage and selection are
+                     two different gates; this panel only ever spoke about the
+                     first, so an owner could do exactly what it said and still
+                     have an agent that never touches the token. */
+                  <>
+                    <br />
+                    <br />
+                    One more thing, and a signature won&apos;t do it:{" "}
+                    <b>{watchedNotTraded.join(", ")}</b>{" "}
+                    {watchedNotTraded.length === 1 ? "is" : "are"} on your watch list but not in
+                    your <b>trading basket</b>, so your agent will follow{" "}
+                    {watchedNotTraded.length === 1 ? "it" : "them"} and never buy. Tick{" "}
+                    {watchedNotTraded.length === 1 ? "it" : "them"} on in Settings → Trading basket.
+                  </>
+                )}
                 {/*
                   SCROLLS, does not sign — the same correction the expiry prompt
                   below already got, and for the same reason. This button called

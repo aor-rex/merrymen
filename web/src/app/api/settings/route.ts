@@ -21,6 +21,8 @@ import {
   STOCK_TOKENS,
   isHostedMode,
   isValidCustomToken,
+  officialCoinsFor,
+  robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
 } from "@merrymen/core";
@@ -53,6 +55,15 @@ export interface SettingsView {
   values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey" | "bitqueryApiKey" | "merrymenToken">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
+  /**
+   * THE VERIFIED COINS ACTUALLY LISTED ON THIS CHAIN, which is a different fact
+   * from whether the setting is on. official-coins.ts: "An empty list is the
+   * honest state for a chain with no verified listing, and is a different fact
+   * from official coins are turned off — which is a setting." The screen had
+   * only the setting, so it affirmed "coins are in your basket" on a chain where
+   * the list is empty. A constant read; it costs nothing.
+   */
+  officialCoins: string[];
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
@@ -141,6 +152,7 @@ export async function GET(req: Request) {
     values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
+    officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
   };

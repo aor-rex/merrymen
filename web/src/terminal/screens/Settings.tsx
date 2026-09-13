@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
@@ -98,6 +99,24 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   // either. null = untouched this session; the server value stands.
   const [tokens, setTokens] = useState<CustomToken[] | null>(null);
   const [newToken, setNewToken] = useState({ symbol: "", address: "", decimals: "18" });
+  /**
+   * SHOULD THE AGENT TRADE THIS ONE, as well as know about it?
+   *
+   * Defaulted ON, and shown right beside the address box rather than assumed.
+   * Adding a token and trading it are two different writes — `customTokens` says
+   * "know about this", `basketSymbols` says "trade it" — and the second was
+   * offered nowhere an owner would find it: the chip renders unselected at the
+   * end of twenty-five identical stock chips, and the rule itself lived only in
+   * a JSX comment. An owner pasted an address, saved, re-signed, and asked the
+   * group why his agent still traded only stocks. He had done nothing wrong.
+   *
+   * NOT made automatic, because `strategies/registry.ts` is deliberate about it:
+   * "a token added to be tracked must not start being bought on its own." That
+   * rule protects an owner from the PLATFORM widening what gets bought. A person
+   * typing forty-two hex characters and pressing a button is not the platform —
+   * so the choice is theirs, made visible, made here, and reversible.
+   */
+  const [tradeNewToken, setTradeNewToken] = useState(true);
   const [tokenError, setTokenError] = useState<string | null>(null);
   // The grant the browser holds, so the basket can say which symbols this
   // signature can actually get back out of. null = none stored yet.
@@ -230,6 +249,21 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
       return;
     }
     setTokens([...current, candidate]);
+    // THE SECOND WRITE, which never happened here. `Proposals.tsx` has always
+    // done both in one click; this screen wrote only `customTokens`, so a token
+    // was added and never selected, and the basket stayed on its stocks-only
+    // default. `basketNow` rather than `values.basketSymbols ?? []` because an
+    // unset basket is the DEFAULT basket, not an empty one — reading it as
+    // empty would narrow the agent's whole universe to the coin just added.
+    // `symbols` first: an edit made in this session has not been saved yet, and
+    // rebuilding from `view` would silently throw it away.
+    setSymbols(
+      basketAfterAdd({
+        saved: symbols ?? basketNow({ values: view?.values, defaults: view?.defaults }),
+        symbol: candidate.symbol,
+        trade: tradeNewToken,
+      }),
+    );
     setNewToken({ symbol: "", address: "", decimals: "18" });
   }
 
@@ -317,11 +351,17 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
   const d = view.defaults;
   const activeSymbols = symbols ?? view.values.basketSymbols ?? d.basketSymbols;
+  /** What is actually listed on this chain — not whether the setting is on. */
+  const listedCoins = view.officialCoins ?? [];
   const activeTokens =
     tokens ?? ((view.values.customTokens as CustomToken[] | undefined) ?? []);
   // Read the grant straight from localStorage — this page has no other handle on
   // it, and what matters is the signature the browser actually holds.
-  const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant);
+  // WITH THE OWNER'S OWN TOKENS, so the banner can fire for a memecoin — the
+  // token most likely to have been added after the grant was signed, and the one
+  // this warning could never reach. Unlike Wallet.tsx and the worker's coverage
+  // note, this screen has no `tokenCoverage` union of its own to double-report.
+  const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant, activeTokens);
   const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
     s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
 
@@ -754,6 +794,20 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               />
             </Field>
           </div>
+          {/* THE SECOND GATE, MADE VISIBLE. Adding a token means "know about
+              this"; trading it is a separate decision that lived only in a code
+              comment and in an unselected chip at the end of twenty-five stock
+              chips. Offered here, defaulted on, one click to decline. */}
+          <label className="ack-row" style={{ marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={tradeNewToken}
+              onChange={(e) => setTradeNewToken(e.target.checked)}
+            />
+            <span>
+              Trade this one too — add it to the trading basket, not just the watch list.
+            </span>
+          </label>
           <button type="button" className="copy-btn" onClick={addToken}>
             add token
           </button>
@@ -787,8 +841,16 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               />
             </Field>
           </div>
+          {/* ALL THREE STEPS, because naming two of them is how an owner ends
+              up doing everything he was told and getting nowhere. This said
+              "save your tokens, then update trading permissions" and omitted
+              the basket entirely — the one gate that was invisible. */}
           <div className="mm-hint">
-            Save your tokens, then update <Link href="/grant">trading permissions</Link> to enable trading them.
+            Three things have to be true before your agent buys a token you added:
+            it&apos;s <b>in your trading basket</b> above (the checkbox does that when you
+            add it), you&apos;ve <b>saved</b>, and your{" "}
+            <Link href="/grant">trading permission</Link> covers it — re-sign after
+            saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
           </div>
 
           {/* ── DISCOVERY ──────────────────────────────────────────────────
@@ -852,11 +914,24 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {officialCoinsVal ? "coins are in your basket" : "stocks only"}
+                  {/* THREE STATES, NOT TWO. This read off the SETTING and said
+                      "coins are in your basket" whenever it was on — which is the
+                      default — while OFFICIAL_COINS[4663] is empty, so there are
+                      none. official-coins.ts already names the distinction the UI
+                      was collapsing: "An empty list is the honest state for a chain
+                      with no verified listing, and is a different fact from
+                      'official coins are turned off' — which is a setting." */}
+                  {!officialCoinsVal
+                    ? "stocks only"
+                    : listedCoins.length > 0
+                      ? `${listedCoins.length} in your basket: ${listedCoins.join(", ")}`
+                      : "on — but none are listed on this chain yet"}
                 </span>
               </span>
               <span className="mm-hint">
-                Verified coins we publish, watched and traded without you adding them. Coins trade
+                {listedCoins.length > 0
+                  ? "Verified coins we publish, watched and traded without you adding them. Coins trade"
+                  : "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"}{" "}
                 around the clock, so your agent keeps working when the stock market is shut. Your
                 caps, budgets and trading permissions still apply — and a coin listed after you
                 signed needs a free re-sign at /grant before your key can touch it.
@@ -1429,7 +1504,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="Class vault factory contract"
-              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route below."
+              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here."
             >
               <input
                 type="text"
