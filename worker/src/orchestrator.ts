@@ -1766,6 +1766,95 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * re-runs and sends nothing new. The body ships in the repo because there is no
  * other way to hand this process a file.
  */
+/**
+ * GRANT LIVE INTENT TO THE PEOPLE WHO ALREADY HAD IT, ONCE, BEFORE ENFORCEMENT.
+ *
+ * `liveTradingEnabled` defaults FALSE and `worker/src/settings.ts` resolves an
+ * absent field to the default, so the deploy that enforces the consent gate
+ * would otherwise move every agent in the fleet to paper — including the ones
+ * whose owners are watching them trade real funds. See backfill-live-intent.ts
+ * for what counts as consent already given, and what deliberately does not.
+ *
+ * TWO STEPS, OPERATOR-DRIVEN, because this writes settings on other people's
+ * agents and the report is the only chance to notice it is wrong:
+ *
+ *   MERRYMEN_BACKFILL_LIVE_INTENT=report   read, decide, print, write nothing
+ *   MERRYMEN_BACKFILL_LIVE_INTENT=apply    the same, then write the grants
+ *
+ * Idempotent either way: once applied, every tenant it touched carries the
+ * field explicitly and the next plan is empty.
+ */
+async function runLiveIntentBackfillIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
+  if (mode !== "report" && mode !== "apply") return;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("live-intent backfill asked for, but there is no DATABASE_URL");
+    return;
+  }
+  try {
+    const { applyLiveIntentBackfill, describeBackfill, planLiveIntentBackfill } = await import(
+      "./backfill-live-intent"
+    );
+    const { getSettingsStore } = await import("./settings-store");
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      /**
+       * TENANT → SMART ACCOUNT, the same index announce.ts uses and for the same
+       * reason: `trades` is keyed by `agent_id`, which is the smart account, and
+       * nothing in it knows what a tenant is. `grants` is keyed by tenant and
+       * carries the account, so it is the only bridge.
+       *
+       * Deliberately NOT `agents.owner_address` — that is a browser-generated
+       * key for every hosted tenant, so the join would return zero rows and the
+       * whole fleet would read as "never traded for real".
+       */
+      const ids = new Map<string, string>();
+      const { rows } = await client.query(
+        `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`,
+      );
+      for (const r of rows) {
+        if (typeof r.smart_account === "string") {
+          ids.set(String(r.tenant).toLowerCase(), r.smart_account);
+        }
+      }
+      log(`live-intent backfill: ${ids.size} tenant(s) have a grant with an account`);
+
+      const store = getSettingsStore();
+      const plan = await planLiveIntentBackfill({
+        settings: store as never,
+        db: client,
+        agentIdOf: (t) => ids.get(t.toLowerCase()) ?? null,
+      });
+      for (const line of describeBackfill(plan).split("\n")) log(`live-intent backfill: ${line}`);
+
+      if (mode !== "apply") {
+        log("live-intent backfill: REPORT ONLY — nothing written. Set =apply to write these grants.");
+        return;
+      }
+      const out = await applyLiveIntentBackfill(plan, store as never);
+      log(`live-intent backfill: APPLIED — ${out.written.length} granted, ${out.skipped.length} skipped`);
+      for (const s of out.skipped) log(`live-intent backfill:   SKIP ${s.tenant} — ${s.why}`);
+    } finally {
+      await client.end();
+    }
+  } catch (e) {
+    // Loud, and never silently "done". A backfill that failed and said nothing
+    // is indistinguishable from one that found nothing to do — and the second
+    // is a green light to deploy enforcement.
+    log(`live-intent backfill: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runAnnouncementIfAsked(): Promise<void> {
   const id = (process.env.MERRYMEN_ANNOUNCE_ID ?? "").trim();
   if (!id) return;
@@ -2640,6 +2729,7 @@ export async function runOrchestrator(): Promise<void> {
       // operator who sets the variable and redeploys is watching the log now,
       // and a dry run that appears twenty minutes later reads as nothing having
       // happened. It is idempotent, so running early costs nothing.
+      if (cohortPasses === 1) await runLiveIntentBackfillIfAsked();
       if (cohortPasses === 1) await runAnnouncementIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {

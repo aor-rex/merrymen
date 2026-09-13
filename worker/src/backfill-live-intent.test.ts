@@ -1,0 +1,293 @@
+/**
+ * THE MIGRATION IS THE DANGEROUS HALF, so it is the tested half.
+ *
+ * A consent gate with a safe default is a fleet outage unless somebody has
+ * already written the field for the people who are mid-trade. `bool()` in
+ * worker/src/settings.ts resolves an ABSENT field to the default, and the
+ * default is false — so the deploy that enforces the gate stops every agent
+ * whose owner never wrote a setting they could not previously write.
+ *
+ * Two failure directions, both expensive and neither loud:
+ *   grant too little  a funded agent stops trading mid-position, silently
+ *   grant too much    consent is fabricated for somebody who never gave it,
+ *                     which is the original defect re-created inside its fix
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import {
+  applyLiveIntentBackfill,
+  planLiveIntentBackfill,
+  type BackfillPlan,
+  type SettingsStoreLike,
+} from "./backfill-live-intent";
+
+/** A settings store in memory. `throwFor` makes one tenant unreadable. */
+function store(
+  initial: Record<string, Record<string, unknown>>,
+  throwFor?: string,
+): SettingsStoreLike & { written: Record<string, Record<string, unknown>> } {
+  const rows = { ...initial };
+  const written: Record<string, Record<string, unknown>> = {};
+  return {
+    written,
+    async listTenants() {
+      return Object.keys(rows) as `0x${string}`[];
+    },
+    async get(tenant) {
+      if (tenant === throwFor) throw new Error("sealed with a key this process does not have");
+      return rows[tenant] ?? null;
+    },
+    async put(tenant, settings) {
+      rows[tenant] = settings;
+      written[tenant] = settings;
+    },
+  };
+}
+
+/** A trades table. Rows are [agent_id, status]. */
+const db = (rows: [string, string][]) => ({
+  async query(sql: string) {
+    assert.match(sql, /FROM trades/, "the evidence must come from the trade tape");
+    assert.match(sql, /'landed'/, "and a landed order is what counts");
+    assert.doesNotMatch(sql, /balance|cash|usdg/i, "never from a balance — funding is not consent");
+    return {
+      rows: rows
+        .filter(([, status]) => status === "landed" || status === "submitted")
+        .map(([agent_id]) => ({ agent_id })),
+    };
+  },
+});
+
+const ALICE = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
+const BOB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
+const CAROL = "0xcccccccccccccccccccccccccccccccccccccccc" as const;
+const DAVE = "0xdddddddddddddddddddddddddddddddddddddddd" as const;
+
+/** Identity mapping — the tenant IS the agent id in these cases. */
+const identity = (t: `0x${string}`) => t;
+
+describe("who already consented, and how we can tell", () => {
+  it("AN AGENT THAT HAS PUT A REAL ORDER ON CHAIN KEEPS TRADING", () => {
+    // The outage case. Alice is mid-position with real money; the enforcing
+    // deploy must not be the thing that stops her.
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: { paperTradingEnabled: true } }),
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, [{ tenant: ALICE, reason: "has-traded-for-real" }]);
+      assert.deepEqual(plan.leaveDefault, []);
+    });
+  });
+
+  it("a SUBMITTED order counts too — it left, whether or not it mined", () => {
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: {} }),
+      db: db([[ALICE, "submitted"]]),
+      agentIdOf: identity,
+    }).then((plan) => assert.equal(plan.grant.length, 1));
+  });
+
+  it("but a PAPER fill is not evidence of anything", () => {
+    // The whole tape of a practising agent is `status: "paper"`. Reading it as
+    // live trading would grant consent to precisely the cohort this work exists
+    // to protect.
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: {} }),
+      db: db([[BOB, "paper"]]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.deepEqual(plan.leaveDefault, [BOB]);
+    });
+  });
+
+  it("nor is a REJECTED one", () => {
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: {} }),
+      db: db([[BOB, "rejected"]]),
+      agentIdOf: identity,
+    }).then((plan) => assert.deepEqual(plan.grant, []));
+  });
+
+  it("an owner who explicitly switched the simulator off was ASKING for live", () => {
+    // `paperTradingEnabled: false` is what the old go-live command wrote. It
+    // never gated anything, but it is a thing the owner did on purpose, and
+    // this migration is the first chance to honour it.
+    return planLiveIntentBackfill({
+      settings: store({ [CAROL]: { paperTradingEnabled: false } }),
+      db: db([]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, [{ tenant: CAROL, reason: "explicitly-not-paper" }]);
+    });
+  });
+
+  it("BUT AN ABSENT paperTradingEnabled IS NOT — it defaults TRUE", () => {
+    // The single most dangerous misreading available here. Absence is the state
+    // of every tenant who never touched the setting, so treating it as a live
+    // request would grant the whole fleet consent nobody gave — the original
+    // defect, rebuilt inside its own migration.
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: { strategy: "even-keel" } }),
+      db: db([]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.deepEqual(plan.leaveDefault, [BOB]);
+    });
+  });
+});
+
+describe("what must never count as consent", () => {
+  it("HAVING MONEY IS NOT ASKING TO SPEND IT", () => {
+    // Asserted through the query itself: the plan is built from the trade tape
+    // and nothing else, and `db()` above fails the test if a balance is ever
+    // consulted. Funding implying consent is the bug; it must not reappear here.
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: { paperTradingEnabled: true, paperStartUsdg: 100000 } }),
+      db: db([]),
+      agentIdOf: identity,
+    }).then((plan) => assert.deepEqual(plan.grant, []));
+  });
+
+  it("and neither is holding a mainnet grant", () => {
+    // Signing a permission is not asking to use it. Nothing in the inputs here
+    // is a chain id, which is the point.
+    return planLiveIntentBackfill({
+      settings: store({ [BOB]: {} }),
+      db: db([]),
+      agentIdOf: identity,
+    }).then((plan) => assert.deepEqual(plan.leaveDefault, [BOB]));
+  });
+});
+
+describe("it only ever grants", () => {
+  it("a tenant who already set the field is left exactly as they set it", () => {
+    return planLiveIntentBackfill({
+      settings: store({
+        [ALICE]: { liveTradingEnabled: false },
+        [CAROL]: { liveTradingEnabled: true },
+      }),
+      // Alice HAS traded for real, and still must not be overwritten: her own
+      // answer outranks our inference about her.
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.equal(plan.alreadySet.length, 2);
+      assert.deepEqual(
+        plan.alreadySet.find((a) => a.tenant === ALICE),
+        { tenant: ALICE, value: false },
+      );
+    });
+  });
+
+  it("and nothing in the writer can produce a false", async () => {
+    const s = store({ [ALICE]: { strategy: "even-keel" } });
+    const plan: BackfillPlan = {
+      grant: [{ tenant: ALICE, reason: "has-traded-for-real" }],
+      leaveDefault: [],
+      alreadySet: [],
+      unreadable: [],
+    };
+    const out = await applyLiveIntentBackfill(plan, s);
+    assert.deepEqual(out.written, [ALICE]);
+    assert.equal(s.written[ALICE]!.liveTradingEnabled, true);
+    // And it preserved everything else it found.
+    assert.equal(s.written[ALICE]!.strategy, "even-keel");
+  });
+
+  it("the owner's own answer wins if they set it between plan and apply", async () => {
+    // The report is read by a human, so minutes pass. In them an owner may
+    // decide for themselves, and a migration that stomped that would be taking
+    // the decision back off them.
+    const s = store({ [ALICE]: { liveTradingEnabled: false } });
+    const plan: BackfillPlan = {
+      grant: [{ tenant: ALICE, reason: "has-traded-for-real" }],
+      leaveDefault: [],
+      alreadySet: [],
+      unreadable: [],
+    };
+    const out = await applyLiveIntentBackfill(plan, s);
+    assert.deepEqual(out.written, []);
+    assert.match(out.skipped[0]!.why, /owner set it themselves/);
+  });
+});
+
+describe("failures are reported, never guessed at", () => {
+  it("an unreadable tenant is skipped and named, not counted as either answer", () => {
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: {}, [DAVE]: {} }, DAVE),
+      db: db([]),
+      agentIdOf: identity,
+    }).then((plan) => {
+      assert.deepEqual(plan.unreadable, [DAVE]);
+      assert.ok(!plan.grant.some((g) => g.tenant === DAVE));
+      assert.ok(!plan.leaveDefault.includes(DAVE));
+    });
+  });
+
+  it("one tenant's write failure does not abandon the rest", async () => {
+    // A migration that stopped at the first error leaves the fleet split across
+    // two contracts with nobody knowing where the line falls.
+    const s = store({ [ALICE]: {}, [BOB]: {} });
+    const boom: SettingsStoreLike = {
+      ...s,
+      async put(tenant, settings) {
+        if (tenant === ALICE) throw new Error("write conflict");
+        return s.put(tenant, settings);
+      },
+    };
+    const out = await applyLiveIntentBackfill(
+      {
+        grant: [
+          { tenant: ALICE, reason: "has-traded-for-real" },
+          { tenant: BOB, reason: "has-traded-for-real" },
+        ],
+        leaveDefault: [],
+        alreadySet: [],
+        unreadable: [],
+      },
+      boom,
+    );
+    assert.deepEqual(out.written, [BOB], "the second tenant still got migrated");
+    assert.equal(out.skipped.length, 1);
+    assert.match(out.skipped[0]!.why, /write conflict/);
+  });
+
+  it("a tenant with no agent id is never matched by accident", () => {
+    // `agentIdOf` returning null means "we cannot say which account this is".
+    // Matching it against the tape anyway would grant consent on a coincidence.
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: {} }),
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: () => null,
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.deepEqual(plan.leaveDefault, [ALICE]);
+    });
+  });
+});
+
+describe("running it twice changes nothing the second time", () => {
+  it("IS IDEMPOTENT — the apply writes the field, so the next plan is empty", async () => {
+    const s = store({ [ALICE]: { paperTradingEnabled: true } });
+    const first = await planLiveIntentBackfill({
+      settings: s,
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: identity,
+    });
+    assert.equal(first.grant.length, 1);
+    await applyLiveIntentBackfill(first, s);
+
+    const second = await planLiveIntentBackfill({
+      settings: s,
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: identity,
+    });
+    assert.deepEqual(second.grant, [], "nothing left to do");
+    assert.deepEqual(second.alreadySet, [{ tenant: ALICE, value: true }]);
+  });
+});
