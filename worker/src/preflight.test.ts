@@ -56,7 +56,7 @@ describe("preflight — the things that stop a trade", () => {
     const input = ready({ grant: { ...ready().grant!, chainId: 46630 } as never });
     const chain = preflight(input).find((c) => c.id === "chain")!;
     assert.equal(chain.level, "blocker");
-    assert.match(chain.detail!, /practice only/i);
+    assert.match(chain.detail!, /cannot trade/i);
   });
 
   it("A DEAD POLICY IS A BLOCKER, and it is not the same check as the contract probe", () => {

@@ -560,7 +560,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             <Field
                 label="Pimlico API key"
                 action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-                hint="Required for live trading on mainnet. Leave blank for paper trading or testnet."
+                hint="Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet."
               >
                 <input
                   type="password"
@@ -812,7 +812,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   style={{ width: "auto" }}
                 />
                 <span className="mm-unit">
-                  {trencherLiveVal ? "trencher can open real positions" : "practice only"}
+                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
                 </span>
               </span>
               <span className="mm-hint">

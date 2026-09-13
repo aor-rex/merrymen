@@ -188,7 +188,7 @@ export function readStatus(ctx: StatusContext): string {
       // Say the quiet part out loud: people fund testnet, see 0, and think it's
       // broken. It isn't — the token registry is mainnet-only, so on-chain reads
       // there always return 0, and practice never spends those funds anyway.
-      lines.push(`• chain: testnet 46630 — <b>practice only</b> (no real swaps)`);
+      lines.push(`• chain: testnet 46630 — <b>simulated only</b> (no real swaps)`);
       lines.push(
         `• ℹ️ testnet funds you send are <b>not used and not shown</b> — merrymen only knows mainnet ` +
           `token addresses, so a funded balance reads 0 here. It paper-trades a simulated ` +

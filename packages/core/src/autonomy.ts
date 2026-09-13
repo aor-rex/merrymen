@@ -395,7 +395,17 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
 
 /** The two money labels, named once so no surface can invent a third. */
 export const REAL_LABEL = "Available cash";
-export const SIMULATED_LABEL = "Practice balance (not real money)";
+/**
+ * "PAPER", NOT "PRACTICE", and the word matters more than it looks.
+ *
+ * The product used "practice" for two unrelated things: simulated trading on any
+ * chain, and the testnet itself — the wallet screen literally offered "Move this
+ * key to practice (testnet 46630)". An owner who wanted the first could pick the
+ * second and end up with a grant that can never trade, which is exactly what
+ * happened. Three words now mean three things and nothing else: TESTNET is the
+ * 46630 network, PAPER is simulated trading, LIVE is real money.
+ */
+export const SIMULATED_LABEL = "Paper balance (not real money)";
 
 /**
  * The blocker as it arrives from the API: a TEXT column, so it can hold anything.

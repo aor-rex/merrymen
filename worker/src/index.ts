@@ -3472,7 +3472,7 @@ async function main() {
       return {
         ok: false,
         line:
-          "this agent is on the live rail, so there is no practice book to clear — " +
+          "this agent is on the live rail, so there is no paper book to clear — " +
           "real positions and trades are never deleted.",
       };
     }
@@ -3481,12 +3481,12 @@ async function main() {
     await addEvent(
       id,
       "ok",
-      `practice book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
+      `paper book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
         `and earlier paper trades closed into epoch ${opened - 1} (kept, but no longer counted)`,
     );
     return {
       ok: true,
-      line: `practice book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
+      line: `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
     };
   }
 
@@ -4149,7 +4149,7 @@ async function main() {
       console.log(
         cfg.paperTradingEnabled
           ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
-          : "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
+          : "[worker] no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
       );
       // SAY IT WHERE THE OWNER WILL LOOK, not only on a console nobody is
       // tailing. Without a bundler NOTHING can ever be signed, so every intent
@@ -4201,7 +4201,7 @@ async function main() {
         "this key was signed before a wall fix and CANNOT trade: it carries a rate-limit policy whose " +
           "contract has no code on this chain, so every operation fails validation. Re-signing is free " +
           "and instant — open the wallet page and use 're-sign this key'. Your funds are untouched, " +
-          "and practice mode still works meanwhile.",
+          "and Paper still works meanwhile.",
       );
     }
 
@@ -6858,10 +6858,14 @@ async function main() {
     // ── AND SAY WHY IT IS NOT LIVE ──────────────────────────────────────
     //
     // A tester funded an agent with ETH and USDG, set their key, watched it
-    // run, saw "Paper trading", and asked where the switch to real trading
-    // was. There is no switch, and there should not be: paper is PERMISSION to
-    // simulate, not a request to — execModeOf asks canTradeForReal first, so a
-    // working agent goes live on its own. What was missing was the sentence.
+    // run, saw "Paper trading", and asked where the switch to real trading was.
+    //
+    // FOR A LONG TIME THE ANSWER WAS "THERE ISN'T ONE", and this block said so
+    // in the feed. That answer was true and it was the bug: a working agent
+    // went live on its own, so an owner who had chosen to practise was promoted
+    // to real money by funding an account. There is a switch now —
+    // `liveTradingEnabled`, a required term of canTradeForReal — and the line
+    // below had to stop telling every owner in the fleet it does not exist.
     //
     // Once per CHANGE, not once per tick: the same line sixty times an hour
     // teaches an owner to scroll past it, and this repo already carries the
@@ -6879,12 +6883,20 @@ async function main() {
       );
       void addEvent(
         active.agentId,
-        blocking === null ? "ok" : "warn",
+        // `live-not-enabled` is an "ok", not a "warn". The feed colours these,
+        // and a warning stripe against "your agent is practising, as you asked"
+        // is the same false alarm the red banner was.
+        blocking === null || blocking === "live-not-enabled" ? "ok" : "warn",
         blocking === null
           ? "trading for real — every leg of the live rail is available"
-          : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
-            `Fills below are simulated at live prices until that is fixed. There is no ` +
-            `paper/live switch to find — your agent goes live by itself once this clears.`,
+          : blocking === "live-not-enabled"
+            ? // NOT A WARNING, and the level above is "ok" for it. This is the
+              // agent reporting that it is doing what it was told.
+              `Paper mode: practising with simulated money at live prices, and placing no real ` +
+              `orders. Turn on Live trading in Settings when you want it to trade your real funds.`
+            : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
+              `Fills below are simulated at live prices until that is fixed. Live trading is a ` +
+              `switch in Settings, and it stays off until you turn it on.`,
       );
     }
   }
@@ -8852,7 +8864,7 @@ async function main() {
     // which surfaces to the owner and reads like a crash rather than a decision.
     if (paperActive()) {
       return no(
-        `${symbol} trades on a bonding curve, and curve trading is live-only for now — the practice book ` +
+        `${symbol} trades on a bonding curve, and curve trading is live-only for now — the paper book ` +
         `can't simulate a curve yet. Nothing was sent.`
       );
     }
@@ -9023,7 +9035,7 @@ async function main() {
         // not the practice trade — and ok:false is what gets it onto a surface
         // the owner actually reads.
         return no(
-          `📝 practised ${what}${note} instead of trading — I cannot trade for real right now` +
+          `📝 simulated ${what}${note} instead of trading for real` +
             `${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}. Your money did not move.`,
         );
       case "reverted":

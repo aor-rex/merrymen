@@ -166,7 +166,7 @@ export function preflight(input: PreflightInput): Check[] {
       level: "blocker",
       title: `grant is on chain ${g.chainId} — it cannot trade`,
       detail:
-        "Testnet is practice only. Every token and router address merrymen knows is a MAINNET " +
+        "Testnet cannot trade. Every token and router address merrymen knows is a MAINNET " +
         `deployment, so a funded testnet balance reads as 0 and swaps only simulate. Re-sign at ` +
         `/grant and pick mainnet ${TRADEABLE_CHAIN_ID} (it asks you to confirm, deliberately).`,
     });
@@ -229,7 +229,7 @@ export function preflight(input: PreflightInput): Check[] {
         "It seals a rate-limit policy whose contract has no code on this chain, so Kernel has " +
         "nothing to call and every operation fails validation. A signature is frozen: no deploy, " +
         "no funding and no setting fixes it. Re-signing is free and instant — open the wallet page " +
-        "and use 're-sign this key'. Your funds are untouched, and practice mode still works.",
+        "and use 're-sign this key'. Your funds are untouched, and Paper still works.",
     });
   }
 
