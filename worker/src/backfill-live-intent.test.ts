@@ -45,15 +45,28 @@ function store(
   };
 }
 
-/** A trades table. Rows are [agent_id, status]. */
+/**
+ * A trades table. Rows are [agent_id, status].
+ *
+ * THE FILTER COMES FROM THE PRODUCTION QUERY, not from this file. It used to be
+ * hard-coded here as `status === "landed" || status === "submitted"`, which
+ * meant the test did the filtering and the real `WHERE status IN (...)` was
+ * never exercised: deleting that clause in production would have left every
+ * test green while the migration granted live consent to every agent that had
+ * ever simulated a fill.
+ *
+ * So the statuses are parsed out of the SQL the caller actually sent. A query
+ * with no status filter now returns everything, and the "a PAPER fill is not
+ * evidence" case below fails — which is the assertion that matters most here.
+ */
 const db = (rows: [string, string][]) => ({
   async query(sql: string) {
     assert.match(sql, /FROM trades/, "the evidence must come from the trade tape");
-    assert.match(sql, /'landed'/, "and a landed order is what counts");
     assert.doesNotMatch(sql, /balance|cash|usdg/i, "never from a balance — funding is not consent");
+    const allowed = [...sql.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]!);
     return {
       rows: rows
-        .filter(([, status]) => status === "landed" || status === "submitted")
+        .filter(([, status]) => allowed.includes(status))
         .map(([agent_id]) => ({ agent_id })),
     };
   },

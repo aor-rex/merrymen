@@ -109,7 +109,20 @@ describe("an owner who needs to re-sign is told so where the money is", () => {
   it("it routes to the screen where re-signing actually happens", () => {
     // A tester was once told to "head to the wallet screen", spent minutes
     // looking, and reported there was no such thing. The button navigates.
-    assert.match(SURFACES["Desktop.tsx"], /\/grant/, "the CTA must open the grant screen");
+    // ANCHORED TO THE BUTTON, not to the string "/grant".
+    //
+    // The old assertion matched `onScreen({kind:"grant"})`, which existed once
+    // in this file. When the mechanism changed to a URL — `pathForScreen` drops
+    // descriptor fields, so the chain intent could not survive — the obvious
+    // replacement `/\/grant/` also matched the unrelated sidebar link
+    // `<Link href="/grant">`, and would have passed with the CTA deleted
+    // entirely. A regex that survives the removal of the thing it is about is
+    // not a test.
+    assert.match(
+      SURFACES["Desktop.tsx"],
+      /window\.location\.href = mine\.autonomy\.action\?\.chain/,
+      "the CTA itself must navigate to the grant screen",
+    );
   });
 
   it("AND IT CARRIES THE NETWORK IT NAMED", () => {
