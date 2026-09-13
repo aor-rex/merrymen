@@ -151,7 +151,7 @@ import {
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
-import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, watchTokensFor } from "./strategies/registry";
+import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
 import { TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
@@ -8649,7 +8649,31 @@ async function main() {
     // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
     // this repo already carries the incident where 1,242 identical rows told
     // nobody anything. The same de-duplication the live-rail blocker uses.
-    const idleNow = idle ? renderWhy(idle) : null;
+    /**
+     * A MODE THAT LEAVES NOTHING TO TRADE MUST SAY SO.
+     *
+     * The one way the asset mode could be worse than no feature at all: an
+     * owner picks "crypto only" with a basket of equities, every strategy
+     * resolves zero legs, and the agent goes quiet with nothing on any screen
+     * to connect the silence to the dropdown they just moved. That is the exact
+     * shape of the trencher incident this file already carries — "it didn't
+     * take any trades yet", then "I think I'm stuck in paper mode".
+     *
+     * Computed from the same inputs `makeStrategy` resolves legs from, so it
+     * cannot disagree with them, and only when the mode is actually narrowing
+     * something. It rides the once-per-change idle channel below rather than
+     * inventing a second one.
+     */
+    const modeEmptied =
+      cfg.assetMode !== "all" &&
+      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), cfg.assetMode)
+        .length === 0 &&
+      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
+        ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
+          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade. ` +
+          `Change the mode in Settings, or add something it allows to your basket.`
+        : null;
+    const idleNow = idle ? renderWhy(idle) : modeEmptied;
     if (idleNow !== lastIdleReason) {
       lastIdleReason = idleNow;
       if (idleNow) {

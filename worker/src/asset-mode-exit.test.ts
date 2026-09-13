@@ -141,3 +141,37 @@ describe("the setting actually reaches the strategy", () => {
     assert.match(body, /cfg\.officialCoinsEnabled/);
   });
 });
+
+describe("a mode that empties the basket does not go quiet", () => {
+  const index = read("index.ts");
+
+  it("SAYS SO, through the once-per-change idle channel", () => {
+    // The one way this feature could be worse than not shipping it: an owner
+    // picks "crypto only" over a basket of equities, every strategy resolves
+    // zero legs, and the agent falls silent with nothing connecting that to the
+    // dropdown they just moved. Exactly the trencher incident this file already
+    // carries — "it didn't take any trades yet", then "I think I'm stuck in
+    // paper mode".
+    assert.match(index, /modeEmptied/);
+    assert.match(index, /there is nothing to trade/);
+    assert.match(index, /Change the mode in Settings/, "and what to do about it");
+  });
+
+  it("ONLY when the mode is what emptied it", () => {
+    // An empty basket is an empty basket; blaming the mode for one would be a
+    // different wrong sentence. The second `legsForUniverse` call — unfiltered —
+    // is what tells those two apart.
+    const at = index.indexOf("const modeEmptied");
+    const clause = index.slice(at, index.indexOf("const idleNow", at));
+    assert.match(clause, /cfg\.assetMode !== "all"/, "not reported when nothing is being filtered");
+    assert.equal(
+      (clause.match(/legsForUniverse\(/g) ?? []).length,
+      2,
+      "filtered AND unfiltered — the difference is the claim",
+    );
+  });
+
+  it("and rides the existing channel rather than inventing a second one", () => {
+    assert.match(index, /const idleNow = idle \? renderWhy\(idle\) : modeEmptied;/);
+  });
+});
