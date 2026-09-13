@@ -195,7 +195,12 @@ const REGISTRY: ChatCommand[] = [
     writes: ["paperTradingEnabled", "liveTradingEnabled"],
     fixed: { paperTradingEnabled: true, liveTradingEnabled: false },
     weighty: true,
-    say: () => `Paper mode from now on: I will practise with simulated money at live prices and place no real orders, whatever is in the account, until you turn Live trading back on.`,
+    // NAMES WHAT IT STOPS DOING, not just what it starts. On the paper rail the
+    // tick values the paper book and never reads the chain, so any position
+    // bought with real funds goes unmanaged — no stop-loss, no take-profit, no
+    // exit — while the screen shows a tidy simulated book over the top of it.
+    // An owner confirming this card is entitled to know that before they tap.
+    say: () => `Paper mode from now on: I will practise with simulated money at live prices and place no real orders, whatever is in the account. If I am holding anything bought with real funds I will stop managing it too — no stop-loss, no take-profit — until you turn Live trading back on. Nothing is sold either way.`,
   },
   {
     id: "go-live",

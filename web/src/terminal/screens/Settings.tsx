@@ -460,6 +460,23 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </span>
             </label>
           </div>
+          {!liveTradingVal && (view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* TURNING IT OFF IS NOT A NEUTRAL ACT IF REAL MONEY IS ALREADY OUT.
+               On the paper rail the tick values the PAPER BOOK — positions come
+               from `paperPositionsOf(bookRow.shares)` and nothing reads the
+               chain — so tokens bought with real funds become invisible to the
+               agent: no stop-loss, no take-profit, no exit of any kind, and a
+               screen showing a tidy simulated book over the top of them.
+               Nothing warns about it anywhere else, and switching back is the
+               only thing that restores it. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>If your agent holds positions bought with real funds, read this first.</b> In Paper
+              mode it stops managing them — no stop-loss, no take-profit, no exits — and the screen
+              shows its simulated book instead. The tokens stay in the account and nothing is sold;
+              they are simply left alone until you turn Live trading back on. If you want out of a
+              real position, close it first and switch afterwards.
+            </p>
+          )}
           {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
             /* SAID BEFORE IT IS TRUE, not after. The owner has ticked the box
                but not yet pressed save, which is the last moment this sentence

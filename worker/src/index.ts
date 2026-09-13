@@ -5058,8 +5058,24 @@ async function main() {
       // (above, shared with every rail) and AGAIN on the terms review()
       // returns — fees and slippage included. place() is unreachable except
       // downstream of a review that passed both.
+      /**
+       * THE BROKER LANE CROSSES THE FORK TOO, and it is the one rail that does
+       * not reach it on its own.
+       *
+       * This branch returns before `execMode()` is consulted at the swap fork
+       * below, so `place()` is reached without anyone having asked whether real
+       * execution was wanted. That is harmless today only because
+       * `orderExecutor` is hardwired null a few hundred lines up and every order
+       * paper-fills — which means the hole is invisible, and the first live
+       * `OrderExecutor` (step 6) would land on the wrong side of the consent
+       * gate with nothing failing to say so.
+       *
+       * So the live executor is used only on the live rail. A paper or refused
+       * verdict falls to the simulator exactly as it does today, and consent is
+       * required for the broker lane on the day it grows one.
+       */
       const orderExec =
-        active.orderExecutor ??
+        (execMode().mode === "live" ? active.orderExecutor : null) ??
         createPaperOrderExecutor({
           priceUsd8Of: (ticker) => lastPrices.get(ticker)?.price8 ?? null,
           slippageBps: cfg.slippageBps,

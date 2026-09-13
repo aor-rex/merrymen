@@ -42,9 +42,14 @@
  * file exists to forbid.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { canTradeForReal, execModeOf, type ExecInputs } from "./exec-mode";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MAINNET = 4663;
 const TESTNET = 46630;
@@ -262,5 +267,62 @@ describe("a paper verdict still knows what would block live", () => {
   it("an owner who HAS consented gets the blocker as the headline, not as a footnote", () => {
     const m = execModeOf({ ...healthy, liveTradingEnabled: true, chainId: TESTNET });
     assert.equal(m.mode === "paper" ? m.rule : null, "wrong-chain");
+  });
+});
+
+/**
+ * THE TWO THINGS AN ADVERSARIAL REVIEW FOUND, both consequences of making Paper
+ * a mode an owner can deliberately sit in rather than a fallback from a broken
+ * rail. Neither existed before that was possible.
+ */
+describe("the broker lane crosses the fork too", () => {
+  it("A LIVE ORDER EXECUTOR IS USED ONLY ON THE LIVE RAIL", () => {
+    // `intent.kind === "equity-order"` is handled and RETURNS before the swap
+    // fork consults execMode(), so `place()` was reachable without anyone having
+    // asked whether real execution was wanted. Harmless today — `orderExecutor`
+    // is hardwired null and every order paper-fills — which is exactly what made
+    // it invisible: the first live OrderExecutor would have landed on the wrong
+    // side of the consent gate with nothing failing to say so.
+    const src = readFileSync(path.join(__dirname, "index.ts"), "utf8");
+    assert.match(
+      src,
+      /\(execMode\(\)\.mode === "live" \? active\.orderExecutor : null\) \?\?/,
+      "the broker lane must ask the fork before using a live executor",
+    );
+  });
+});
+
+describe("switching INTO paper cannot be taken silently", () => {
+  /**
+   * On the paper rail the tick values the PAPER BOOK — positions come from
+   * `paperPositionsOf(bookRow.shares)` and nothing reads the chain — so a
+   * position bought with real funds becomes invisible to the agent: no
+   * stop-loss, no take-profit, no exit, and a tidy simulated book rendered over
+   * the top of it.
+   *
+   * That was unreachable while paper was only a fallback from a broken rail,
+   * because a broken rail could not have exited either. Making Paper a choice
+   * made it reachable, so the choice has to say what it costs.
+   */
+  it("the chat command says what it STOPS doing, not just what it starts", () => {
+    const commands = readFileSync(
+      path.join(__dirname, "..", "..", "web", "src", "lib", "chat-commands.ts"),
+      "utf8",
+    );
+    const goPaper = commands.slice(commands.indexOf('id: "go-paper"'), commands.indexOf('id: "go-live"'));
+    assert.match(goPaper, /stop managing it/i, "unmanaged real positions must be named");
+    assert.match(goPaper, /stop-loss/i);
+    assert.match(goPaper, /Nothing is sold/i, "and the owner told their tokens are not touched");
+  });
+
+  it("and so does the settings control", () => {
+    const settings = readFileSync(
+      path.join(__dirname, "..", "..", "web", "src", "terminal", "screens", "Settings.tsx"),
+      "utf8",
+    );
+    // Rendered only on the way OUT of live — an owner who was never live has no
+    // real position to strand, and a warning they cannot act on is noise.
+    assert.match(settings, /!liveTradingVal && \(view\.values\.liveTradingEnabled/);
+    assert.match(settings, /stops managing them/i);
   });
 });
