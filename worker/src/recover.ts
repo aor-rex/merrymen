@@ -81,6 +81,17 @@ export interface RecoverPlan {
   balances: TokenBalance[];
   gasWei: bigint;
   /**
+   * What the ETH leg WOULD move, and what would stay to pay for the move.
+   *
+   * A forecast, from the same `nativeSweep` the sweep itself uses — so the
+   * confirmation can name the ETH instead of listing only the tokens. Zero
+   * recoverable when the gas price could not be read, which also puts
+   * "gas price" in `unreadable`: a disclosure must not promise ETH it cannot
+   * price. The settled figures are `nativeSweptWei` on the result.
+   */
+  nativeRecoverableWei: bigint;
+  nativeReserveWei: bigint;
+  /**
    * What could not be READ — distinct from what is not held.
    *
    * A recovery that reports "this account is empty" because an RPC blinked is
@@ -528,11 +539,39 @@ export async function planRecovery(opts: {
     unreadable.push("class vault");
   }
 
+  // ── HOW MUCH NATIVE ETH WOULD ACTUALLY LEAVE ────────────────────────────
+  //
+  // Forecast here so the CONFIRMATION can state it. The ETH leg moves on every
+  // recovery — `recoverFunds` appends a bare value call — and a disclosure that
+  // lists the tokens but not the ETH understates what the owner is agreeing to.
+  //
+  // THE SAME FUNCTION THE SWEEP USES, deliberately: `nativeSweep` is called
+  // here and again at execution, so the number shown and the number sent come
+  // from one rule rather than two that can drift. They are not guaranteed
+  // IDENTICAL — the gas price is read twice and moves in between — which is
+  // exactly why the wording is "approximately" and why this is named
+  // `recoverable` rather than `swept`. `nativeSweptWei` on the RESULT is the
+  // settled fact; these two are the estimate.
+  //
+  // A failed gas read forecasts ZERO recoverable rather than the whole balance:
+  // over-promising on an exit is the direction that turns into a complaint.
+  let nativeRecoverableWei = 0n;
+  let nativeReserveWei = gas ?? 0n;
+  try {
+    const split = nativeSweep(gas ?? 0n, await publicClient.getGasPrice());
+    nativeRecoverableWei = split.sweep;
+    nativeReserveWei = split.reserve;
+  } catch {
+    unreadable.push("gas price");
+  }
+
   return {
     smartAccount: account.address,
     ownerAddress: ownerAccount.address,
     balances,
     gasWei: gas ?? 0n,
+    nativeRecoverableWei,
+    nativeReserveWei,
     unreadable,
     classVault,
     classHoldings,

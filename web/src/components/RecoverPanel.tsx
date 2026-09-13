@@ -59,6 +59,9 @@ interface PlanRes {
   /** The class vault's contents, and the vault itself. Absent is not empty. */
   classHoldings?: ClassHolding[];
   classVault?: string | null;
+  /** The ETH leg: what would move, and what stays to pay for the move. */
+  nativeRecoverableWei?: string;
+  nativeReserveWei?: string;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -247,6 +250,11 @@ export function RecoverPanelView({
         // would have confirmed a sweep whose screen said "20.000000 USDG".
         classHoldings: b.classHoldings,
         classVault: b.classVault,
+        // THE ETH LEG. It moves on every recovery and was in neither
+        // classHoldings nor balances, so the confirmation listed the tokens and
+        // silently omitted it.
+        nativeRecoverableWei: String(b.nativeRecoverableWei),
+        nativeReserveWei: String(b.nativeReserveWei),
         // Same reason `unreadable` exists at all: absence and ignorance are
         // different facts, and the panel cannot tell them apart without this.
         unreadable: b.unreadable,
@@ -345,6 +353,23 @@ export function RecoverPanelView({
   // read. Saying an account is empty because an RPC blinked is how somebody
   // concludes their money is gone.
   const unreadable = (ctx?.unreadable ?? plan?.unreadable ?? []) as string[];
+  /**
+   * The ETH leg, formatted once for both the dialog and the screen.
+   *
+   * Null when there is nothing recoverable OR the gas price could not be read —
+   * and those are deliberately the same answer HERE, because in both cases the
+   * honest disclosure is to say nothing about ETH rather than to promise a
+   * figure. `unreadable` already carries "gas price" when it was the latter.
+   */
+  const ethLeg = (() => {
+    const raw = plan?.nativeRecoverableWei;
+    if (raw === undefined) return null;
+    const wei = BigInt(raw);
+    if (wei <= 0n) return null;
+    const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(9);
+    return { recoverable: fmt(wei), reserve: fmt(BigInt(plan?.nativeReserveWei ?? "0")) };
+  })();
+
   // A vault holding is something to recover, so it cannot be "empty" either.
   const empty = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length === 0;
   const blind = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length > 0;
@@ -368,6 +393,18 @@ export function RecoverPanelView({
       lines.push(`SMART ACCOUNT ${smartAccount ?? ""}`.trimEnd());
       for (const b of balances) lines.push(`  ${b.amount} ${b.symbol}`);
       lines.push("");
+    }
+    // NATIVE ETH, which moves on every recovery and was in neither list above.
+    // Derived from the engine's own `nativeSweep`, not recomputed here — so the
+    // number the owner agrees to and the number the sweep sends come from one
+    // rule. "approximately" because the gas price is read again at execution.
+    if (ethLeg) {
+      lines.push(
+        "NATIVE ETH",
+        `  approximately ${ethLeg.recoverable} ETH recoverable`,
+        `  reserve remaining on the account approximately ${ethLeg.reserve} ETH`,
+        "",
+      );
     }
     lines.push("DESTINATION", `  ${normalizeAddr(to)}`);
     const list =
@@ -564,6 +601,14 @@ export function RecoverPanelView({
                       </span>
                     ))}
                   </div>
+                  {ethLeg && (
+                    <p className="recover-sub">
+                      <strong>Native ETH</strong> · approximately{" "}
+                      <span className="mono">{ethLeg.recoverable}</span> ETH recoverable, leaving about{" "}
+                      <span className="mono">{ethLeg.reserve}</span> ETH on the account to pay for the
+                      withdrawal itself.
+                    </p>
+                  )}
 
                   {!canSubmit && (
                     <p className="recover-warn">

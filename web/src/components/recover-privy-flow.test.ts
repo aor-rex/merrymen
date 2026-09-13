@@ -112,6 +112,11 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
         classHoldings: [{ token: TOKEN, symbol: "DOGGOS", raw: 1n, amount: "1,063,408.141815" }],
         classNote: null,
         gasWei: 1_000_000_000_000_000n,
+        // The ETH leg, as the real planner now forecasts it: held minus the
+        // engine's own reserve. Without these the panel cannot disclose the
+        // one thing that leaves without being in any token list.
+        nativeRecoverableWei: 828_820_000_000_000n,
+        nativeReserveWei: 171_180_000_000_000n,
         unreadable: [],
         needsGas: false,
       };
@@ -186,5 +191,11 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
       /Held in a separate contract, not in the account/i,
       "and why it was not already in the balance list",
     );
+    // THE ETH LEG, on screen. It moves on every recovery and appears in neither
+    // the class list nor the balances, so it is the one thing that could leave
+    // unnamed.
+    assert.match(text, /Native ETH/i, "the ETH leg must be disclosed");
+    assert.match(text, /0.000828820/, "with the amount the engine would actually send");
+    assert.match(text, /0.000171180/, "and what stays behind to pay for it");
   });
 });
