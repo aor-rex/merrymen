@@ -79,7 +79,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -9074,8 +9074,32 @@ async function main() {
         return no(
           `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`,
         );
-      default:
-        return no(`🧱 refused: ${outcome.rejectRule ?? outcome.status}. Nothing was sent and nothing was spent.`);
+      default: {
+        /**
+         * THE SLUG IS NOT AN EXPLANATION, and this line was handing one to
+         * owners: "🧱 refused: no-exit. Nothing was sent and nothing was spent.
+         * What does this mean if my agent tries to buy some custom token i
+         * added?" — asked in the beta, about a rule whose whole meaning and
+         * remedy were already written down two modules away.
+         *
+         * The vocabulary is the same one the public feed reads, so the two
+         * cannot drift; the remedy is the owner's register and carries /grant,
+         * which the public one deliberately does not.
+         *
+         * The slug SURVIVES as a parenthetical rather than being replaced. It
+         * is what support triages on, and an unknown rule must still be
+         * traceable — it just stops being the whole sentence.
+         */
+        const label = rejectRuleLabel(outcome.rejectRule);
+        const remedy = rejectRuleRemedy(outcome.rejectRule);
+        const slug = outcome.rejectRule ?? outcome.status;
+        if (!label) {
+          return no(`🧱 refused. Nothing was sent and nothing was spent.${slug ? ` (${slug})` : ""}`);
+        }
+        return no(
+          `🧱 refused: ${label}.${remedy ? ` ${remedy}` : ""} Nothing was sent and nothing was spent. (${slug})`,
+        );
+      }
     }
   }
 

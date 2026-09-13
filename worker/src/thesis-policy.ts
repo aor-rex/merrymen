@@ -280,6 +280,11 @@ export function classifyDrop(dropped: string): string {
  */
 const R: Readonly<Record<string, string>> = Object.freeze({
   "per-trade-cap": "past the per-trade cap",
+  // The same ceiling, met by a DEPOSIT into the vault rather than by a trade —
+  // `policy.ts` picks between the two names on one line. It was missing here,
+  // found by the drift test written for `no-exit`, which is the point of having
+  // one: the same omission had already happened twice before anybody looked.
+  "deposit-cap": "past the per-trade cap, which a vault deposit is measured against too",
   "daily-cap": "past today's spending cap",
   "ops-cap": "past today's number of trades",
   "drawdown-breaker": "the drawdown breaker was tripped",
@@ -299,6 +304,20 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // invisible in the lane breakdown and unnamed in the feed.
   "no-curve-adapter": "this grant carries no adapter for that launchpad",
   "curve-provenance": "the launch could not be verified",
+  // MISSED IN THE SAME SWEEP AS THE FIVE BELOW, and it reached an owner as the
+  // bare word: "🧱 refused: no-exit. Nothing was sent and nothing was spent.
+  // What does this mean if my agent tries to buy some custom token i added?"
+  //
+  // It means exactly one thing, and it is a fact about the SIGNATURE, never
+  // about liquidity or routing: the buy token is not in the grant's sellable
+  // set, so the position could be opened and never closed. policy.ts refuses it
+  // before any quote is fetched, which is why it says nothing at all about
+  // whether the token is tradable.
+  //
+  // Third person and no URL, like every other entry here — a stranger reading
+  // the public tape cannot act on it. The owner's half, which names /grant,
+  // lives in `rejectRuleRemedy` below.
+  "no-exit": "its signed permission cannot sell that token, so the buy was refused before anything was sent",
   // ── THE FIVE THAT SAY AN AGENT IS NOT TRADING AT ALL ────────────────────
   //
   // `no-gas` above is one of six RefuseRules that execModeOf can produce, and
@@ -357,6 +376,53 @@ export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
 export function rejectRuleLabel(rule: string | null | undefined): string | null {
   if (!rule) return null;
   return Object.prototype.hasOwnProperty.call(R, rule) ? R[rule]! : null;
+}
+
+/**
+ * WHAT THE OWNER CAN DO ABOUT IT — a second register, deliberately separate.
+ *
+ * `R` above is the PUBLIC sentence: third person, no URLs, because a stranger
+ * reading another agent's tape cannot act on it and should not be told to. This
+ * is the sentence for the person who can, and it is the half that was missing
+ * when an owner asked what `no-exit` meant and the product answered with the
+ * slug.
+ *
+ * ONLY RULES WITH A REAL OWNER ACTION GET AN ENTRY. Everything else returns
+ * null, which is what `autonomy.ts`'s `ownerRemedy` already establishes: "the
+ * owner can fix it" and "the owner fixes it the same way" are different claims,
+ * and a remedy invented for a rule that has none is worse than silence.
+ *
+ * NOT BUILT FROM `verdict.detail`, which is where these sentences already exist
+ * in prose. Four reasons: the detail is not on the trade row (`store.ts` has a
+ * `reject_rule` column and no detail column), it is unbounded free text this
+ * file already fights to keep off a public page, several details embed a raw
+ * address — one of them a third party's recipient — and the remedy is a
+ * property of the RULE rather than of one refusal's wording, so every surface
+ * needs it and not just the chat.
+ */
+export function rejectRuleRemedy(rule: string | null | undefined): string | null {
+  if (!rule) return null;
+  switch (rule) {
+    case "no-exit":
+      return "Re-sign your trading permission at /grant so it covers that token — it is free, and nothing moves on-chain.";
+    case "asset-allowlist":
+      return "Add the token at /settings, then re-sign your trading permission at /grant to cover it.";
+    case "dead-policy":
+    case "not-armed":
+      return "Re-sign your trading permission at /grant — it is free and takes a moment.";
+    case "grant-too-wide":
+      return "Re-sign at /grant with fewer tokens or fewer venues; the current set is too large to install on-chain.";
+    case "no-cash":
+      return "Send USDG to the agent's account.";
+    case "no-gas":
+      return "Send a little ETH to the agent's account — every operation pays a fee before it reaches the chain.";
+    case "wrong-chain":
+      return "Re-sign at /grant on Robinhood Chain; the current key is for a different network.";
+    case "live-not-enabled":
+      return "Turn on Live trading in Settings when you want it to trade real funds.";
+    default:
+      return null;
+  }
 }
 
 /** What the wall said, from the slug alone — the detail is never selected. */

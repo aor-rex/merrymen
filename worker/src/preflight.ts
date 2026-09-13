@@ -63,6 +63,12 @@ export interface PreflightInput {
     /** Seconds between ticks. Paired with buyPerTickUsdg it IS the spend rate. */
     tickSeconds?: number;
     idleFloorUsdg?: number;
+    /**
+     * The owner's own tokens, needed to resolve a basket symbol that is not in
+     * the shipped registry — see the `sellable` check below, which reported
+     * every one of them as unsellable whether the grant covered it or not.
+     */
+    customTokens?: { symbol: string; address: string }[];
     /** RPC overrides, if the owner set them — the CLI reads balances through these. */
     rpcMainnet?: string;
     rpcTestnet?: string;
@@ -274,9 +280,27 @@ export function preflight(input: PreflightInput): Check[] {
   // and report a leg three times the real size, which is the opposite of the
   // warning this check exists to give.
   const basket = s.basketSymbols?.length ? s.basketSymbols : [...DEFAULT_BASKET_SYMBOLS];
+  /**
+   * RESOLVED AGAINST THE OWNER'S TOKENS TOO, not just the shipped registry.
+   *
+   * This looked only in `STOCK_TOKENS`, so a custom token in the basket found
+   * no match and fell straight into `!token` — reported as "this key cannot
+   * sell CATE" whether the grant covered it or not. A blocker that fires for an
+   * owner who has done everything correctly, on the one screen that exists to
+   * tell them what is wrong.
+   *
+   * The union is the same one `watchTokensFor` builds, so the check and the
+   * runtime agree about what a basket symbol means. A symbol that resolves to
+   * NOTHING in either list is still uncovered — that case is real, and it means
+   * the basket names something the agent has never heard of.
+   */
+  const known = new Map<string, string>([
+    ...STOCK_TOKENS.map((t) => [t.symbol, t.address] as const),
+    ...(s.customTokens ?? []).map((t) => [t.symbol, t.address] as const),
+  ]);
   const uncovered = basket.filter((sym) => {
-    const token = STOCK_TOKENS.find((t) => t.symbol === sym);
-    return !token || !sellable.has(token.address.toLowerCase());
+    const address = known.get(sym);
+    return !address || !sellable.has(address.toLowerCase());
   });
   if (uncovered.length) {
     out.push({

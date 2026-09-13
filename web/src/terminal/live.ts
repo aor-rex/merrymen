@@ -1,5 +1,6 @@
 import { loadTokenQuotes, applyTokenQuotes } from "./quotes";
 import { STOCK_TOKENS } from "@merrymen/core";
+import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
 
@@ -847,7 +848,17 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // floor. `/api/feed` selects `reject_rule` deliberately; without it
         // every refused trade of the owner's own rendered "No explanation
         // available", which is a statement about us and not about the wall.
-        outcomeText:t.reject_rule ?? null,
+        // AND IN WORDS, not as the slug. The rule reached the screen but the
+        // sentence for it did not, so an owner read `no-exit` and had to come
+        // and ask what it meant. `rejectRuleLabel` is the same map the public
+        // tape renders, so the owner's feed and a stranger's cannot disagree
+        // about the same refusal; an unrecognised rule still falls back to the
+        // slug rather than to nothing, because a name is more use than silence.
+        //
+        // This also makes `why.ts`'s `stampOf` work for the first time: it
+        // matches on phrases in `outcomeText` ("per-trade", "spending",
+        // "drawdown") which could never match a slug.
+        outcomeText:rejectRuleLabel(t.reject_rule) ?? t.reject_rule ?? null,
       };
     }),
     glance: {

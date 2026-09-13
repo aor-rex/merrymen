@@ -290,3 +290,54 @@ describe("the tick rate is checked against the daily cap", () => {
     assert.equal(c, undefined, "an unknown cap must not produce an invented ratio");
   });
 });
+
+/**
+ * A BLOCKER THAT FIRES FOR AN OWNER WHO DID EVERYTHING RIGHT.
+ *
+ * The `sellable` check resolved basket symbols against `STOCK_TOKENS` alone, so
+ * a custom token found no match, fell into the `!token` arm, and was reported as
+ * "this key cannot sell CATE" — whether the grant covered it or not. On the one
+ * screen whose whole job is to say what is wrong.
+ *
+ * This is the proactive half of the `no-exit` report from the beta: the rule
+ * fires at trade time, and the two places that could have warned in advance both
+ * looked only at the shipped registry.
+ */
+describe("a custom token in the basket is judged by the grant, not by the registry", () => {
+  const CATE = "0xcacacacacacacacacacacacacacacacacacacace";
+
+  it("COVERED BY THE GRANT IS NOT A BLOCKER", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["CATE"], customTokens: [{ symbol: "CATE", address: CATE }] },
+      grant: { ...ready().grant, grantTokens: [CATE] } as never,
+    });
+    const sellable = checks.find((c) => c.id === "sellable");
+    assert.ok(sellable);
+    assert.notEqual(sellable.level, "blocker", "the key can sell it — saying otherwise is a false alarm");
+  });
+
+  it("but NOT covered still is, and still names it", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["CATE"], customTokens: [{ symbol: "CATE", address: CATE }] },
+      grant: { ...ready().grant, grantTokens: [] } as never,
+    });
+    const sellable = checks.find((c) => c.id === "sellable");
+    assert.ok(sellable);
+    assert.equal(sellable.level, "blocker");
+    assert.match(sellable.title, /CATE/);
+    // The slug stays inside the operator-facing detail — it is what support
+    // triages on, and this string is not the owner's chat reply.
+    assert.match(sellable.detail!, /no-exit/);
+  });
+
+  it("and a symbol in neither list is uncovered, because it names nothing", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["GHOST"], customTokens: [] },
+      grant: { ...ready().grant, grantTokens: [] } as never,
+    });
+    assert.equal(checks.find((c) => c.id === "sellable")?.level, "blocker");
+  });
+});
