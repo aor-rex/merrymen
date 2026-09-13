@@ -6892,8 +6892,16 @@ async function main() {
           : blocking === "live-not-enabled"
             ? // NOT A WARNING, and the level above is "ok" for it. This is the
               // agent reporting that it is doing what it was told.
-              `Paper mode: practising with simulated money at live prices, and placing no real ` +
-              `orders. Turn on Live trading in Settings when you want it to trade your real funds.` +
+              //
+              // TWO STATES SHARE THIS RULE and they are not the same sentence:
+              // with paper trading on the agent simulates, with it off it does
+              // nothing at all. Here — unlike the shared vocabulary in core —
+              // the verdict is in hand, so it can say which.
+              (verdict.mode === "paper"
+                ? `Paper mode: simulating fills at live prices and placing no real orders. `
+                : `Live trading is off and paper trading is off too, so nothing is being traded or ` +
+                  `simulated. `) +
+              `Turn on Live trading in Settings when you want it to trade your real funds.` +
               // AND WHAT WOULD STILL BE IN THE WAY, said NOW rather than as a
               // surprise on the day they switch. Without this the owner turns
               // Live on, lands straight in a red BLOCKED banner, and learns that

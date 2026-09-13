@@ -323,7 +323,10 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // phrased as one. This sentence is embedded mid-line after "it is not trading
   // for real because…", and it has to finish that sentence without implying
   // anybody made a mistake.
-  "live-not-enabled": "its owner has it in Paper mode, practising rather than trading real funds",
+  // Neutral about simulation for the same reason as core's `liveBlockerText`:
+  // this rule covers an agent that simulates AND one that does nothing, and a
+  // public tape cannot tell a reader which from the rule alone.
+  "live-not-enabled": "its owner has not turned on live trading, so it places no real orders",
   "wrong-chain": "its key was signed for a different network",
   "no-cash": "the account held no USDG to trade with",
 });

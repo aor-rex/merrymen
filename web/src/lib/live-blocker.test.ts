@@ -175,8 +175,16 @@ describe("the owner is told on the screen they actually open", () => {
     assert.equal(a.fault, false, "nothing is wrong");
     assert.equal(a.resign, false, "so a signature is not the remedy");
     assert.equal(a.funding, false, "and neither is money");
-    assert.match(a.say, /Paper mode/i);
     assert.match(a.say, /Live trading/i, "it names the switch");
+    // AND SAYS NOTHING ABOUT SIMULATION. This advice is keyed on the rule alone,
+    // and the rule reaches two states: with paper trading on the agent
+    // simulates, with it off `execModeOf` returns `refuse` and it does nothing
+    // at all. An earlier draft said "practising with simulated money" for both,
+    // which told a stopped agent's owner it was practising — and, in the idle
+    // arm of `autonomyOf`, sat that sentence beside `simulated: false` and
+    // "Available cash" in one object.
+    assert.doesNotMatch(a.say, /practis|simulat/i, "the rule alone cannot know that");
+    assert.match(a.say, /no real orders/i, "only what is true in both states");
 
     const agent = at("../terminal/screens/Agent.tsx");
     assert.match(agent, /liveBlocker === "live-not-enabled"/);
@@ -241,5 +249,60 @@ describe("the chat is told what the screen already knows", () => {
     // is working.
     const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
     assert.match(chat, /A NULL \\?`liveBlocker\\?` IS TWO ANSWERS/);
+  });
+});
+
+/**
+ * THE MODEL IS A SURFACE TOO, and it was the one telling owners the opposite.
+ *
+ * Three separate things pointed the chat at the wrong answer after live intent
+ * became a real switch, and every one of them was invisible: the prompt is
+ * prose, the STATE blob is a string, and neither typechecks.
+ */
+describe("the chat is not instructed to deny the switch it now has", () => {
+  /**
+   * The PROMPT, not the file. Comments are stripped because the history of this
+   * copy is deliberately recorded in one above the template literal — quoting
+   * the retired sentence inside the prompt would risk the model repeating it,
+   * which is precisely the failure being fixed.
+   */
+  const PROMPT = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n");
+
+  it("STOPS SAYING THERE IS NO SWITCH", () => {
+    // It said so in capitals, three lines above the bullet describing the
+    // switch, with two beta incidents cited as justification. The paragraph was
+    // written when it was true, and it stayed after it stopped being true —
+    // which is the most durable kind of wrong copy there is.
+    assert.doesNotMatch(PROMPT, /You do not have a switch/i);
+    assert.doesNotMatch(
+      PROMPT,
+      /run on your own as soon as your key is signed and there is something to trade with/i,
+      "funding plus a signature is exactly what must no longer imply live trading",
+    );
+  });
+
+  it("and says which field IS the mode", () => {
+    // `paperTradingEnabled` defaults true and CreateAgent now writes it true
+    // unconditionally, so it is true for nearly every agent — including live
+    // ones. A model reading it as the mode tells an owner their money is
+    // pretend while it is being spent, which is the original defect pointed the
+    // more dangerous way.
+    // Backticks are escaped inside the template literal, so match the words.
+    assert.match(PROMPT, /liveTradingEnabled\\?` IS THE MODE/);
+    assert.match(PROMPT, /paperTradingEnabled\\?` IS NOT/);
+  });
+
+  it("and the STATE actually carries it", () => {
+    // The prompt can only reason about fields the client sends. This one was
+    // sending the misleading field and not the decisive one.
+    const AGENT = readFileSync(
+      new URL("../terminal/screens/Agent.tsx", import.meta.url),
+      "utf8",
+    );
+    assert.match(AGENT, /liveTradingEnabled:settings\?\.values\?\.liveTradingEnabled/);
   });
 });

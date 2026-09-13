@@ -79,7 +79,18 @@ export function liveBlockerText(rule: RefuseRule): string {
       // Present tense, no remedy, no urgency. This is a description of a
       // working agent doing what it was asked, and the one sentence here that
       // must never read like a problem.
-      return "live trading is off, so it is practising with simulated money — turn on Live trading when you want it to trade for real";
+      //
+      // AND IT MUST NOT CLAIM SIMULATION, because this rule reaches TWO
+      // different states. With `paperTradingEnabled` on it is a paper verdict
+      // and the agent simulates; with it off, `execModeOf` returns `refuse` and
+      // the agent does nothing at all. The first draft said "it is practising
+      // with simulated money" for both, which put this sentence next to
+      // `simulated: false` and "Available cash" in the idle arm below — one
+      // object asserting both halves of a contradiction.
+      //
+      // So this says only what is true either way. Whether anything is being
+      // simulated is carried by `mode`, which every caller already has.
+      return "live trading is off, so no real orders are placed — turn it on in Settings when you want it to trade for real";
     case "wrong-chain":
       return "this key is for a different network than the one trading happens on";
     case "no-gas":
