@@ -337,8 +337,26 @@ describe("the phone-fireable trigger on the orchestrator", () => {
   });
 
   it("refuses a body Telegram would silently mangle, before any send", () => {
-    assert.match(BLOCK, /illegalTags\(body\)/);
+    // EVERY body, not just the first. A per-agent campaign ships several, and
+    // telegram/api.ts answers one bad tag by stripping ALL tags, re-sending as
+    // plain text and returning {ok:true} — so an unchecked body is delivered
+    // mangled and reported as a clean send. The check is inside the loop over
+    // bodies, which is why this no longer pins the literal `illegalTags(body)`.
+    assert.match(BLOCK, /illegalTags\(text\)/);
+    assert.match(BLOCK, /for \(const \[who, text\] of/, "checked per body, in a loop");
     assert.match(BLOCK, /refusing/);
+  });
+
+  it("a per-agent campaign cannot select an owner whose message was never written", () => {
+    // The recipient list IS the set of prepared files, so the two cannot drift.
+    assert.match(BLOCK, /tenants: Object\.keys\(bodies\)/);
+    assert.match(BLOCK, /bodies\[f\.slice\(0, -5\)\.toLowerCase\(\)\]/, "keyed by the filename's tenant");
+  });
+
+  it("the dry run prints the text and the agent, never a token", () => {
+    assert.match(BLOCK, /out\.preview/, "the preview must be logged");
+    assert.match(BLOCK, /p\.chatRedacted/, "the chat is redacted");
+    assert.doesNotMatch(BLOCK, /\.token/, "no token may be logged from the trigger");
   });
 
   it("never lets a thrown error object reach the log", () => {
