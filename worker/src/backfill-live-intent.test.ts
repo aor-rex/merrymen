@@ -13,7 +13,12 @@
  *                     which is the original defect re-created inside its fix
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import {
   applyLiveIntentBackfill,
@@ -302,5 +307,77 @@ describe("running it twice changes nothing the second time", () => {
     });
     assert.deepEqual(second.grant, [], "nothing left to do");
     assert.deepEqual(second.alreadySet, [{ tenant: ALICE, value: true }]);
+  });
+});
+
+/**
+ * THE GAP THE FIRST REPORT FOUND, and the reason report-before-apply exists.
+ *
+ * The dry run printed "46 tenant(s) have a grant with an account" and then a
+ * plan covering 39 — because it walked the settings store alone, and a tenant
+ * who has never saved a setting has no row there. Seven accounts with live
+ * grants were invisible to the migration. Any of them that trades for real
+ * would have fallen to the `false` default when the gate came into force and
+ * stopped trading, with nothing anywhere to explain it.
+ *
+ * Settings-less is not the same as never-asked. The trade tape is the evidence
+ * either way.
+ */
+describe("a tenant with a grant but no settings row is still migrated", () => {
+  const ORPHAN = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const;
+
+  it("IS EVALUATED AT ALL — walking the settings store alone misses it", () => {
+    return planLiveIntentBackfill({
+      settings: store({}),
+      db: db([[ORPHAN, "landed"]]),
+      agentIdOf: identity,
+      grantTenants: [ORPHAN],
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, [{ tenant: ORPHAN, reason: "has-traded-for-real" }]);
+    });
+  });
+
+  it("and one that has NOT traded is still left on Paper", () => {
+    // The union widens who is looked at, never what counts as consent.
+    return planLiveIntentBackfill({
+      settings: store({}),
+      db: db([[ORPHAN, "paper"]]),
+      agentIdOf: identity,
+      grantTenants: [ORPHAN],
+    }).then((plan) => {
+      assert.deepEqual(plan.grant, []);
+      assert.deepEqual(plan.leaveDefault, [ORPHAN]);
+    });
+  });
+
+  it("APPLYING IT CREATES THE ROW, carrying only the flag", () => {
+    // Every other setting keeps falling through to its default, exactly as it
+    // did while the row was absent.
+    const s = store({});
+    return applyLiveIntentBackfill(
+      { grant: [{ tenant: ORPHAN, reason: "has-traded-for-real" }], leaveDefault: [], alreadySet: [], unreadable: [] },
+      s,
+    ).then((out) => {
+      assert.deepEqual(out.written, [ORPHAN]);
+      assert.deepEqual(s.written[ORPHAN], { liveTradingEnabled: true });
+    });
+  });
+
+  it("and a tenant in BOTH lists is counted once", () => {
+    return planLiveIntentBackfill({
+      settings: store({ [ALICE]: {} }),
+      db: db([[ALICE, "landed"]]),
+      agentIdOf: identity,
+      grantTenants: [ALICE],
+    }).then((plan) => {
+      assert.equal(plan.grant.length + plan.leaveDefault.length + plan.alreadySet.length, 1);
+    });
+  });
+
+  it("and the orchestrator actually passes the grant tenants", () => {
+    // The plan accepts them optionally so every existing caller is unchanged —
+    // which means the one caller that matters has to opt in explicitly.
+    const orch = readFileSync(path.join(__dirname, "orchestrator.ts"), "utf8");
+    assert.match(orch, /grantTenants: \[\.\.\.ids\.keys\(\)\]/);
   });
 });

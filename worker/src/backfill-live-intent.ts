@@ -120,11 +120,33 @@ export async function planLiveIntentBackfill(deps: {
   settings: SettingsStoreLike;
   db: TradesReader;
   agentIdOf: (tenant: `0x${string}`) => string | null;
+  /**
+   * EVERY TENANT WITH A GRANT, not just those with a stored settings row.
+   *
+   * The first report caught this: 46 tenants had a grant with an account and the
+   * plan covered 39, because it iterated the settings store alone. A tenant who
+   * has never saved a setting has no row there — and if they have traded for
+   * real, they would be invisible to the migration, fall to the `false` default
+   * when the gate came into force, and stop trading with nothing to explain it.
+   *
+   * Settings-less is not the same as never-asked. The trade tape is the evidence
+   * either way, so the union is what must be walked.
+   */
+  grantTenants?: readonly `0x${string}`[];
 }): Promise<BackfillPlan> {
   const traded = await accountsThatTradedForReal(deps.db);
   const plan: BackfillPlan = { grant: [], leaveDefault: [], alreadySet: [], unreadable: [] };
 
-  for (const tenant of await deps.settings.listTenants()) {
+  const seen = new Set<string>();
+  const everyone: `0x${string}`[] = [];
+  for (const t of [...(await deps.settings.listTenants()), ...(deps.grantTenants ?? [])]) {
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    everyone.push(t);
+  }
+
+  for (const tenant of everyone) {
     let current: Record<string, unknown> | null;
     try {
       current = await deps.settings.get(tenant);
@@ -133,9 +155,22 @@ export async function planLiveIntentBackfill(deps: {
       continue;
     }
     if (current === null) {
-      // No stored settings at all. Nothing to migrate and nothing to lose: this
-      // tenant has never set anything, so they have never asked for live.
-      plan.leaveDefault.push(tenant);
+      /**
+       * NO STORED SETTINGS — which says nothing about whether they trade.
+       *
+       * This used to drop straight to `leaveDefault`, on the reasoning that
+       * somebody who has never set anything has never asked for live. That is
+       * true of the SETTING and false of the account: an agent can be trading
+       * real money on a grant whose owner never opened the settings screen, and
+       * the trade tape says so. Dropping them here would have disarmed exactly
+       * the people with the least reason to expect it.
+       */
+      const agentId = deps.agentIdOf(tenant);
+      if (agentId !== null && traded.has(agentId.toLowerCase())) {
+        plan.grant.push({ tenant, reason: "has-traded-for-real" });
+      } else {
+        plan.leaveDefault.push(tenant);
+      }
       continue;
     }
 
@@ -180,7 +215,13 @@ export async function applyLiveIntentBackfill(
     try {
       const fresh = await settings.get(tenant);
       if (fresh === null) {
-        skipped.push({ tenant, why: "settings disappeared between plan and apply" });
+        // A TENANT WITH NO SETTINGS ROW IS STILL MIGRATED, because the plan only
+        // puts one here on the evidence of the trade tape. Writing the flag
+        // alone creates the row with nothing else in it, which is exactly right:
+        // every other setting keeps falling through to its default, as it did
+        // when the row was absent.
+        await settings.put(tenant, { liveTradingEnabled: true });
+        written.push(tenant);
         continue;
       }
       if (typeof fresh.liveTradingEnabled === "boolean") {

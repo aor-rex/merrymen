@@ -1843,6 +1843,9 @@ async function runLiveIntentBackfillIfAsked(): Promise<void> {
         settings: store as never,
         db: client,
         agentIdOf: (t) => ids.get(t.toLowerCase()) ?? null,
+        // The union — see planLiveIntentBackfill. The first report showed 46
+        // tenants with a grant against 39 covered by the settings store alone.
+        grantTenants: [...ids.keys()] as `0x${string}`[],
       });
       for (const line of describeBackfill(plan).split("\n")) log(`live-intent backfill: ${line}`);
 
