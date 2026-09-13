@@ -323,8 +323,36 @@ export function App() {
     realCashUsd: account?.status.balances
       ? Number(account.status.balances.cashUsdg) / 1e6
       : null,
+    /**
+     * IS THE BLOCKER OLDER THAN THE SIGNATURE?
+     *
+     * Both halves come from this one response: `grantedAt` from the grant store
+     * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
+     * row that also carries `liveBlocker` — so the comparison is between two
+     * facts that arrived together, not a race between sources.
+     *
+     * Both must be present. A missing timestamp is not a fresh signature, and
+     * defaulting either way would turn "we don't know" into a claim.
+     */
+    blockerPredatesGrant:
+      account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
+        ? account.status.grant.grantedAt > account.status.workerAliveAt
+        : false,
   });
   const mine = account?.status.exists && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
+  /**
+   * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
+   *
+   * These handlers are a full page load, so React state and props both die on
+   * the way and a URL is the only carrier that survives. `action.chain` is set
+   * only where the remedy is a signature on a DIFFERENT network; everywhere
+   * else the grant screen's own selector is already correct and must be left
+   * alone, because pinning it to the loaded grant is what stops a mainnet owner
+   * silently re-signing onto the sandbox.
+   */
+  const resignHref = autonomy.action?.chain
+    ? `/grant?chain=${autonomy.action.chain}#resign`
+    : "/grant#resign";
   // THE SHELL FOR A VISITOR WITH NO AGENT — and every figure on it is unknown,
   // not zero. `equity:0, cashUsd:0` rendered "$0.00" in the header and the
   // sidebar for somebody who has no account at all, which is a balance we have
@@ -414,9 +442,10 @@ export function App() {
             onDeposit={() => openScreen({ kind: "deposit" })}
             onWithdraw={() => openScreen({ kind: "withdraw" })}
             onLimits={() => openScreen({ kind: "limits" })}
-            onResign={() => {window.location.href="/grant#resign";}}
+            onResign={() => {window.location.href=resignHref;}}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
+            staleBlocker={autonomy.state === "checking"}
           />
         )}
         {screen.kind === "tab" && screen.tab === "alpha" && (
@@ -606,10 +635,11 @@ export function App() {
             onWithdraw={() => openScreen({ kind: "withdraw" })}
             onLimits={() => openScreen({ kind: "limits" })}
             onResign={() => {
-              window.location.href = "/grant#resign";
+              window.location.href = resignHref;
             }}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
+            staleBlocker={autonomy.state === "checking"}
           />
         </ChatDock>
       )}

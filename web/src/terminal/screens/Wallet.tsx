@@ -208,6 +208,36 @@ const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
 
 const MAINNET = robinhoodChain.id; // 4663 — real funds
 
+/**
+ * WHICH CHAIN THE PAGE WAS ASKED TO OPEN ON, from `?chain=`.
+ *
+ * A banner elsewhere says "Re-sign on Robinhood Chain" and, until this existed,
+ * opened a screen that pinned its selector to the testnet grant being replaced
+ * — so the obvious control here read "re-sign this key (free)" and minted
+ * another testnet grant. The owner re-signed, the banner came back, and he
+ * reported the product as broken. The button's promise now arrives with it.
+ *
+ * A QUERY RATHER THAN A PROP, because the descriptor cannot survive the trip:
+ * `pathForScreen` flattens `{kind:"grant"}` to the string "/grant" and the
+ * screen is re-hydrated from `usePathname()`, which carries no query — and the
+ * phone's route is a full page load besides, where props do not exist at all.
+ *
+ * IT ONLY PRE-SELECTS. Everything downstream is unchanged: the move is still an
+ * explicit ticked checkbox (derived from `chainId !== grant.chainId`), the
+ * mainnet acknowledgement is still required, the button still renames itself to
+ * "move to real money & re-sign", and the change line still lists the move. A
+ * link cannot sign anything; it can only open the form on the right page.
+ *
+ * Unrecognised values are ignored rather than trusted — this comes from a URL,
+ * so it is input, and the fallback is the behaviour that was already correct.
+ */
+function requestedChain(): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = new URLSearchParams(window.location.search).get("chain");
+  const id = Number(raw);
+  return id === MAINNET || id === TESTNET ? id : null;
+}
+
 function short(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
@@ -400,7 +430,7 @@ export default function GrantPage() {
     // follow for the same reason: the form should open showing what the
     // current key actually carries.
     if (stored) {
-      setChainId(stored.chainId);
+      setChainId(requestedChain() ?? stored.chainId);
       setCaps(stored.caps);
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
@@ -467,7 +497,12 @@ export default function GrantPage() {
            */
           if (s.grant) {
             setGrant(s.grant);
-            setChainId(s.grant.chainId);
+            // THE SAME INTENT ON THE OTHER ARM. This branch serves a hosted
+            // Privy owner signed in from any browser that did not mint the
+            // agent — which is most of them — so an intent applied only to the
+            // localStorage arm above would miss exactly the cohort that cannot
+            // re-sign any other way.
+            setChainId(requestedChain() ?? s.grant.chainId);
             setCaps(s.grant.caps);
             // NOTHING TO WRITE DOWN *HERE*, which is not the same as backed
             // up. A Privy agent has no owner key in any browser; a legacy one

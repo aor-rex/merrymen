@@ -103,7 +103,7 @@ export function liveBlockerText(rule: RefuseRule): string {
  * word "paper" is how nine owners sat in practice mode without being told that a
  * free signature would end it.
  */
-export type AutonomyState = "live" | "paper" | "blocked" | "idle";
+export type AutonomyState = "live" | "paper" | "blocked" | "idle" | "checking";
 
 /** Blockers only the OWNER can clear. Everything else is ours to fix. */
 const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
@@ -129,7 +129,7 @@ const OWNER_ACTION: ReadonlySet<RefuseRule> = new Set<RefuseRule>([
  */
 function ownerRemedy(rule: RefuseRule | "expired"): {
   headline: string;
-  action: { label: string; kind: "renew-grant" | "add-funds" };
+  action: { label: string; kind: "renew-grant" | "add-funds"; chain?: number };
 } {
   switch (rule) {
     case "wrong-chain":
@@ -137,7 +137,15 @@ function ownerRemedy(rule: RefuseRule | "expired"): {
         headline: "Your Merryman's permission is for a different network.",
         // Names the network, because the fix is to CHANGE one and the screen
         // opens on the one being replaced.
-        action: { label: "Re-sign on Robinhood Chain", kind: "renew-grant" },
+        //
+        // AND NOW CARRIES IT. Naming the network in the label was only half a
+        // remedy: the button said "Re-sign on Robinhood Chain" and opened a
+        // screen whose selector syncs to the grant being replaced — so the
+        // prominent control there read "re-sign this key (free)" and minted
+        // another testnet grant. The owner re-signed, the banner came back, and
+        // he reported the product as broken. `chain` is the intent travelling
+        // with the button so the destination can honour what the label promised.
+        action: { label: "Re-sign on Robinhood Chain", kind: "renew-grant", chain: 4663 },
       };
     case "grant-too-wide":
       return {
@@ -170,6 +178,32 @@ export interface AutonomyInput {
    * Null means unreadable, which is not zero and must not render as zero.
    */
   realCashUsd?: number | null;
+  /**
+   * WAS THIS VERDICT REACHED ABOUT A KEY THAT NO LONGER EXISTS?
+   *
+   * True when the owner signed a new grant more recently than the worker last
+   * spoke — i.e. `grant.grantedAt > workerAliveAt`. Both facts already travel on
+   * `AgentStatus`, from the grant store the POST wrote synchronously and from
+   * the mirrored `agents` row, so this asks nothing new of any service.
+   *
+   * WHY IT HAS TO EXIST. A corrected grant takes four hops to reach this
+   * screen — the orchestrator's 15s ferry, the child's 240s tick, the 15s
+   * mirror, the browser's 60s poll — about five and a half minutes at worst.
+   * For all of it the page kept asserting the OLD blocker, so an owner who had
+   * just done exactly what they were told watched the same banner tell them to
+   * do it again. One of them re-signed repeatedly and reported the product as
+   * broken; he was right to.
+   *
+   * THIS DOES NOT MAKE IT FASTER. It stops the screen claiming to know
+   * something it cannot know yet, which is the only honest move available — the
+   * remedy is a latency nobody can shorten from here.
+   *
+   * DELIBERATELY NOT A SUPPRESSION. It never says the agent is fine; it says we
+   * have not heard since the signature. The instant the worker beats, whatever
+   * it reports is shown in full — including "still wrong-chain", if the owner
+   * re-signed onto the sandbox again.
+   */
+  blockerPredatesGrant?: boolean;
 }
 
 export interface Autonomy {
@@ -209,7 +243,7 @@ export interface Autonomy {
    * explicitly turned real trading on" to be a thing an owner can actually do —
    * without an affordance, consent would be required and ungrantable.
    */
-  action: { label: string; kind: "renew-grant" | "add-funds" | "start-live" } | null;
+  action: { label: string; kind: "renew-grant" | "add-funds" | "start-live"; chain?: number } | null;
   /**
    * Is the money on this screen simulated?
    *
@@ -245,6 +279,37 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       needsOwnerAction: true,
       headline: remedy.headline,
       action: remedy.action,
+      simulated: input.mode === "paper",
+      moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
+    };
+  }
+
+  /**
+   * A VERDICT ABOUT A KEY THE OWNER HAS ALREADY REPLACED IS NOT NEWS.
+   *
+   * Placed ahead of the OWNER_ACTION arm because that arm is the one that
+   * renders the red pill and asks for a signature — and asking for the
+   * signature they just gave is precisely the loop being closed here.
+   *
+   * Only the owner-clearable rules are gated. `no-cash` and `no-gas` are not
+   * about the key at all, so a fresh signature says nothing about them and they
+   * carry on reporting normally.
+   */
+  if (input.blockerPredatesGrant === true && rule && OWNER_ACTION.has(rule)) {
+    return {
+      state: "checking",
+      label: "CHECKING",
+      reason:
+        "we have not heard from your agent since you re-signed — this usually takes a few minutes, " +
+        "and what it reports next will be about the new key",
+      rule,
+      // NOT an owner action: they have already taken it. Offering the button
+      // again is how the same signature gets made three times.
+      needsOwnerAction: false,
+      headline: null,
+      action: null,
+      // Unchanged from every other arm: what the money IS does not depend on
+      // how fresh our news about it is.
       simulated: input.mode === "paper",
       moneyLabel: input.mode === "paper" ? SIMULATED_LABEL : REAL_LABEL,
     };

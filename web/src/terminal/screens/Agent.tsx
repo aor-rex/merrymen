@@ -97,6 +97,7 @@ export function Agent({
   onResign,
   onSettings,
   liveBlocker,
+  staleBlocker,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
@@ -128,6 +129,16 @@ export function Agent({
    * beaten. See AgentStatus.liveBlocker.
    */
   liveBlocker?: string | null;
+  /**
+   * True when that verdict was reached about a key the owner has since
+   * replaced — `grant.grantedAt > workerAliveAt`.
+   *
+   * A corrected grant takes up to ~5.5 minutes to reach this screen (the
+   * orchestrator's ferry, the child's tick, the mirror, the browser's poll), and
+   * for all of it the panel below told an owner who had just re-signed to
+   * re-sign. One of them did, repeatedly, and reported the product as broken.
+   */
+  staleBlocker?: boolean;
 }) {
   const [sending,setSending]=useState(false);
   const [chatError,setChatError]=useState("");
@@ -461,6 +472,17 @@ export function Agent({
   };
 
   const blocked = blockerAdvice(liveBlocker);
+  /**
+   * DO NOT REPEAT A VERDICT ABOUT A KEY THE OWNER HAS ALREADY REPLACED.
+   *
+   * The desktop banner gets this from `autonomyOf`, which this screen never
+   * touches — it reads the raw rule string — so the same fact has to be applied
+   * here or the phone keeps showing the stale panel that started all of this.
+   * Deliberately wrapping the RENDER rather than folding it into `blocked`
+   * above, which `live-blocker.test.ts` pins literally as the child's verdict
+   * arriving unmodified.
+   */
+  const blockerIsStale = staleBlocker === true;
   return (
     <div className="desk-page">
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
@@ -472,7 +494,7 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && (
+      {blocked && !blockerIsStale && (
         /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
            rendered for every blocker there is — including the one that means
            "your agent is practising, exactly as you asked". An owner who had
