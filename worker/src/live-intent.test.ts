@@ -219,3 +219,48 @@ describe("the whole matrix, as the owner specified it", () => {
     }
   });
 });
+
+/**
+ * WHAT WOULD STILL BE IN THE WAY, said BEFORE the switch is flipped.
+ *
+ * Consent and capability are different questions, and separating them created a
+ * new way to surprise somebody: an owner practising on a testnet grant is no
+ * longer told anything is wrong — correctly, because nothing is — and would
+ * learn the truth by turning Live on and landing in a red BLOCKED banner. That
+ * is the same "the remedy did not work" experience this change exists to end,
+ * moved one step later.
+ *
+ * So the paper verdict carries the rail's health alongside the owner's choice.
+ */
+describe("a paper verdict still knows what would block live", () => {
+  it("carries the rail's blocker without presenting it as today's problem", () => {
+    const a: ExecInputs = { ...healthy, liveTradingEnabled: false, chainId: TESTNET };
+    const m = execModeOf(a);
+    assert.equal(m.mode, "paper");
+    assert.equal(m.mode === "paper" ? m.rule : null, "live-not-enabled", "the CHOICE is the headline");
+    assert.equal(
+      m.mode === "paper" ? m.wouldBlockLive : null,
+      "wrong-chain",
+      "and the rail's fault is carried, not hidden",
+    );
+  });
+
+  it("and reports null when the rail is sound — no invented problem", () => {
+    const m = execModeOf({ ...healthy, liveTradingEnabled: false });
+    assert.equal(m.mode === "paper" ? m.wouldBlockLive : "unset", null);
+  });
+
+  it("measured with consent forced ON, so it is never circular", () => {
+    // Asked naively, "what blocks live?" for a paper owner answers
+    // "live-not-enabled" — true and useless. It has to be asked as "if they said
+    // yes, what then?", which is a question about machinery alone.
+    const m = execModeOf({ ...healthy, liveTradingEnabled: false, cashUsdg: 0n });
+    assert.notEqual(m.mode === "paper" ? m.wouldBlockLive : null, "live-not-enabled");
+    assert.equal(m.mode === "paper" ? m.wouldBlockLive : null, "no-cash");
+  });
+
+  it("an owner who HAS consented gets the blocker as the headline, not as a footnote", () => {
+    const m = execModeOf({ ...healthy, liveTradingEnabled: true, chainId: TESTNET });
+    assert.equal(m.mode === "paper" ? m.rule : null, "wrong-chain");
+  });
+});

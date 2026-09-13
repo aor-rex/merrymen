@@ -6893,7 +6893,15 @@ async function main() {
             ? // NOT A WARNING, and the level above is "ok" for it. This is the
               // agent reporting that it is doing what it was told.
               `Paper mode: practising with simulated money at live prices, and placing no real ` +
-              `orders. Turn on Live trading in Settings when you want it to trade your real funds.`
+              `orders. Turn on Live trading in Settings when you want it to trade your real funds.` +
+              // AND WHAT WOULD STILL BE IN THE WAY, said NOW rather than as a
+              // surprise on the day they switch. Without this the owner turns
+              // Live on, lands straight in a red BLOCKED banner, and learns that
+              // the thing they were told to do did not work — which is the exact
+              // shape of the complaint this whole change came from.
+              (verdict.mode !== "live" && verdict.wouldBlockLive
+                ? ` One thing to know first: when you do turn it on, ${liveBlockerText(verdict.wouldBlockLive)}.`
+                : "")
             : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
               `Fills below are simulated at live prices until that is fixed. Live trading is a ` +
               `switch in Settings, and it stays off until you turn it on.`,
