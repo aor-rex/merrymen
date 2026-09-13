@@ -1784,9 +1784,18 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * Idempotent either way: once applied, every tenant it touched carries the
  * field explicitly and the next plan is empty.
  */
+let liveIntentBackfillRan = false;
+
 async function runLiveIntentBackfillIfAsked(): Promise<void> {
   const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
   if (mode !== "report" && mode !== "apply") return;
+  // ONCE PER PROCESS. It moved ahead of `reconcile()` so the apply lands before
+  // any child reads settings, and that put it on every pass rather than the
+  // first — which in report mode would re-print the whole fleet every fifteen
+  // seconds, and this repo already carries the incident where 1,242 identical
+  // rows told nobody anything.
+  if (liveIntentBackfillRan) return;
+  liveIntentBackfillRan = true;
   const url = process.env.DATABASE_URL;
   if (!url) {
     log("live-intent backfill asked for, but there is no DATABASE_URL");
@@ -2701,6 +2710,21 @@ export async function runOrchestrator(): Promise<void> {
         for (const t of [...leases.keys()]) await releaseLease(t);
       }
     } else {
+      /**
+       * BEFORE `reconcile()`, AND THAT ORDERING IS THE WHOLE SAFETY OF IT.
+       *
+       * `reconcile()` spawns children and ferries them their settings. Run the
+       * backfill after it and the first cohort starts with the consent flag
+       * still absent — so every live agent drops to paper for a tick or two,
+       * and a live agent on the paper rail loses its stop-loss and take-profit
+       * as well, because holdings there come from the paper book.
+       *
+       * Ahead of it, the grants are written before any child reads settings and
+       * the apply step has no window at all. It is idempotent and returns
+       * immediately when the variable is unset, so it costs a healthy fleet one
+       * comparison per pass.
+       */
+      await runLiveIntentBackfillIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
@@ -2729,7 +2753,6 @@ export async function runOrchestrator(): Promise<void> {
       // operator who sets the variable and redeploys is watching the log now,
       // and a dry run that appears twenty minutes later reads as nothing having
       // happened. It is idempotent, so running early costs nothing.
-      if (cohortPasses === 1) await runLiveIntentBackfillIfAsked();
       if (cohortPasses === 1) await runAnnouncementIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {

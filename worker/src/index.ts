@@ -551,6 +551,8 @@ async function main() {
       // THE OWNER'S OWN ANSWER, carried in from their settings and nowhere else.
       // Every other field on this object is measured; this one is given.
       liveTradingEnabled: cfg.liveTradingEnabled,
+      // False only during the migration that populates the field above.
+      enforceLiveIntent: cfg.enforceLiveIntent,
     });
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */

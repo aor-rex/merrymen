@@ -326,3 +326,72 @@ describe("switching INTO paper cannot be taken silently", () => {
     assert.match(settings, /stops managing them/i);
   });
 });
+
+/**
+ * THE MIGRATION WINDOW, which my own runbook got wrong.
+ *
+ * It said "deploy with =report first", on the reasoning that a report writes
+ * nothing and is therefore safe. But the report deploy carries the ENFORCEMENT
+ * too, and `reconcile()` spawns children before the backfill runs — so a
+ * report-only run would drop every live agent to paper for as long as it took a
+ * human to read the log and redeploy. Worse than idle: a live agent on the paper
+ * rail loses its stop-loss and take-profit, because holdings there come from the
+ * paper book.
+ *
+ * So the gate stands down for exactly as long as the migration is unfinished,
+ * and the two are driven by the SAME variable so they cannot disagree about
+ * whether it has run.
+ *
+ * THIS IS NOT AN ESCAPE HATCH FOR CONSENT. It grants nothing new — it restores
+ * the behaviour that shipped for months, for one release, and step three of the
+ * rollout removes the variable that enables it.
+ */
+describe("the consent gate stands down while its migration is still running", () => {
+  it("DEFERRED: the rail behaves exactly as it did before the gate existed", () => {
+    const a: ExecInputs = { ...healthy, liveTradingEnabled: false, enforceLiveIntent: false };
+    assert.equal(canTradeForReal(a), true, "a funded mainnet agent keeps trading");
+    assert.equal(execModeOf(a).mode, "live");
+  });
+
+  it("and it does not invent a blocker for an agent it is not gating", () => {
+    // `liveBlocker` must not name `live-not-enabled` while the gate is stood
+    // down, or every agent in the fleet would carry a reason that is not true.
+    const a: ExecInputs = { ...healthy, liveTradingEnabled: false, enforceLiveIntent: false, chainId: TESTNET };
+    const m = execModeOf(a);
+    assert.equal(m.mode === "paper" ? m.rule : null, "wrong-chain");
+  });
+
+  it("ENFORCED BY DEFAULT — an absent flag is not a stood-down gate", () => {
+    // The dangerous direction. If omitting the field disabled the gate, every
+    // caller that forgot it would silently trade real money without consent.
+    const { enforceLiveIntent: _omitted, ...withoutIt } = {
+      ...healthy,
+      liveTradingEnabled: false,
+      enforceLiveIntent: true,
+    };
+    assert.equal(canTradeForReal(withoutIt as ExecInputs), false, "absent must mean enforced");
+  });
+
+  it("and enforced whenever it is true", () => {
+    const a: ExecInputs = { ...healthy, liveTradingEnabled: false, enforceLiveIntent: true };
+    assert.equal(canTradeForReal(a), false);
+  });
+
+  it("IT IS TIED TO THE MIGRATION'S OWN VARIABLE, not to one of its own", () => {
+    // A separate switch could be left on for ever and nobody would notice. This
+    // one is only false while the backfill is mid-rollout, and the last step of
+    // that rollout is removing the variable.
+    const settings = readFileSync(path.join(__dirname, "settings.ts"), "utf8");
+    assert.match(settings, /enforceLiveIntent:\s*\(env\.MERRYMEN_BACKFILL_LIVE_INTENT[^)]*\)\.trim\(\) !== "report"/);
+    assert.doesNotMatch(settings, /MERRYMEN_ENFORCE_LIVE/, "no switch of its own");
+  });
+
+  it("and the backfill runs BEFORE children are spawned", () => {
+    // The ordering that makes the apply step windowless. After `reconcile()`
+    // the first cohort starts with the flag still absent.
+    const orch = readFileSync(path.join(__dirname, "orchestrator.ts"), "utf8");
+    const backfillAt = orch.indexOf("await runLiveIntentBackfillIfAsked();");
+    const reconcileAt = orch.indexOf("await reconcile();", backfillAt - 2000);
+    assert.ok(backfillAt > 0 && reconcileAt > backfillAt, "the grants must land first");
+  });
+});

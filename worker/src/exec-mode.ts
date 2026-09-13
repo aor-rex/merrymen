@@ -192,7 +192,41 @@ export interface ExecInputs {
    * only, and says so there.
    */
   liveTradingEnabled: boolean;
+  /**
+   * IS THE CONSENT GATE IN FORCE YET? True everywhere except during the
+   * migration that populates it.
+   *
+   * A safe default is a fleet outage until somebody has written the field for
+   * the people who are mid-trade. `liveTradingEnabled` defaults FALSE and
+   * `settings.ts` resolves an absent field to the default, so the deploy that
+   * first carries this gate would move every agent in the fleet to paper on its
+   * next tick — and a live agent moved to paper loses its stop-loss and
+   * take-profit too, because the paper rail builds holdings from the paper book.
+   *
+   * The orchestrator spawns children BEFORE the backfill runs, so even a
+   * report-only run would open that window. This closes it: while
+   * `MERRYMEN_BACKFILL_LIVE_INTENT=report` is set, the rail behaves exactly as
+   * it did before the gate existed.
+   *
+   * NOT AN ESCAPE HATCH, and the difference matters. It grants nothing new — it
+   * restores the PREVIOUS behaviour for the length of one migration, and it is
+   * tied to the migration's own variable, which step three of the rollout
+   * removes. There is deliberately no way to switch consent off on its own; see
+   * `liveTradingEnabled` above for why an env override of THAT would be the
+   * house consenting on every owner's behalf.
+   */
+  enforceLiveIntent?: boolean;
 }
+
+/**
+ * Consent, as the rail sees it during a migration.
+ *
+ * One helper so `canTradeForReal`, `liveBlocker` and `execModeOf` cannot answer
+ * this question three different ways — which is the drift that made the original
+ * paper/live fork wrong in two places at once.
+ */
+const consented = (a: ExecInputs): boolean =>
+  a.liveTradingEnabled || a.enforceLiveIntent === false;
 
 /** Could this agent put a real order on-chain right now? */
 export function canTradeForReal(a: ExecInputs): boolean {
@@ -219,7 +253,7 @@ export function canTradeForReal(a: ExecInputs): boolean {
     // CONSENT FIRST, and first for a reason: it is the only term whose absence
     // is not a defect. Everything below is something we could fix or the owner
     // could fund; this one we must be given.
-    a.liveTradingEnabled &&
+    consented(a) &&
     a.armed &&
     a.executor &&
     a.chainId === TRADEABLE_CHAIN_ID &&
@@ -262,7 +296,7 @@ export function execModeOf(a: ExecInputs): ExecMode {
    * working live rail; for someone who is not trying to use one, that implication
    * was never made, and `wouldBlockLive` says the wall is there.
    */
-  if (!a.liveTradingEnabled) {
+  if (!consented(a)) {
     // Asked with consent forced ON, so the answer is about the machinery alone
     // and never circularly about the consent we already know is missing.
     const probe = { ...a, liveTradingEnabled: true };
@@ -313,7 +347,7 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
   // intention of using — which is precisely the loop that made a practising
   // owner re-sign his key over and over to clear a banner about a network he
   // was not trying to trade on.
-  if (!a.liveTradingEnabled) return "live-not-enabled";
+  if (!consented(a)) return "live-not-enabled";
   if (a.deadPolicy) return "dead-policy";
   // Beside dead-policy because the remedy is the same shape — only the owner can
   // fix it — but it is NARROWER: re-signing the same wall changes nothing, so

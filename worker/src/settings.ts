@@ -69,6 +69,13 @@ export interface ResolvedConfig {
   paperTradingEnabled: boolean;
   /** The owner's explicit consent to put real orders on chain. Default false. */
   liveTradingEnabled: boolean;
+  /**
+   * Is the consent gate in force yet? False ONLY while the one-time migration
+   * that populates `liveTradingEnabled` is still in report mode — see
+   * `ExecInputs.enforceLiveIntent` for why a gate with a safe default is an
+   * outage until somebody has written the field for the people mid-trade.
+   */
+  enforceLiveIntent: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -345,6 +352,10 @@ export function mergeSettings(
     // is still the reader, with `undefined` for the env slot, so an absent
     // field falls to the default (false) rather than to anything ambient.
     liveTradingEnabled: bool(file.liveTradingEnabled, undefined, d.liveTradingEnabled),
+    // NOT a tenant setting and not in the file: this is an operator-controlled
+    // migration state, and it is read from the SAME variable that drives the
+    // backfill so the two cannot disagree about whether the migration has run.
+    enforceLiveIntent: (env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim() !== "report",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
