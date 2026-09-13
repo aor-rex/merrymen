@@ -155,6 +155,22 @@ export interface MerrymenSettings {
   paperTradingEnabled?: boolean;
   /** Starting paper cash, USDG. */
   paperStartUsdg?: number;
+  /**
+   * THE OWNER'S CONSENT TO SPEND REAL MONEY. Off until they say otherwise.
+   *
+   * Separate from `paperTradingEnabled` because they answer different
+   * questions: this one is "may real orders reach the chain", that one is
+   * "when they may not, should I simulate instead". For a while there was only
+   * the second, and it could not do this job — it is consulted only after the
+   * live rail has already failed, so an agent whose rail was healthy traded for
+   * real no matter what its owner had chosen. Funding an account was enough to
+   * cross that line, which is not a thing funding should be able to do.
+   *
+   * A REQUIRED TERM of `canTradeForReal` (worker/src/exec-mode.ts), not a
+   * fallback — see the long note on `ExecInputs.liveTradingEnabled` for why the
+   * distinction is the whole fix.
+   */
+  liveTradingEnabled?: boolean;
 
   // ── trading ────────────────────────────────────────────────────────────
   /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
@@ -732,6 +748,19 @@ export const SLIPPAGE_BPS_MAX = 1_000;
 export const SETTINGS_DEFAULTS = {
   paperTradingEnabled: true,
   paperStartUsdg: 1000,
+  /**
+   * OFF. The only safe default for a term that means "spend my money", and the
+   * one place in this file where the default is a promise rather than a
+   * preference: no agent trades for real until a person says so.
+   *
+   * MIGRATION — this default is why the rollout is two deploys, not one.
+   * `worker/src/settings.ts` resolves an absent field to the default, so
+   * shipping enforcement and this default together would move every existing
+   * tenant to paper at once, including agents whose owners are watching them
+   * trade real money right now. The backfill in `scripts/backfill-live-intent`
+   * writes the flag explicitly for anyone already live BEFORE enforcement lands.
+   */
+  liveTradingEnabled: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,

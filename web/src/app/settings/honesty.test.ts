@@ -132,7 +132,14 @@ describe("every control survives the restyle", () => {
     // entry and a worker read, and no control at all — so it could not be
     // turned on from the app by anyone, and the factory field sitting alone in
     // Connections made the page look as though the feature were reachable.
-    assert.equal(count(/type="checkbox"/g), 14, "checkboxes");
+    // 15 since LIVE TRADING — the switch that decides whether any of this costs
+    // real money, and the one this page went longest without. Two other screens
+    // told owners to change paper/live "in Settings" while no such control
+    // existed here; worse, until `liveTradingEnabled` became a required term of
+    // canTradeForReal there was nothing to bind it to, so a funded agent traded
+    // real money whatever its owner had chosen. First on the page, because it
+    // outranks every control below it.
+    assert.equal(count(/type="checkbox"/g), 15, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -148,7 +155,7 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 5, "selects");
   });
 
-  it("sends exactly the 20 fields save() guards", () => {
+  it("sends exactly the 21 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -161,7 +168,13 @@ describe("every control survives the restyle", () => {
     // pointing the other way: unguarded, an owner who opened this screen and
     // saved anything would send `false` and silently switch a running class
     // canary off mid-position.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 20);
+    // 21 since liveTradingEnabled, and this guard is load-bearing in a way none
+    // of the others are: unguarded, an owner who opened this screen and saved
+    // anything at all would send whatever the form happened to hold for the
+    // consent flag — either switching a live agent to paper mid-position, or
+    // granting permission to spend real money. No other field here can do the
+    // second thing.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 21);
   });
 });
 

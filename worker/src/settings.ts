@@ -65,6 +65,8 @@ export interface ResolvedConfig {
   /** The PonsClassVaultFactory. A HINT for signing; the grant is the authority. */
   ponsClassVaultFactory: `0x${string}` | undefined;
   paperTradingEnabled: boolean;
+  /** The owner's explicit consent to put real orders on chain. Default false. */
+  liveTradingEnabled: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -327,6 +329,19 @@ export function mergeSettings(
     ponsAdapterAddress,
     ponsClassVaultFactory,
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
+    // NO ENVIRONMENT OVERRIDE, and the omission is the point.
+    //
+    // Every sibling here takes `env.MERRYMEN_*` as a middle term, which is right
+    // for operational knobs: the house may set a bundler, a tick rate, a fee. It
+    // is wrong for this one. `MERRYMEN_LIVE_TRADING=true` on the orchestrator
+    // would be the house granting consent to spend real money on behalf of every
+    // owner in the fleet simultaneously — the exact implicit promotion this
+    // field was added to prevent, available as a single deploy variable.
+    //
+    // So consent is read from the tenant's OWN settings or not at all. `bool`
+    // is still the reader, with `undefined` for the env slot, so an absent
+    // field falls to the default (false) rather than to anything ambient.
+    liveTradingEnabled: bool(file.liveTradingEnabled, undefined, d.liveTradingEnabled),
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest

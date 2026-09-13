@@ -95,6 +95,7 @@ export function Agent({
   onWithdraw,
   onLimits,
   onResign,
+  onSettings,
   liveBlocker,
 }: {
   mine: LiveMine | null;
@@ -112,6 +113,14 @@ export function Agent({
   onLimits: () => void;
   /** Point at the ONE signing control — see Proposals.tsx. */
   onResign: () => void;
+  /**
+   * Open Settings, where the Live trading switch lives.
+   *
+   * Separate from `onResign` because they are opposite errands: one repairs a
+   * permission, the other changes a decision. Routing "start live trading" at
+   * the signer was the original confusion in miniature.
+   */
+  onSettings: () => void;
   /**
    * WHAT IS STOPPING THIS AGENT TRADING FOR REAL, as the child resolved it.
    *
@@ -464,13 +473,28 @@ export function Agent({
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
       {blocked && (
-        <section className="desk-blocked" role="status">
+        /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
+           rendered for every blocker there is — including the one that means
+           "your agent is practising, exactly as you asked". An owner who had
+           deliberately chosen Paper mode read a red warning telling him his
+           agent was blocked, and reasonably concluded the product was broken. */
+        <section className={blocked.fault ? "desk-blocked" : "desk-note"} role="status">
           <p>{blocked.say}</p>
-          {/* Money is not the fix for wrong-chain, dead-policy or not-armed —
-              blockerAdvice says which — so only those get sent to the signer. */}
-          {!blocked.funding && (
+          {/* ASK THE ADVICE, DO NOT INFER FROM `funding`. This used to render on
+              `!blocked.funding`, which is not the same question and got two rules
+              wrong: `no-executor` is ours to fix and was offering the owner a
+              signature anyway, and `live-not-enabled` is not broken at all. */}
+          {blocked.resign && (
             <button type="button" onClick={onResign}>
               Fix it — re-sign my permission →
+            </button>
+          )}
+          {/* THE ONE CONTROL THAT ACTUALLY CHANGES THIS STATE. Without it the
+              screen names a switch and offers no way to reach it, which is the
+              shape of the original complaint. */}
+          {liveBlocker === "live-not-enabled" && (
+            <button type="button" onClick={onSettings}>
+              Start live trading →
             </button>
           )}
         </section>

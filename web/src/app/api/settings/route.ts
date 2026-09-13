@@ -214,6 +214,16 @@ const NUM_FIELDS: Record<string, [number, number]> = {
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  // THE CONSENT FLAG, and it must be here or the "Start live trading" control
+  // is a button that returns {ok:true} and changes nothing — the exact silent
+  // drop this file's own comment above warns about, on the one field where
+  // failing silently means an owner believes they went live and did not.
+  //
+  // Tenant-settable ON PURPOSE, and therefore deliberately absent from core's
+  // host-only allowlist beside sponsorGasEnabled: this is the owner's decision
+  // about the owner's money, and the one thing the house must not decide for
+  // them.
+  "liveTradingEnabled",
   // LET THE STRATEGIST RESEARCH BEFORE IT DECIDES, instead of answering in one
   // shot from a fixed blob of numbers — it can pull depth, check what a
   // position cost, and read back its own past decisions before it commits.

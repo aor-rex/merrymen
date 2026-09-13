@@ -39,6 +39,18 @@ export type RefuseRule =
   | "dead-policy"
   | "grant-too-wide"
   | "no-executor"
+  /**
+   * THE ONE THAT IS NOT A FAULT. The owner has not asked for real execution,
+   * so nothing is broken and there is nothing to repair — the agent is doing
+   * exactly what it was told. It sits in this union because every surface
+   * already knows how to carry a rule, and inventing a parallel channel for it
+   * would guarantee some surface forgot to read one of the two.
+   *
+   * It is deliberately ABSENT from `OWNER_ACTION` below. That set drives the
+   * red BLOCKED pill and the re-sign banner, and a practising owner is neither
+   * blocked nor in need of a signature.
+   */
+  | "live-not-enabled"
   | "wrong-chain"
   | "no-gas"
   | "no-cash";
@@ -63,6 +75,11 @@ export function liveBlockerText(rule: RefuseRule): string {
       );
     case "no-executor":
       return "no bundler is configured, so nothing can be submitted to the chain";
+    case "live-not-enabled":
+      // Present tense, no remedy, no urgency. This is a description of a
+      // working agent doing what it was asked, and the one sentence here that
+      // must never read like a problem.
+      return "live trading is off, so it is practising with simulated money — turn on Live trading when you want it to trade for real";
     case "wrong-chain":
       return "this key is for a different network than the one trading happens on";
     case "no-gas":
@@ -186,7 +203,13 @@ export interface Autonomy {
    */
   headline: string | null;
   /** The button to render, when there is one worth rendering. */
-  action: { label: string; kind: "renew-grant" | "add-funds" } | null;
+  /**
+   * `start-live` is the odd one out, deliberately: the other two REPAIR
+   * something, this one CHANGES A DECISION. It has to exist for "the owner
+   * explicitly turned real trading on" to be a thing an owner can actually do —
+   * without an affordance, consent would be required and ungrantable.
+   */
+  action: { label: string; kind: "renew-grant" | "add-funds" | "start-live" } | null;
   /**
    * Is the money on this screen simulated?
    *
@@ -248,6 +271,16 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
     // NO REAL MONEY AND NO OWNER ACTION: the honest reading is "you have not
     // funded this yet", and the remedy is money, not a signature.
     const unfunded = input.realCashUsd === 0;
+    /**
+     * PRACTISING ON PURPOSE IS NOT A FUNDING PROBLEM, and offering "Add funds"
+     * here was how the confusion started: a deliberately-practising owner was
+     * shown a money button, so money is what he assumed was missing. It is not,
+     * and after this change money cannot promote him anyway.
+     *
+     * The honest control for someone already doing what they chose is the one
+     * that changes the choice.
+     */
+    const byChoice = rule === "live-not-enabled";
     return {
       state: "paper",
       label: "PAPER",
@@ -255,7 +288,11 @@ export function autonomyOf(input: AutonomyInput): Autonomy {
       rule,
       needsOwnerAction: false,
       headline: null,
-      action: unfunded ? { label: "Add funds", kind: "add-funds" } : null,
+      action: byChoice
+        ? { label: "Start live trading", kind: "start-live" }
+        : unfunded
+          ? { label: "Add funds", kind: "add-funds" }
+          : null,
       simulated: true,
       moneyLabel: SIMULATED_LABEL,
     };
@@ -309,6 +346,12 @@ function normaliseRule(v: RefuseRule | string | null | undefined): RefuseRule | 
     case "dead-policy":
     case "grant-too-wide":
     case "no-executor":
+    // MUST BE LISTED, and the failure if it is not is the quiet kind: this
+    // function drops anything it does not recognise to null, and a null rule
+    // renders as an agent with nothing to say about itself. The one state whose
+    // whole purpose is to explain that practising is deliberate would arrive as
+    // no explanation at all.
+    case "live-not-enabled":
     case "wrong-chain":
     case "no-gas":
     case "no-cash":

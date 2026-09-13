@@ -30,6 +30,10 @@ const base = {
   gasWei: 0n,
   gasSponsored: true,
   paperTradingEnabled: true,
+  // CONSENT GIVEN. Every case in this file is about the RAIL — which leg of the
+  // machinery carries a trade and which stops it — so the owner's own decision
+  // is held constant at yes. The cases where it is NO live in live-intent.test.ts.
+  liveTradingEnabled: true,
 };
 
 describe("an unsupported wall stops the agent before the bundler", () => {

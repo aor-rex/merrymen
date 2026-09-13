@@ -141,15 +141,54 @@ describe("the owner is told on the screen they actually open", () => {
     // the ones reporting "it doesn't trade".
     const agent = at("../terminal/screens/Agent.tsx");
     assert.match(agent, /const blocked = blockerAdvice\(liveBlocker\)/);
-    assert.match(agent, /className="desk-blocked"/);
+    // THE RED PANEL IS NOW CONDITIONAL, and that is the fix rather than a
+    // regression. It was unconditional, so the one state that means "your agent
+    // is practising, exactly as you asked" was delivered as an alarm — which is
+    // how a beta owner came to believe a working agent was broken.
+    assert.match(agent, /blocked\.fault \? "desk-blocked" : "desk-note"/);
   });
 
   it("and it points at the signer only when signing is the fix", () => {
     // Sending money to a wrong-chain agent is money spent for nothing, and
-    // re-signing does not conjure USDG. `funding` is which of the two it is.
+    // re-signing does not conjure USDG.
+    //
+    // THIS USED TO READ `!blocked.funding`, inferring "a signature fixes it"
+    // from "money does not". That inference was wrong in both directions and
+    // shipped wrong: `no-executor` is ours to fix — the advice says so in as
+    // many words — and the screen offered its owner a re-sign button for it
+    // anyway. `live-not-enabled` is the second counterexample. The remedy is
+    // now stated by the advice rather than guessed from its opposite.
     const agent = at("../terminal/screens/Agent.tsx");
-    assert.match(agent, /\{!blocked\.funding && \(/);
+    assert.match(agent, /\{blocked\.resign && \(/);
     assert.match(agent, /onClick=\{onResign\}/);
+    assert.doesNotMatch(agent, /\{!blocked\.funding && \(/, "no longer inferred from funding");
+  });
+
+  it("and a state that is NOT a fault offers the switch, not a signature", () => {
+    // The complaint this whole change came from: a practising owner was shown a
+    // red banner and a re-sign button, and re-signing could never clear it
+    // because nothing was broken. What he needed was the control that changes
+    // the decision — and it has to be on this screen, because this is the one
+    // he opens.
+    const a = blockerAdvice("live-not-enabled");
+    assert.ok(a);
+    assert.equal(a.fault, false, "nothing is wrong");
+    assert.equal(a.resign, false, "so a signature is not the remedy");
+    assert.equal(a.funding, false, "and neither is money");
+    assert.match(a.say, /Paper mode/i);
+    assert.match(a.say, /Live trading/i, "it names the switch");
+
+    const agent = at("../terminal/screens/Agent.tsx");
+    assert.match(agent, /liveBlocker === "live-not-enabled"/);
+    assert.match(agent, /onClick=\{onSettings\}/, "and points at where the switch lives");
+  });
+
+  it("no-executor stops asking the owner for a signature it never needed", () => {
+    const a = blockerAdvice("no-executor");
+    assert.ok(a);
+    assert.equal(a.funding, false);
+    assert.equal(a.resign, false, "ours to fix — its own sentence says so");
+    assert.equal(a.fault, true, "but it IS a fault, unlike live-not-enabled");
   });
 
   it("WRONG-CHAIN IS A SIGNING PROBLEM, NOT A FUNDING ONE", () => {

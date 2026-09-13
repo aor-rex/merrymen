@@ -547,6 +547,9 @@ async function main() {
       // another first-enable, so its historical wall cannot block it.
       wallTooWide: (active?.wallOverMax ?? false) && active?.accountDeployed === false,
       paperTradingEnabled: cfg.paperTradingEnabled,
+      // THE OWNER'S OWN ANSWER, carried in from their settings and nowhere else.
+      // Every other field on this object is measured; this one is given.
+      liveTradingEnabled: cfg.liveTradingEnabled,
     });
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */

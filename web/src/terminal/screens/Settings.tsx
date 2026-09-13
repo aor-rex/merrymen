@@ -79,6 +79,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
+  /** The owner's consent to spend real money. Null = untouched this session. */
+  const [liveTrading, setLiveTrading] = useState<boolean | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
@@ -250,6 +252,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
+    if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -354,6 +357,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
   const classSnipeVal = classSnipe ?? view.values.classSnipeEnabled ?? d.classSnipeEnabled;
+  const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
@@ -416,6 +420,56 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
         {/* Setup steps live here after the /app muster is done — a quiet, honest
             status strip read from real state, and a fast way back to fund or re-key. */}
         <SetupChecklist onFund={onFund} paper={view.values.paperTradingEnabled ?? view.defaults.paperTradingEnabled}/>
+
+          {/* ── PAPER OR LIVE ───────────────────────────────────────────────
+              THE SWITCH THAT DID NOT EXIST.
+
+              Two other screens have been telling owners to "turn paper trading
+              on in Settings" for months. There was no control here — not for
+              paper, not for live — so the only way to change how an agent
+              treated real money was a chat command most owners never found.
+              Worse, it would not have helped: until `liveTradingEnabled` was
+              added, nothing anywhere withheld permission to trade for real, and
+              a funded agent on mainnet traded real money whatever its owner had
+              chosen in the create wizard.
+
+              FIRST ON THE PAGE because it outranks everything below it. A
+              strategy, a cap or a venue only matters once you know whether the
+              money is real. */}
+          <div className="mm-section">Trading mode</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">live trading</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={liveTradingVal}
+                  onChange={(e) => setLiveTrading(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {liveTradingVal
+                    ? "ON — real orders, real money, within your signed caps"
+                    : "OFF — Paper mode: practising with simulated money at live prices"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                {liveTradingVal
+                  ? "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way."
+                  : "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does."}
+              </span>
+            </label>
+          </div>
+          {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* SAID BEFORE IT IS TRUE, not after. The owner has ticked the box
+               but not yet pressed save, which is the last moment this sentence
+               can still be useful to them. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>This spends real money.</b> Once you save, your agent can open positions with the
+              funds in its account, up to the per-trade and daily caps in the permission you signed.
+              It will not exceed those caps, and you can switch back to Paper at any time.
+            </p>
+          )}
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="mm-section">Agent settings</div>

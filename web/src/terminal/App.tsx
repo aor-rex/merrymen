@@ -415,6 +415,7 @@ export function App() {
             onWithdraw={() => openScreen({ kind: "withdraw" })}
             onLimits={() => openScreen({ kind: "limits" })}
             onResign={() => {window.location.href="/grant#resign";}}
+            onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
           />
         )}
@@ -607,6 +608,7 @@ export function App() {
             onResign={() => {
               window.location.href = "/grant#resign";
             }}
+            onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
           />
         </ChatDock>

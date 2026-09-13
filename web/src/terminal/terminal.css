@@ -7487,11 +7487,39 @@
 }
 
 
-:where(.terminal-host) .desk-blocked p {
+/* THE SAME PANEL, FOR A STATE THAT IS NOT A FAULT.
+   Identical geometry to .desk-blocked so the layout does not jump, and a
+   deliberately neutral palette instead of --down: an owner who chose Paper mode
+   is being told what their agent is doing, not warned about it. Rendering that
+   sentence in the red box is what convinced a beta owner his agent was broken
+   while it was practising exactly as he had asked. */
+:where(.terminal-host) .desk-note {
+  margin: 0 0 14px;
+  padding: 13px 15px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--tx) 5%, transparent);
+}
+
+:where(.terminal-host) .desk-blocked p,
+:where(.terminal-host) .desk-note p {
   margin: 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--tx);
+}
+
+:where(.terminal-host) .desk-note button {
+  margin-top: 11px;
+  margin-right: 8px;
+  padding: 8px 15px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 :where(.terminal-host) .desk-blocked button {

@@ -319,6 +319,11 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // narrower one rather than anything they need to undo.
   "grant-too-wide": "its permission set is too wide to install on-chain",
   "no-executor": "no bundler is configured to submit anything",
+  // The only entry here that is a CHOICE rather than a condition, so it is
+  // phrased as one. This sentence is embedded mid-line after "it is not trading
+  // for real because…", and it has to finish that sentence without implying
+  // anybody made a mistake.
+  "live-not-enabled": "its owner has it in Paper mode, practising rather than trading real funds",
   "wrong-chain": "its key was signed for a different network",
   "no-cash": "the account held no USDG to trade with",
 });
