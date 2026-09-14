@@ -282,7 +282,28 @@ export function RecoverPanelView({
       setError("this browser doesn't hold that wallet.");
       return;
     }
-    const list = balances.map((b) => `${b.amount} ${b.symbol}`).join(", ") || "the balance";
+    /**
+     * THE CLASS VAULT GOES IN THE CONFIRMATION, because it goes in the sweep.
+     *
+     * This listed `balances` alone — the SMART ACCOUNT's tokens — while the
+     * operation beneath it also empties the class vault, whose contents are
+     * usually the largest thing an owner is moving. The panel body shows them
+     * under "Held in a separate contract"; the dialog that actually takes the
+     * decision did not, so the last thing anyone read before signing named a
+     * strict subset of what they were signing for.
+     *
+     * The server path (`sweep`, below) already lists both. Two confirmations
+     * for one operation must not disclose different things, and the one that
+     * disclosed less was the one hosted owners actually use.
+     *
+     * Class holdings come FIRST, matching the server path and the order of
+     * operations: the vault is emptied into the account, then everything moves.
+     */
+    const list =
+      [
+        ...classHoldings.map((h) => `${h.amount} ${h.symbol}`),
+        ...balances.map((b) => `${b.amount} ${b.symbol}`),
+      ].join(", ") || "the balance";
     if (
       !window.confirm(
         `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,

@@ -35,6 +35,7 @@ const OWNER = "0x8e93bad5a60a266b4283855ceffa0979720aed72";
 const ACCOUNT = "0x05a198A677Fbcd8f5c168d397Fa7ef5eB6D65487";
 const VAULT = "0x3fcdde6e011769ca05f0115f1543290862473216";
 const TOKEN = "0x15e498ff2dbca95e8648a1f025cbbd12c2525461";
+const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 /** The grant a hosted Privy mint writes to localStorage. Key from session.ts. */
 const STORAGE_KEY = "merrymen.grant.v1";
 
@@ -109,7 +110,14 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
         chainId: 4663,
         balances: [{ symbol: "USDG", address: TOKEN, raw: 20_000_000n, decimals: 6, amount: "20.000000" }],
         classVault: VAULT,
-        classHoldings: [{ token: TOKEN, symbol: "DOGGOS", raw: 1n, amount: "1,063,408.141815" }],
+        // BOTH assets, as the fixed planner now enumerates them. The vault
+        // holds stranded quote as well as its class token, and the quote asset
+        // appears in no ClassBuy/ClassSell/Swept event — so it reaches this list
+        // only because the candidate set unions the token registry in.
+        classHoldings: [
+          { token: TOKEN, symbol: "DOGGOS", raw: 1n, amount: "1,063,408.141815" },
+          { token: USDG, symbol: "USDG", raw: 5785344n, amount: "5.785344" },
+        ],
         classNote: null,
         gasWei: 1_000_000_000_000_000n,
         // The ETH leg, as the real planner now forecasts it: held minus the
@@ -197,5 +205,52 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
     assert.match(text, /Native ETH/i, "the ETH leg must be disclosed");
     assert.match(text, /0.000828820/, "with the amount the engine would actually send");
     assert.match(text, /0.000171180/, "and what stays behind to pay for it");
+    assert.match(text, /5\.785344/, "and the quote stranded in the vault, which no event names");
+  });
+
+  /**
+   * THE LAST THING READ BEFORE SIGNING.
+   *
+   * The panel body is not the decision — the browser confirmation is, and it
+   * listed the SMART ACCOUNT's balances alone while the operation beneath it
+   * also emptied the class vault. So the dialog that takes the decision named a
+   * strict subset of what it was taking, and the largest holding sat in the
+   * part it omitted.
+   *
+   * The server path already listed both. Two confirmations for one operation
+   * must not disclose different things, and the one that disclosed less was the
+   * one hosted owners actually use.
+   */
+  it("AND THE CONFIRM DIALOG NAMES THE VAULT ASSETS, not just the account", async () => {
+    const asked: string[] = [];
+    (dom.window as unknown as { confirm: (m: string) => boolean }).confirm = (m: string) => {
+      asked.push(m);
+      return false; // decline — this test is about the disclosure, not the sweep
+    };
+
+    const doc = dom.window.document;
+    const input = [...doc.querySelectorAll("input")].find((i) =>
+      (i.getAttribute("placeholder") ?? "").startsWith("send to"),
+    );
+    assert.ok(input, "the destination field must be present after the disclosure");
+
+    const { act } = await import("react");
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setter?.call(input, "0x1111111111111111111111111111111111111111");
+      input!.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+
+    const go = [...doc.querySelectorAll("button")].find((b) => /recover funds/i.test(b.textContent ?? ""));
+    assert.ok(go, "the sweep button must be present");
+    await act(async () => {
+      go!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    });
+
+    assert.equal(asked.length, 1, "exactly one confirmation is asked");
+    const msg = asked[0]!;
+    assert.match(msg, /1,063,408\.141815 DOGGOS/, "the class token must be named in the dialog");
+    assert.match(msg, /5\.785344 USDG/, "and the quote stranded in the vault");
+    assert.match(msg, /irreversible/i, "and it must still say what kind of act this is");
   });
 });
