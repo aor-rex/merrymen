@@ -104,3 +104,48 @@ export const MUST_PRESERVE = [
   "telegramBotToken",
   "assetMode",
 ] as const;
+
+/**
+ * STOP NEW ENTRIES. LEAVE EVERY EXIT ALONE.
+ *
+ * `classSnipeEnabled` gates `proposeClassEntries` and nothing else — the exit
+ * path reads `classMaxHoldSec` and `classExitAtGraduationPct` and never consults
+ * it, which is why an agent holding a position keeps managing it after entries
+ * are switched off. That asymmetry is the whole reason this is safe to do to a
+ * tenant with money in the market, and the reason it is one field rather than a
+ * "pause the route" flag that would take the exit with it.
+ *
+ * ONE FIELD. Not `liveTradingEnabled` (which would stop the sell), not
+ * `classMaxPositions` (0 would read as a configuration the owner chose), not
+ * `scoutEnabled` (the budget is also what an exit reports against). Anything
+ * broader here silently strands a live position in a book that can no longer
+ * close it, which is the trap `merrymen`'s class route was built to avoid.
+ */
+export const HALT_ENTRIES = Object.freeze({ classSnipeEnabled: false });
+
+/** The owner's settings with entries switched off and nothing else changed. */
+export function mergeHaltEntries(
+  current: Record<string, unknown> | null,
+): Record<string, unknown> {
+  return { ...(current ?? {}), ...HALT_ENTRIES };
+}
+
+/**
+ * Fields that MUST survive an entries-halt, named so a test can prove it.
+ *
+ * The first two are the exit triggers and the third is the rail the sell rides
+ * on. If any of them moved, the halt would not be a halt — it would be a
+ * position nobody can get out of.
+ */
+export const HALT_MUST_PRESERVE = [
+  "classMaxHoldSec",
+  "classExitAtGraduationPct",
+  "liveTradingEnabled",
+  "classPerEntryUsdg",
+  "classMaxPositions",
+  "scoutEnabled",
+  "scoutBudgetUsdg",
+  "maxImpactBps",
+  "slippageBps",
+  "assetMode",
+] as const;

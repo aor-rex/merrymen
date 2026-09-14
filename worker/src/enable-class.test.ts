@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE } from "./enable-class";
+import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries } from "./enable-class";
 
 describe("enabling the class route preserves everything else", () => {
   it("KEEPS EVERY FIELD IT DOES NOT SET", () => {
@@ -93,5 +93,72 @@ describe("the operator sees what changed", () => {
     const lines = describeCanaryChange({ classMinDepthUsdg: 250, classPerEntryUsdg: 0 }).join("\n");
     assert.match(lines, /classMinDepthUsdg\s+250 \(unchanged\)/);
     assert.match(lines, /classPerEntryUsdg\s+0 -> 5/);
+  });
+});
+
+/**
+ * SWITCHING OFF ENTRIES MUST NOT SWITCH OFF THE WAY OUT.
+ *
+ * Shogun is holding 1,006,167.87 tokens bought with its own money. Stopping it
+ * opening more positions is one switch; stopping it closing this one is a
+ * different switch, and moving both would strand a live position in a book that
+ * can no longer sell it. That is the exact trap the class route was built to
+ * avoid — `proposeClassEntries` shipped before any exit existed, and the comment
+ * on the exit path calls the gap "not a missing feature, it is a trap".
+ *
+ * So the halt is ONE field, and these tests are about everything it must leave
+ * alone.
+ */
+describe("halting class entries leaves every exit intact", () => {
+  /** A real-shaped settings blob: the canary's, plus the owner's own choices. */
+  const owner = {
+    classSnipeEnabled: true,
+    classMaxHoldSec: 21_600,
+    classExitAtGraduationPct: 85,
+    liveTradingEnabled: true,
+    classPerEntryUsdg: 5,
+    classMaxPositions: 3,
+    scoutEnabled: true,
+    scoutBudgetUsdg: 15,
+    maxImpactBps: 500,
+    slippageBps: 200,
+    assetMode: "all",
+    telegramBotToken: "secret-and-must-survive",
+  };
+
+  it("turns entries off", () => {
+    assert.equal(mergeHaltEntries(owner).classSnipeEnabled, false);
+  });
+
+  it("MOVES NOTHING ELSE — every other key byte-identical", () => {
+    const after = mergeHaltEntries(owner);
+    for (const [k, v] of Object.entries(owner)) {
+      if (k === "classSnipeEnabled") continue;
+      assert.deepEqual(after[k], v, `${k} must not move`);
+    }
+    assert.equal(Object.keys(after).length, Object.keys(owner).length, "and nothing is added");
+  });
+
+  it("THE EXIT TRIGGERS SPECIFICALLY, named so this cannot regress quietly", () => {
+    const after = mergeHaltEntries(owner);
+    // The clock and the cliff are the only two things that can close a class
+    // position. If either moved, the halt would have stranded the position.
+    assert.equal(after.classMaxHoldSec, 21_600, "the hold clock still runs");
+    assert.equal(after.classExitAtGraduationPct, 85, "the graduation cliff still fires");
+    assert.equal(after.liveTradingEnabled, true, "and the rail the sell rides on is still live");
+    for (const k of HALT_MUST_PRESERVE) {
+      assert.deepEqual(after[k], (owner as Record<string, unknown>)[k], `${k} is in MUST_PRESERVE`);
+    }
+  });
+
+  it("HALT_ENTRIES names exactly one field, and it is the entry gate", () => {
+    // Structural, not a promise: `mergeHaltEntries` spreads HALT_ENTRIES' own
+    // keys, so one key here is the guarantee that one key moves.
+    assert.deepEqual(Object.keys(HALT_ENTRIES), ["classSnipeEnabled"]);
+    assert.equal(HALT_ENTRIES.classSnipeEnabled, false);
+  });
+
+  it("an owner with no settings row at all still gets a well-formed one", () => {
+    assert.deepEqual(mergeHaltEntries(null), { classSnipeEnabled: false });
   });
 });

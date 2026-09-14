@@ -2025,6 +2025,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
   }
 }
 let enableClassRan = false;
+let haltClassEntriesRan = false;
 
 /**
  * TURN THE CLASS ROUTE ON FOR ONE NAMED TENANT.
@@ -2076,6 +2077,76 @@ async function runEnableClassIfAsked(): Promise<void> {
     log("enable-class: remove MERRYMEN_ENABLE_CLASS_FOR now.");
   } catch (e) {
     log(`enable-class: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * SWITCH OFF NEW CLASS ENTRIES FOR ONE TENANT, AND NOTHING ELSE.
+ *
+ * The case this exists for: an agent holding a live class position that needs to
+ * stop opening new ones while it keeps managing the one it has. Those are
+ * different switches, and conflating them strands money in a book that can no
+ * longer close it.
+ *
+ * `classSnipeEnabled` gates `proposeClassEntries` and nothing else. The exit
+ * path reads `classMaxHoldSec` and `classExitAtGraduationPct` and never consults
+ * it, so an agent with entries off still sells on the clock and still sells at
+ * the graduation cliff. That asymmetry is verified, not assumed — it is why one
+ * field is the right lever and why `HALT_MUST_PRESERVE` names the exit triggers
+ * so a test can prove they were untouched.
+ *
+ * MERGE, NEVER REPLACE, for the reason `enable-class.ts` gives at length: `put`
+ * writes the whole blob, so a naive write erases every setting the owner chose.
+ */
+async function runHaltClassEntriesIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_HALT_CLASS_ENTRIES_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (haltClassEntriesRan) return;
+  haltClassEntriesRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("halt-entries: MERRYMEN_HALT_CLASS_ENTRIES_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries } = await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const store = getSettingsStore();
+
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const before = Object.fromEntries(HALT_MUST_PRESERVE.map((k) => [k, current?.[k]]));
+    log(
+      `halt-entries: classSnipeEnabled ${JSON.stringify(current?.classSnipeEnabled)} -> false ` +
+        `for ${want}`,
+    );
+
+    await store.put(want as `0x${string}`, mergeHaltEntries(current) as never);
+
+    // READ IT BACK, and check BOTH halves: that entries actually stopped, and
+    // that nothing an exit depends on moved. A halt that silently took the exit
+    // with it would look identical in the log to one that did not.
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const stuck = after?.classSnipeEnabled === false;
+    const moved = HALT_MUST_PRESERVE.filter((k) => JSON.stringify(after?.[k]) !== JSON.stringify(before[k]));
+    log(
+      stuck
+        ? `halt-entries: WROTE and verified classSnipeEnabled=false (${Object.keys(HALT_ENTRIES).length} field)`
+        : `halt-entries: *** VERIFY FAILED — classSnipeEnabled did not stick ***`,
+    );
+    log(
+      moved.length === 0
+        ? `halt-entries: every exit setting preserved (${HALT_MUST_PRESERVE.join(", ")})`
+        : `halt-entries: *** ${moved.join(", ")} CHANGED — the exit path may be affected ***`,
+    );
+    log("halt-entries: remove MERRYMEN_HALT_CLASS_ENTRIES_FOR now.");
+  } catch (e) {
+    log(`halt-entries: FAILED — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -3400,6 +3471,7 @@ export async function runOrchestrator(): Promise<void> {
       await runTenantInspectIfAsked();
       await runHwmRepairIfAsked();
       await runEnableClassIfAsked();
+      await runHaltClassEntriesIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
