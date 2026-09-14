@@ -178,10 +178,24 @@ export interface LaunchVenue {
   quoteBuy(opts: { leg: VenueLeg; quoteInRaw: bigint }): VenueQuote | null;
   quoteSell(opts: { leg: VenueLeg; tokensInRaw: bigint }): VenueQuote | null;
 
+  /**
+   * Rehearse the REAL calls against live state, sending nothing.
+   *
+   * Takes everything a call needs — the account it runs as, the custody address
+   * and the deadline — because a rehearsal built from anything less is a
+   * rehearsal of a different trade. The first version of this took only a size
+   * and returned curve arithmetic, which would have reported "simulated" in the
+   * funnel for a chain call that never happened.
+   */
   simulate(opts: {
     leg: VenueLeg;
     side: "buy" | "sell";
     amountInRaw: bigint;
+    minOutRaw: bigint;
+    /** The account the calls execute as — the smart account in production. */
+    account: `0x${string}`;
+    custody: `0x${string}`;
+    deadline: bigint;
   }): Promise<VenueSimulation>;
 
   /** The calls that perform a buy. Pure. Throws on unbuildable input. */
