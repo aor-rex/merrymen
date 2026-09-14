@@ -361,3 +361,34 @@ describe("class provenance is re-read every tick", () => {
     assert.doesNotMatch(BLOCK, /knownCurves: \[\]/);
   });
 });
+
+/**
+ * THE QUIET BRANCH, WHICH WAS THE SILENT ONE.
+ *
+ * `candidates.length === 0` is the commonest outcome of this whole route — a
+ * quiet launchpad, or a child whose candidate table was rebuilt by a redeploy —
+ * and it returned without saying anything. An owner watching an agent that has
+ * discovered nothing yet is precisely the owner most likely to conclude it is
+ * broken, which is the complaint this milestone exists to answer.
+ */
+describe("an empty launchpad is reported, not silently returned", () => {
+  const ENTRY = (() => {
+    const start = CODE.indexOf("async function proposeClassEntries()");
+    return CODE.slice(start, CODE.indexOf("async function proposeClassExits", start));
+  })();
+
+  it("reports before returning on an empty candidate set", () => {
+    const emptyBranch = ENTRY.indexOf("if (candidates.length === 0)");
+    assert.ok(emptyBranch > 0, "the empty-candidates branch must exist");
+    const afterBranch = ENTRY.slice(emptyBranch, emptyBranch + 600);
+    assert.match(afterBranch, /reportClassScan\(/, "it must report before it returns");
+  });
+
+  it("and every path out of the scan has reported first", () => {
+    // Two reporting sites: the empty-candidate branch and the scored pass. If a
+    // third early return ever appears between them it will not be covered, so
+    // this pins the count rather than the positions.
+    const reports = [...ENTRY.matchAll(/reportClassScan\(/g)].length;
+    assert.equal(reports, 2, `expected both scan exits to report, found ${reports}`);
+  });
+});

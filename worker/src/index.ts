@@ -972,7 +972,23 @@ async function main() {
         console.log(`[class census] the candidate census could not be read — counts below are unavailable, not zero`);
       }
     }
-    if (candidates.length === 0) return [];
+    if (candidates.length === 0) {
+      // REPORTED, NOT SILENTLY RETURNED. This is the commonest outcome of the
+      // whole route — a quiet launchpad, or a child whose candidate table was
+      // rebuilt by a redeploy — and it was the one branch that said nothing at
+      // all. An owner watching an agent that has discovered nothing yet is
+      // exactly the owner most likely to conclude it is broken.
+      reportClassScan({
+        discovered: rows.length,
+        pairs: 0,
+        verified: 0,
+        refusedByVenue: 0,
+        choice: { pick: null, refused: [] },
+        holding: held.length,
+        buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+      });
+      return [];
+    }
 
     const { legs, refused } = await readClassLegs({
       client: active.client,
