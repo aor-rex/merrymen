@@ -1786,6 +1786,60 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  */
 let liveIntentBackfillRan = false;
 let tenantInspectRan = false;
+let enableClassRan = false;
+
+/**
+ * TURN THE CLASS ROUTE ON FOR ONE NAMED TENANT.
+ *
+ * Same shape as the consent migration and the tenant inspector: one tenant named
+ * explicitly, once per process, reported in full. The settings store is in a
+ * Postgres reachable only from inside Railway, so there is no other way to set
+ * these.
+ *
+ * MERGES. `put` writes the whole blob, so a naive write erases every setting the
+ * owner chose. Remove the variable as soon as the write is confirmed.
+ */
+async function runEnableClassIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_ENABLE_CLASS_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (enableClassRan) return;
+  enableClassRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("enable-class: MERRYMEN_ENABLE_CLASS_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { CANARY, describeCanaryChange, mergeCanary } = await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const store = getSettingsStore();
+
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    for (const line of describeCanaryChange(current, CANARY)) log(`enable-class: ${line}`);
+
+    const next = mergeCanary(current, CANARY);
+    await store.put(want as `0x${string}`, next as never);
+
+    // READ IT BACK. A write that reported success and changed nothing is the
+    // failure this whole milestone keeps running into.
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<
+      string,
+      unknown
+    > | null;
+    const wrong = Object.entries(CANARY).filter(([k, v]) => after?.[k] !== v);
+    log(
+      wrong.length === 0
+        ? `enable-class: WROTE and verified all ${Object.keys(CANARY).length} fields for ${want}`
+        : `enable-class: *** VERIFY FAILED — ${wrong.map(([k]) => k).join(", ")} did not stick ***`,
+    );
+    log("enable-class: remove MERRYMEN_ENABLE_CLASS_FOR now.");
+  } catch (e) {
+    log(`enable-class: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /**
  * PRINT ONE TENANT'S CLASS-ROUTE CONFIGURATION, ONCE, AND WRITE NOTHING.
@@ -2894,6 +2948,7 @@ export async function runOrchestrator(): Promise<void> {
        */
       await runLiveIntentBackfillIfAsked();
       await runTenantInspectIfAsked();
+      await runEnableClassIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
