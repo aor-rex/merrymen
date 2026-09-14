@@ -1785,6 +1785,171 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * field explicitly and the next plan is empty.
  */
 let liveIntentBackfillRan = false;
+let tenantInspectRan = false;
+
+/**
+ * PRINT ONE TENANT'S CLASS-ROUTE CONFIGURATION, ONCE, AND WRITE NOTHING.
+ *
+ * The grant and settings live in a Postgres reachable only from inside Railway,
+ * so this is the only way to answer "does this owner's signed wall carry a class
+ * vault?" without guessing. It reads through the SAME stores the worker uses —
+ * no second decoder to drift.
+ *
+ * ONCE PER PROCESS and named explicitly: the variable carries a single tenant
+ * address, there is no "all" mode, and the guard below stops it reprinting every
+ * fifteen seconds. It still prints on every RESTART while the variable is set,
+ * which is why the runbook says to remove it as soon as the answer is captured.
+ *
+ * It cannot leak: `describeTenant` is handed a flat record of the thirteen
+ * fields asked for, never the settings object, so nothing else is in scope where
+ * the strings are built.
+ */
+async function runTenantInspectIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_INSPECT_TENANT ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (tenantInspectRan) return;
+  tenantInspectRan = true;
+
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log(`inspect: MERRYMEN_INSPECT_TENANT is not an address — refusing to guess`);
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("inspect: asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { describeTenant, type: _t } = (await import("./inspect-tenant")) as never as {
+      describeTenant: (f: Record<string, unknown>) => string[];
+      type?: never;
+    };
+    void _t;
+    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import(
+      "../../packages/core/src/index"
+    );
+    const { getSettingsStore } = await import("./settings-store");
+
+    // @ts-expect-error pg is runtime-only here, as everywhere else in this repo
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    let grant: Record<string, unknown> | null = null;
+    try {
+      const { rows } = await client.query(
+        "SELECT grant_json FROM grants WHERE lower(tenant) = lower($1)",
+        [want],
+      );
+      const raw = rows[0]?.grant_json;
+      grant =
+        typeof raw === "string"
+          ? (JSON.parse(raw) as Record<string, unknown>)
+          : ((raw as Record<string, unknown>) ?? null);
+    } finally {
+      await client.end();
+    }
+
+    if (!grant) {
+      log(`inspect: no grant row for ${want}`);
+      return;
+    }
+
+    const smartAccount = typeof grant.smartAccount === "string" ? grant.smartAccount : null;
+    const chainId = Number(grant.chainId);
+    const grantClassVault = (grantPonsClassVault(grant as never) as string | null) ?? null;
+
+    // The DERIVED vault, which exists as an address whether or not it was
+    // sealed — so a NO on sealing can still say which vault is being discussed.
+    let derivedClassVault: string | null = null;
+    let vaultDeployed: boolean | null = null;
+    const factory = PONS_CLASS_VAULT_FACTORY[chainId];
+    if (factory && smartAccount) {
+      try {
+        const { createPublicClient, http } = await import("viem");
+        // The same default the announcement pass uses, so one operator
+        // variable governs every read this process makes.
+        const rpcUrl =
+          (chainId === 4663
+            ? process.env.MERRYMEN_RPC_MAINNET
+            : process.env.MERRYMEN_RPC_TESTNET) ?? "https://rpc.mainnet.chain.robinhood.com";
+        const client2 = createPublicClient({ transport: http(rpcUrl) });
+        derivedClassVault = (await client2.readContract({
+          address: factory as `0x${string}`,
+          abi: [
+            {
+              type: "function",
+              name: "vaultFor",
+              stateMutability: "view",
+              inputs: [{ name: "owner_", type: "address" }],
+              outputs: [{ type: "address" }],
+            },
+          ] as const,
+          functionName: "vaultFor",
+          args: [smartAccount as `0x${string}`],
+        })) as string;
+        const target = (grantClassVault ?? derivedClassVault) as `0x${string}`;
+        const code = await client2.getBytecode({ address: target });
+        vaultDeployed = code !== undefined && code !== "0x";
+      } catch {
+        // UNKNOWN, not false. The whole point of this module is that somebody
+        // was about to act on the difference.
+        vaultDeployed = null;
+      }
+    }
+
+    let settingsMissing = false;
+    let settingsError: string | null = null;
+    let s: Record<string, unknown> = {};
+    try {
+      const got = (await getSettingsStore().get(want as `0x${string}`)) as unknown as Record<
+        string,
+        unknown
+      > | null;
+      if (got === null) settingsMissing = true;
+      else s = got;
+    } catch (e) {
+      settingsError = e instanceof Error ? e.message : String(e);
+    }
+
+    // ONE FIELD AT A TIME, BY NAME. This is the line that makes a leak
+    // impossible: the report never receives `s`.
+    const pick = <T>(k: string): T | null => (s[k] === undefined ? null : (s[k] as T));
+    const facts = {
+      tenant: want,
+      smartAccount,
+      grantClassVault,
+      derivedClassVault,
+      vaultDeployed,
+      assetMode: pick("assetMode"),
+      liveTradingEnabled: pick("liveTradingEnabled"),
+      classSnipeEnabled: pick("classSnipeEnabled"),
+      classPerEntryUsdg: pick("classPerEntryUsdg"),
+      classMaxPositions: pick("classMaxPositions"),
+      scoutEnabled: pick("scoutEnabled"),
+      scoutBudgetUsdg: pick("scoutBudgetUsdg"),
+      scoutPerTokenUsdg: pick("scoutPerTokenUsdg"),
+      classMinDepthUsdg: pick("classMinDepthUsdg"),
+      maxImpactBps: pick("maxImpactBps"),
+      slippageBps: pick("slippageBps"),
+      classMaxHoldSec: pick("classMaxHoldSec"),
+      classExitAtGraduationPct: pick("classExitAtGraduationPct"),
+      settingsMissing,
+      settingsError,
+    };
+
+    for (const line of describeTenant(facts)) log(`inspect: ${line}`);
+    log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
+  } catch (e) {
+    log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 async function runLiveIntentBackfillIfAsked(): Promise<void> {
   const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
@@ -2728,6 +2893,7 @@ export async function runOrchestrator(): Promise<void> {
        * comparison per pass.
        */
       await runLiveIntentBackfillIfAsked();
+      await runTenantInspectIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
