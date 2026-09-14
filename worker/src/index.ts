@@ -1399,24 +1399,28 @@ async function main() {
         } catch {
           /* the next tick retries; a null quote_token is refused, never guessed */
         }
-        for (const [field, fn] of [
-          ["symbol", "symbol"],
-          ["decimals", "decimals"],
-        ] as const) {
-          try {
-            const v = await client.readContract({
-              address: p.token as `0x${string}`,
-              abi: [
-                { type: "function", name: fn, stateMutability: "view", inputs: [], outputs: [{ type: fn === "symbol" ? "string" : "uint8" }] },
-              ] as never,
-              functionName: fn,
-            });
-            if (field === "symbol") symbol = symbol ?? (v as string);
-            else decimals = Number(v);
-          } catch {
-            /* a nameless token is still tradable; the row falls back to its address */
-          }
-        }
+        /**
+         * THE SYMBOL IS DERIVED FROM THE ADDRESS, NOT READ FROM THE TOKEN.
+         *
+         * Two reasons, and the first is a bug I nearly shipped. The buy path
+         * keys this row as `symbolOfToken(t) ?? short(t)`, which for a class
+         * token is always the short address — and the cost basis is keyed by
+         * that same symbol. Reading the ERC-20's own `symbol()` here would give
+         * a rebuilt row a DIFFERENT key ("DOGGOS" rather than "0x15e4…5461"),
+         * splitting one position's basis across a restart: the buy booked under
+         * one key, the sell looked under another, and the realised P&L would
+         * come out as if the position had appeared from nowhere.
+         *
+         * The second is that a launch token's symbol is attacker-controlled. It
+         * can call itself USDC. `instrumentClassOf` is address-keyed for exactly
+         * this reason, and a basis key is a worse place to trust a string than a
+         * display label is.
+         *
+         * Decimals stay 18 — the launchpad's shape, and the same constant the
+         * buy path writes — so the two producers cannot disagree.
+         */
+        symbol = symbol ?? short(p.token);
+        decimals = existing?.decimals ?? 18;
       }
 
       await upsertClassPosition(agentId, {
@@ -6465,17 +6469,53 @@ async function main() {
         // reverts), but a wrongly-derived SELL would read a USDG figure as a
         // count of class-token units. Cheap to confirm, expensive to get wrong.
         if (!isBuy) {
+          /**
+           * TWO RECORDS MAY CONFIRM THE LEGS, AND A RESTART DESTROYS ONE OF THEM.
+           *
+           * `curveFor` consults the official-coin constant and then
+           * `discovered_pools`. Its own docstring says why the table cannot be
+           * an authority — wiped on every redeploy, and pruned to 5,000 rows
+           * against a launchpad running at ~475 launches an hour. With
+           * OFFICIAL_COINS[4663] empty, that leaves a restarted agent with NO
+           * confirming record at all: every sell of a position it still holds
+           * was refused `class-legs-unconfirmed`, permanently, and the position
+           * could only leave through the owner's own sweep.
+           *
+           * The position row is the better authority anyway. `discovered_pools`
+           * is a record of what was LAUNCHED; `class_positions` is a record of
+           * what this vault actually BOUGHT, restored by the reconciler from the
+           * vault's own ClassBuy events. For a token we hold, that is closer to
+           * the trade than the launch feed is.
+           *
+           * THE CHECK IS NOT WEAKENED, only given a second source. Both still
+           * have to agree with the intent on curve AND quote, which is the
+           * property that matters: a sell carries no asset words — the vault
+           * derives both from the curve — so a wrongly-derived sell would read a
+           * USDG figure as a count of class-token units. Either record
+           * confirming that pairing is a confirmation; neither confirming it is
+           * still a refusal.
+           */
           const ref = await curveFor(intent.assetIn);
-          if (
-            !ref ||
-            ref.curve.toLowerCase() !== intent.curve.toLowerCase() ||
-            ref.quoteToken.toLowerCase() !== intent.assetOut.toLowerCase()
-          ) {
+          const confirms = (r: { curve: string; quoteToken: string } | null | undefined): boolean =>
+            !!r &&
+            r.curve.toLowerCase() === intent.curve.toLowerCase() &&
+            r.quoteToken.toLowerCase() === intent.assetOut.toLowerCase();
+
+          let held: { curve: string; quoteToken: string } | null = null;
+          if (!confirms(ref)) {
+            const rows = await classPositions(agentId);
+            const row = rows?.find((r) => r.token.toLowerCase() === intent.assetIn.toLowerCase());
+            // Both legs or nothing: a row missing either cannot confirm a pair.
+            held = row?.curve && row.quoteToken ? { curve: row.curve, quoteToken: row.quoteToken } : null;
+          }
+
+          if (!confirms(ref) && !confirms(held)) {
             await refuse(
               "class-legs-unconfirmed",
-              `refusing to sell ${short(intent.assetIn)} through the class vault: the launch record ` +
-                `does not confirm this curve and quote pair. The sell's asset legs are not in the ` +
-                `calldata, so this record is the only thing that can check them.`,
+              `refusing to sell ${short(intent.assetIn)} through the class vault: neither the launch ` +
+                `record nor this vault's own position record confirms this curve and quote pair. The ` +
+                `sell's asset legs are not in the calldata, so one of those records is the only thing ` +
+                `that can check them.`,
             );
             releaseBudget();
             return;
@@ -6682,7 +6722,27 @@ async function main() {
           const outIsUsdg = intent.assetOut.toLowerCase() === usdgAddr;
           if (inIsUsdg !== outIsUsdg) {
             const curveToken = inIsUsdg ? intent.assetOut : intent.assetIn;
-            const symbol = symbolOfToken(curveToken);
+            /**
+             * AND FOR A CLASS TOKEN, THE ADDRESS IS THE NAME.
+             *
+             * `symbolOfToken` covers the watch set and STOCK_TOKENS, neither of
+             * which can contain a class token — it postdates the grant by
+             * definition. So this was undefined for every class trade, the
+             * `if (symbol)` below never ran, `fillPair` stayed null, and
+             * `bookFill` was never called. Every bonding-curve round trip this
+             * repo could produce booked NO cost basis at all: the sell then met
+             * `prev.qtyRaw <= 0` in applyFill, returned basisUnknown, and wrote
+             * a NULL realised P&L that getRealizedPnlUsdg excludes. The position
+             * was also invisible to the stop floor and the take-profit, both of
+             * which skip what they cannot price against an entry.
+             *
+             * THE SAME EXPRESSION THE POSITION ROW USES, deliberately. The buy
+             * path writes `symbolOfToken(t) ?? short(t)` into class_positions,
+             * and the basis is keyed by symbol — so any other spelling here
+             * would book the buy under one key and look for it under another.
+             * One expression, and the two cannot drift.
+             */
+            const symbol = symbolOfToken(curveToken) ?? short(curveToken);
             if (symbol) {
               fillPair = {
                 stockToken: curveToken,

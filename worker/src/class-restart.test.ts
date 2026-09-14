@@ -119,3 +119,87 @@ describe("the hold clock comes from the chain, not from the container", () => {
     assert.doesNotMatch(upsert.slice(0, 400), /first_seen/, "the upsert must still not touch the clock");
   });
 });
+
+/**
+ * COST BASIS AND REALISED P&L FOR A CLASS TRADE.
+ *
+ * `fillPair` gates on `symbolOfToken`, which covers the watch set and
+ * STOCK_TOKENS — neither of which can contain a class token, since it postdates
+ * the grant by definition. So it was undefined for every class trade, `fillPair`
+ * stayed null, and `bookFill` was never called. Every bonding-curve round trip
+ * this repo could produce booked NO cost basis: the sell then met
+ * `prev.qtyRaw <= 0` in applyFill, returned basisUnknown, and wrote a NULL
+ * realised P&L that getRealizedPnlUsdg excludes. The position was also invisible
+ * to the stop floor and the take-profit.
+ */
+describe("a class round trip books a basis and a realised P&L", () => {
+  it("ATTRIBUTES THE FILL instead of skipping it", () => {
+    const at = CODE.indexOf("const curveToken = inIsUsdg ? intent.assetOut : intent.assetIn;");
+    assert.ok(at > 0, "the curve fill-pair branch must exist");
+    const block = CODE.slice(at, at + 400);
+    assert.match(block, /symbolOfToken\(curveToken\) \?\? short\(curveToken\)/);
+  });
+
+  it("USING THE SAME KEY THE POSITION ROW USES", () => {
+    /**
+     * The basis is keyed by symbol. The buy path writes
+     * `symbolOfToken(t) ?? short(t)` into class_positions. Any other spelling at
+     * fill time books the buy under one key and looks for it under another, and
+     * the realised P&L comes out as if the position appeared from nowhere.
+     */
+    assert.match(CODE, /symbol: symbolOfToken\(intent\.assetOut\) \?\? short\(intent\.assetOut\)/);
+    const fill = CODE.indexOf("symbolOfToken(curveToken) ?? short(curveToken)");
+    assert.ok(fill > 0, "and the fill path must use the identical expression");
+  });
+
+  it("and the rehydrator does NOT invent a third key from the token itself", () => {
+    /**
+     * A launch token's `symbol()` is attacker-controlled — it can call itself
+     * USDC — and reading it here would give a rebuilt row a different key from
+     * the one the buy booked under, splitting one position's basis across a
+     * restart. `instrumentClassOf` is address-keyed for the same reason.
+     */
+    assert.match(REHYDRATE, /symbol = symbol \?\? short\(p\.token\)/);
+    assert.doesNotMatch(REHYDRATE, /functionName: "symbol"/, "never read the token's own symbol");
+  });
+
+  it("and decimals stay the launchpad's shape on both producers", () => {
+    assert.match(REHYDRATE, /decimals = existing\?\.decimals \?\? 18/);
+    assert.match(CODE, /decimals: 18,\n\s*curve: intent\.curve/);
+  });
+});
+
+/**
+ * THE SELL'S LEGS MUST STILL BE CONFIRMABLE AFTER A RESTART.
+ *
+ * A class sell carries no asset words — the vault derives both from the curve —
+ * so the mirror judges legs that are not in the calldata. `curveFor` consults
+ * the official-coin constant and then `discovered_pools`, and its own docstring
+ * says why that table cannot be an authority: wiped on every redeploy, pruned to
+ * 5,000 rows against ~475 launches an hour. With OFFICIAL_COINS[4663] empty, a
+ * restarted agent had NO confirming record and every sell was refused
+ * `class-legs-unconfirmed` permanently.
+ */
+describe("the position record can confirm a sell's legs", () => {
+  // Anchored on CODE, which has comments stripped — so the slice must start at
+  // a real statement rather than at the prose that explains it.
+  const ARM = (() => {
+    const from = CODE.indexOf("const confirms = (r:");
+    assert.ok(from > 0, "the leg-confirmation helper must exist");
+    return CODE.slice(from, CODE.indexOf("class-legs-unconfirmed", from) + 600);
+  })();
+
+  it("falls back to this vault's own position row", () => {
+    assert.match(ARM, /classPositions\(agentId\)/);
+    assert.match(ARM, /row\?\.curve && row\.quoteToken/, "both legs or nothing");
+  });
+
+  it("and the check is not weakened — both must match curve AND quote", () => {
+    assert.match(ARM, /r\.curve\.toLowerCase\(\) === intent\.curve\.toLowerCase\(\)/);
+    assert.match(ARM, /r\.quoteToken\.toLowerCase\(\) === intent\.assetOut\.toLowerCase\(\)/);
+  });
+
+  it("and neither record confirming is still a refusal", () => {
+    assert.match(ARM, /if \(!confirms\(ref\) && !confirms\(held\)\)/);
+  });
+});
