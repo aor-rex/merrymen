@@ -203,3 +203,45 @@ describe("the position record can confirm a sell's legs", () => {
     assert.match(ARM, /if \(!confirms\(ref\) && !confirms\(held\)\)/);
   });
 });
+
+/**
+ * REAL ACTIVITY, AND THE DIFFERENCE BETWEEN QUIET AND UNREADABLE.
+ *
+ * The scorer's contract is that a null signal is a refusal. That is right for a
+ * per-token measurement and wrong for a whole-tape one: if the tape query is
+ * refused, NOTHING is known about ANY curve, and refusing every candidate on a
+ * transient RPC error would be fail-closed in form and broken in effect.
+ *
+ * So the floor applies only to a tape that was actually read. A curve missing
+ * from a tape we HAVE is a measured zero and is refused; a curve we could not
+ * measure at all leaves the floor stood down, and the funnel says so.
+ */
+describe("the activity floor gates only on a tape that was read", () => {
+  const ENTRY = (() => {
+    const start = CODE.indexOf("async function proposeClassEntries()");
+    return CODE.slice(start, CODE.indexOf("async function proposeClassExits", start));
+  })();
+
+  it("uses the MEASURED bar, not an invented one", () => {
+    assert.match(ENTRY, /minRecentTrades: classActivity === null \? 0 : ACTIVITY_GATE\.minTrades/);
+  });
+
+  it("counts a curve absent from a READ tape as zero, not unknown", () => {
+    assert.match(ENTRY, /classActivity === null\s*\?\s*null/);
+    assert.match(ENTRY, /return a \? a\.buys \+ a\.sells : 0;/);
+  });
+
+  it("is BOUNDED and cached, so the cost is per pass and not per token", () => {
+    assert.match(ENTRY, /readCurveActivity\(active\.client, MAX_ACTIVITY_BLOCKS\)/);
+    assert.match(ENTRY, /CLASS_ACTIVITY_TTL_SEC/);
+    assert.match(CODE, /const CLASS_ACTIVITY_TTL_SEC = 300;/);
+  });
+
+  it("and a refused query keeps the previous tally rather than wiping it", () => {
+    // A stale tally is still a measurement; five minutes of staleness is a
+    // smaller error than losing the signal. The timestamp advances only on
+    // success, so the next pass retries.
+    assert.match(ENTRY, /if \(tape !== null\) \{/);
+    assert.match(ENTRY, /classActivityAt = nowSecForActivity;/);
+  });
+});

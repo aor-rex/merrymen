@@ -288,6 +288,28 @@ const CLASS_WINDOW_SEC = 6 * 3600;
 /** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
 let lastClassFunnelKey = "";
 let lastClassIdleKey = "";
+
+/**
+ * THE LAUNCHPAD'S TAPE, CACHED, because the entry pass runs far more often than
+ * the tape changes meaningfully.
+ *
+ * `readCurveActivity` is ONE chunked query for every curve at once rather than
+ * one per candidate — bounded to MAX_ACTIVITY_BLOCKS (9,000) in 3,000-block
+ * chunks, and it returns null rather than a short tally when a chunk hits the
+ * node's 10,000-log cap. So the cost is a handful of eth_getLogs per refresh,
+ * not per token.
+ *
+ * Null is kept DISTINCT from an empty map, and the distinction is the whole
+ * point of this cache existing rather than a bare call: an empty map means the
+ * launchpad was quiet and a curve genuinely has no trades, while null means the
+ * query was refused and NOTHING is known about any curve. Gating a buy on the
+ * second would refuse every candidate on a transient RPC error and call it
+ * prudence.
+ */
+let classActivity: Map<string, { buys: number; sells: number; traders: number }> | null = null;
+let classActivityAt = 0;
+/** Refreshed on the discovery cadence — the tape is not more informative sooner. */
+const CLASS_ACTIVITY_TTL_SEC = 300;
 import {
   CURVE_GUARD_DEFAULTS,
   curveFloorDrawdownBps,
@@ -301,6 +323,7 @@ import {
   type CurveReserves,
 } from "./venues/pons-price";
 import { chooseEntry } from "./venues/candidate-score";
+import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
@@ -1098,13 +1121,47 @@ async function main() {
      * measure them yet — gating on a signal nobody produced would refuse
      * everything and call it prudence.
      */
+    /**
+     * THE TAPE, REFRESHED AT MOST EVERY FIVE MINUTES.
+     *
+     * Read here rather than in the venue because the cost is per PASS, not per
+     * token, and this is the one place that knows whether a pass is happening.
+     */
+    const nowSecForActivity = Math.floor(Date.now() / 1000);
+    if (nowSecForActivity - classActivityAt >= CLASS_ACTIVITY_TTL_SEC) {
+      const tape = await readCurveActivity(active.client, MAX_ACTIVITY_BLOCKS);
+      // A refused query leaves the PREVIOUS answer in place rather than wiping
+      // it to null: a stale tally is still a measurement, and five minutes of
+      // staleness is a smaller error than losing the signal entirely. The
+      // timestamp only advances on success, so the next pass retries.
+      if (tape !== null) {
+        classActivity = tape;
+        classActivityAt = nowSecForActivity;
+      } else if (classActivity === null) {
+        // Never measured at all. Distinct from "measured and empty".
+        classActivityAt = nowSecForActivity;
+      }
+    }
+
     const exitBpsForScore = cfg.classExitAtGraduationPct * 100;
     const thresholds = {
       minRealDepthRaw: usdg(cfg.classMinDepthUsdg),
       maxCostBps: cfg.maxImpactBps,
       minAgeSec: 0,
       maxGraduationBps: Math.max(0, exitBpsForScore - CLASS_ENTRY_GRADUATION_MARGIN_BPS),
-      minRecentTrades: 0,
+      /**
+       * GATED ONLY ON A TAPE WE ACTUALLY READ.
+       *
+       * When the tape is a map, a curve missing from it genuinely has no
+       * trades, so the floor applies and refuses it. When the tape is null the
+       * query was REFUSED, and nothing is known about any curve — refusing
+       * every candidate on a transient RPC error would be fail-closed in form
+       * and broken in effect, so the floor stands down and the funnel says so.
+       *
+       * ACTIVITY_GATE.minTrades is the measured bar: 12.6% of launches clear
+       * it, and 96% of the ones that go on to graduate.
+       */
+      minRecentTrades: classActivity === null ? 0 : ACTIVITY_GATE.minTrades,
     };
 
     const scored = legs.map((l) => {
@@ -1127,7 +1184,15 @@ async function main() {
           realDepthRaw: realQuoteRaw(l.reserves),
           graduationBps: progressNow === null ? null : Math.round(progressNow * 10_000),
           ageSec: null,
-          recentTrades: null,
+          // Absent from a tape we DID read is a measured zero. Absent because
+          // there is no tape is null, and the floor above stands down for it.
+          recentTrades:
+            classActivity === null
+              ? null
+              : (() => {
+                  const a = classActivity.get(l.curve.toLowerCase());
+                  return a ? a.buys + a.sells : 0;
+                })(),
         },
         entry: out === null || out <= 0n ? null : { amountOutRaw: out, costBps },
       };
