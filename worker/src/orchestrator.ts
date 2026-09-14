@@ -1982,7 +1982,17 @@ async function runTenantInspectIfAsked(): Promise<void> {
             [acctAddr],
           );
           acct.trades = Number(t.rows[0]?.n ?? 0);
+        } catch (e) {
+          // UNREADABLE, not empty. A failed count must never render as zero
+          // trades, because zero trades is the premise of the verdict below.
+          acct.error = e instanceof Error ? e.message : String(e);
+        }
 
+        // ITS OWN TRY, deliberately. Folded into the block above, one bad
+        // column name in the ledger half reported the ACCOUNTING half as
+        // unreadable too — after it had already read correctly. A later failure
+        // must not retract an earlier fact.
+        try {
           const ts = await client.query(
             "SELECT status, count(*)::int AS n FROM trades WHERE lower(agent_id) = lower($1) GROUP BY status",
             [acctAddr],
@@ -1991,13 +2001,13 @@ async function runTenantInspectIfAsked(): Promise<void> {
             ts.rows.map((x) => [String(x.status), Number(x.n)]),
           );
           const ps = await client.query(
-            "SELECT symbol, custody, qty FROM positions WHERE lower(agent_id) = lower($1)",
+            "SELECT symbol, custody, value_usdg FROM positions WHERE lower(agent_id) = lower($1)",
             [acctAddr],
           );
           ledger.openPositions = ps.rows.map((x) => ({
             symbol: String(x.symbol),
             custody: String(x.custody ?? "account"),
-            qty: String(x.qty),
+            qty: `${Number(x.value_usdg).toFixed(6)} USDG`,
           }));
           const cp = await client.query(
             "SELECT symbol, state, cost_usdg, proceeds_usdg FROM class_positions WHERE lower(agent_id) = lower($1)",
@@ -2010,10 +2020,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
             proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
           }));
         } catch (e) {
-          // UNREADABLE, not empty. A failed count must never render as zero
-          // trades, because zero trades is the premise of the verdict below.
-          acct.error = e instanceof Error ? e.message : String(e);
-          ledger.error = acct.error;
+          ledger.error = e instanceof Error ? e.message : String(e);
         }
       }
     } finally {
