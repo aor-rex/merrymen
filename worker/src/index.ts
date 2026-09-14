@@ -8254,7 +8254,21 @@ async function main() {
       const why = unpricedByDesign
         .map((s) => `${s} (${poolRefusals.get(s) ?? "no Chainlink feed and no usable pool"})`)
         .join(", ");
-      console.log(`[tick] held ${why} — trading continues, equity/breaker paused while held`);
+      // AND SAY WHAT ACTUALLY HAPPENS NOW, which is no longer "paused".
+      //
+      // This line predates the class basis fallback, when an unpriceable holding
+      // with no `cost_basis` row read as cost 0n and took equity, the HWM, the
+      // fee and the breaker down with it. A holding whose cost the chain knows
+      // is now carried AT COST and none of that is skipped — so the old wording
+      // would tell an owner their breaker was off while it was running. Only a
+      // holding whose cost is unknown too still stops the book, and that is the
+      // condition `bookIncomplete` reports separately and by name.
+      console.log(
+        `[tick] held ${why} — carried at cost, not at a mark` +
+          (bookIncomplete
+            ? `; ${unknownCost.join(",")} has no cost on record either, so equity and the breaker are paused`
+            : `; equity and the breaker keep running`),
+      );
       await addEvent(
         agentId,
         "warn",
