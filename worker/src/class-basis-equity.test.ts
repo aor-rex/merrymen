@@ -1,0 +1,168 @@
+/**
+ * AN OPEN CLASS POSITION MUST NOT MAKE THE BOOK UNVALUABLE.
+ *
+ * THE LIVE CASE. Shogun bought 1,006,167.866057921304348465 of 0x34d7…b4af for
+ * exactly 5.000000 USDG at block 63155033. Every tick afterwards its book said:
+ *
+ *     book incomplete (0x34d7…b4af unpriced AND no cost on record)
+ *       — equity, HWM, fee and breaker skipped this tick
+ *
+ * A class token has no price feed by design, so it lands in `unpricedByDesign`
+ * and is carried at COST. But the cost came from `cost_basis`, which no class
+ * buy writes — so it read as 0n, which is the one value meaning "we know neither
+ * what it is worth nor what was paid", and the whole book went unvaluable. The
+ * drawdown breaker was skipped on the one account that had just put real money
+ * into a memecoin.
+ *
+ * The cost was never unknown. `ClassBuy.quoteIn` is on chain, it is exact, and
+ * `writeClassLedger` persists it — and unlike a `cost_basis` row it is
+ * re-derived from the vault's own events on every arm, so it survives the
+ * container rebuild that wipes the child's sqlite.
+ *
+ * WHAT THIS PINS is the rule, against the real arithmetic: a basis row wins when
+ * it exists, the chain's figure fills in when it does not, an unknown cost stays
+ * unknown, and the scout budget counts the money once.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
+import { quarantineOf } from "./quarantine";
+
+/** Shogun's position, as `class_positions` holds it after the chain read. */
+const SYMBOL = "0x34d7…b4af";
+const COST = 5_000_000n; // 5.000000 USDG, ClassBuy.quoteIn
+
+/**
+ * The lookup the tick builds: `cost_basis` first, the class ledger second.
+ *
+ * Extracted here as the rule rather than copied from the tick, so what is
+ * asserted is the decision and not a paraphrase of it. The tick applies exactly
+ * this: a basis above zero wins, otherwise the chain-derived class cost.
+ */
+function costFor(
+  symbol: string,
+  basis: Map<string, bigint>,
+  fromClass: Map<string, bigint>,
+): { cost: bigint; countedFromClass: bigint } {
+  const b = basis.get(symbol) ?? 0n;
+  if (b > 0n) return { cost: b, countedFromClass: 0n };
+  const c = fromClass.get(symbol) ?? 0n;
+  return { cost: c, countedFromClass: c > 0n ? c : 0n };
+}
+
+const build = (basis: Map<string, bigint>, fromClass: Map<string, bigint>, symbols = [SYMBOL]) => {
+  const qCost = new Map<string, bigint>();
+  let classCostInQuarantine = 0n;
+  for (const s of symbols) {
+    const { cost, countedFromClass } = costFor(s, basis, fromClass);
+    qCost.set(s, cost);
+    classCostInQuarantine += countedFromClass;
+  }
+  const q = quarantineOf(
+    symbols,
+    (s) => qCost.get(s) ?? 0n,
+    () => undefined,
+  );
+  const unknownCost = q.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
+  return { q, unknownCost, bookIncomplete: unknownCost.length > 0, classCostInQuarantine };
+};
+
+describe("a class position is valued at what the chain says it cost", () => {
+  it("SHOGUN'S TICK: no basis row, but the chain knows — the book is valuable", () => {
+    const r = build(new Map(), new Map([[SYMBOL, COST]]));
+    assert.equal(r.bookIncomplete, false, "equity, HWM, fee and breaker all run again");
+    assert.deepEqual(r.unknownCost, []);
+    assert.equal(r.q.totalCostUsdg, COST, "carried at its actual fill, 5.000000 USDG");
+  });
+
+  it("THE FAILURE IT REPLACES: with neither, the book is correctly unvaluable", () => {
+    // The control, and it must keep working. A cost that is genuinely unknown
+    // still stops the tick — the fallback may only ever fill in a figure the
+    // chain actually stated.
+    const r = build(new Map(), new Map());
+    assert.equal(r.bookIncomplete, true);
+    assert.deepEqual(r.unknownCost, [SYMBOL]);
+  });
+
+  it("a real cost_basis row still wins — the fallback never overrides one", () => {
+    const r = build(new Map([[SYMBOL, 7_000_000n]]), new Map([[SYMBOL, COST]]));
+    assert.equal(r.q.totalCostUsdg, 7_000_000n, "the ledger's own basis is authoritative");
+    assert.equal(r.classCostInQuarantine, 0n, "and nothing is attributed to the fallback");
+  });
+
+  it("THE BUDGET COUNTS THE MONEY ONCE", () => {
+    // `lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg
+    //                        + lastClassCostUsdg − classCostInQuarantine`
+    // When the fallback supplied every held class cost, the last two cancel and
+    // the ceiling is exactly what it was before this change.
+    const r = build(new Map(), new Map([[SYMBOL, COST]]));
+    const lastClassCostUsdg = COST; // what scoutCostOf returns for the same rows
+    const budget = r.q.totalCostUsdg + 0n + lastClassCostUsdg - r.classCostInQuarantine;
+    assert.equal(budget, COST, "5.000000 of unpriceable money, counted once");
+  });
+
+  it("and when the class book could not be read, the budget is untouched", () => {
+    // Nothing reaches `unpricedByDesign`, so the fallback contributes nothing
+    // and the subtrahend is zero — the pre-change arithmetic, exactly.
+    const r = build(new Map(), new Map(), []);
+    assert.equal(r.classCostInQuarantine, 0n);
+    const budget = r.q.totalCostUsdg + 0n + COST - r.classCostInQuarantine;
+    assert.equal(budget, COST);
+  });
+
+  it("A RESTART CHANGES NOTHING, because the chain is the source", () => {
+    // A redeploy wipes the child's sqlite: `cost_basis` is gone, and so is any
+    // row the executor might have written. `class_positions` is rebuilt from the
+    // vault's own ClassBuy events on the next arm, so the same figure comes
+    // back — which is the whole reason the fallback reads the class ledger and
+    // not some cached copy of the basis.
+    const beforeRestart = build(new Map([[SYMBOL, COST]]), new Map([[SYMBOL, COST]]));
+    const afterRestart = build(new Map(), new Map([[SYMBOL, COST]]));
+    assert.equal(afterRestart.q.totalCostUsdg, beforeRestart.q.totalCostUsdg, "same cost basis");
+    assert.equal(afterRestart.bookIncomplete, false, "and still a valuable book");
+  });
+});
+
+/**
+ * AND THE TICK ACTUALLY APPLIES IT.
+ *
+ * Everything above is the rule in isolation, which is testable and is also
+ * exactly the shape that can pass while the product does the old thing. The tick
+ * lives in a ~10.5k-line closure with no export, so the honest way to tie the
+ * two together is to assert on its source — the same technique
+ * `class-restart.test.ts` uses for the same reason.
+ *
+ * These are deliberately about the two decisions, not about formatting: that the
+ * fallback is consulted only when the basis is absent, and that the budget
+ * subtracts what the fallback contributed.
+ */
+describe("the tick applies the rule these tests describe", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  it("consults the class ledger only when there is no basis row", () => {
+    assert.match(
+      CODE,
+      /const basis = \(await getBasis\(agentId, qMode, s\)\)\.costUsdg;[\s\S]{0,120}if \(basis > 0n\) \{/,
+      "a real basis must short-circuit before the fallback is reached",
+    );
+    assert.match(
+      CODE,
+      /const fromClass = classCostBySymbol\.get\(s\) \?\? 0n;/,
+      "and the fallback must read the chain-derived class cost",
+    );
+  });
+
+  it("subtracts what the fallback contributed, so the budget counts once", () => {
+    assert.match(
+      CODE,
+      /quarantine\.totalCostUsdg \+ curveCostUsdg \+ lastClassCostUsdg - classCostInQuarantine/,
+      "without the subtrahend the same class money is added twice",
+    );
+  });
+
+  it("builds the cost map from HELD rows with a known cost, never from all rows", () => {
+    // A row with a zero balance is sold or swept; its cost must not prop up an
+    // equity figure. A row with a null cost is unknown and must stay unknown.
+    assert.match(CODE, /classCostBySymbol = new Map\(\s*classHeldRows[\s\S]{0,160}r\.costRaw !== null/);
+  });
+});

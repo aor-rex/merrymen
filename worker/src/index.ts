@@ -1369,6 +1369,15 @@ async function main() {
   let lastClassBalances: ReadonlyMap<string, bigint> = new Map<string, bigint>();
   /** What the OPEN class positions actually cost, from the chain. Scout budget. */
   let lastClassCostUsdg = 0n;
+  /**
+   * What the chain says each HELD class position cost, keyed by the symbol the
+   * quarantine looks costs up under.
+   *
+   * Replaced wholesale on every class read, never merged, for the same reason
+   * `lastClassBalances` is: a position that stopped answering must not leave a
+   * stale cost behind for equity to be built on.
+   */
+  let classCostBySymbol = new Map<string, bigint>();
   /** Last class-refusal tally, so the reason is logged on change and not per tick. */
   let lastClassRefusalKey: string | null = null;
   /** Diagnostic dedupe for the candidate census — counts only, never ages. */
@@ -7937,6 +7946,30 @@ async function main() {
         symbols: classHeldRows.map((r) => r.symbol ?? short(r.token)),
         tokens: classHeldRows.map((r) => r.token),
       };
+      // WHAT THE CHAIN SAYS EACH HELD CLASS POSITION COST, keyed the way the
+      // quarantine looks costs up.
+      //
+      // The quarantine reads `cost_basis`, and no class buy writes one — so a
+      // class token arrived in `unpricedByDesign` with a cost of ZERO, which is
+      // the one value that means "we know neither what it is worth nor what was
+      // paid" and makes the whole book unvaluable. Equity, the high-water mark,
+      // the fee AND the drawdown breaker are then all skipped for the tick.
+      //
+      // That is right when a cost is genuinely unknown and wrong here, because
+      // it is not unknown at all: `ClassBuy.quoteIn` is on chain, it is exact,
+      // `writeClassLedger` already persists it, and it is re-derived from the
+      // chain on every arm — so unlike a `cost_basis` row it survives the
+      // container rebuild that wipes the child's sqlite.
+      //
+      // Shogun is the live case: 5.000000 USDG into 0x34d7…b4af at block
+      // 63155033, on chain and in the class ledger, and its book still reported
+      // "unpriced AND no cost on record" — so the breaker it needs most was the
+      // thing being skipped.
+      classCostBySymbol = new Map(
+        classHeldRows
+          .filter((r) => r.costRaw !== null)
+          .map((r) => [r.symbol ?? short(r.token), r.costRaw as bigint]),
+      );
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
       // for the same reason `lastCurveLegs` is: a token that stopped answering
@@ -8065,7 +8098,25 @@ async function main() {
     // synchronous cost lookup (the ledger read is async now).
     const qMode: BasisMode = paper ? "paper" : "live";
     const qCost = new Map<string, bigint>();
-    for (const s of unpricedByDesign) qCost.set(s, (await getBasis(agentId, qMode, s)).costUsdg);
+    /** Σ class cost the quarantine has now counted, so the budget cannot double it. */
+    let classCostInQuarantine = 0n;
+    for (const s of unpricedByDesign) {
+      const basis = (await getBasis(agentId, qMode, s)).costUsdg;
+      if (basis > 0n) {
+        qCost.set(s, basis);
+        continue;
+      }
+      // NO cost_basis ROW — fall back to what the CHAIN says this position cost.
+      //
+      // Only ever a fallback, and only upward from zero: a real basis row always
+      // wins, so nothing that already worked changes. The class ledger's figure
+      // is `ClassBuy.quoteIn`, the actual fill rather than the size that was
+      // proposed, re-derived from the vault's own events on every arm — which is
+      // why it is still there after the redeploy that wipes `cost_basis`.
+      const fromClass = classCostBySymbol.get(s) ?? 0n;
+      if (fromClass > 0n) classCostInQuarantine += fromClass;
+      qCost.set(s, fromClass);
+    }
     const quarantine = quarantineOf(
       unpricedByDesign,
       (symbol) => qCost.get(symbol) ?? 0n,
@@ -8146,7 +8197,22 @@ async function main() {
     // for unpriceable money bounded nothing at all for the least priceable
     // asset on the chain. No double count: there is no cost_basis row to have
     // counted it once already, which is precisely the defect.
-    lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg;
+    // MINUS WHAT THE QUARANTINE HAS NOW ALREADY COUNTED.
+    //
+    // The comment above says "No double count: there is no cost_basis row to
+    // have counted it once already, which is precisely the defect." The defect
+    // is fixed — the quarantine now falls back to the class ledger's
+    // chain-derived cost — so the premise of that sentence no longer holds and
+    // the same class money would be added twice.
+    //
+    // Subtracting exactly what the fallback contributed keeps this figure
+    // byte-identical in both directions: when every held class symbol got its
+    // cost from the fallback, `classCostInQuarantine` equals `lastClassCostUsdg`
+    // and the two cancel; when the class book could not be read at all, nothing
+    // reached `unpricedByDesign`, the fallback contributed nothing, and the
+    // subtrahend is zero.
+    lastQuarantinedUsdg =
+      quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
     const bookIncomplete = unknownCost.length > 0;
