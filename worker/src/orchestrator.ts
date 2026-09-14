@@ -59,6 +59,7 @@ import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort
 import { datasetLines, viewRun } from "./brain-dataset";
 import { auditIdentity, type GrantClaimLite, type IdentityRowLite } from "./identity-audit";
 import { replayLines, scoreDecision, type Observation, type PricedDecision } from "./replay";
+import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
@@ -1786,6 +1787,197 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  */
 let liveIntentBackfillRan = false;
 let tenantInspectRan = false;
+let hwmRepairRan = false;
+
+/**
+ * WHAT THE FLEET'S HIGH-WATER MARKS SHOULD BE, AND WHY. REPORT ONLY.
+ *
+ * `MERRYMEN_REPAIR_HWM=report` prints one plan per tenant and writes nothing.
+ * There is deliberately no apply path in this commit: the figures it proposes
+ * are what the drawdown breaker divides by and what the performance fee is
+ * measured against, and a tool that could write them the moment it was armed is
+ * one typo away from halting a fleet or charging owners on their own principal.
+ *
+ * It derives rather than assumes — see `hwm-repair.ts` for the rule and the two
+ * clamps. What lives HERE is only the gathering: the roster from the grant
+ * store, the durable figures from Postgres, and the capital totals from a
+ * full-history chain sweep classified by `classifyUsdgMovement`.
+ *
+ * THE MANAGED SYSTEM IS THE ACCOUNT *AND* ITS CLASS VAULT. Both are scanned and
+ * their capital totals summed, because money can enter custody without ever
+ * touching the account — Shogun's vault was paid 5.785344 USDG directly by a
+ * DOGGOS-linked contract, which no account-scoped scan can see. Movements
+ * BETWEEN the two are classified `internal` or as trade legs and contribute
+ * nothing, so summing cannot double-count them.
+ */
+async function runHwmRepairIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_REPAIR_HWM ?? "").trim().toLowerCase();
+  if (!mode) return;
+  if (hwmRepairRan) return;
+  hwmRepairRan = true;
+
+  if (mode !== "report") {
+    // NAMED, NOT ASSUMED. An operator who types `apply` must be told plainly
+    // that it does not exist yet rather than have it silently read as `report`
+    // and come away believing a repair landed.
+    log(`hwm| MERRYMEN_REPAIR_HWM=${mode} is not a mode. Only "report" exists; nothing was done.`);
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("hwm| asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { planHwmRepair, repairLines } = await import("./hwm-repair");
+    const shared = await makePgDb(url);
+
+    const agentRows = (await shared
+      .prepare(
+        "SELECT smart_account, name, hwm_usdg, hwm_withdrawn_usdg FROM agents",
+      )
+      .all()) as unknown as Record<string, unknown>[];
+    const agentBy = new Map(agentRows.map((a) => [String(a.smart_account).toLowerCase(), a]));
+
+    const equityRows = (await shared
+      .prepare("SELECT agent_id, equity_usdg FROM equity ORDER BY agent_id, at DESC, id DESC")
+      .all()) as unknown as Record<string, unknown>[];
+    const equityBy = new Map<string, number>();
+    for (const e of equityRows) {
+      const k = String(e.agent_id).toLowerCase();
+      if (!equityBy.has(k)) equityBy.set(k, Number(e.equity_usdg));
+    }
+
+    // THE PEAK'S PERFORMANCE COMPONENT. `fee_accruals` is the only durable
+    // record of the mark being raised by profit rather than by capital, so it
+    // is what keeps a genuine earner's peak from being cut down to their
+    // deposits — which would re-charge them for profit already paid on.
+    const feeRows = (await shared
+      .prepare("SELECT agent_id, SUM(profit_usdg) AS profit FROM fee_accruals GROUP BY agent_id")
+      .all()) as unknown as Record<string, unknown>[];
+    const profitBy = new Map(feeRows.map((r) => [String(r.agent_id).toLowerCase(), Number(r.profit ?? 0)]));
+
+    // Class positions the owner swept home. Non-USDG capital leaving custody,
+    // which no USDG log names — valued at COST, never at a curve mark.
+    const classRows = (await shared
+      .prepare("SELECT agent_id, token, state, cost_usdg FROM class_positions")
+      .all()) as unknown as Record<string, unknown>[];
+    const sweptCostBy = new Map<string, number>();
+    const sweptUnknownBy = new Map<string, number>();
+    for (const c of classRows) {
+      if (String(c.state ?? "") !== "swept") continue;
+      const k = String(c.agent_id).toLowerCase();
+      const raw = c.cost_usdg === null || c.cost_usdg === undefined ? null : String(c.cost_usdg);
+      if (raw === null) {
+        sweptUnknownBy.set(k, (sweptUnknownBy.get(k) ?? 0) + 1);
+        continue;
+      }
+      sweptCostBy.set(k, (sweptCostBy.get(k) ?? 0) + Number(raw) / 1e6);
+    }
+
+    // ── the roster, from the grant store ─────────────────────────────────
+    const roster: { tenant: string; account: string; vaults: readonly string[]; capBps: number | null }[] = [];
+    const gs = getGrantStore();
+    for (const tenant of await gs.listTenants()) {
+      const g = await gs.get(tenant);
+      const acct = g?.smartAccount ? String(g.smartAccount) : null;
+      if (!acct) {
+        log(`hwm| tenant ${tenant} holds a grant with no smart account — skipped`);
+        continue;
+      }
+      const caps = (g as unknown as { caps?: Record<string, unknown> })?.caps ?? null;
+      const pct = caps && typeof caps.maxDrawdownPct === "number" ? caps.maxDrawdownPct : null;
+      roster.push({ tenant, account: acct, vaults: custodyAddressesOf(g), capBps: pct === null ? null : pct * 100 });
+    }
+    log(`hwm| roster: ${roster.length} tenant(s) with a grant`);
+
+    // ── the chain, full history, accounts AND their vaults ───────────────
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+    const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+    const custodyOf = new Map<string, readonly string[]>();
+    for (const r of roster) if (r.vaults.length) custodyOf.set(r.account.toLowerCase(), r.vaults);
+    const scanTargets = [...new Set(roster.flatMap((r) => [r.account, ...r.vaults]))];
+    log(`hwm| scanning ${scanTargets.length} address(es) to block ${head} (accounts and their class vaults)`);
+
+    const chain = await scanFleetCapital(rpc, {
+      accounts: scanTargets,
+      usdgToken: String(CASH.USDG),
+      fromBlock: 0n,
+      toBlock: head,
+      custodyAddressesFor: (a) => custodyOf.get(a.toLowerCase()),
+      log: (m) => log(`hwm| ${m}`),
+    });
+
+    const plans = roster.map((r) => {
+      const key = r.account.toLowerCase();
+      const a = agentBy.get(key);
+      const gross = a?.hwm_usdg === undefined || a?.hwm_usdg === null ? null : Number(a.hwm_usdg);
+      const withdrawn = a?.hwm_withdrawn_usdg === undefined || a?.hwm_withdrawn_usdg === null ? 0 : Number(a.hwm_withdrawn_usdg);
+
+      // SUMMED ACROSS THE ACCOUNT AND ITS VAULT, which together are the
+      // managed system. `complete` is AND-ed: one unread window anywhere in
+      // custody makes the whole derivation for this tenant unsafe.
+      let deposits: number | null = 0;
+      let withdrawals: number | null = 0;
+      let internalMoves = 0;
+      let tradeLegs = 0;
+      let ambiguousMoves = 0;
+      let complete = true;
+      const notes: string[] = [];
+      for (const addr of [r.account, ...r.vaults]) {
+        const c = chain.get(addr.toLowerCase());
+        if (!c) {
+          complete = false;
+          notes.push(`no scan result for ${addr}`);
+          continue;
+        }
+        if (!c.complete) complete = false;
+        deposits = deposits === null ? null : deposits + Number(BigInt(c.totals.grossContributionsRaw)) / 1e6;
+        withdrawals = withdrawals === null ? null : withdrawals + Number(BigInt(c.totals.grossWithdrawalsRaw)) / 1e6;
+        internalMoves += c.totals.internal;
+        tradeLegs += c.totals.tradeLegs;
+        ambiguousMoves += c.totals.ambiguous;
+        notes.push(...c.notes);
+      }
+
+      return planHwmRepair({
+        tenant: r.tenant,
+        smartAccount: r.account,
+        name: a?.name === undefined || a?.name === null ? null : String(a.name),
+        equityUsdg: equityBy.get(key) ?? null,
+        currentHwmUsdg: gross === null ? null : Math.max(0, gross - withdrawn),
+        maxDrawdownBps: r.capBps,
+        depositsUsdg: deposits,
+        withdrawalsUsdg: withdrawals,
+        internalMoves,
+        tradeLegs,
+        ambiguousMoves,
+        sweptAtCostUsdg: sweptCostBy.get(key) ?? 0,
+        sweptUnpriceable: sweptUnknownBy.get(key) ?? 0,
+        ratchetedProfitUsdg: profitBy.get(key) ?? 0,
+        scanComplete: complete,
+        scanNote: notes.length ? notes.slice(0, 2).join("; ") : null,
+      });
+    });
+
+    for (const line of repairLines(plans)) log(`hwm| ${line}`);
+    log("hwm| REPORT ONLY — no apply path exists yet. Remove MERRYMEN_REPAIR_HWM now.");
+  } catch (e) {
+    log(`hwm| FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 let enableClassRan = false;
 
 /**
@@ -2487,6 +2679,8 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // than absent.
     const tenantByAccount = new Map<string, string>();
     const byAccount = new Map<string, Record<string, unknown>>();
+    /** account → the class vault holding its assets, for the classifier. */
+    const custodyVaults = new Map<string, readonly string[]>();
     for (const a of ledgerAgents) byAccount.set(String(a.smart_account ?? "").toLowerCase(), a);
 
     let rosterOnly = 0;
@@ -2501,6 +2695,12 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           continue;
         }
         tenantByAccount.set(acct.toLowerCase(), tenant);
+        // FROM THE GRANT, which is the only place a class vault can honestly
+        // come from: it is CREATE2-salted with one smart account, so there is no
+        // fleet-wide list, and a settings-sourced value would point one owner's
+        // reader at another owner's vault (custody.ts).
+        const vaults = custodyAddressesOf(g);
+        if (vaults.length > 0) custodyVaults.set(acct.toLowerCase(), vaults);
         if (byAccount.has(acct.toLowerCase())) continue;
         rosterOnly += 1;
         byAccount.set(acct.toLowerCase(), {
@@ -2595,6 +2795,21 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       usdgToken,
       fromBlock: 0n,
       toBlock: head,
+      // WITHOUT THIS EVERY CLASS BUY READS AS A WITHDRAWAL.
+      //
+      // A class buy moves USDG account→vault and the token curve→vault, so the
+      // token never touches the account at all. `classifyUsdgMovement`'s primary
+      // rule looks for a paired token moving the other way into somewhere that
+      // is OURS, and without the vault in that set nothing pairs: the leg falls
+      // through to `no-pair-external` and is booked `capital-out` — the owner's
+      // own money recorded as having left.
+      //
+      // `chain-capital.ts` says exactly this about omitting it ("the fleet-scale
+      // version of the same bug deposit-log carries per agent") and the argument
+      // was simply never passed. It matters here and now because this scan feeds
+      // a repair: a trade counted as a withdrawal moves the peak the drawdown
+      // breaker divides by, in the direction that halts a healthy account.
+      custodyAddressesFor: (a) => custodyVaults.get(a.toLowerCase()),
       log: (m) => log(`recon| ${m}`),
     });
 
@@ -3137,6 +3352,7 @@ export async function runOrchestrator(): Promise<void> {
        */
       await runLiveIntentBackfillIfAsked();
       await runTenantInspectIfAsked();
+      await runHwmRepairIfAsked();
       await runEnableClassIfAsked();
       await reconcile();
       watchdog();
