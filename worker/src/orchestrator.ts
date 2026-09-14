@@ -1899,6 +1899,27 @@ async function runHwmRepairIfAsked(): Promise<void> {
     }
     log(`hwm| roster: ${roster.length} tenant(s) with a grant`);
 
+    // SCOPE, because `railway logs` is a ~500-line snapshot rather than a
+    // stream and the ledger mirror alone writes a couple of hundred lines a
+    // minute. A 45-tenant report is ~450 lines and pushes its own head out of
+    // the window before it can be read — a report that cannot be retrieved is
+    // not a report. Names TENANTS, not accounts, because that is what an
+    // operator has in front of them.
+    const only = new Set(
+      (process.env.MERRYMEN_REPAIR_HWM_ONLY ?? "")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.startsWith("0x")),
+    );
+    const scoped = only.size ? roster.filter((r) => only.has(r.tenant.toLowerCase())) : roster;
+    if (only.size && scoped.length !== only.size) {
+      // LOUD. A named tenant that is not in the roster silently does nothing,
+      // and "2 examined" after naming 3 gives an operator no way to tell which.
+      log(`hwm| WARNING: ${only.size} tenant(s) named but ${scoped.length} found in the roster`);
+    }
+    roster.length = 0;
+    roster.push(...scoped);
+
     // ── the chain, full history, accounts AND their vaults ───────────────
     const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
     let rpcId = 1;
