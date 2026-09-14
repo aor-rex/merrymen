@@ -166,3 +166,55 @@ describe("the tick applies the rule these tests describe", () => {
     assert.match(CODE, /classCostBySymbol = new Map\(\s*classHeldRows[\s\S]{0,160}r\.costRaw !== null/);
   });
 });
+
+/**
+ * THE QUOTE ASSET IN THE VAULT IS CASH.
+ *
+ * The moment the real position started valuing correctly, Shogun's book failed
+ * on the other token in its vault:
+ *
+ *     book incomplete (0x5fc5…d168 unpriced AND no cost on record)
+ *
+ * 0x5fc5…d168 is USDG. As a "position" it is nonsense in both directions: it has
+ * no ClassBuy so it has no basis and reads as unknown, and it has no price feed
+ * to look up because it IS the unit everything else is priced in.
+ *
+ * Excluding it without counting it would be the opposite error — that is the
+ * owner's money at an address `readAccountBalances` does not cover.
+ */
+describe("USDG left in the class vault is cash, not an unpriceable position", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  it("is kept out of the set the quarantine values", () => {
+    assert.match(
+      CODE,
+      /symbols: classHeldRows\s*\.filter\(\(r\) => r\.token\.toLowerCase\(\) !== CASH\.USDG\.toLowerCase\(\)\)/,
+      "the cash token must not reach unpricedByDesign",
+    );
+  });
+
+  it("AND IS ADDED TO EQUITY AT FACE VALUE, not dropped", () => {
+    assert.match(
+      CODE,
+      /cashUsdg: balances\.cashUsdg \+ classCashUsdg,/,
+      "dropping it would understate the book by the owner's own money",
+    );
+    assert.match(
+      CODE,
+      /classCashUsdg = classHeldRows[\s\S]{0,200}CASH\.USDG\.toLowerCase\(\)[\s\S]{0,160}classRead\.balances\.get/,
+      "and it is the vault's real balance, not a cost",
+    );
+  });
+
+  it("the class LEDGER still records it — only the valuation changes", () => {
+    // The filter is at the valuation, not at `reconcileClassBook`. The ledger
+    // should go on knowing every token the vault holds; a recovery disclosure
+    // that stopped listing stranded USDG is exactly the defect that shipped
+    // once already.
+    assert.doesNotMatch(
+      CODE,
+      /reconcileClassBook\([\s\S]{0,400}CASH\.USDG/,
+      "the reconciler must stay ignorant of which token is the unit",
+    );
+  });
+});

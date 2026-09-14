@@ -1378,6 +1378,8 @@ async function main() {
    * stale cost behind for equity to be built on.
    */
   let classCostBySymbol = new Map<string, bigint>();
+  /** USDG the class vault holds. Cash at an address the balance read misses. */
+  let classCashUsdg = 0n;
   /** Last class-refusal tally, so the reason is logged on change and not per tick. */
   let lastClassRefusalKey: string | null = null;
   /** Diagnostic dedupe for the candidate census — counts only, never ages. */
@@ -7943,8 +7945,16 @@ async function main() {
       );
       classBook = {
         ok: classRead.unread.length === 0,
-        symbols: classHeldRows.map((r) => r.symbol ?? short(r.token)),
-        tokens: classHeldRows.map((r) => r.token),
+        // THE CASH TOKEN IS NOT A POSITION — see classCashUsdg below. Filtered
+        // here rather than at the reconciler, because the class LEDGER should go
+        // on recording every token the vault holds; it is only the VALUATION
+        // that must not treat a dollar as an unpriceable asset.
+        symbols: classHeldRows
+          .filter((r) => r.token.toLowerCase() !== CASH.USDG.toLowerCase())
+          .map((r) => r.symbol ?? short(r.token)),
+        tokens: classHeldRows
+          .filter((r) => r.token.toLowerCase() !== CASH.USDG.toLowerCase())
+          .map((r) => r.token),
       };
       // WHAT THE CHAIN SAYS EACH HELD CLASS POSITION COST, keyed the way the
       // quarantine looks costs up.
@@ -7970,6 +7980,26 @@ async function main() {
           .filter((r) => r.costRaw !== null)
           .map((r) => [r.symbol ?? short(r.token), r.costRaw as bigint]),
       );
+      // THE QUOTE ASSET IN THE VAULT IS CASH, NOT AN UNPRICEABLE POSITION.
+      //
+      // The class ledger enumerates every token the vault holds, and that
+      // includes USDG left behind as change. As a "position" it is nonsense in
+      // both directions: it has no ClassBuy, so it has no cost basis and reads
+      // as unknown — which made the whole book unvaluable and paused the
+      // breaker — and it has no price feed to look up, because it IS the unit
+      // everything else is priced in.
+      //
+      // Shogun hit exactly this the moment the real position started valuing
+      // correctly: `book incomplete (0x5fc5…d168 unpriced AND no cost on
+      // record)`, where 0x5fc5…d168 is USDG.
+      //
+      // Excluding it without counting it would be the opposite error — that is
+      // the owner's money, sitting at an address the account-balance read does
+      // not cover. So it leaves the quarantine and joins the CASH term at face
+      // value, which is the only honest valuation of a dollar.
+      classCashUsdg = classHeldRows
+        .filter((r) => r.token.toLowerCase() === CASH.USDG.toLowerCase())
+        .reduce((sum, r) => sum + (classRead.balances.get(r.token) ?? 0n), 0n);
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
       // for the same reason `lastCurveLegs` is: a token that stopped answering
@@ -8239,7 +8269,11 @@ async function main() {
     // reading as an instant loss: cash left the wallet, so without it equity
     // would drop by the full spend and book a drawdown that never happened.
     const equityUsdg = composeEquityUsdg({
-      cashUsdg: balances.cashUsdg,
+      // PLUS THE QUOTE ASSET SITTING IN THE CLASS VAULT. It is the owner's
+      // money at an address `readAccountBalances` does not cover, and it is
+      // USDG, so it is worth its balance. No double count: the vault is a
+      // different address from the account this cash figure reads.
+      cashUsdg: balances.cashUsdg + classCashUsdg,
       vaultUsdg: balances.vaultUsdg,
       positionsUsdg,
       quarantinedCostUsdg: quarantine.totalCostUsdg,
