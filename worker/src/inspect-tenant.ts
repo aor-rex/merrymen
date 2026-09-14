@@ -284,3 +284,62 @@ export function describeAccounting(f: AccountingFacts): string[] {
   }
   return lines;
 }
+
+/**
+ * WHERE THE MONEY WENT, when the peak and the equity disagree.
+ *
+ * `describeAccounting` can say the peak is above what is left; it cannot say
+ * whether the shortfall is a LOSS (which the breaker exists to stop, and which
+ * nothing here may repair away) or a WITHDRAWAL (which should have moved the
+ * peak with it and did not). Only the position ledger separates those, so this
+ * prints it: what was bought, what it cost, what came back, and how each row
+ * ended.
+ *
+ * `recovered` is the answer that matters. It is the state the class ledger uses
+ * for a holding whose basis it cannot find, and it is what an owner-driven
+ * sweep leaves behind — money that went home rather than money that was lost.
+ */
+export interface LedgerFacts {
+  /** Trade rows by status: `{landed: 2, rejected: 94}`. Null when unread. */
+  tradesByStatus: Record<string, number> | null;
+  /** Non-class positions still on the books. Null when unread. */
+  openPositions: { symbol: string; custody: string; qty: string }[] | null;
+  /** Class rows, whatever their state. Null when unread. */
+  classPositions:
+    | { symbol: string; state: string; costUsdg: string | null; proceedsUsdg: string | null }[]
+    | null;
+  error: string | null;
+}
+
+export function describeLedger(f: LedgerFacts): string[] {
+  const lines: string[] = [``, `── where the money went ───────────────────────`];
+  if (f.error !== null) {
+    lines.push(`ledger UNREADABLE — ${f.error}`);
+    return lines;
+  }
+
+  if (f.tradesByStatus === null) lines.push(`trades by status             UNKNOWN`);
+  else {
+    const entries = Object.entries(f.tradesByStatus).sort((a, b) => b[1] - a[1]);
+    lines.push(
+      `trades by status             ${entries.length === 0 ? "none" : entries.map(([k, v]) => `${k}=${v}`).join(" ")}`,
+    );
+    // THE FIGURE THE DRAWDOWN QUESTION TURNS ON. A rejected trade moved no
+    // money, so a book full of them cannot have lost any.
+    const moved = entries.filter(([k]) => k === "landed" || k === "submitted").reduce((n, [, v]) => n + v, 0);
+    lines.push(`  of which actually moved    ${moved}`);
+  }
+
+  if (f.openPositions === null) lines.push(`open positions               UNKNOWN`);
+  else if (f.openPositions.length === 0) lines.push(`open positions               none`);
+  else for (const p of f.openPositions) lines.push(`  ${p.symbol.padEnd(10)} ${p.custody.padEnd(8)} ${p.qty}`);
+
+  if (f.classPositions === null) lines.push(`class positions              UNKNOWN`);
+  else if (f.classPositions.length === 0) lines.push(`class positions              none`);
+  else
+    for (const p of f.classPositions)
+      lines.push(
+        `  ${p.symbol.padEnd(10)} ${p.state.padEnd(10)} cost ${p.costUsdg ?? "unknown"} proceeds ${p.proceedsUsdg ?? "unknown"}`,
+      );
+  return lines;
+}

@@ -1875,11 +1875,12 @@ async function runTenantInspectIfAsked(): Promise<void> {
   }
 
   try {
-    const { describeTenant, describeAccounting, type: _t } = (await import(
+    const { describeTenant, describeAccounting, describeLedger, type: _t } = (await import(
       "./inspect-tenant"
     )) as never as {
       describeTenant: (f: Record<string, unknown>) => string[];
       describeAccounting: (f: Record<string, unknown>) => string[];
+      describeLedger: (f: Record<string, unknown>) => string[];
       type?: never;
     };
     void _t;
@@ -1927,6 +1928,14 @@ async function runTenantInspectIfAsked(): Promise<void> {
       trades: null,
       error: null,
     };
+    const ledger: {
+      tradesByStatus: Record<string, number> | null;
+      openPositions: { symbol: string; custody: string; qty: string }[] | null;
+      classPositions:
+        | { symbol: string; state: string; costUsdg: string | null; proceedsUsdg: string | null }[]
+        | null;
+      error: string | null;
+    } = { tradesByStatus: null, openPositions: null, classPositions: null, error: null };
     try {
       const { rows } = await client.query(
         "SELECT grant_json FROM grants WHERE lower(tenant) = lower($1)",
@@ -1973,10 +1982,38 @@ async function runTenantInspectIfAsked(): Promise<void> {
             [acctAddr],
           );
           acct.trades = Number(t.rows[0]?.n ?? 0);
+
+          const ts = await client.query(
+            "SELECT status, count(*)::int AS n FROM trades WHERE lower(agent_id) = lower($1) GROUP BY status",
+            [acctAddr],
+          );
+          ledger.tradesByStatus = Object.fromEntries(
+            ts.rows.map((x) => [String(x.status), Number(x.n)]),
+          );
+          const ps = await client.query(
+            "SELECT symbol, custody, qty FROM positions WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          ledger.openPositions = ps.rows.map((x) => ({
+            symbol: String(x.symbol),
+            custody: String(x.custody ?? "account"),
+            qty: String(x.qty),
+          }));
+          const cp = await client.query(
+            "SELECT symbol, state, cost_usdg, proceeds_usdg FROM class_positions WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          ledger.classPositions = cp.rows.map((x) => ({
+            symbol: String(x.symbol ?? "?"),
+            state: String(x.state ?? "?"),
+            costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
+            proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
+          }));
         } catch (e) {
           // UNREADABLE, not empty. A failed count must never render as zero
           // trades, because zero trades is the premise of the verdict below.
           acct.error = e instanceof Error ? e.message : String(e);
+          ledger.error = acct.error;
         }
       }
     } finally {
@@ -2090,6 +2127,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
       error: acct.error,
     }))
       log(`inspect: ${line}`);
+    for (const line of describeLedger(ledger)) log(`inspect: ${line}`);
     log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
   } catch (e) {
     log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);
