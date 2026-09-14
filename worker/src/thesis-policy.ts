@@ -166,7 +166,32 @@ export const PUBLISHABLE_STRATEGIES = [
   "even-keel",
   "dip-hunter",
   "trencher",
+  // `llm-strategist` IS DELIBERATELY ABSENT — see thesis.test.ts, which pins
+  // that absence: its decisions publish as `strategist`, which is MODEL trust
+  // (capped, address-checked) rather than the uncapped trust this list grants.
+  //
+  // KNOWN GAP, recorded rather than silently closed. Two sites in index.ts —
+  // the idle post and the ensureDecision fallback — file renderWhy output (OUR
+  // words: `model-held`, stop-floor, take-profit) under this strategy's name,
+  // so for a strategist tenant those sentences reach no key at all and publish
+  // nothing. Closing it by adding the name here would widen a trust boundary
+  // that was drawn on purpose, so it is the owner's call, not a tidy-up.
 ] as const;
+
+/**
+ * The source a decision row is filed under, from the strategy's own name.
+ *
+ * A strategy may carry a parenthetical suffix that identifies its ENGINE rather
+ * than its identity — `llm-strategist(anthropic:claude-opus-4)`. That belongs in
+ * the operator log, where it tells you which driver answered, and it must not
+ * reach the publication key: the policy is keyed by strategy, and a source that
+ * silently changes when someone swaps the model is a source that matches
+ * nothing. Stripping it here keeps one name in the ledger no matter who the
+ * driver is.
+ */
+export function publicationSourceFor(strategyName: string): string {
+  return `strategy:${strategyName.replace(/\([^)]*\)\s*$/, "")}`;
+}
 
 /** How much of a row each source is trusted for. Absent key ⇒ publish nothing. */
 const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.freeze({
@@ -237,7 +262,15 @@ export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(
 const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
 
 /** Matches the `/why` truncation point, so no surface cuts one mid-word. */
-const REASON_MAX = 220;
+/**
+ * The published length of a model's reason.
+ *
+ * EXPORTED because the web rail used to keep its own, shorter number — 90 — and
+ * so clipped sentences the card beside it rendered in full. A cap is a product
+ * decision about how much of an agent's view a reader gets; two of them means
+ * the tighter one silently wins and nobody knows which.
+ */
+export const REASON_MAX = 220;
 
 /**
  * Why a proposal never reached the wall, said in our words.

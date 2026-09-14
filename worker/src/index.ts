@@ -80,7 +80,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, publicationSourceFor, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -8711,7 +8711,7 @@ async function main() {
         await addDecision({
           id: newDecisionId(),
           agent_id: agentId,
-          source: `strategy:${strategy.name}`,
+          source: publicationSourceFor(strategy.name),
           reason: idleNow,
         });
       }
@@ -8726,7 +8726,7 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
-      await ensureDecision(intent, `strategy:${strategy.name}`, w ? renderWhy(w) : undefined);
+      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w) : undefined);
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
