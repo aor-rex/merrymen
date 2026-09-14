@@ -1875,8 +1875,11 @@ async function runTenantInspectIfAsked(): Promise<void> {
   }
 
   try {
-    const { describeTenant, type: _t } = (await import("./inspect-tenant")) as never as {
+    const { describeTenant, describeAccounting, type: _t } = (await import(
+      "./inspect-tenant"
+    )) as never as {
       describeTenant: (f: Record<string, unknown>) => string[];
+      describeAccounting: (f: Record<string, unknown>) => string[];
       type?: never;
     };
     void _t;
@@ -1896,6 +1899,34 @@ async function runTenantInspectIfAsked(): Promise<void> {
     const client = new pg.Client({ connectionString: url });
     await client.connect();
     let grant: Record<string, unknown> | null = null;
+    // THE ACCOUNTING HALF, read from the same connection. Everything the
+    // drawdown breaker divides by lives in this database and nowhere an
+    // operator can reach, which is the whole reason for the round trip.
+    const acct: {
+      durableHwmUsdg: number | null;
+      durableAccruedFeeUsdg: number | null;
+      durableEpoch: number | null;
+      equityUsdg: number | null;
+      flows:
+        | {
+            direction: string;
+            amountUsdg: number;
+            source: string;
+            txHash: string | null;
+            blockNumber: number | null;
+          }[]
+        | null;
+      trades: number | null;
+      error: string | null;
+    } = {
+      durableHwmUsdg: null,
+      durableAccruedFeeUsdg: null,
+      durableEpoch: null,
+      equityUsdg: null,
+      flows: null,
+      trades: null,
+      error: null,
+    };
     try {
       const { rows } = await client.query(
         "SELECT grant_json FROM grants WHERE lower(tenant) = lower($1)",
@@ -1906,6 +1937,48 @@ async function runTenantInspectIfAsked(): Promise<void> {
         typeof raw === "string"
           ? (JSON.parse(raw) as Record<string, unknown>)
           : ((raw as Record<string, unknown>) ?? null);
+
+      const acctAddr = typeof grant?.smartAccount === "string" ? grant.smartAccount : null;
+      if (acctAddr) {
+        try {
+          const a = await client.query(
+            "SELECT hwm_usdg, accrued_fee_usdg, epoch FROM agents WHERE lower(smart_account) = lower($1)",
+            [acctAddr],
+          );
+          const r = a.rows[0];
+          if (r) {
+            acct.durableHwmUsdg = Number(r.hwm_usdg);
+            acct.durableAccruedFeeUsdg = Number(r.accrued_fee_usdg);
+            acct.durableEpoch = Number(r.epoch);
+          }
+          const e = await client.query(
+            "SELECT equity_usdg FROM equity WHERE lower(agent_id) = lower($1) ORDER BY at DESC LIMIT 1",
+            [acctAddr],
+          );
+          if (e.rows[0]) acct.equityUsdg = Number(e.rows[0].equity_usdg);
+          const fl = await client.query(
+            `SELECT direction, amount_usdg, source, tx_hash, block_number
+               FROM flows WHERE lower(agent_id) = lower($1) ORDER BY at ASC, id ASC`,
+            [acctAddr],
+          );
+          acct.flows = fl.rows.map((x) => ({
+            direction: String(x.direction),
+            amountUsdg: Number(x.amount_usdg),
+            source: String(x.source),
+            txHash: x.tx_hash === null ? null : String(x.tx_hash),
+            blockNumber: x.block_number === null ? null : Number(x.block_number),
+          }));
+          const t = await client.query(
+            "SELECT count(*)::int AS n FROM trades WHERE lower(agent_id) = lower($1)",
+            [acctAddr],
+          );
+          acct.trades = Number(t.rows[0]?.n ?? 0);
+        } catch (e) {
+          // UNREADABLE, not empty. A failed count must never render as zero
+          // trades, because zero trades is the premise of the verdict below.
+          acct.error = e instanceof Error ? e.message : String(e);
+        }
+      }
     } finally {
       await client.end();
     }
@@ -1999,6 +2072,24 @@ async function runTenantInspectIfAsked(): Promise<void> {
     };
 
     for (const line of describeTenant(facts)) log(`inspect: ${line}`);
+
+    // The signed ceiling, read off the grant's own caps — the same derivation
+    // limits.ts makes, so the number printed is the one the breaker compares
+    // against rather than a default that resembles it.
+    const caps = (grant.caps ?? null) as Record<string, unknown> | null;
+    const pct = caps && typeof caps.maxDrawdownPct === "number" ? caps.maxDrawdownPct : null;
+    for (const line of describeAccounting({
+      smartAccount,
+      durableHwmUsdg: acct.durableHwmUsdg,
+      durableAccruedFeeUsdg: acct.durableAccruedFeeUsdg,
+      durableEpoch: acct.durableEpoch,
+      equityUsdg: acct.equityUsdg,
+      maxDrawdownBps: pct === null ? null : pct * 100,
+      flows: acct.flows,
+      trades: acct.trades,
+      error: acct.error,
+    }))
+      log(`inspect: ${line}`);
     log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
   } catch (e) {
     log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);

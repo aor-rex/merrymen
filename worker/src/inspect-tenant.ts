@@ -157,3 +157,130 @@ export function describeTenant(f: TenantFacts): string[] {
   );
   return lines;
 }
+
+/**
+ * THE SECOND QUESTION THIS MODULE GETS ASKED: why is the breaker refusing?
+ *
+ * The drawdown breaker divides by `agents.hwm_usdg` (policy.ts:725-731), and
+ * that figure lives in the SHARED database — the one an operator's machine
+ * cannot reach. So "is this a real drawdown or a stale peak?" was, like the
+ * settings question above, answerable only by guessing.
+ *
+ * ONE INVARIANT MAKES THE ANSWER CHECKABLE. A peak is contributed capital plus
+ * realised profit. An agent that has never traded has no realised profit, so
+ * for it the peak MUST equal net contributions. When the durable peak exceeds
+ * what the owner ever put in, the excess is not performance — it is money the
+ * book is still counting after it left, or counted twice on the way in. That is
+ * a defect in the accounting, and it is reported here as one rather than
+ * rendered as a drawdown the owner is expected to trade out of.
+ *
+ * SAME DISCIPLINE AS ABOVE: a flat record of named numbers. No settings blob,
+ * no grant, no keys.
+ */
+export interface AccountingFacts {
+  smartAccount: string | null;
+  /** `agents.hwm_usdg` as the SHARED database holds it. Null when unread. */
+  durableHwmUsdg: number | null;
+  durableAccruedFeeUsdg: number | null;
+  durableEpoch: number | null;
+  /** On-chain equity right now, in USDG. Null when the chain would not answer. */
+  equityUsdg: number | null;
+  /** The owner's own signed ceiling, from `grant.caps.maxDrawdownPct`. */
+  maxDrawdownBps: number | null;
+  /** Every durable flow row for this agent, oldest first. Null when unread. */
+  flows:
+    | {
+        direction: string;
+        amountUsdg: number;
+        source: string;
+        txHash: string | null;
+        blockNumber: number | null;
+      }[]
+    | null;
+  /** How many trade rows the shared ledger holds. Null when unread. */
+  trades: number | null;
+  /** Set when a read threw — distinct from "no rows". */
+  error: string | null;
+}
+
+const usd = (n: number): string => n.toFixed(6);
+
+/**
+ * The accounting report, and the one derived verdict worth printing.
+ *
+ * EVERY UNKNOWN STAYS UNKNOWN. A null peak is not zero and a null flow list is
+ * not an empty one; the whole reason this file exists is that somebody was
+ * about to act on that difference.
+ */
+export function describeAccounting(f: AccountingFacts): string[] {
+  const lines: string[] = [``, `── accounting ─────────────────────────────────`];
+  if (f.error !== null) {
+    lines.push(`accounting UNREADABLE — ${f.error}`);
+    lines.push(`(nothing below is known; do NOT read a missing figure as zero)`);
+    return lines;
+  }
+
+  lines.push(`smartAccount                  ${f.smartAccount ?? "UNKNOWN"}`);
+  lines.push(
+    `durable hwm_usdg              ${f.durableHwmUsdg === null ? "UNKNOWN" : usd(f.durableHwmUsdg)}`,
+  );
+  lines.push(
+    `durable accrued_fee_usdg      ${f.durableAccruedFeeUsdg === null ? "UNKNOWN" : usd(f.durableAccruedFeeUsdg)}`,
+  );
+  lines.push(`durable epoch                 ${f.durableEpoch ?? "UNKNOWN"}`);
+  lines.push(`equity now (on chain)         ${f.equityUsdg === null ? "UNKNOWN" : usd(f.equityUsdg)}`);
+  lines.push(`trade rows in shared ledger   ${f.trades ?? "UNKNOWN"}`);
+  lines.push(
+    `maxDrawdownBps (signed cap)   ${f.maxDrawdownBps === null ? "UNKNOWN" : String(f.maxDrawdownBps)}`,
+  );
+
+  if (f.durableHwmUsdg !== null && f.durableHwmUsdg > 0 && f.equityUsdg !== null) {
+    const bps = Math.floor(((f.durableHwmUsdg - f.equityUsdg) / f.durableHwmUsdg) * 10_000);
+    lines.push(
+      `→ breaker reads                ${bps}bps` +
+        (f.maxDrawdownBps === null ? `` : bps >= f.maxDrawdownBps ? ` — REFUSING every buy` : ` — under the cap`),
+    );
+  }
+
+  lines.push(``);
+  if (f.flows === null) {
+    lines.push(`flows UNREADABLE`);
+    return lines;
+  }
+  if (f.flows.length === 0) {
+    lines.push(`flows: NONE on record — the book has never seen capital arrive`);
+  }
+  let net = 0;
+  for (const fl of f.flows) {
+    net += fl.direction === "in" ? fl.amountUsdg : -fl.amountUsdg;
+    lines.push(
+      `  ${fl.direction === "in" ? "IN " : "OUT"} ${usd(fl.amountUsdg).padStart(14)}` +
+        `  running ${usd(net).padStart(14)}  ${fl.source.padEnd(11)}` +
+        `  ${fl.txHash ? fl.txHash.slice(0, 12) + "…" : "(no tx)"}` +
+        `  ${fl.blockNumber ?? ""}`,
+    );
+  }
+  lines.push(`net contributions             ${usd(net)}`);
+
+  // THE VERDICT. Only stated when the premise for it actually holds: a peak
+  // above contributions is only provably wrong when there is no realised
+  // profit that could explain it, and only a zero trade count establishes that.
+  if (f.durableHwmUsdg !== null && f.trades !== null && f.flows.length > 0) {
+    const excess = f.durableHwmUsdg - net;
+    if (f.trades === 0 && excess > 0.000001) {
+      lines.push(
+        `→ DEFECT: the peak exceeds contributed capital by ${usd(excess)} USDG on ZERO trades. ` +
+          `With no realised profit the peak cannot exceed what was put in, so this is money the ` +
+          `book is still counting after it left (or counted twice on the way in) — not a drawdown.`,
+      );
+    } else if (f.trades === 0) {
+      lines.push(`→ peak agrees with contributed capital on zero trades`);
+    } else {
+      lines.push(
+        `→ ${f.trades} trade(s) on record, so realised profit may legitimately explain a peak ` +
+          `above contributions — this module cannot settle it alone`,
+      );
+    }
+  }
+  return lines;
+}

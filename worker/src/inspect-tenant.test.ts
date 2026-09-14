@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { describeTenant, type TenantFacts } from "./inspect-tenant";
+import { describeAccounting, describeTenant, type TenantFacts } from "./inspect-tenant";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -160,5 +160,82 @@ describe("IT CANNOT PRINT A SECRET", () => {
   it("and runs once per process, not once per pass", () => {
     const orch = readFileSync(path.join(__dirname, "orchestrator.ts"), "utf8");
     assert.match(orch, /if \(tenantInspectRan\) return;/);
+  });
+});
+
+/**
+ * THE VERDICT IS THE WHOLE POINT, so it is the thing under test.
+ *
+ * Shogun's real numbers: a peak of 49.91 against 24.92 of equity, on an account
+ * that had never traded. The breaker read 5008bps and refused every buy, and
+ * the question that mattered — is this a loss or a bookkeeping artefact? — was
+ * decided by exactly the comparison below.
+ */
+describe("describeAccounting separates a stale peak from a real drawdown", () => {
+  const base = {
+    smartAccount: "0x05a198A677Fbcd8f5c168d397Fa7ef5eB6D65487",
+    durableAccruedFeeUsdg: 0,
+    durableEpoch: 1,
+    maxDrawdownBps: 500,
+    error: null,
+  };
+
+  it("names a peak above contributed capital on zero trades as a DEFECT", () => {
+    const out = describeAccounting({
+      ...base,
+      durableHwmUsdg: 49.912,
+      equityUsdg: 24.915968,
+      trades: 0,
+      flows: [{ direction: "in", amountUsdg: 24.915968, source: "inferred", txHash: null, blockNumber: null }],
+    }).join("\n");
+    assert.match(out, /REFUSING every buy/);
+    assert.match(out, /DEFECT: the peak exceeds contributed capital by 24\.996032 USDG on ZERO trades/);
+    assert.match(out, /not a drawdown/);
+  });
+
+  it("does NOT cry defect when the peak matches what was put in", () => {
+    const out = describeAccounting({
+      ...base,
+      durableHwmUsdg: 24.915968,
+      equityUsdg: 24.915968,
+      trades: 0,
+      flows: [{ direction: "in", amountUsdg: 24.915968, source: "chain-log", txHash: "0xabc", blockNumber: 1 }],
+    }).join("\n");
+    assert.match(out, /peak agrees with contributed capital/);
+    assert.doesNotMatch(out, /DEFECT/);
+  });
+
+  it("refuses the verdict once a trade could explain the peak", () => {
+    const out = describeAccounting({
+      ...base,
+      durableHwmUsdg: 49.912,
+      equityUsdg: 24.915968,
+      trades: 3,
+      flows: [{ direction: "in", amountUsdg: 24.915968, source: "chain-log", txHash: "0xabc", blockNumber: 1 }],
+    }).join("\n");
+    assert.match(out, /cannot settle it alone/);
+    assert.doesNotMatch(out, /DEFECT/);
+  });
+
+  it("an unreadable count is never rendered as zero trades", () => {
+    const out = describeAccounting({ ...base, durableHwmUsdg: null, equityUsdg: null, trades: null, flows: null, error: "connection refused" }).join("\n");
+    assert.match(out, /UNREADABLE/);
+    assert.doesNotMatch(out, /DEFECT/);
+    assert.doesNotMatch(out, /0\.000000/);
+  });
+
+  it("carries the running total so a withdrawal is visible as one", () => {
+    const out = describeAccounting({
+      ...base,
+      durableHwmUsdg: 49.912,
+      equityUsdg: 24.915968,
+      trades: 0,
+      flows: [
+        { direction: "in", amountUsdg: 30.701312, source: "chain-log", txHash: "0x06cd8dba8f", blockNumber: 63014999 },
+        { direction: "out", amountUsdg: 5.785344, source: "chain-log", txHash: "0x84fab7ee56", blockNumber: 63015107 },
+      ],
+    }).join("\n");
+    assert.match(out, /OUT\s+5\.785344\s+running\s+24\.915968/);
+    assert.match(out, /net contributions\s+24\.915968/);
   });
 });
