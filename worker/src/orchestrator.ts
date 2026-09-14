@@ -1875,12 +1875,13 @@ async function runTenantInspectIfAsked(): Promise<void> {
   }
 
   try {
-    const { describeTenant, describeAccounting, describeLedger, type: _t } = (await import(
+    const { describeTenant, describeAccounting, describeLedger, describeMovements, type: _t } = (await import(
       "./inspect-tenant"
     )) as never as {
       describeTenant: (f: Record<string, unknown>) => string[];
       describeAccounting: (f: Record<string, unknown>) => string[];
       describeLedger: (f: Record<string, unknown>) => string[];
+      describeMovements: (f: Record<string, unknown>) => string[];
       type?: never;
     };
     void _t;
@@ -1936,6 +1937,24 @@ async function runTenantInspectIfAsked(): Promise<void> {
         | null;
       error: string | null;
     } = { tradesByStatus: null, openPositions: null, classPositions: null, error: null };
+    const moves: {
+      landed:
+        | { kind: string; target: string; amountUsdg: number; status: string; txHash: string | null }[]
+        | null;
+      classRows:
+        | {
+            token: string;
+            symbol: string | null;
+            state: string;
+            costUsdg: string | null;
+            proceedsUsdg: string | null;
+            qtyRaw: string | null;
+            entryTx: string | null;
+            exitTx: string | null;
+          }[]
+        | null;
+      error: string | null;
+    } = { landed: null, classRows: null, error: null };
     try {
       const { rows } = await client.query(
         "SELECT grant_json FROM grants WHERE lower(tenant) = lower($1)",
@@ -2021,6 +2040,39 @@ async function runTenantInspectIfAsked(): Promise<void> {
           }));
         } catch (e) {
           ledger.error = e instanceof Error ? e.message : String(e);
+        }
+
+        try {
+          const lt = await client.query(
+            `SELECT kind, target, amount_usdg, status, tx_hash FROM trades
+              WHERE lower(agent_id) = lower($1) AND status <> 'rejected'
+              ORDER BY created_at ASC`,
+            [acctAddr],
+          );
+          moves.landed = lt.rows.map((x) => ({
+            kind: String(x.kind),
+            target: String(x.target),
+            amountUsdg: Number(x.amount_usdg),
+            status: String(x.status),
+            txHash: x.tx_hash === null ? null : String(x.tx_hash),
+          }));
+          const cr = await client.query(
+            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, entry_tx, exit_tx
+               FROM class_positions WHERE lower(agent_id) = lower($1)`,
+            [acctAddr],
+          );
+          moves.classRows = cr.rows.map((x) => ({
+            token: String(x.token),
+            symbol: x.symbol === null ? null : String(x.symbol),
+            state: String(x.state ?? "?"),
+            costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
+            proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
+            qtyRaw: x.qty_raw === null ? null : String(x.qty_raw),
+            entryTx: x.entry_tx === null ? null : String(x.entry_tx),
+            exitTx: x.exit_tx === null ? null : String(x.exit_tx),
+          }));
+        } catch (e) {
+          moves.error = e instanceof Error ? e.message : String(e);
         }
       }
     } finally {
@@ -2135,6 +2187,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
     }))
       log(`inspect: ${line}`);
     for (const line of describeLedger(ledger)) log(`inspect: ${line}`);
+    for (const line of describeMovements(moves)) log(`inspect: ${line}`);
     log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
   } catch (e) {
     log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);

@@ -343,3 +343,65 @@ export function describeLedger(f: LedgerFacts): string[] {
       );
   return lines;
 }
+
+/**
+ * THE FOUR ROWS THAT MOVED MONEY, IN FULL.
+ *
+ * A count of landed trades is enough to refuse a verdict and not enough to
+ * reach one. When the question is "how much of the missing capital went HOME
+ * and how much was LOST", the answer is per-row and the rows are few, so they
+ * are printed whole rather than summarised into a figure that hides the
+ * distinction the question turns on.
+ *
+ * Rejections are excluded on purpose: 94 of them moved nothing, and listing
+ * them would bury the four that did.
+ */
+export interface MovementFacts {
+  landed:
+    | { kind: string; target: string; amountUsdg: number; status: string; txHash: string | null }[]
+    | null;
+  classRows:
+    | {
+        token: string;
+        symbol: string | null;
+        state: string;
+        costUsdg: string | null;
+        proceedsUsdg: string | null;
+        qtyRaw: string | null;
+        entryTx: string | null;
+        exitTx: string | null;
+      }[]
+    | null;
+  error: string | null;
+}
+
+export function describeMovements(f: MovementFacts): string[] {
+  const lines: string[] = [``, `── every row that moved money ─────────────────`];
+  if (f.error !== null) {
+    lines.push(`movements UNREADABLE — ${f.error}`);
+    return lines;
+  }
+  if (f.landed === null) lines.push(`landed trades                UNKNOWN`);
+  else if (f.landed.length === 0) lines.push(`landed trades                none`);
+  else
+    for (const t of f.landed)
+      lines.push(
+        `  ${t.status.padEnd(10)} ${t.kind.padEnd(12)} ${t.amountUsdg.toFixed(6).padStart(12)} USDG ` +
+          `→ ${t.target}  ${t.txHash ? t.txHash.slice(0, 12) + "…" : "(no tx)"}`,
+      );
+
+  lines.push(``);
+  if (f.classRows === null) lines.push(`class rows                   UNKNOWN`);
+  else if (f.classRows.length === 0) lines.push(`class rows                   none`);
+  else
+    for (const c of f.classRows) {
+      lines.push(`  ${c.token}  ${c.symbol ?? "(no symbol)"}  state=${c.state}`);
+      lines.push(
+        `    cost ${c.costUsdg ?? "UNKNOWN"} · proceeds ${c.proceedsUsdg ?? "UNKNOWN"} · qty ${c.qtyRaw ?? "UNKNOWN"}`,
+      );
+      lines.push(
+        `    entry ${c.entryTx ? c.entryTx.slice(0, 12) + "…" : "(none)"} · exit ${c.exitTx ? c.exitTx.slice(0, 12) + "…" : "(none)"}`,
+      );
+    }
+  return lines;
+}
