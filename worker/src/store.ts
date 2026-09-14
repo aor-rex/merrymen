@@ -588,6 +588,37 @@ const SQLITE_ALTERS: string[] = [
     // Unix seconds of the assessment. A quality flag with no timestamp cannot be
     // told from a stale one, and stale quality is exactly what a redeploy leaves.
     "ALTER TABLE agents ADD COLUMN quality_at INTEGER",
+    // ── THE PEAK HAS TO BE ABLE TO COME DOWN, WITHOUT BEING WRITABLE DOWN ──
+    //
+    // `adjustAgentHwm` lowers the peak when capital LEAVES, and it must: leave
+    // the peak up and the account is permanently "in drawdown" by the amount its
+    // owner took home, which trips the breaker on every buy forever. That is not
+    // a hypothetical — it is Shogun, refused at 5008bps against a 500bps cap
+    // with 24.915968 USDG of equity and nothing lost.
+    //
+    // But the reduction could never reach the shared database. The mirror copies
+    // `agents` with an UPWARD-ONLY ratchet, for its own good reason: a hosted
+    // child rebuilt by a redeploy recreates its row at the schema default of
+    // hwm 0, and an unconditional write would clobber durable history with that
+    // zero. So the ratchet is right and the reduction is right, and they
+    // contradict each other the moment a redeploy lands.
+    //
+    // THE FIX IS NOT TO RELAX THE RATCHET. It is to split the figure so that
+    // BOTH halves only ever grow:
+    //
+    //   hwm_usdg            Σ every upward move — deposits and booked profit
+    //   hwm_withdrawn_usdg  Σ every withdrawal that moved the peak down
+    //   effective peak      hwm_usdg − hwm_withdrawn_usdg
+    //
+    // A rebuilt child reports 0 and 0, and neither ratchet moves, so durable
+    // history survives exactly as before. A child that books a withdrawal
+    // reports a LARGER withdrawn total, which the ratchet carries. The peak can
+    // come down, and nothing can write it down: the only way to lower it is to
+    // raise an append-only total that a flow row has to justify.
+    //
+    // Clamped at `hwm_usdg` so the effective peak can never go negative, which
+    // is what `MAX(0, hwm + delta)` did before and what two tests pin.
+    "ALTER TABLE agents ADD COLUMN hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0",
     // ── CHAIN-DERIVED FLOWS CANNOT BE IMPORTED TWICE ─────────────────────
     //
     // A chain-log row's identity is the LOG that produced it, not the row: the
@@ -1045,14 +1076,44 @@ export async function ensureAgent(grant: StoredGrant): Promise<string> {
   return grant.smartAccount;
 }
 
-/** Persisted HWM + accrued fees, loaded at arm time. */
-export async function getAgentFinancials(
-  agentId: string,
-): Promise<{ hwmUsdg: number; accruedFeeUsdg: number }> {
-  const row = await getDb()
-    .prepare("SELECT hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?")
-    .get(agentId) as { hwm_usdg: number; accrued_fee_usdg: number } | undefined;
-  return { hwmUsdg: row?.hwm_usdg ?? 0, accruedFeeUsdg: row?.accrued_fee_usdg ?? 0 };
+/**
+ * Persisted HWM + accrued fees, loaded at arm time.
+ *
+ * `hwmUsdg` is the EFFECTIVE peak — gross minus what withdrawals have taken out
+ * of it — because that is the figure every caller actually wants: the drawdown
+ * breaker divides by it and the performance fee accrues above it. The two
+ * components come back beside it for the surfaces that have to explain the
+ * number rather than just use it.
+ *
+ * Before `hwm_withdrawn_usdg` existed every account had 0 withdrawn, so this
+ * returns exactly what it returned before for all existing data.
+ */
+export async function getAgentFinancials(agentId: string): Promise<{
+  hwmUsdg: number;
+  /** Σ every upward move. Monotonic. */
+  hwmGrossUsdg: number;
+  /** Σ every withdrawal that moved the peak down. Monotonic, clamped at gross. */
+  hwmWithdrawnUsdg: number;
+  accruedFeeUsdg: number;
+}> {
+  const row = (await getDb()
+    .prepare(
+      "SELECT hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?",
+    )
+    .get(agentId)) as
+    | { hwm_usdg: number; hwm_withdrawn_usdg: number | null; accrued_fee_usdg: number }
+    | undefined;
+  const gross = row?.hwm_usdg ?? 0;
+  // `?? 0` for the pre-migration row shape, not as a guess: the column is NOT
+  // NULL DEFAULT 0, so a null here means a database the ALTER has not reached,
+  // and zero withdrawn is the truth for every row written before it existed.
+  const withdrawn = row?.hwm_withdrawn_usdg ?? 0;
+  return {
+    hwmUsdg: Math.max(0, gross - withdrawn),
+    hwmGrossUsdg: gross,
+    hwmWithdrawnUsdg: withdrawn,
+    accruedFeeUsdg: row?.accrued_fee_usdg ?? 0,
+  };
 }
 
 /** Ratchet the persisted HWM (monotonic — ignores values below the stored peak). */
@@ -1086,11 +1147,30 @@ export async function setAgentEpoch(agentId: string, epoch: number): Promise<boo
   }
 }
 
+/**
+ * Ratchet the persisted peak to an EFFECTIVE figure.
+ *
+ * Callers hand this the peak they want measured against — `accrueAboveHwm`'s
+ * `newHwmUsdg`, the anchor's restored mark — which is an effective figure, while
+ * the column stores the gross. So the stored value is the effective one with
+ * what withdrawals have already taken added back, and the ratchet then compares
+ * gross to gross. Without the `+ hwm_withdrawn_usdg` the first fee accrual after
+ * any withdrawal would quietly write the effective figure into the gross column
+ * and subtract the withdrawals a second time.
+ *
+ * CASE, not MAX. `MAX(a, b)` is a scalar in sqlite and an aggregate in Postgres,
+ * and `translateQuery` does not rewrite it — the same reason the mirror's upsert
+ * gives for avoiding it.
+ */
 export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boolean> {
   try {
     await getDb()
-      .prepare("UPDATE agents SET hwm_usdg = MAX(hwm_usdg, ?) WHERE smart_account = ?")
-      .run(hwmUsdg, agentId);
+      .prepare(
+        `UPDATE agents SET hwm_usdg =
+           CASE WHEN ? + hwm_withdrawn_usdg > hwm_usdg THEN ? + hwm_withdrawn_usdg ELSE hwm_usdg END
+         WHERE smart_account = ?`,
+      )
+      .run(hwmUsdg, hwmUsdg, agentId);
     return true;
   } catch (e) {
     // A swallowed HWM update lets the persisted peak lag the true one, so the
@@ -1113,11 +1193,79 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boo
  * withdrawal is the mirror: leave the peak up and the account is permanently
  * "in drawdown" by the amount its owner took home, which trips the breaker.
  */
+/**
+ * Restore BOTH halves of the peak from the accounting anchor. Ratchets, never assigns.
+ *
+ * Separate from `setAgentHwm` because the two speak different units and mixing
+ * them is the bug this whole split is guarding against: `setAgentHwm` takes an
+ * EFFECTIVE peak and adds the withdrawn total back before storing, while the
+ * anchor carries the GROSS and the withdrawn total as they sit in the shared
+ * row. Passing one to the other adds the withdrawals twice.
+ *
+ * Each half is a one-way door on its own, so a child whose local figures are
+ * already higher keeps them — a restore can only ever fill in what a rebuilt
+ * database has forgotten.
+ */
+export async function restoreAgentHwmParts(
+  agentId: string,
+  parts: { grossUsdg: number | null; withdrawnUsdg: number | null },
+): Promise<void> {
+  try {
+    const db = getDb();
+    // WITHDRAWN FIRST. `hwm_usdg` is the clamp for the withdrawn total, so
+    // raising the gross first can only ever admit more of the withdrawal, never
+    // less — the safe order. The reverse can clamp a legitimate total against a
+    // gross that is about to grow.
+    if (parts.grossUsdg !== null) {
+      await db
+        .prepare(
+          `UPDATE agents SET hwm_usdg = CASE WHEN ? > hwm_usdg THEN ? ELSE hwm_usdg END
+           WHERE smart_account = ?`,
+        )
+        .run(parts.grossUsdg, parts.grossUsdg, agentId);
+    }
+    // NULL MEANS THE ANCHOR NEVER READ ONE, which is not a claim that nothing
+    // was withdrawn. Writing 0 here would be that claim, and on a shared row it
+    // would be one this process has no evidence for.
+    if (parts.withdrawnUsdg !== null) {
+      await db
+        .prepare(
+          `UPDATE agents SET hwm_withdrawn_usdg =
+             CASE WHEN ? > hwm_withdrawn_usdg THEN ? ELSE hwm_withdrawn_usdg END
+           WHERE smart_account = ?`,
+        )
+        .run(parts.withdrawnUsdg, parts.withdrawnUsdg, agentId);
+    }
+  } catch (e) {
+    console.error("[store] hwm restore failed:", e);
+  }
+}
+
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    await getDb()
-      .prepare("UPDATE agents SET hwm_usdg = MAX(0, hwm_usdg + ?) WHERE smart_account = ?")
-      .run(deltaUsdg, agentId);
+    const db = getDb();
+    if (deltaUsdg >= 0) {
+      // A DEPOSIT RAISES THE GROSS, exactly as before.
+      await db
+        .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
+        .run(deltaUsdg, agentId);
+      return;
+    }
+    // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
+    // effective peak by the same amount while leaving both stored figures
+    // monotonic — so the mirror's upward-only ratchet carries the reduction
+    // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
+    //
+    // Clamped at the gross so the effective peak floors at zero, which is what
+    // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
+    const amount = -deltaUsdg;
+    await db
+      .prepare(
+        `UPDATE agents SET hwm_withdrawn_usdg =
+           CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
+         WHERE smart_account = ?`,
+      )
+      .run(amount, amount, agentId);
   } catch (e) {
     console.error("[store] hwm adjust failed:", e);
   }

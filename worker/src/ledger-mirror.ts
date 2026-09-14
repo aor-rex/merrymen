@@ -525,7 +525,7 @@ export async function mirrorTenant(args: {
         // they rendered as a confident zero.
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle, x_verified,
-                epoch, hwm_usdg, accrued_fee_usdg,
+                epoch, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg,
                 contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
       )
       .all()) as Record<string, unknown>[];
@@ -534,9 +534,10 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id,
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
-                               sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg, accrued_fee_usdg,
+                               sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg,
+                               hwm_withdrawn_usdg, accrued_fee_usdg,
                                contributions_known, contributions_why, gas_accounting, quality_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at, mode = excluded.mode,
@@ -567,6 +568,24 @@ export async function mirrorTenant(args: {
              -- in Postgres, and GREATEST does not exist in sqlite.
              epoch = CASE WHEN excluded.epoch > agents.epoch THEN excluded.epoch ELSE agents.epoch END,
              hwm_usdg = CASE WHEN excluded.hwm_usdg > agents.hwm_usdg THEN excluded.hwm_usdg ELSE agents.hwm_usdg END,
+             -- THE HALF THAT LETS THE PEAK COME DOWN, and it is a ratchet too.
+             --
+             -- The peak has to fall when capital leaves, or an owner who
+             -- withdraws is permanently "in drawdown" by what they took home and
+             -- the breaker refuses every buy forever. But the line above cannot
+             -- be relaxed to allow it: a rebuilt child reports hwm 0, and that
+             -- zero would erase the durable peak, hand the whole principal to
+             -- accrueAboveHwm as profit, and charge a fee on the owner's own
+             -- money — the exact failure the ratchet was added to stop.
+             --
+             -- So the reduction travels as its own MONOTONIC total instead. A
+             -- rebuilt child reports 0 here as well and this ratchet ignores it,
+             -- exactly like the one above; a child that has booked a withdrawal
+             -- reports a LARGER total and it carries. The effective peak is
+             -- hwm_usdg − hwm_withdrawn_usdg (store.getAgentFinancials), so it
+             -- falls without any statement anywhere being able to write it down.
+             hwm_withdrawn_usdg = CASE WHEN excluded.hwm_withdrawn_usdg > agents.hwm_withdrawn_usdg
+                                       THEN excluded.hwm_withdrawn_usdg ELSE agents.hwm_withdrawn_usdg END,
              accrued_fee_usdg = CASE WHEN excluded.accrued_fee_usdg > agents.accrued_fee_usdg
                                      THEN excluded.accrued_fee_usdg ELSE agents.accrued_fee_usdg END,
              -- DELIBERATELY NOT MONOTONIC, unlike the three above. Quality is a
@@ -596,7 +615,7 @@ export async function mirrorTenant(args: {
             // These three have NOT NULL DEFAULTs at the source, so a null here
             // means a pre-migration child rather than an absent value — fall back
             // to the same defaults the schema would have applied.
-            a.epoch ?? 1, a.hwm_usdg ?? 0, a.accrued_fee_usdg ?? 0,
+            a.epoch ?? 1, a.hwm_usdg ?? 0, a.hwm_withdrawn_usdg ?? 0, a.accrued_fee_usdg ?? 0,
             // NULL means NEVER ASSESSED, which is not the same as false. An agent
             // that has not armed since quality shipped has made no claim about
             // its own book, and a reader must render that as unknown rather than

@@ -377,6 +377,7 @@ import {
   getGasPaidUsdg,
   getNetContributionsUsdg,
   setAgentEpoch,
+  restoreAgentHwmParts,
   setAgentHwm,
   setAgentQuality,
   setAgentMode,
@@ -2919,6 +2920,8 @@ async function main() {
   let anchorCashUsdg: bigint | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
   let anchorHwmUsdg: bigint | null = null;
+  /** Σ withdrawals the shared row already counts. Null means the anchor read none. */
+  let anchorHwmWithdrawnUsdg: bigint | null = null;
   /** The durable accounting epoch this child must file its rows under. */
   let anchorEpoch: number | null = null;
   /** One warning per process, not one per tick, when the fee is being suppressed. */
@@ -2941,6 +2944,7 @@ async function main() {
     const l = accountingLicence(verdict, { hosted: isHostedMode() });
     accounting.openingBalanceLicence = l.licence;
     anchorHwmUsdg = l.highWaterMarkUsdg;
+    anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
     anchorEpoch = l.accountingEpoch;
     // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
@@ -3046,11 +3050,33 @@ async function main() {
     // gate on a healthy account.
     if (anchorEpoch !== null) await setAgentEpoch(agentId, anchorEpoch);
 
-    if (anchorHwmUsdg === null || anchorHwmUsdg <= 0n) return;
-    const local = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-    if (anchorHwmUsdg > local) {
-      await setAgentHwm(agentId, usdgNum(anchorHwmUsdg));
-      console.log(`[anchor] restored high-water mark ${fmt(anchorHwmUsdg)} USDG (local was ${fmt(local)})`);
+    // BOTH HALVES OF THE PEAK, and the withdrawn half matters most here.
+    //
+    // The effective peak is gross minus what withdrawals have taken out of it.
+    // Restoring the gross alone would hand a rebuilt child a peak that has
+    // forgotten every withdrawal its owner ever made — which is precisely the
+    // state that had Shogun refused at 5008bps on an account that never lost a
+    // penny. And seeding the withdrawn total at zero is just as wrong in the
+    // other direction: the child's next booked withdrawal would report a total
+    // SMALLER than the shared row already holds, and the mirror's ratchet would
+    // drop it.
+    //
+    // `restoreAgentHwmParts` ratchets each half independently and takes gross
+    // in gross units, so nothing here has to net the two figures — the place
+    // that netting went wrong before is exactly this call site.
+    if (anchorHwmUsdg === null && anchorHwmWithdrawnUsdg === null) return;
+    const before = await getAgentFinancials(agentId);
+    await restoreAgentHwmParts(agentId, {
+      grossUsdg: anchorHwmUsdg === null || anchorHwmUsdg <= 0n ? null : usdgNum(anchorHwmUsdg),
+      withdrawnUsdg: anchorHwmWithdrawnUsdg === null ? null : usdgNum(anchorHwmWithdrawnUsdg),
+    });
+    const after = await getAgentFinancials(agentId);
+    if (after.hwmUsdg !== before.hwmUsdg || after.hwmWithdrawnUsdg !== before.hwmWithdrawnUsdg) {
+      console.log(
+        `[anchor] restored high-water mark ${fmt(usdg(after.hwmUsdg))} USDG ` +
+          `(gross ${fmt(usdg(after.hwmGrossUsdg))} − withdrawn ${fmt(usdg(after.hwmWithdrawnUsdg))}; ` +
+          `local was ${fmt(usdg(before.hwmUsdg))})`,
+      );
     }
   }
 

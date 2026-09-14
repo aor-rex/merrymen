@@ -71,6 +71,23 @@ export const ACCOUNTING_SCOPES = {
    * reached is still the right thing to measure against.
    */
   hwmUsdg: "monotonic",
+  /**
+   * Σ withdrawals that have taken the peak down. MONOTONIC, and it is what makes
+   * the line above able to stay monotonic while the EFFECTIVE peak still falls.
+   *
+   * The peak must come down when capital leaves — leave it up and the account is
+   * permanently in drawdown by the amount its owner took home, and the breaker
+   * refuses every buy. But `hwm_usdg` cannot simply be written downward: a
+   * hosted child rebuilt by a redeploy reports the schema default of 0, and the
+   * mirror would carry that zero over durable history, handing the whole
+   * principal to `accrueAboveHwm` as profit.
+   *
+   * So the reduction is a SECOND ratchet. Both stored figures only ever grow,
+   * both survive the mirror unchanged, and the effective peak —
+   * `hwm_usdg − hwm_withdrawn_usdg`, computed in `getAgentFinancials` — falls
+   * without any statement anywhere being able to write it down.
+   */
+  hwmWithdrawnUsdg: "monotonic",
   /** What the house has earned, ever. MONOTONIC — a boundary does not un-earn a fee. */
   accruedFeeUsdg: "monotonic",
   /**
