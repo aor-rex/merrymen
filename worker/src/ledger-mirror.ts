@@ -782,7 +782,8 @@ export async function mirrorTenant(args: {
       const classRows = (await child
         .prepare(
           `SELECT agent_id, token, symbol, decimals, curve, quote_token, first_seen,
-                  vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state
+                  vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state,
+                  swept_raw
              FROM class_positions`,
         )
         .all()
@@ -795,8 +796,9 @@ export async function mirrorTenant(args: {
         const ins = db.prepare(
           `INSERT INTO class_positions
              (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
-              vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              vault, entry_tx, exit_tx, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, state,
+              swept_raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            -- THE EXISTING-ROW SIDE MUST BE QUALIFIED, and sqlite will not tell you.
            --
            -- Inside ON CONFLICT ... DO UPDATE SET, Postgres has TWO relations in
@@ -834,7 +836,13 @@ export async function mirrorTenant(args: {
              qty_raw = COALESCE(excluded.qty_raw, class_positions.qty_raw),
              proceeds_usdg = COALESCE(excluded.proceeds_usdg, class_positions.proceeds_usdg),
              opened_at_block = COALESCE(excluded.opened_at_block, class_positions.opened_at_block),
-             state = excluded.state`,
+             state = excluded.state,
+             -- COALESCE, like the other money columns. A child that has not
+             -- re-read the vault's log yet reports null here, and null must not
+             -- erase the record that the owner took this position home — that
+             -- record is the only thing separating a withdrawal from a sale
+             -- that returned nothing.
+             swept_raw = COALESCE(excluded.swept_raw, class_positions.swept_raw)`,
         );
         for (const c of classRows) {
           await ins.run(
@@ -853,6 +861,7 @@ export async function mirrorTenant(args: {
             c.proceeds_usdg,
             c.opened_at_block,
             c.state,
+            c.swept_raw ?? null,
           );
         }
       });

@@ -802,6 +802,23 @@ const SQLITE_ALTERS: string[] = [
   // WHERE A POSITION SITS. 'account' for everything that existed before this
   // column, which is every row: the default is the truth for them, not a guess.
   "ALTER TABLE positions ADD COLUMN custody TEXT NOT NULL DEFAULT 'account'",
+  // ── A SWEEP IS A WITHDRAWAL, NOT A SALE FOR ZERO ──────────────────────
+  //
+  // `state` had one value for "gone": `closed`. A position the owner swept out
+  // through the Recover panel landed there beside genuine liquidations, with
+  // `proceeds_usdg = '0'` next to a real cost — which reads as a position that
+  // was sold and returned nothing, i.e. a total loss of everything it cost.
+  //
+  // Shogun's DOGGOS is the live case: cost 5.000000, proceeds 0, closed, and
+  // the owner is holding 1,063,408 DOGGOS in their own wallet. Nothing computed
+  // a realised -5 from it, but equity fell by the full 5.000000 the moment the
+  // balance hit zero, with no flow row to say where it went — so the peak did
+  // not follow it, and the drawdown breaker widened by exactly that much.
+  //
+  // The chain always said which it was: `foldClassEvents` has counted Swept
+  // amounts since the class ledger shipped, and then dropped them on the floor.
+  // This is where they land, so the difference survives the fold.
+  "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
 ];
 
 /** Open node:sqlite, run the schema SYNCHRONOUSLY, and wrap it as the async Db.
@@ -3723,6 +3740,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       proceeds_usdg: string | null;
       opened_at_block: string | null;
       state: string | null;
+      swept_raw: string | null;
     }[];
     // NULL STAYS NULL through this map. Every one of these is money or the
     // clock money is measured against, and `?? 0n` on any of them would turn
@@ -3749,6 +3767,7 @@ export async function classPositions(agentId: string): Promise<ClassPositionRow[
       proceedsRaw: big(r.proceeds_usdg),
       openedAtBlock: big(r.opened_at_block),
       state: r.state ?? "open",
+      sweptRaw: big(r.swept_raw),
       // A NULL clock reads as "right now", not as 1970. The column has a
       // default so this should not happen, but a zero would make every position
       // instantly older than any hold window and force an immediate exit — an
@@ -3801,15 +3820,24 @@ export async function writeClassLedger(
     openedAtBlock: bigint | null;
     entryTx: string | null;
     exitTx: string | null;
-    state: "open" | "closed" | "recovered";
+    state: "open" | "closed" | "recovered" | "swept";
+    /**
+     * Tokens the owner swept out. Null when the tape could not say.
+     *
+     * Stored so "gone because it was sold" and "gone because the owner took it
+     * home" stay distinguishable after the fact. The row is the only place that
+     * difference survives, and every consequence of the position turns on it:
+     * a sale has proceeds and a result, a withdrawal has neither.
+     */
+    sweptRaw: bigint | null;
   },
 ): Promise<void> {
   try {
     await getDb()
       .prepare(
         `INSERT INTO class_positions
-           (agent_id, token, vault, curve, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, entry_tx, exit_tx, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (agent_id, token, vault, curve, cost_usdg, qty_raw, proceeds_usdg, opened_at_block, entry_tx, exit_tx, state, swept_raw)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id, token) DO UPDATE SET
            vault = COALESCE(excluded.vault, vault),
            curve = COALESCE(excluded.curve, curve),
@@ -3819,7 +3847,8 @@ export async function writeClassLedger(
            opened_at_block = COALESCE(excluded.opened_at_block, opened_at_block),
            entry_tx = COALESCE(excluded.entry_tx, entry_tx),
            exit_tx = COALESCE(excluded.exit_tx, exit_tx),
-           state = excluded.state`,
+           state = excluded.state,
+           swept_raw = COALESCE(excluded.swept_raw, swept_raw)`,
       )
       .run(
         agentId,
@@ -3835,6 +3864,7 @@ export async function writeClassLedger(
         row.entryTx,
         row.exitTx,
         row.state,
+        row.sweptRaw === null ? null : row.sweptRaw.toString(),
       );
   } catch (e) {
     console.error("[store] class ledger write failed:", e);

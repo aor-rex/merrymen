@@ -47,7 +47,7 @@ const SRC = [
   // The class book. Money the ACCOUNT does not hold — it sits in a separate
   // contract — so it appears in no other table here, and without the mirror the
   // shared ledger cannot see a class position at all.
-  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', PRIMARY KEY (agent_id, token));",
+  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', swept_raw TEXT, PRIMARY KEY (agent_id, token));",
 ].join("\n");
 
 /** The destination, with the same shape a Postgres ledger has. */

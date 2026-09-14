@@ -150,6 +150,16 @@ export interface ClassLedgerEntry {
   soldRaw: bigint;
   /** Tokens swept out to the owner's account. */
   sweptRaw: bigint;
+  /**
+   * The LAST sweep's transaction and log position, or null if none was seen.
+   *
+   * Carried so the withdrawal this implies can be booked exactly once. `flows`
+   * is uniquely indexed on (chain_id, agent_id, tx_hash, log_index), so a flow
+   * row stamped with these is idempotent by construction — a re-read of the
+   * same vault log cannot book the owner's money as leaving twice.
+   */
+  lastSweptTx: `0x${string}` | null;
+  lastSweptLogIndex: number | null;
   /** USDG returned by sells. Realised proceeds. */
   proceedsRaw: bigint;
   /** Block of the FIRST buy — the hold clock, and it cannot be reset. */
@@ -183,6 +193,8 @@ export function foldClassEvents(events: readonly ClassEvent[]): Map<string, Clas
         boughtRaw: 0n,
         soldRaw: 0n,
         sweptRaw: 0n,
+        lastSweptTx: null,
+        lastSweptLogIndex: null,
         proceedsRaw: 0n,
         openedAtBlock: e.blockNumber,
         entryTx: e.txHash,
@@ -213,6 +225,12 @@ export function foldClassEvents(events: readonly ClassEvent[]): Map<string, Clas
       if (!entry.curve) entry.curve = e.curve;
     } else {
       entry.sweptRaw += e.tokenRaw;
+      // THE LAST ONE WINS, because the booking is per POSITION, not per event:
+      // what leaves is a share of a cost basis the position holds as a whole,
+      // and that share can only be computed once every sweep is folded in. The
+      // last sweep's log is a stable, unique key for that one booking.
+      entry.lastSweptTx = e.txHash;
+      entry.lastSweptLogIndex = e.logIndex;
     }
   }
   return byToken;

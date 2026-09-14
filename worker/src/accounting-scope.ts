@@ -63,7 +63,7 @@ export const ACCOUNTING_SCOPES = {
   /**
    * The high-water mark. MONOTONIC and deliberately NOT reset at a boundary.
    *
-   * `setAgentHwm` is `MAX(hwm_usdg, ?)` in SQL — a one-way door with a real
+   * `setAgentHwm` is a one-way ratchet in SQL — a door that only opens upward, with a real
    * performance fee written in the same breath, and no procedure walks either
    * back. Resetting it at a boundary would re-charge the owner for profit
    * already paid on. The bridge keeps the frames consistent: the new epoch opens

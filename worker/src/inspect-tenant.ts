@@ -295,9 +295,17 @@ export function describeAccounting(f: AccountingFacts): string[] {
  * prints it: what was bought, what it cost, what came back, and how each row
  * ended.
  *
- * `recovered` is the answer that matters. It is the state the class ledger uses
- * for a holding whose basis it cannot find, and it is what an owner-driven
- * sweep leaves behind — money that went home rather than money that was lost.
+ * `swept` is the answer that matters: the owner took the asset home, so the
+ * position is gone with no sale, no proceeds and no result.
+ *
+ * THIS COMMENT USED TO NAME `recovered` FOR THAT, AND IT WAS WRONG. `recovered`
+ * is reached only under `if (balance > 0n)` (class-reconcile.ts) and means a
+ * holding STILL IN the vault whose purchase the tape cannot explain — an
+ * unknown basis, not a withdrawal. A sweep leaves a zero balance, which took
+ * the other branch entirely and landed on `closed`, beside genuine
+ * liquidations, with `proceeds 0` next to a real cost. That is what made a
+ * withdrawal read as a total loss, and reading this comment while fixing it
+ * would have sent the fix to the wrong branch.
  */
 export interface LedgerFacts {
   /** Trade rows by status: `{landed: 2, rejected: 94}`. Null when unread. */

@@ -1576,9 +1576,12 @@ async function main() {
           entryTx: p.entryTx,
           exitTx: p.exitTx,
           state: p.state,
+          sweptRaw: p.sweptRaw,
         });
         // THE OTHER HALF OF THE ROW, WITHOUT WHICH THE POSITION CANNOT BE SOLD.
         await rehydrateClassRow(agentId, p, client);
+        // A SWEEP IS THE OWNER TAKING CAPITAL OUT, AND IT HAS TO BE BOOKED AS ONE.
+        await bookClassSweepWithdrawal(agentId, p);
       }
 
       const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
@@ -1607,6 +1610,74 @@ async function main() {
       // closed.
       console.error("[class] reconcile failed:", e);
     }
+  }
+
+  /**
+   * Book the capital an owner took out of the class vault by their own hand.
+   *
+   * WHY THIS IS NOT OPTIONAL. When a swept position's balance hits zero its
+   * symbol drops out of `unpricedByDesign`, so `quarantine.totalCostUsdg` loses
+   * its cost basis and `composeEquityUsdg` falls by exactly that much in one
+   * tick. Nothing books a flow, so the high-water mark does not follow — and the
+   * account is left permanently "in drawdown" by the amount its owner took home.
+   * That is the same failure `adjustAgentHwm`'s own comment describes for a USDG
+   * withdrawal, reached through an asset the flow scanner cannot see: the tokens
+   * left the VAULT as tokens, in a transaction the account's USDG log never
+   * mentions.
+   *
+   * It is not a loss and there is no result. Nothing sold, there was no
+   * counterparty and no price. The position leaves the book as a WITHDRAWAL at
+   * cost, which is the only figure this book can honestly say went with it.
+   *
+   * IDEMPOTENT BY CONSTRUCTION, not by a flag. The flow is stamped with the
+   * sweep's own (txHash, logIndex), and `flows` is uniquely indexed on
+   * (chain_id, agent_id, tx_hash, log_index) — so a re-read of the same vault
+   * log on the next arm cannot withdraw the owner's capital a second time. This
+   * runs on every reconcile pass and is a no-op on all but the first.
+   *
+   * THE PEAK AND THE FLOW MOVE TOGETHER OR NOT AT ALL, the same rule `record`
+   * keeps: `adjustAgentHwm` runs only if the row actually landed.
+   */
+  async function bookClassSweepWithdrawal(
+    agentId: string,
+    p: { token: string; state: string; sweptCostRaw: bigint | null; sweptTx: string | null; sweptLogIndex: number | null },
+  ): Promise<void> {
+    if (p.state !== "swept") return;
+    if (p.sweptTx === null || p.sweptLogIndex === null) return;
+    if (p.sweptCostRaw === null) {
+      // UNPRICEABLE, SO UNBOOKED — and said out loud rather than estimated. An
+      // invented figure here would move the peak the fee is measured against.
+      await addEvent(
+        agentId,
+        "warn",
+        `${short(p.token)} was swept out of your class vault, but I never saw what it cost, so I cannot ` +
+          `record the withdrawal. Your P&L will treat that position as unknown rather than guess at it.`,
+      );
+      return;
+    }
+    if (p.sweptCostRaw <= 0n) return;
+
+    const landed = await addFlow({
+      agentId,
+      direction: "out",
+      amountUsdg: usdgNum(p.sweptCostRaw),
+      // A RECEIPT: the Swept log is on chain and anyone with an RPC can refetch
+      // it, which is what `chain-log` means (packages/core flow-evidence.ts).
+      source: "chain-log",
+      txHash: p.sweptTx,
+      logIndex: p.sweptLogIndex,
+      mode: "live",
+    });
+    if (!landed) return; // already booked, or refused — either way the peak must not move
+    await adjustAgentHwm(agentId, -usdgNum(p.sweptCostRaw));
+    highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    await addEvent(
+      agentId,
+      "ok",
+      `📤 you swept ${short(p.token)} out of your class vault — recorded as a withdrawal of ` +
+        `${fmt(p.sweptCostRaw)} USDG at cost, not as a loss. Nothing was sold, so there is no result to ` +
+        `report, and the high-water mark moved with the capital.`,
+    );
   }
 
   /**
@@ -3030,7 +3101,8 @@ async function main() {
    * mark. It is called immediately after `ensureAgent`, which is the first
    * moment the row it writes to exists.
    *
-   * `setAgentHwm` is `MAX(hwm_usdg, ?)` in SQL, a one-way door — so a restored
+   * `setAgentHwm` ratchets in SQL (a CASE, not MAX — MAX is an aggregate in
+   * Postgres), so it is a one-way door and a restored
    * peak can only ever be raised. Too high suppresses a fee; too low charges the
    * owner for their own principal. Between those two the monotonic direction is
    * the safe one, and the store already enforces it.
@@ -7902,10 +7974,17 @@ async function main() {
           openedAtBlock: r.openedAtBlock,
           entryTx: r.entryTx,
           exitTx: r.exitTx,
-          state: (r.state === "closed" ? "closed" : r.state === "recovered" ? "recovered" : "open") as
-            | "open"
-            | "closed"
-            | "recovered",
+          state: (r.state === "closed" || r.state === "swept" || r.state === "recovered"
+            ? r.state
+            : "open") as "open" | "closed" | "recovered" | "swept",
+          // HELD ROWS ONLY REACH HERE (`classHeldRows` filters on balance > 0),
+          // so nothing has been swept out of them and there is no sweep to
+          // price or to book. Null throughout rather than 0: `scoutCostOf`
+          // reads none of these, and a zero would be a claim.
+          sweptRaw: null,
+          sweptCostRaw: null,
+          sweptTx: null,
+          sweptLogIndex: null,
           balanceRaw: classRead.balances.get(r.token) ?? 0n,
         })),
       );
@@ -8291,7 +8370,7 @@ async function main() {
     // A CURVE-VALUED POSITION MAY NOT RATCHET ANY HIGH-WATER MARK.
     //
     // Both marks are monotonic and persisted -- the live one through
-    // setAgentHwm (MAX(hwm_usdg, ?), with a performance fee written in the same
+    // setAgentHwm (a one-way CASE ratchet, with a performance fee written in the same
     // breath) and the paper one through setPaperBook. Nothing walks either
     // back. A bonding-curve mark has no oracle behind it, moves 1,546 bps at
     // p99 over four minutes, and arrives DISCONTINUOUSLY: the tick a curve
@@ -8411,7 +8490,7 @@ async function main() {
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
-      // `setAgentHwm` is MAX(hwm_usdg, ?) — a one-way door in SQL, with a real
+      // `setAgentHwm` is a one-way ratchet in SQL, with a real
       // performance fee written in the same breath. There is no procedure that
       // walks either back. A bonding-curve mark has no oracle behind it and can
       // be moved a long way by one small trade (p99 move over four minutes:
