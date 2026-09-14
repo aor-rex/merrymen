@@ -264,6 +264,17 @@ const CLASS_MAX_ROUND_TRIP_BPS = 600;
  */
 const CLASS_ENTRY_GRADUATION_MARGIN_BPS = 1_000;
 
+/**
+ * How far back the class route looks for a candidate to enter.
+ *
+ * HOISTED so discovery can reach it. The candidate table is a cache of factory
+ * logs, and a child rebuilds its sqlite on redeploy — so the first scan after a
+ * restart must reach back far enough to refill THIS window, or the route is
+ * blind to everything that launched before it booted. One number, two readers:
+ * the producer that consumes the window and the scan that fills it.
+ */
+const CLASS_WINDOW_SEC = 6 * 3600;
+
 /** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
 let lastClassFunnelKey = "";
 let lastClassIdleKey = "";
@@ -840,22 +851,32 @@ async function main() {
      * difference between "nothing qualified" and "you have not turned this on".
      */
     const held = a.holding > 0 ? `Holding ${a.holding} position${a.holding === 1 ? "" : "s"}. ` : "";
-    let sentence: string;
+    let scanning: string;
     if (a.discovered === 0) {
-      sentence = `${held}Scanning — no new tokens have appeared on the launchpad yet.`;
+      scanning = `Scanning the launchpad — no new tokens have appeared yet.`;
     } else if (a.choice.pick) {
-      sentence = a.buying
-        ? `${held}Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`
-        : `${held}Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} qualifies, but autonomous buying is switched off.`;
+      scanning = `Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`;
     } else if (passedDepth <= 0) {
-      sentence = `${held}Still scanning — nothing currently has enough real liquidity.`;
+      scanning = `Still scanning — nothing currently has enough real liquidity.`;
     } else if (passedImpact <= 0) {
-      sentence = `${held}Found ${passedDepth} deep enough, but getting in and out would cost too much.`;
+      scanning = `Found ${passedDepth} deep enough, but getting in and out would cost too much.`;
     } else if (passedGrad <= 0) {
-      sentence = `${held}Found ${passedImpact} worth pricing, but they are too close to graduating to sell safely afterwards.`;
+      scanning = `Found ${passedImpact} worth pricing, but they are too close to graduating to sell safely afterwards.`;
     } else {
-      sentence = `${held}Scanning ${a.discovered} tokens on the launchpad…`;
+      scanning = `Scanning ${a.discovered} tokens on the launchpad…`;
     }
+
+    /**
+     * SCANNING AND PAUSED ARE TWO FACTS, AND BOTH ARE TRUE.
+     *
+     * An agent with autonomous buying switched off is not idle and it is not
+     * broken — it is looking and not acting, which is a state the product had no
+     * way to express. Saying only "scanning" hides that nothing will be bought;
+     * saying only "paused" hides that it is still working. The owner gets both,
+     * in that order, because the first answers "is it alive" and the second
+     * answers "why has it not bought anything".
+     */
+    const sentence = a.buying ? `${held}${scanning}` : `${held}${scanning} Trading is paused.`;
 
     if (sentence !== lastClassIdleKey) {
       lastClassIdleKey = sentence;
@@ -915,7 +936,6 @@ async function main() {
     // feed, a chat message) breaks the property checkPolicy's curve-provenance
     // rule rests on, and for a class trade that rule is the ONLY thing vouching
     // for the output token.
-    const CLASS_WINDOW_SEC = 6 * 3600;
     const CLASS_LIMIT = 40;
     const rows = await recentCandidates(CLASS_WINDOW_SEC, CLASS_LIMIT);
     const candidates = rows
@@ -3514,8 +3534,18 @@ async function main() {
       nowSec,
       intervalSec: PONS_INTERVAL_SEC,
       blocksPerSec: BLOCKS_PER_SEC,
+      // THE WARM-UP. One bounded scan at boot that reaches back over the whole
+      // window the class route reads, so a restarted child sees the live
+      // universe immediately instead of rebuilding it over six hours.
+      coldStartSec: CLASS_WINDOW_SEC,
     });
     if (!window.due) return;
+    if (window.coldStart) {
+      console.log(
+        `[pons] warm-up scan: reaching back ${window.lookbackBlocks} blocks (~${(CLASS_WINDOW_SEC / 3600).toFixed(0)}h) ` +
+          `to refill the candidate table after a restart — one pass, then the usual ${PONS_INTERVAL_SEC}s cadence`,
+      );
+    }
 
     ponsInFlight = true;
     try {

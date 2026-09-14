@@ -254,14 +254,41 @@ export function ponsScanWindow(opts: {
   blocksPerSec: bigint;
   /** Seconds of deliberate overlap, to absorb block-time variance. */
   overlapSec?: number;
-}): { due: boolean; elapsedSec: number; lookbackBlocks: bigint } {
+  /**
+   * HOW FAR THE FIRST SCAN AFTER A RESTART REACHES BACK.
+   *
+   * A child's sqlite is rebuilt on redeploy, so its candidate table starts
+   * empty. With `lastSuccessAt === 0` this function used to treat a cold start
+   * as "one interval has passed" — a 360-second reach, about six minutes of
+   * chain — while the class route reads a SIX HOUR candidate window. So a
+   * restarted agent was blind to everything that launched before it booted and
+   * needed a full six hours of five-minute scans to see what it already knew,
+   * during which the funnel honestly reported zero and looked identical to a
+   * dead scanner.
+   *
+   * The launch feed is derived from factory logs, so the chain is the
+   * authoritative source and the table is only a cache. A cache that empties is
+   * supposed to be refilled from the source, not waited out.
+   *
+   * Bounded: `recentPonsLaunches` clamps to MAX_LOOKBACK_BLOCKS (300,000 ≈ 8.4h),
+   * sized to stay inside the node's 10,000-log response cap at the measured
+   * 474.8 launches/hour. This is ONE scan at boot, not a per-tick replay.
+   */
+  coldStartSec?: number;
+}): { due: boolean; elapsedSec: number; lookbackBlocks: bigint; coldStart: boolean } {
   const overlap = opts.overlapSec ?? 60;
-  const since = opts.lastSuccessAt === 0 ? opts.nowSec - opts.intervalSec : opts.lastSuccessAt;
+  const coldStart = opts.lastSuccessAt === 0;
+  const since = coldStart ? opts.nowSec - opts.intervalSec : opts.lastSuccessAt;
   const elapsedSec = Math.max(0, opts.nowSec - since);
+  // `due` and `elapsedSec` keep their old meaning — only the REACH widens, and
+  // only on the first pass. Conflating the two would make every subsequent scan
+  // re-read six hours it has already seen.
+  const reachSec = coldStart ? Math.max(elapsedSec, opts.coldStartSec ?? opts.intervalSec) : elapsedSec;
   return {
     due: elapsedSec >= opts.intervalSec,
     elapsedSec,
-    lookbackBlocks: BigInt(elapsedSec + overlap) * opts.blocksPerSec,
+    lookbackBlocks: BigInt(reachSec + overlap) * opts.blocksPerSec,
+    coldStart,
   };
 }
 

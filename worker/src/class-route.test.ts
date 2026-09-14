@@ -392,3 +392,39 @@ describe("an empty launchpad is reported, not silently returned", () => {
     assert.equal(reports, 2, `expected both scan exits to report, found ${reports}`);
   });
 });
+
+/**
+ * SCANNING AND PAUSED ARE TWO FACTS, AND BOTH ARE TRUE.
+ *
+ * An agent with autonomous buying switched off is not idle and it is not
+ * broken — it is looking and not acting, a state the product had no way to
+ * express. Saying only "scanning" hides that nothing will be bought; saying
+ * only "paused" hides that it is still working.
+ */
+describe("the owner is told both what it is doing and that it will not buy", () => {
+  const REPORT = (() => {
+    const start = CODE.indexOf("function reportClassScan(");
+    assert.ok(start > 0, "the reporter must exist");
+    return CODE.slice(start, CODE.indexOf("async function proposeClassEntries", start));
+  })();
+
+  it("appends the paused state when buying is off", () => {
+    assert.match(REPORT, /Trading is paused\./);
+    assert.match(REPORT, /a\.buying \?/, "and only when it is actually off");
+  });
+
+  it("and the scanning half is said either way", () => {
+    // The sentence is built once and the paused clause appended, rather than
+    // two parallel sets of copy that can drift.
+    assert.match(REPORT, /const sentence = a\.buying \? `\$\{held\}\$\{scanning\}`/);
+  });
+
+  it("carries no technical codes into the owner's sentence", () => {
+    const forbidden = /no-exit|wrong-chain|live-not-enabled|classSnipeEnabled|scout-budget|grant-too-wide/;
+    const sentences = [...REPORT.matchAll(/scanning = `([^`]*)`/g)].map((m) => m[1]!);
+    assert.ok(sentences.length >= 4, `expected the owner sentences, found ${sentences.length}`);
+    for (const s of sentences) {
+      assert.doesNotMatch(s, forbidden, `owner sentence leaked a code: ${s}`);
+    }
+  });
+});
