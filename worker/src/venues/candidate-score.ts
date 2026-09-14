@@ -94,6 +94,30 @@ export function thresholdsFor(style: RiskStyle): StyleThresholds {
 }
 
 /**
+ * A style name OR the numbers themselves.
+ *
+ * The entry path already has thresholds an owner chose and a wall SIGNED —
+ * `classMinDepthUsdg`, `maxImpactBps`, and a graduation ceiling derived from
+ * their exit setting. Making it pick a style word and then look those numbers
+ * up again would mean two sources for one limit, and the one that wins would be
+ * whichever was consulted last.
+ *
+ * So the styles are a way for an OWNER to choose numbers, and this is how the
+ * numbers get used. When the three-way style control ships in the UI it writes
+ * the same fields; nothing downstream has to learn a new concept.
+ */
+export type Thresholds = RiskStyle | StyleThresholds;
+
+function resolve(t: Thresholds): StyleThresholds {
+  return typeof t === "string" ? THRESHOLDS[t] : t;
+}
+
+/** What to call the limits in a refusal an owner reads. */
+function nameOf(t: Thresholds): string {
+  return typeof t === "string" ? t : "your settings";
+}
+
+/**
  * Does this style leave room between entry and the exit cliff?
  *
  * Checked rather than assumed, because the exit threshold is an owner setting
@@ -149,15 +173,16 @@ const usdg = (raw: bigint): string => `${(Number(raw) / 1e6).toFixed(2)} USDG`;
  * satisfied is how an agent buys the one token it could not read. "Unknown" and
  * "fine" are different words and this function keeps them apart.
  */
-export function scoreLeg(leg: VenueLeg, style: RiskStyle, entry: VenueQuote | null): Verdict {
-  const t = thresholdsFor(style);
+export function scoreLeg(leg: VenueLeg, style: Thresholds, entry: VenueQuote | null): Verdict {
+  const t = resolve(style);
+  const who = nameOf(style);
 
   if (leg.realDepthRaw < t.minRealDepthRaw) {
     return {
       ok: false,
       kind: "depth",
       score: 0,
-      reason: `only ${usdg(leg.realDepthRaw)} of real liquidity — ${style} wants at least ${usdg(t.minRealDepthRaw)}`,
+      reason: `only ${usdg(leg.realDepthRaw)} of real liquidity — ${who} wants at least ${usdg(t.minRealDepthRaw)}`,
     };
   }
 
@@ -177,7 +202,7 @@ export function scoreLeg(leg: VenueLeg, style: RiskStyle, entry: VenueQuote | nu
       ok: false,
       kind: "impact",
       score: 0,
-      reason: `expected price impact is ${(entry.costBps / 100).toFixed(2)}% — above the ${(t.maxCostBps / 100).toFixed(2)}% ${style} allows`,
+      reason: `expected price impact is ${(entry.costBps / 100).toFixed(2)}% — above the ${(t.maxCostBps / 100).toFixed(2)}% ${who} allows`,
     };
   }
 
@@ -202,14 +227,14 @@ export function scoreLeg(leg: VenueLeg, style: RiskStyle, entry: VenueQuote | nu
 
   if (t.minAgeSec > 0) {
     if (leg.ageSec === null) {
-      return { ok: false, kind: "age", score: 0, reason: `do not know how old ${leg.symbol} is, and ${style} will not buy an unknown age` };
+      return { ok: false, kind: "age", score: 0, reason: `do not know how old ${leg.symbol} is, and ${who} will not buy an unknown age` };
     }
     if (leg.ageSec < t.minAgeSec) {
       return {
         ok: false,
         kind: "age",
         score: 0,
-        reason: `${leg.symbol} is ${Math.floor(leg.ageSec / 60)} minutes old — ${style} waits ${Math.floor(t.minAgeSec / 60)}`,
+        reason: `${leg.symbol} is ${Math.floor(leg.ageSec / 60)} minutes old — ${who} waits ${Math.floor(t.minAgeSec / 60)}`,
       };
     }
   }
@@ -223,7 +248,7 @@ export function scoreLeg(leg: VenueLeg, style: RiskStyle, entry: VenueQuote | nu
         ok: false,
         kind: "activity",
         score: 0,
-        reason: `${leg.symbol} has had ${leg.recentTrades} trades recently — ${style} wants ${t.minRecentTrades}`,
+        reason: `${leg.symbol} has had ${leg.recentTrades} trades recently — ${who} wants ${t.minRecentTrades}`,
       };
     }
   }
@@ -252,7 +277,7 @@ export function scoreLeg(leg: VenueLeg, style: RiskStyle, entry: VenueQuote | nu
  */
 export function chooseEntry(
   legs: readonly { leg: VenueLeg; entry: VenueQuote | null }[],
-  style: RiskStyle,
+  style: Thresholds,
 ): {
   pick: VenueLeg | null;
   score: number;

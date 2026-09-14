@@ -255,7 +255,63 @@ describe("three layers must hold before an agent reaches for a class token", () 
     // The caps would bound a burst anyway; one proposal keeps the decision
     // legible instead of producing a wall of refusals from a batch that could
     // only ever have filled its first member.
-    assert.match(PRODUCER, /const leg = legs\[0\]!/);
+    //
+    // This used to pin `legs[0]`, which proved one-per-tick by proving the
+    // route took whichever candidate the launch scan happened to return first —
+    // an ordering by discovery time and by nothing else. The singleness was
+    // real; the selection was not. It now scores every eligible leg and takes
+    // the best, so the property is asserted directly: exactly one pick, and one
+    // returned intent.
+    assert.match(PRODUCER, /choice\.pick/, "the entry comes from a scored choice");
+    assert.doesNotMatch(PRODUCER, /const leg = legs\[0\]/, "never first-past-the-post again");
+    /**
+     * Counted as INTENTS and scoped to the ENTRY producer alone.
+     *
+     * Two things made a naive count wrong. The candidate builder's `flatMap`
+     * also returns an array literal, so counting `return [{` caught a shape
+     * that was never an entry. And `PRODUCER` is sliced as far as
+     * `curveLegsNow`, which means it also contains `proposeClassExits` — whose
+     * `curve-trade` is the EXIT. Neither is a second entry path.
+     */
+    const entryOnly = PRODUCER.slice(0, PRODUCER.indexOf("async function proposeClassExits"));
+    assert.ok(entryOnly.length > 0, "the entry producer must be separable from the exit producer");
+    const intents = [...entryOnly.matchAll(/kind: "curve-trade"/g)].length;
+    assert.equal(intents, 1, `exactly one entry intent is constructed, found ${intents}`);
+  });
+
+  it("SCORES every eligible leg rather than taking the first", () => {
+    // The scorer is where fail-closed lives: an unreadable depth, impact or
+    // graduation figure is a refusal there, never a zero. Taking legs[0] walked
+    // straight past all of it.
+    assert.match(PRODUCER, /chooseEntry\(/);
+    assert.match(PRODUCER, /minRealDepthRaw: usdg\(cfg\.classMinDepthUsdg\)/, "depth floor is the owner's");
+    assert.match(PRODUCER, /maxCostBps: cfg\.maxImpactBps/, "impact ceiling is the owner's");
+    assert.match(PRODUCER, /maxGraduationBps/, "and the graduation ceiling is applied in scoring too");
+  });
+
+  it("LOOKS AT THE MARKET EVEN WHEN BUYING IS SWITCHED OFF", () => {
+    /**
+     * The complaint this milestone exists for: an owner whose bot "doesn't want
+     * to trade alone". With the execution gates above every read, an agent with
+     * the route off did not look at the market at all and had nothing to say
+     * about it — indistinguishable from a broken one.
+     *
+     * Those three settings say DO NOT BUY, not do not look. They must therefore
+     * come AFTER the scan and its report.
+     */
+    const scan = PRODUCER.indexOf("reportClassScan(");
+    const snipe = PRODUCER.indexOf("if (!cfg.classSnipeEnabled) return [];");
+    const size = PRODUCER.indexOf("if (cfg.classPerEntryUsdg <= 0) return [];");
+    const positions = PRODUCER.indexOf("cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions");
+    assert.ok(scan > 0, "the scan must report");
+    for (const [name, at] of [
+      ["classSnipeEnabled", snipe],
+      ["classPerEntryUsdg", size],
+      ["classMaxPositions", positions],
+    ] as const) {
+      assert.ok(at > 0, `${name} must still gate execution`);
+      assert.ok(at > scan, `${name} must gate EXECUTION, not the scan`);
+    }
   });
 
   it("targets the sealed vault, so the executor's fork and the mirror agree", () => {

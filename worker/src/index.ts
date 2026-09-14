@@ -263,6 +263,10 @@ const CLASS_MAX_ROUND_TRIP_BPS = 600;
  * contradiction.
  */
 const CLASS_ENTRY_GRADUATION_MARGIN_BPS = 1_000;
+
+/** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
+let lastClassFunnelKey = "";
+let lastClassIdleKey = "";
 import {
   CURVE_GUARD_DEFAULTS,
   curveFloorDrawdownBps,
@@ -272,8 +276,10 @@ import {
   curveSellOut,
   curveMinOut,
   curveDepthFraction,
+  realQuoteRaw,
   type CurveReserves,
 } from "./venues/pons-price";
+import { chooseEntry } from "./venues/candidate-score";
 import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
@@ -780,6 +786,83 @@ async function main() {
    * Returns [] rather than throwing on every refusal, because "no class entry
    * this tick" is the overwhelmingly common answer and the ordinary one.
    */
+  /**
+   * WHAT THE SCAN SAW, IN TWO REGISTERS.
+   *
+   * The operator gets the funnel — every stage, so a quiet agent can be
+   * diagnosed in seconds instead of by reading a tick by hand. The owner gets
+   * one sentence in plain English, because `depth 7 · impact 3` is not an
+   * answer to "what is my agent doing".
+   *
+   * Both are change-keyed. The producer runs every fifteen seconds and the
+   * answer is usually the same one; a line per tick is a line nobody reads, and
+   * this repo already carries the incident where 1,242 identical rows told
+   * nobody anything.
+   *
+   * The stage counts are CUMULATIVE and that is sound, because `scoreLeg`
+   * short-circuits in this order — depth, then impact, then graduation. So
+   * "passed depth" is everything the depth check did not turn back, and each
+   * later stage narrows what survived the one before it.
+   */
+  function reportClassScan(a: {
+    discovered: number;
+    pairs: number;
+    verified: number;
+    refusedByVenue: number;
+    choice: { pick: { symbol: string } | null; refused: { reason: string; kind: string }[] };
+    holding: number;
+    buying: boolean;
+  }): void {
+    const by = (k: string) => a.choice.refused.filter((r) => r.kind === k).length;
+    const depthOut = by("depth");
+    const impactOut = by("impact") + by("unpriceable");
+    const gradOut = by("graduation");
+    const passedDepth = a.verified - depthOut;
+    const passedImpact = passedDepth - impactOut;
+    const passedGrad = passedImpact - gradOut;
+    const qualified = a.choice.pick ? 1 : 0;
+
+    const key =
+      `${a.discovered}/${a.pairs}/${a.verified}/${passedDepth}/${passedImpact}/${passedGrad}/${qualified}/${a.buying ? 1 : 0}`;
+    if (key !== lastClassFunnelKey) {
+      lastClassFunnelKey = key;
+      console.log(
+        `[class funnel] scanned ${a.discovered} → ${a.pairs} usdg pairs → ${a.verified} tradable → ` +
+          `${passedDepth} passed depth → ${passedImpact} passed impact → ${passedGrad} passed graduation safety → ` +
+          `${qualified} qualified${a.buying ? "" : " · BUYING OFF (scan only)"}`,
+      );
+    }
+
+    /**
+     * THE OWNER'S SENTENCE. One line, no codes, and it never claims progress it
+     * did not make. When the route is switched off it says so plainly rather
+     * than implying the market was the obstacle — that distinction is the
+     * difference between "nothing qualified" and "you have not turned this on".
+     */
+    const held = a.holding > 0 ? `Holding ${a.holding} position${a.holding === 1 ? "" : "s"}. ` : "";
+    let sentence: string;
+    if (a.discovered === 0) {
+      sentence = `${held}Scanning — no new tokens have appeared on the launchpad yet.`;
+    } else if (a.choice.pick) {
+      sentence = a.buying
+        ? `${held}Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`
+        : `${held}Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} qualifies, but autonomous buying is switched off.`;
+    } else if (passedDepth <= 0) {
+      sentence = `${held}Still scanning — nothing currently has enough real liquidity.`;
+    } else if (passedImpact <= 0) {
+      sentence = `${held}Found ${passedDepth} deep enough, but getting in and out would cost too much.`;
+    } else if (passedGrad <= 0) {
+      sentence = `${held}Found ${passedImpact} worth pricing, but they are too close to graduating to sell safely afterwards.`;
+    } else {
+      sentence = `${held}Scanning ${a.discovered} tokens on the launchpad…`;
+    }
+
+    if (sentence !== lastClassIdleKey) {
+      lastClassIdleKey = sentence;
+      if (active) void addEvent(active.agentId, "ok", sentence);
+    }
+  }
+
   async function proposeClassEntries(): Promise<TradeIntent[]> {
     // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, and a
     // simulated class fill would need a price for a token with no oracle, no
@@ -794,18 +877,35 @@ async function main() {
     // the whole route. No symbol set to sift, and therefore no drift surface —
     // this is a gate, not a filter.
     if (cfg.assetMode === "stocks") return [];
-    if (!cfg.classSnipeEnabled) return [];
-    if (cfg.classPerEntryUsdg <= 0) return [];
     if (!active) return [];
     const vault = grantPonsClassVault(active.grant);
     if (!vault) return [];
+
+    /**
+     * THE EXECUTION GATES MOVED DOWN, AND THAT IS THE POINT.
+     *
+     * `classSnipeEnabled`, `classPerEntryUsdg` and `classMaxPositions` used to
+     * sit here, above every read — so an agent with the route switched off did
+     * not look at the market at all, and had nothing whatsoever to say about it.
+     * From outside that is indistinguishable from an agent that is broken, which
+     * is the complaint this whole milestone exists to answer: "my bot doesn't
+     * want to trade alone" from an owner whose bot was never permitted to look.
+     *
+     * Those three settings say DO NOT BUY. They do not say do not look. They are
+     * now applied after the scan, so the funnel and the owner's sentence are
+     * produced either way and an idle agent can prove it is alive.
+     *
+     * The gates that remain above are the ones where looking is impossible or
+     * meaningless rather than merely forbidden: no rail (paper), the wrong asset
+     * class entirely, no armed grant, or no vault sealed into the signature —
+     * without which there is no route to report on.
+     */
 
     // ALREADY-HELD POSITIONS BOUND THE COUNT. Null means the record could not
     // be read, and an unreadable position count must not read as zero — that
     // would let the ceiling free itself exactly when the book is unknown.
     const held = await classPositions(active.agentId);
     if (held === null) return [];
-    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
     const alreadyHeld = new Set(held.map((h) => h.token));
 
     // THE ONLY ADMISSIBLE SOURCE. recentCandidates without `poolsOnly`, whose
@@ -910,15 +1010,117 @@ async function main() {
         console.log(`[class] ${refused.length} of ${candidates.length} candidate(s) turned back, ${outcome} — ${key}`);
       }
     }
+    /**
+     * WHAT SIZE THE SCORING IS DONE AT.
+     *
+     * Impact and round-trip cost are functions of SIZE, so scoring needs one
+     * even when the route is switched off and nothing will be bought. Using the
+     * owner's real entry size keeps the report truthful about the trade they
+     * would actually make; when that size is zero — the scanning-only case —
+     * a small probe is used purely so the funnel can still say something about
+     * impact, and no intent is ever built from it because the execution gates
+     * below refuse first.
+     */
+    const configured = usdg(cfg.classPerEntryUsdg);
+    const probe = usdg(5) < active.limits.perTradeUsdg ? usdg(5) : active.limits.perTradeUsdg;
+    const spend =
+      configured > 0n
+        ? configured < active.limits.perTradeUsdg
+          ? configured
+          : active.limits.perTradeUsdg
+        : probe;
+
+    /**
+     * SCORED, NOT FIRST-PAST-THE-POST.
+     *
+     * This took `legs[0]` — whichever candidate the launch scan happened to
+     * return first, which is an ordering by discovery time and by nothing else.
+     * A route that buys the first thing it can reach is not selecting.
+     *
+     * The scorer applies the owner's OWN limits: `classMinDepthUsdg` for depth,
+     * `maxImpactBps` for the round trip, and the graduation ceiling derived from
+     * their exit setting. No new knob, and nothing here can loosen a signed
+     * limit — it chooses among candidates the wall would already permit.
+     *
+     * FAIL CLOSED ON EVERY SIGNAL. A depth, impact or graduation figure that
+     * could not be MEASURED is a refusal, never a zero and never a pass: the
+     * scorer's own tests pin that, and it is the difference between declining a
+     * token and buying the one token nobody could read.
+     *
+     * Age and recent-activity floors are left at zero because this pass does not
+     * measure them yet — gating on a signal nobody produced would refuse
+     * everything and call it prudence.
+     */
+    const exitBpsForScore = cfg.classExitAtGraduationPct * 100;
+    const thresholds = {
+      minRealDepthRaw: usdg(cfg.classMinDepthUsdg),
+      maxCostBps: cfg.maxImpactBps,
+      minAgeSec: 0,
+      maxGraduationBps: Math.max(0, exitBpsForScore - CLASS_ENTRY_GRADUATION_MARGIN_BPS),
+      minRecentTrades: 0,
+    };
+
+    const scored = legs.map((l) => {
+      const out = curveBuyOut(l.reserves, spend);
+      const back = out === null || out <= 0n ? null : curveSellOut(l.reserves, out);
+      const costBps =
+        back === null || spend <= 0n
+          ? null
+          : Math.max(0, Number(((spend - back) * 10_000n) / spend));
+      const progressNow = curveDepthFraction(l.reserves);
+      return {
+        raw: l,
+        leg: {
+          venue: "pons" as const,
+          token: l.token,
+          symbol: l.symbol,
+          decimals: l.decimals,
+          route: l.curve,
+          quoteToken: l.quoteToken,
+          realDepthRaw: realQuoteRaw(l.reserves),
+          graduationBps: progressNow === null ? null : Math.round(progressNow * 10_000),
+          ageSec: null,
+          recentTrades: null,
+        },
+        entry: out === null || out <= 0n ? null : { amountOutRaw: out, costBps },
+      };
+    });
+
+    const choice = chooseEntry(
+      scored.map((s) => ({ leg: s.leg, entry: s.entry })),
+      thresholds,
+    );
+
+    // THE FUNNEL, EVERY TICK, WHETHER OR NOT ANYTHING IS BOUGHT. An agent that
+    // looked at the market and declined is doing its job; one that cannot say
+    // so is indistinguishable from one that is broken.
+    reportClassScan({
+      discovered: rows.length,
+      pairs: candidates.length,
+      verified: legs.length,
+      refusedByVenue: refused.length,
+      choice,
+      holding: held.length,
+      buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+    });
+
     if (legs.length === 0) return [];
+
+    /**
+     * NOW THE EXECUTION GATES. Everything above this line is looking; nothing
+     * above it can spend. These three say DO NOT BUY, and they are applied here
+     * so that the scan and its report happen first.
+     */
+    if (!cfg.classSnipeEnabled) return [];
+    if (cfg.classPerEntryUsdg <= 0) return [];
+    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
     // proposal keeps the decision legible: an owner reading the feed sees one
     // considered entry rather than a wall of refusals from a batch that could
     // only ever have filled its first member.
-    const leg = legs[0]!;
-    const size = usdg(cfg.classPerEntryUsdg);
-    const spend = size < active.limits.perTradeUsdg ? size : active.limits.perTradeUsdg;
+    if (!choice.pick) return [];
+    const leg = scored.find((s) => s.leg.token === choice.pick!.token)!.raw;
 
     // THE LAST FIVE SILENT REFUSALS ON THIS PATH.
     //
