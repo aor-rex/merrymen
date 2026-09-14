@@ -1816,11 +1816,19 @@ async function runHwmRepairIfAsked(): Promise<void> {
   if (hwmRepairRan) return;
   hwmRepairRan = true;
 
-  if (mode !== "report") {
-    // NAMED, NOT ASSUMED. An operator who types `apply` must be told plainly
-    // that it does not exist yet rather than have it silently read as `report`
-    // and come away believing a repair landed.
-    log(`hwm| MERRYMEN_REPAIR_HWM=${mode} is not a mode. Only "report" exists; nothing was done.`);
+  if (mode !== "report" && mode !== "apply") {
+    // NAMED, NOT ASSUMED. A typo must be told plainly rather than read as
+    // `report` — or worse, as `apply`.
+    log(`hwm| MERRYMEN_REPAIR_HWM=${mode} is not a mode. Use "report" or "apply"; nothing was done.`);
+    return;
+  }
+  const applying = mode === "apply";
+  // A FLEET-WIDE APPLY IS NOT A THING. Every write here moves the figure the
+  // drawdown breaker divides by and the performance fee is measured against, so
+  // it happens to tenants somebody named, one at a time, having read their
+  // numbers. `report` may sweep the fleet; `apply` may not.
+  if (applying && !(process.env.MERRYMEN_REPAIR_HWM_ONLY ?? "").trim()) {
+    log("hwm| REFUSING to apply without MERRYMEN_REPAIR_HWM_ONLY — name the tenants explicitly");
     return;
   }
   const url = process.env.DATABASE_URL;
@@ -1830,7 +1838,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
   }
 
   try {
-    const { planHwmRepair, repairLines } = await import("./hwm-repair");
+    const { hwmWriteTargets, planHwmRepair, repairLines } = await import("./hwm-repair");
     const shared = await makePgDb(url);
     // THE SCHEMA FIRST, because this pass runs BEFORE `mirrorLedgers`, and the
     // mirror is the only thing that applies the ledger DDL to the shared
@@ -1965,6 +1973,24 @@ async function runHwmRepairIfAsked(): Promise<void> {
       log: (m) => log(`hwm| ${m}`),
     });
 
+    // AN OPERATOR JUDGEMENT, PER NAMED TENANT. Not a rule and not a heuristic:
+    // a tenant appears here because somebody read its numbers and concluded its
+    // recorded fee-history profit is legacy residue. Shogun is the case it
+    // exists for — 24.915968 of recorded profit against a book never marked
+    // above 25.000000 and a chain lifetime result of 0.000000.
+    const phantomProfit = new Set(
+      (process.env.MERRYMEN_REPAIR_HWM_PHANTOM_PROFIT ?? "")
+        .split(",")
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.startsWith("0x")),
+    );
+    if (phantomProfit.size) {
+      log(
+        `hwm| operator declares the fee history phantom for ${phantomProfit.size} named tenant(s): ` +
+          [...phantomProfit].join(", "),
+      );
+    }
+
     const plans = roster.map((r) => {
       const key = r.account.toLowerCase();
       const a = agentBy.get(key);
@@ -2015,11 +2041,84 @@ async function runHwmRepairIfAsked(): Promise<void> {
         maxEquityUsdg: maxEquityBy.get(key) ?? null,
         scanComplete: complete,
         scanNote: notes.length ? notes.slice(0, 2).join("; ") : null,
-      });
+      }, { treatProfitAsPhantom: phantomProfit.has(r.tenant.toLowerCase()) });
     });
 
     for (const line of repairLines(plans)) log(`hwm| ${line}`);
-    log("hwm| REPORT ONLY — no apply path exists yet. Remove MERRYMEN_REPAIR_HWM now.");
+
+    if (!applying) {
+      log("hwm| REPORT ONLY — nothing was written. Remove MERRYMEN_REPAIR_HWM now.");
+      return;
+    }
+
+    // ── the apply ────────────────────────────────────────────────────────
+    //
+    // EXPRESSED ENTIRELY AS RAISES. The effective peak is
+    // `hwm_usdg − hwm_withdrawn_usdg` and both halves are one-way ratchets, so
+    // lowering a peak means raising the second faster than the first. Nothing
+    // here gains the ability to write a peak DOWN, which matters because such a
+    // door would then be available to every future caller — including a rebuilt
+    // child reporting its schema defaults.
+    for (const plan of plans) {
+      const acct = plan.facts.smartAccount;
+      const a = agentBy.get(acct.toLowerCase());
+      const current = {
+        grossUsdg: a?.hwm_usdg === null || a?.hwm_usdg === undefined ? 0 : Number(a.hwm_usdg),
+        withdrawnUsdg:
+          a?.hwm_withdrawn_usdg === null || a?.hwm_withdrawn_usdg === undefined
+            ? 0
+            : Number(a.hwm_withdrawn_usdg),
+      };
+      const t = hwmWriteTargets(plan, current);
+      if ("refused" in t) {
+        log(`hwm| ${plan.facts.tenant} NOT APPLIED — ${t.refused}`);
+        continue;
+      }
+      if (t.grossUsdg === current.grossUsdg && t.withdrawnUsdg === current.withdrawnUsdg) {
+        log(`hwm| ${plan.facts.tenant} already at the derived figures — nothing to write`);
+        continue;
+      }
+
+      // THE EVIDENCE GOES IN FIRST, and on the AGENT'S OWN event log rather than
+      // only into this process's stdout. A repair whose only record is a log
+      // line in a 500-line rolling window is a repair nobody can audit later —
+      // and this figure is one an owner is entitled to see explained.
+      await shared
+        .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
+        .run(acct, "ok", t.evidence);
+
+      await shared
+        .prepare(
+          `UPDATE agents
+              SET hwm_usdg = CASE WHEN ? > hwm_usdg THEN ? ELSE hwm_usdg END,
+                  hwm_withdrawn_usdg = CASE WHEN ? > hwm_withdrawn_usdg
+                                            THEN ? ELSE hwm_withdrawn_usdg END
+            WHERE lower(smart_account) = lower(?)`,
+        )
+        .run(t.grossUsdg, t.grossUsdg, t.withdrawnUsdg, t.withdrawnUsdg, acct);
+
+      // READ IT BACK. A write that reported success and changed nothing is the
+      // failure this whole milestone keeps running into.
+      const after = (await shared
+        .prepare("SELECT hwm_usdg, hwm_withdrawn_usdg FROM agents WHERE lower(smart_account) = lower(?)")
+        .get(acct)) as { hwm_usdg: number; hwm_withdrawn_usdg: number } | undefined;
+      const gotGross = after === undefined ? null : Number(after.hwm_usdg);
+      const gotWithdrawn = after === undefined ? null : Number(after.hwm_withdrawn_usdg);
+      const effective =
+        gotGross === null || gotWithdrawn === null ? null : Math.max(0, gotGross - gotWithdrawn);
+      const ok =
+        effective !== null && Math.abs(effective - t.effectiveUsdg) < 0.000001;
+      log(
+        ok
+          ? `hwm| ${plan.facts.tenant} APPLIED — gross ${current.grossUsdg.toFixed(6)} → ` +
+            `${(gotGross ?? 0).toFixed(6)}, withdrawn ${current.withdrawnUsdg.toFixed(6)} → ` +
+            `${(gotWithdrawn ?? 0).toFixed(6)}, effective peak ${effective.toFixed(6)} USDG`
+          : `hwm| ${plan.facts.tenant} *** VERIFY FAILED — read back ` +
+            `gross ${gotGross} withdrawn ${gotWithdrawn}, wanted effective ${t.effectiveUsdg.toFixed(6)} ***`,
+      );
+      log(`hwm| ${plan.facts.tenant} evidence: ${t.evidence}`);
+    }
+    log("hwm| APPLY COMPLETE. Remove MERRYMEN_REPAIR_HWM now.");
   } catch (e) {
     log(`hwm| FAILED — ${e instanceof Error ? e.message : String(e)}`);
   }

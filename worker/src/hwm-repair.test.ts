@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { planHwmRepair, repairLines, type TenantCapitalFacts } from "./hwm-repair";
+import { hwmWriteTargets, planHwmRepair, repairLines, type TenantCapitalFacts } from "./hwm-repair";
 
 /** A tenant with everything known and nothing unusual. Tests override one thing. */
 const facts = (over: Partial<TenantCapitalFacts> = {}): TenantCapitalFacts => ({
@@ -185,5 +185,102 @@ describe("it refuses rather than guesses", () => {
     // The account→vault buy leg is 5.000000 and the vault→account recovery leg
     // is 5.785344. Neither may appear in the capital totals.
     assert.match(lines, /deposits 55\.701312 · withdrawals 25\.785344/);
+  });
+});
+
+/**
+ * THE APPLY, AND THE JUDGEMENT THAT UNBLOCKS IT.
+ *
+ * Shogun's plan is ambiguous on its own because its fee history claims
+ * 24.915968 of profit against a book never marked above 25.000000 and a chain
+ * lifetime result of 0.000000. Those three cannot all be true. An operator
+ * reading that evidence may declare the fee figure phantom FOR THAT TENANT — and
+ * these pin that it is a per-call judgement rather than a rule, that the
+ * declaration is recorded rather than silently applied, and that the resulting
+ * write is expressible entirely as raises to two monotonic totals.
+ */
+describe("an operator may declare one tenant's fee history phantom", () => {
+  const shogun = facts({ ratchetedProfitUsdg: 24.915968, maxEquityUsdg: 25.0 });
+
+  it("without the judgement it stays ambiguous", () => {
+    const p = planHwmRepair(shogun);
+    assert.equal(p.ambiguous, true);
+    assert.equal(p.proposedHwmUsdg, null);
+  });
+
+  it("WITH IT, the derivation completes and lands on 24.915968", () => {
+    const p = planHwmRepair(shogun, { treatProfitAsPhantom: true });
+    assert.equal(p.ambiguous, false);
+    assert.equal(p.proposedHwmUsdg, 24.915968, "deposits − withdrawals − swept, with no profit term");
+    assert.equal(p.proposedDrawdownBps, 0);
+    assert.doesNotMatch(p.reason, /raised from the derived/, "and not by a clamp — from the chain");
+  });
+
+  it("AND SAYS SO, with the evidence that justified it", () => {
+    const p = planHwmRepair(shogun, { treatProfitAsPhantom: true });
+    assert.match(p.reason, /DECLARED PHANTOM by an operator/);
+    assert.match(p.reason, /never marked above 25\.000000/);
+    assert.match(p.reason, /lifetime result from the chain is 0\.000000/);
+  });
+
+  it("IT IS NOT A RULE — another tenant with the same shape is untouched", () => {
+    // The judgement is a parameter, so a second tenant with an equally
+    // implausible fee history still refuses unless somebody says otherwise
+    // about THAT tenant.
+    const other = planHwmRepair(facts({ tenant: "0xdave", ratchetedProfitUsdg: 98.4, maxEquityUsdg: 50 }));
+    assert.equal(other.ambiguous, true);
+    assert.match(other.reason, /the fee history records/);
+  });
+
+  it("a declaration does not rescue a tenant blocked for any OTHER reason", () => {
+    const blocked = planHwmRepair(
+      facts({ ratchetedProfitUsdg: 24.915968, maxEquityUsdg: 25.0, ambiguousMoves: 1 }),
+      { treatProfitAsPhantom: true },
+    );
+    assert.equal(blocked.ambiguous, true, "an unclassifiable movement still stops it");
+    assert.match(blocked.reason, /could not be classified/);
+  });
+});
+
+describe("the write is expressed as raises to two monotonic totals", () => {
+  const plan = planHwmRepair(
+    facts({ ratchetedProfitUsdg: 24.915968, maxEquityUsdg: 25.0 }),
+    { treatProfitAsPhantom: true },
+  );
+
+  it("SHOGUN'S TARGETS: gross up, withdrawn up, effective peak down", () => {
+    const t = hwmWriteTargets(plan, { grossUsdg: 49.915968, withdrawnUsdg: 25.0 });
+    assert.ok(!("refused" in t), `must not refuse: ${JSON.stringify(t)}`);
+    const w = t as Exclude<typeof t, { refused: string }>;
+    assert.equal(w.grossUsdg, 55.701312, "raised to what the chain shows arriving");
+    assert.equal(w.withdrawnUsdg, 30.785344, "raised to what left");
+    assert.equal(w.effectiveUsdg, 24.915968, "and the peak falls out of the subtraction");
+    assert.ok(w.grossUsdg >= 49.915968 && w.withdrawnUsdg >= 25.0, "BOTH moves are upward");
+  });
+
+  it("the evidence names every term, so the write can be re-derived later", () => {
+    const t = hwmWriteTargets(plan, { grossUsdg: 49.915968, withdrawnUsdg: 25.0 });
+    const w = t as Exclude<typeof t, { refused: string }>;
+    assert.match(w.evidence, /deposits 55\.701312/);
+    assert.match(w.evidence, /withdrawals 25\.785344/);
+    assert.match(w.evidence, /swept out at cost 5\.000000/);
+    assert.match(w.evidence, /6 internal custody move\(s\)|2 internal custody move\(s\)/);
+    assert.match(w.evidence, /DECLARED PHANTOM by an operator/);
+    assert.match(w.evidence, /the peak falls because the second grows/);
+  });
+
+  it("REFUSES rather than raising a peak", () => {
+    // A withdrawn total that would have to fall means the effective peak would
+    // rise, which widens a drawdown and can halt a healthy account.
+    const t = hwmWriteTargets(plan, { grossUsdg: 49.915968, withdrawnUsdg: 40 });
+    assert.ok("refused" in t);
+    assert.match((t as { refused: string }).refused, /would RAISE the effective peak/);
+  });
+
+  it("refuses when the plan itself proposed nothing", () => {
+    const amb = planHwmRepair(facts({ ambiguousMoves: 2 }));
+    const t = hwmWriteTargets(amb, { grossUsdg: 10, withdrawnUsdg: 0 });
+    assert.ok("refused" in t);
+    assert.match((t as { refused: string }).refused, /no proposal to apply/);
   });
 });

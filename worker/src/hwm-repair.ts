@@ -145,8 +145,33 @@ const micro = (n: number): number => Math.round(n * 1e6) / 1e6;
 
 const f = (n: number): string => n.toFixed(6);
 
+/**
+ * An operator judgement about ONE tenant, made against evidence they have read.
+ *
+ * NOT A RULE, and the shape enforces it: there is no fleet-wide switch, no
+ * heuristic, and no default. Each flag is passed for one named tenant by
+ * somebody who has looked at that tenant's numbers and said what they conclude.
+ * A rule that discarded fee history wherever it looked implausible would be a
+ * rule for silently deleting the record of money the house earned.
+ */
+export interface RepairJudgement {
+  /**
+   * Declare this tenant's recorded fee-history profit phantom legacy accounting.
+   *
+   * Shogun is the case it was added for: 24.915968 USDG of recorded profit on a
+   * book that has never been marked above 25.000000 and whose chain history
+   * shows a lifetime result of 0.000000. Those three cannot all be true, and the
+   * tool refuses to choose between them on its own — this is how an operator
+   * chooses, per tenant, on the record.
+   */
+  treatProfitAsPhantom?: boolean;
+}
+
 /** Derive one tenant's plan. PURE. */
-export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
+export function planHwmRepair(
+  facts: TenantCapitalFacts,
+  judgement: RepairJudgement = {},
+): HwmRepairPlan {
   const base = {
     facts,
     currentDrawdownBps:
@@ -220,7 +245,11 @@ export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
   // WHAT THE BOOK ACTUALLY MADE, net of capital: everything it still has, plus
   // everything that was taken out, less everything that was put in.
   const lifetime = micro(facts.equityUsdg + facts.withdrawalsUsdg + swept - facts.depositsUsdg);
-  const derived = micro(net + facts.ratchetedProfitUsdg);
+  // AN OPERATOR MAY DECLARE THE PROFIT TERM PHANTOM, for one named tenant, and
+  // the reason below records that they did so rather than letting the figure
+  // quietly vanish from the arithmetic.
+  const profit = judgement.treatProfitAsPhantom ? 0 : facts.ratchetedProfitUsdg;
+  const derived = micro(net + profit);
   const out = {
     ...base,
     netContributionsUsdg: net,
@@ -242,6 +271,7 @@ export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
   // would quietly under-repair; ignoring them would erase a real earner's peak.
   // Neither is this tool's call to make silently.
   if (
+    !judgement.treatProfitAsPhantom &&
     facts.ratchetedProfitUsdg > 0 &&
     facts.maxEquityUsdg !== null &&
     micro(net + facts.ratchetedProfitUsdg) > micro(facts.maxEquityUsdg + 0.000001)
@@ -302,7 +332,12 @@ export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
     reason:
       `${f(facts.depositsUsdg)} in − ${f(facts.withdrawalsUsdg)} out` +
       (swept > 0 ? ` − ${f(swept)} swept out at cost` : "") +
-      (facts.ratchetedProfitUsdg > 0 ? ` + ${f(facts.ratchetedProfitUsdg)} profit already in the peak` : "") +
+      (profit > 0 ? ` + ${f(profit)} profit already in the peak` : "") +
+      (judgement.treatProfitAsPhantom && facts.ratchetedProfitUsdg > 0
+        ? ` (the ${f(facts.ratchetedProfitUsdg)} of recorded profit was DECLARED PHANTOM by an operator: ` +
+          `this book was never marked above ${facts.maxEquityUsdg === null ? "an unknown figure" : f(facts.maxEquityUsdg)} ` +
+          `and its lifetime result from the chain is ${f(lifetime)})`
+        : "") +
       ` = ${f(proposed)}${clampNote}`,
   };
 }
@@ -366,4 +401,80 @@ export function repairLines(plans: readonly HwmRepairPlan[]): string[] {
   );
   L.push("NOTHING WAS WRITTEN. This is the report; the apply pass is a separate, explicit run.");
   return L;
+}
+
+/**
+ * THE TWO FIGURES TO WRITE, AND WHY THE REPAIR NEEDS NO NEW DOOR.
+ *
+ * The effective peak is `hwm_usdg − hwm_withdrawn_usdg`, and both stored halves
+ * are one-way ratchets. That is not an obstacle to lowering a peak — it is how
+ * the peak gets lowered, and it means a repair can be expressed entirely in
+ * RAISES:
+ *
+ *     gross     ← every deposit the chain shows          (up, or unchanged)
+ *     withdrawn ← gross − the peak we want               (up, or unchanged)
+ *
+ * Shogun: gross 49.915968 → 55.701312, withdrawn 25.000000 → 30.785344, giving
+ * an effective peak of 24.915968. Both moves are upward, so the repair uses the
+ * ratchets the mirror and the anchor already carry, and no statement anywhere
+ * gains the ability to write a peak DOWN. That property is worth more than the
+ * convenience of a direct write: a downward door would be available to every
+ * future caller, including a rebuilt child reporting its schema defaults.
+ *
+ * REFUSES rather than forcing when the arithmetic will not fit. A withdrawn
+ * total that would have to fall means the repair is trying to RAISE the
+ * effective peak, which this tool never does.
+ *
+ * PURE.
+ */
+export interface HwmWriteTargets {
+  grossUsdg: number;
+  withdrawnUsdg: number;
+  /** What the breaker will divide by afterwards. */
+  effectiveUsdg: number;
+  /** The sentence written to the durable record beside the numbers. */
+  evidence: string;
+}
+
+export function hwmWriteTargets(
+  plan: HwmRepairPlan,
+  current: { grossUsdg: number; withdrawnUsdg: number },
+): HwmWriteTargets | { refused: string } {
+  const target = plan.proposedHwmUsdg;
+  if (plan.ambiguous || target === null) {
+    return { refused: `no proposal to apply — ${plan.reason}` };
+  }
+  const x = plan.facts;
+  // The gross only ever grows, and it grows to what the chain says arrived. When
+  // the recorded gross is already higher it stays: a bigger deposit history is
+  // not evidence against a smaller one, it is what a partly-booked ledger looks
+  // like, and the withdrawn side absorbs the difference either way.
+  const gross = micro(Math.max(current.grossUsdg, x.depositsUsdg ?? 0));
+  const withdrawn = micro(gross - target);
+
+  if (withdrawn < current.withdrawnUsdg - 0.000001) {
+    return {
+      refused:
+        `applying this would need the withdrawn total to fall from ${f(current.withdrawnUsdg)} to ` +
+        `${f(withdrawn)}, which would RAISE the effective peak. This tool never raises a peak`,
+    };
+  }
+  if (withdrawn < 0) {
+    return { refused: `the withdrawn total would be negative (${f(withdrawn)})` };
+  }
+
+  return {
+    grossUsdg: gross,
+    withdrawnUsdg: withdrawn,
+    effectiveUsdg: micro(gross - withdrawn),
+    evidence:
+      `hwm repair: effective peak ${f(x.currentHwmUsdg ?? 0)} → ${f(micro(gross - withdrawn))} USDG. ` +
+      `gross ${f(current.grossUsdg)} → ${f(gross)}, withdrawn ${f(current.withdrawnUsdg)} → ${f(withdrawn)} ` +
+      `(both raised; the peak falls because the second grows, not because anything was written down). ` +
+      `Derived from chain history: deposits ${f(x.depositsUsdg ?? 0)}, withdrawals ${f(x.withdrawalsUsdg ?? 0)}, ` +
+      `swept out at cost ${f(x.sweptAtCostUsdg ?? 0)}, across ${x.internalMoves} internal custody move(s) and ` +
+      `${x.tradeLegs} trade leg(s) which are not capital. Equity ${f(x.equityUsdg ?? 0)}, best equity ever ` +
+      `${x.maxEquityUsdg === null ? "unknown" : f(x.maxEquityUsdg)}, lifetime result ` +
+      `${f(plan.lifetimeResultUsdg ?? 0)}. ${plan.reason}`,
+  };
 }
