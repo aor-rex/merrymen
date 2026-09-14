@@ -176,7 +176,10 @@ describe("it refuses rather than guesses", () => {
     assert.match(lines, /SirSendIt/);
     assert.match(lines, /AMBIGUOUS — no change proposed/);
     assert.match(lines, /3 UNCLASSIFIABLE/);
-    assert.match(lines, /NOTHING WAS WRITTEN/);
+    // The report DESCRIBES; only the caller knows whether it also wrote. This
+    // body used to claim "NOTHING WAS WRITTEN", which was true exactly as long
+    // as no apply path existed and would have gone on printing under one.
+    assert.doesNotMatch(lines, /NOTHING WAS WRITTEN/);
   });
 
   it("the report names internal moves as ignored rather than netting them in", () => {

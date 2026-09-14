@@ -350,7 +350,7 @@ export function repairLines(plans: readonly HwmRepairPlan[]): string[] {
   const refusing = plans.filter((p) => p.refusingNow);
 
   L.push(
-    `HWM REPAIR — REPORT ONLY. ${plans.length} tenant(s) examined · ${affected.length} would change · ` +
+    `HWM REPAIR — ${plans.length} tenant(s) examined · ${affected.length} would change · ` +
       `${ambiguous.length} ambiguous · ${refusing.length} currently refused by the breaker`,
   );
   L.push("");
@@ -399,7 +399,9 @@ export function repairLines(plans: readonly HwmRepairPlan[]): string[] {
     `TOTALS — would change ${affected.length} · ambiguous ${ambiguous.length} · ` +
       `unchanged ${plans.length - affected.length - ambiguous.length}`,
   );
-  L.push("NOTHING WAS WRITTEN. This is the report; the apply pass is a separate, explicit run.");
+  // WHETHER ANYTHING WAS WRITTEN IS THE CALLER'S TO SAY. This body used to
+  // assert "NOTHING WAS WRITTEN", which was true only while no apply path
+  // existed — and would have gone on printing under an apply that wrote.
   return L;
 }
 

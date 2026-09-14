@@ -2074,18 +2074,37 @@ async function runHwmRepairIfAsked(): Promise<void> {
         log(`hwm| ${plan.facts.tenant} NOT APPLIED — ${t.refused}`);
         continue;
       }
-      if (t.grossUsdg === current.grossUsdg && t.withdrawnUsdg === current.withdrawnUsdg) {
-        log(`hwm| ${plan.facts.tenant} already at the derived figures — nothing to write`);
-        continue;
-      }
+      const alreadyRight =
+        t.grossUsdg === current.grossUsdg && t.withdrawnUsdg === current.withdrawnUsdg;
 
       // THE EVIDENCE GOES IN FIRST, and on the AGENT'S OWN event log rather than
       // only into this process's stdout. A repair whose only record is a log
       // line in a 500-line rolling window is a repair nobody can audit later —
       // and this figure is one an owner is entitled to see explained.
+      //
+      // WRITTEN EVEN WHEN NOTHING NEEDS CHANGING, because the point of an
+      // operator-approved repair is the RECORD, not the mutation. "This peak is
+      // 25.487111 because the chain shows these deposits and these withdrawals"
+      // is worth exactly as much when the figure already agrees — more, in fact,
+      // since the alternative is a durable number whose only explanation is that
+      // several bugs happened to cancel.
       await shared
         .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
-        .run(acct, "ok", t.evidence);
+        .run(
+          acct,
+          "ok",
+          alreadyRight ? `${t.evidence} (verified: the durable figures already match)` : t.evidence,
+        );
+
+      if (alreadyRight) {
+        log(
+          `hwm| ${plan.facts.tenant} VERIFIED — the durable figures already equal the derivation ` +
+            `(gross ${t.grossUsdg.toFixed(6)}, withdrawn ${t.withdrawnUsdg.toFixed(6)}, ` +
+            `effective peak ${t.effectiveUsdg.toFixed(6)} USDG). Evidence recorded; nothing written.`,
+        );
+        log(`hwm| ${plan.facts.tenant} evidence: ${t.evidence}`);
+        continue;
+      }
 
       await shared
         .prepare(
