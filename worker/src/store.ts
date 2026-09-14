@@ -1701,6 +1701,40 @@ export async function addFlow(flow: FlowRow): Promise<boolean> {
 }
 
 /**
+ * Has this exact chain log already been booked as a flow?
+ *
+ * `addFlow` CANNOT ANSWER THIS. It inserts `ON CONFLICT DO NOTHING` and then
+ * returns `true` whenever the statement did not throw — so a duplicate and a
+ * fresh insert are indistinguishable to its caller. That is harmless for the
+ * deposit scanner, which pre-filters on `knownFlowKeys` and whose `true` only
+ * has to mean "nothing failed". It is NOT harmless for a caller that moves the
+ * high-water mark on the strength of that return: it books the same withdrawal
+ * again on every pass. Measured on Shogun — one 5.000000 sweep took 10.000000
+ * off the peak across two arms, and `adjustAgentHwm`'s clamp would have walked
+ * it to zero in a few more, switching the drawdown breaker off entirely, since
+ * `policy.ts` only applies it while the peak is above zero.
+ *
+ * NULL WHEN THE QUESTION COULD NOT BE ASKED, and a caller must treat that as
+ * "do not book". An unreadable ledger is not an empty one, and the cost of
+ * waiting a tick is nothing next to the cost of double-counting capital.
+ */
+export async function hasChainFlow(
+  agentId: string,
+  txHash: string,
+  logIndex: number,
+): Promise<boolean | null> {
+  try {
+    const row = await getDb()
+      .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? AND log_index = ? LIMIT 1")
+      .get(agentId, txHash.toLowerCase(), logIndex);
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] flow lookup failed:", e);
+    return null;
+  }
+}
+
+/**
  * Capital the owner has put in, less what they have taken out. Subtract it from
  * equity and what remains is the only thing that deserves to be called P&L.
  *

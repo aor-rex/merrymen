@@ -248,3 +248,77 @@ describe("a peak lowered by a withdrawal survives the redeploy that follows it",
     );
   });
 });
+
+/**
+ * THE TRAP THAT COST 5.000000 USDG OF SHOGUN'S PEAK, PINNED.
+ *
+ * `addFlow` inserts `ON CONFLICT DO NOTHING` and returns `true` whenever the
+ * statement did not throw. For the deposit scanner that is fine: it pre-filters
+ * on `knownFlowKeys`, and its `true` only ever has to mean "nothing failed".
+ *
+ * It is not fine for a caller that moves the high-water mark on the strength of
+ * that return, because a duplicate is indistinguishable from a fresh row. The
+ * class-sweep booking runs on EVERY reconcile pass, so it re-booked the same
+ * 5.000000 withdrawal on every arm — 10.000000 off the peak in two — and
+ * `adjustAgentHwm`'s clamp would have walked the effective peak to zero within a
+ * few more. A zero peak does not merely understate the drawdown: `policy.ts`
+ * applies the breaker only while the peak is above zero, so it switches the
+ * guard off entirely.
+ *
+ * Both halves are asserted: the trap itself, so nobody "simplifies" the
+ * read-before-write away on the reasonable-looking belief that the return value
+ * already says this, and the check that replaces it.
+ */
+describe("a chain-log flow can be recognised as already booked", () => {
+  const SWEEP_TX = "0x06cd8dba8f0000000000000000000000000000000000000000000000000000abcd";
+
+  it("addFlow's TRUE does not mean it inserted — this is the trap", async () => {
+    const { addFlow, hasChainFlow } = await import("./store");
+
+    assert.equal(await hasChainFlow(ACCOUNT, SWEEP_TX, 7), false, "nothing booked yet");
+
+    const first = await addFlow({
+      agentId: ACCOUNT,
+      direction: "out",
+      amountUsdg: 5,
+      source: "chain-log",
+      txHash: SWEEP_TX,
+      logIndex: 7,
+      mode: "live",
+      chainId: 4663,
+    });
+    assert.equal(first, true, "the first insert lands");
+    assert.equal(await hasChainFlow(ACCOUNT, SWEEP_TX, 7), true, "and is visible afterwards");
+
+    const second = await addFlow({
+      agentId: ACCOUNT,
+      direction: "out",
+      amountUsdg: 5,
+      source: "chain-log",
+      txHash: SWEEP_TX,
+      logIndex: 7,
+      mode: "live",
+      chainId: 4663,
+    });
+    assert.equal(
+      second,
+      true,
+      "AND SO DOES THE DUPLICATE — ON CONFLICT DO NOTHING is silent, so this return " +
+        "cannot gate anything that moves money",
+    );
+  });
+
+  it("a DIFFERENT log on the same transaction is a different flow", async () => {
+    // Two positions swept in one transaction are two withdrawals, and the log
+    // index is what separates them. Keying on the hash alone would book one.
+    const { hasChainFlow } = await import("./store");
+    assert.equal(await hasChainFlow(ACCOUNT, SWEEP_TX, 8), false);
+  });
+
+  it("case does not hide a booked flow", async () => {
+    // An RPC may hand back either case, and the repair path and the scanner
+    // must agree about whether the same log is already on the books.
+    const { hasChainFlow } = await import("./store");
+    assert.equal(await hasChainFlow(ACCOUNT, SWEEP_TX.toUpperCase().replace("0X", "0x"), 7), true);
+  });
+});

@@ -355,6 +355,7 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  hasChainFlow,
   accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
@@ -1656,6 +1657,22 @@ async function main() {
       return;
     }
     if (p.sweptCostRaw <= 0n) return;
+
+    // ASK BEFORE BOOKING, because `addFlow` cannot tell us afterwards. It
+    // inserts ON CONFLICT DO NOTHING and returns `true` whenever nothing threw,
+    // so a duplicate looks exactly like a fresh row — and this runs on EVERY
+    // reconcile pass. Trusting that return took 10.000000 off Shogun's peak for
+    // one 5.000000 sweep in two arms, and the clamp in `adjustAgentHwm` would
+    // have walked it to zero in a few more, switching the drawdown breaker off
+    // altogether (policy.ts applies it only while the peak is above zero).
+    const already = await hasChainFlow(agentId, p.sweptTx, p.sweptLogIndex);
+    if (already === null) {
+      // UNREADABLE IS NOT UNBOOKED. Waiting a tick costs nothing; booking the
+      // same withdrawal twice moves the figure the fee is measured against.
+      console.log(`[class] sweep withdrawal deferred — could not read the flow ledger for ${short(p.token)}`);
+      return;
+    }
+    if (already) return;
 
     const landed = await addFlow({
       agentId,
