@@ -1614,86 +1614,61 @@ async function main() {
   }
 
   /**
-   * Book the capital an owner took out of the class vault by their own hand.
+   * Tokens whose sweep this process has already told the owner about.
    *
-   * WHY THIS IS NOT OPTIONAL. When a swept position's balance hits zero its
-   * symbol drops out of `unpricedByDesign`, so `quarantine.totalCostUsdg` loses
-   * its cost basis and `composeEquityUsdg` falls by exactly that much in one
-   * tick. Nothing books a flow, so the high-water mark does not follow — and the
-   * account is left permanently "in drawdown" by the amount its owner took home.
-   * That is the same failure `adjustAgentHwm`'s own comment describes for a USDG
-   * withdrawal, reached through an asset the flow scanner cannot see: the tokens
-   * left the VAULT as tokens, in a transaction the account's USDG log never
-   * mentions.
+   * Per process, not per tick: `reconcileClassFromChain` runs on every arm and a
+   * durable event each time is its own kind of noise. Same shape as
+   * `trencherRailAnnounced`. Deliberately NOT a substitute for durable
+   * idempotency — it cannot be one, and the comment below is about exactly why.
+   */
+  const sweepsAnnounced = new Set<string>();
+
+  /**
+   * Say that a sweep happened. DO NOT MOVE MONEY FOR IT.
    *
-   * It is not a loss and there is no result. Nothing sold, there was no
-   * counterparty and no price. The position leaves the book as a WITHDRAWAL at
-   * cost, which is the only figure this book can honestly say went with it.
+   * THIS FUNCTION USED TO BOOK THE WITHDRAWAL, and the way it was wrong is worth
+   * writing down, because it is the mistake this codebase keeps re-learning: IT
+   * TRIED TO BE IDEMPOTENT AGAINST AN EPHEMERAL LEDGER.
    *
-   * IDEMPOTENT BY CONSTRUCTION, not by a flag. The flow is stamped with the
-   * sweep's own (txHash, logIndex), and `flows` is uniquely indexed on
-   * (chain_id, agent_id, tx_hash, log_index) — so a re-read of the same vault
-   * log on the next arm cannot withdraw the owner's capital a second time. This
-   * runs on every reconcile pass and is a no-op on all but the first.
+   * The guard read `flows` out of the child's own sqlite — a container directory
+   * a redeploy discards. So after every deploy the check answered "not booked
+   * yet" about a withdrawal it had already made, and made it again. Shogun's
+   * durable peak was walked from 49.915968 down to 24.915968, 5.000000 at a
+   * time, across five deploys. `adjustAgentHwm`'s clamp would have taken it to
+   * zero, and a zero peak does not merely understate a drawdown — it switches
+   * the breaker off, because `policy.ts` applies it only above zero.
    *
-   * THE PEAK AND THE FLOW MOVE TOGETHER OR NOT AT ALL, the same rule `record`
-   * keeps: `adjustAgentHwm` runs only if the row actually landed.
+   * THE CHILD CANNOT DO THIS CORRECTLY, and no amount of care inside it will
+   * change that. Booking a capital movement exactly once requires knowing what
+   * has already been booked, and the only process that can know is the one
+   * holding DATABASE_URL. This file says as much a few hundred lines up, about
+   * the deposit scanner's identical temptation: "WHERE THE REPAIR BELONGS. Off
+   * the tick, in an operator tool that can see durable state."
+   *
+   * So the child does what it CAN do honestly: it classifies. The position is
+   * marked `swept` rather than `closed` with zero proceeds, `swept_raw` records
+   * what left, and the owner is told plainly. The accounting belongs to the
+   * repair tool, and `hwm-repair.ts` already values swept positions at cost.
+   *
+   * ONE ANNOUNCEMENT PER TOKEN PER PROCESS. This runs on every reconcile pass,
+   * and a durable event per pass is its own kind of noise.
    */
   async function bookClassSweepWithdrawal(
     agentId: string,
     p: { token: string; state: string; sweptCostRaw: bigint | null; sweptTx: string | null; sweptLogIndex: number | null },
   ): Promise<void> {
     if (p.state !== "swept") return;
-    if (p.sweptTx === null || p.sweptLogIndex === null) return;
-    if (p.sweptCostRaw === null) {
-      // UNPRICEABLE, SO UNBOOKED — and said out loud rather than estimated. An
-      // invented figure here would move the peak the fee is measured against.
-      await addEvent(
-        agentId,
-        "warn",
-        `${short(p.token)} was swept out of your class vault, but I never saw what it cost, so I cannot ` +
-          `record the withdrawal. Your P&L will treat that position as unknown rather than guess at it.`,
-      );
-      return;
-    }
-    if (p.sweptCostRaw <= 0n) return;
-
-    // ASK BEFORE BOOKING, because `addFlow` cannot tell us afterwards. It
-    // inserts ON CONFLICT DO NOTHING and returns `true` whenever nothing threw,
-    // so a duplicate looks exactly like a fresh row — and this runs on EVERY
-    // reconcile pass. Trusting that return took 10.000000 off Shogun's peak for
-    // one 5.000000 sweep in two arms, and the clamp in `adjustAgentHwm` would
-    // have walked it to zero in a few more, switching the drawdown breaker off
-    // altogether (policy.ts applies it only while the peak is above zero).
-    const already = await hasChainFlow(agentId, p.sweptTx, p.sweptLogIndex);
-    if (already === null) {
-      // UNREADABLE IS NOT UNBOOKED. Waiting a tick costs nothing; booking the
-      // same withdrawal twice moves the figure the fee is measured against.
-      console.log(`[class] sweep withdrawal deferred — could not read the flow ledger for ${short(p.token)}`);
-      return;
-    }
-    if (already) return;
-
-    const landed = await addFlow({
-      agentId,
-      direction: "out",
-      amountUsdg: usdgNum(p.sweptCostRaw),
-      // A RECEIPT: the Swept log is on chain and anyone with an RPC can refetch
-      // it, which is what `chain-log` means (packages/core flow-evidence.ts).
-      source: "chain-log",
-      txHash: p.sweptTx,
-      logIndex: p.sweptLogIndex,
-      mode: "live",
-    });
-    if (!landed) return; // already booked, or refused — either way the peak must not move
-    await adjustAgentHwm(agentId, -usdgNum(p.sweptCostRaw));
-    highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    if (sweepsAnnounced.has(p.token)) return;
+    sweepsAnnounced.add(p.token);
+    const cost =
+      p.sweptCostRaw === null
+        ? "I never saw what it cost, so I cannot say how much capital left with it."
+        : `It cost ${fmt(p.sweptCostRaw)} USDG, and your P&L counts that as capital you took home.`;
     await addEvent(
       agentId,
       "ok",
-      `📤 you swept ${short(p.token)} out of your class vault — recorded as a withdrawal of ` +
-        `${fmt(p.sweptCostRaw)} USDG at cost, not as a loss. Nothing was sold, so there is no result to ` +
-        `report, and the high-water mark moved with the capital.`,
+      `📤 you swept ${short(p.token)} out of your class vault. That is a withdrawal, not a loss — ` +
+        `nothing was sold, so there is no result to report. ${cost}`,
     );
   }
 
