@@ -1851,9 +1851,15 @@ async function runHwmRepairIfAsked(): Promise<void> {
       .prepare("SELECT agent_id, equity_usdg FROM equity ORDER BY agent_id, at DESC, id DESC")
       .all()) as unknown as Record<string, unknown>[];
     const equityBy = new Map<string, number>();
+    // THE BEST MARK THIS BOOK EVER HAD, which is what bounds a claim about
+    // profit: a peak is a peak OF EQUITY, so profit genuinely earned had to be
+    // marked at the time.
+    const maxEquityBy = new Map<string, number>();
     for (const e of equityRows) {
       const k = String(e.agent_id).toLowerCase();
-      if (!equityBy.has(k)) equityBy.set(k, Number(e.equity_usdg));
+      const v = Number(e.equity_usdg);
+      if (!equityBy.has(k)) equityBy.set(k, v);
+      if (!maxEquityBy.has(k) || v > (maxEquityBy.get(k) as number)) maxEquityBy.set(k, v);
     }
 
     // THE PEAK'S PERFORMANCE COMPONENT. `fee_accruals` is the only durable
@@ -1872,8 +1878,19 @@ async function runHwmRepairIfAsked(): Promise<void> {
       .all()) as unknown as Record<string, unknown>[];
     const sweptCostBy = new Map<string, number>();
     const sweptUnknownBy = new Map<string, number>();
+    const cashToken = String(CASH.USDG).toLowerCase();
     for (const c of classRows) {
       if (String(c.state ?? "") !== "swept") continue;
+      // A QUOTE-TOKEN ROW IS NOT A POSITION, and counting it here would both
+      // double-count and block the whole tenant.
+      //
+      // This adjustment exists for capital the USDG scanner is BLIND to —
+      // memecoins leaving the vault as tokens, in transactions no USDG log
+      // mentions. USDG stranded in a vault is not blind to it: it goes
+      // vault→account→owner as USDG and the chain sweep already counts it as a
+      // withdrawal. Shogun has exactly such a row, enumerated by the recovery
+      // planner with no cost basis, and it alone made the tenant unproposable.
+      if (String(c.token ?? "").toLowerCase() === cashToken) continue;
       const k = String(c.agent_id).toLowerCase();
       const raw = c.cost_usdg === null || c.cost_usdg === undefined ? null : String(c.cost_usdg);
       if (raw === null) {
@@ -1995,6 +2012,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
         sweptAtCostUsdg: sweptCostBy.get(key) ?? 0,
         sweptUnpriceable: sweptUnknownBy.get(key) ?? 0,
         ratchetedProfitUsdg: profitBy.get(key) ?? 0,
+        maxEquityUsdg: maxEquityBy.get(key) ?? null,
         scanComplete: complete,
         scanNote: notes.length ? notes.slice(0, 2).join("; ") : null,
       });

@@ -80,6 +80,19 @@ export interface TenantCapitalFacts {
 
   /** Σ `fee_accruals.profit_usdg` — the peak's performance component. */
   ratchetedProfitUsdg: number | null;
+  /**
+   * The highest equity this book has EVER been marked at.
+   *
+   * Evidence about whether a recorded profit figure can be real. A peak is a
+   * peak OF EQUITY, so profit that was genuinely earned had to show up in the
+   * series at the time — an account whose best mark was 30 cannot have a
+   * legitimate peak of 50. Null when the series is empty.
+   *
+   * Reported rather than subtracted: equity at a moment includes the capital
+   * held at that moment, so this bounds the claim without being a clean
+   * capital-adjusted peak on its own.
+   */
+  maxEquityUsdg: number | null;
 
   /** False when the chain could not be read end to end. Blocks a proposal. */
   scanComplete: boolean;
@@ -95,6 +108,8 @@ export interface HwmRepairPlan {
   refusingNow: boolean;
   /** Net capital still under management: deposits − withdrawals − swept-at-cost. */
   netContributionsUsdg: number | null;
+  /** equity + withdrawals − deposits: what the book made, net of capital. */
+  lifetimeResultUsdg: number | null;
   /** The derived peak, before the clamps. */
   derivedHwmUsdg: number | null;
   /** What this proposes to write. Null when it refuses. */
@@ -140,6 +155,7 @@ export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
         : bps(facts.currentHwmUsdg, facts.equityUsdg),
     refusingNow: false,
     netContributionsUsdg: null as number | null,
+    lifetimeResultUsdg: null as number | null,
     derivedHwmUsdg: null as number | null,
     proposedHwmUsdg: null as number | null,
     deltaUsdg: null as number | null,
@@ -201,8 +217,44 @@ export function planHwmRepair(facts: TenantCapitalFacts): HwmRepairPlan {
   // ── the derivation ────────────────────────────────────────────────────────
   const swept = facts.sweptAtCostUsdg ?? 0;
   const net = micro(facts.depositsUsdg - facts.withdrawalsUsdg - swept);
+  // WHAT THE BOOK ACTUALLY MADE, net of capital: everything it still has, plus
+  // everything that was taken out, less everything that was put in.
+  const lifetime = micro(facts.equityUsdg + facts.withdrawalsUsdg + swept - facts.depositsUsdg);
   const derived = micro(net + facts.ratchetedProfitUsdg);
-  const out = { ...base, netContributionsUsdg: net, derivedHwmUsdg: derived };
+  const out = {
+    ...base,
+    netContributionsUsdg: net,
+    lifetimeResultUsdg: lifetime,
+    derivedHwmUsdg: derived,
+  };
+
+  // A RECORDED PROFIT THE EQUITY SERIES NEVER SAW.
+  //
+  // A peak is a peak OF EQUITY, so profit genuinely earned had to be marked at
+  // the time. When `fee_accruals` claims more than the best mark ever recorded
+  // could support, the two disagree and the peak rests on which one is right —
+  // which is exactly the question this tool may not answer for itself.
+  //
+  // This is not hypothetical: Shogun's fee history claims 24.915968 of profit on
+  // a book that has never sold anything, and Dave's claims 98.401485 against
+  // 49.145575 of deposits. Both are residue of the era when a redeploy booked
+  // the whole balance as a fresh contribution. Folding them into the derivation
+  // would quietly under-repair; ignoring them would erase a real earner's peak.
+  // Neither is this tool's call to make silently.
+  if (
+    facts.ratchetedProfitUsdg > 0 &&
+    facts.maxEquityUsdg !== null &&
+    micro(net + facts.ratchetedProfitUsdg) > micro(facts.maxEquityUsdg + 0.000001)
+  ) {
+    return {
+      ...out,
+      reason:
+        `the fee history records ${f(facts.ratchetedProfitUsdg)} USDG of profit, but this book has never ` +
+        `been marked above ${f(facts.maxEquityUsdg)} — a peak is a peak OF EQUITY, so the two cannot both ` +
+        `be true. Lifetime result from the chain is ${f(lifetime)}. Nothing is proposed until an operator ` +
+        `says which figure to trust`,
+    };
+  }
 
   if (derived < 0) {
     return {
@@ -288,7 +340,9 @@ export function repairLines(plans: readonly HwmRepairPlan[]): string[] {
         `${x.ambiguousMoves > 0 ? ` · ${x.ambiguousMoves} UNCLASSIFIABLE` : ""}`,
     );
     L.push(
-      `   profit already in the peak ${x.ratchetedProfitUsdg === null ? "UNKNOWN" : f(x.ratchetedProfitUsdg)}   ` +
+      `   profit in the peak ${x.ratchetedProfitUsdg === null ? "UNKNOWN" : f(x.ratchetedProfitUsdg)} · ` +
+        `best equity ever ${x.maxEquityUsdg === null ? "UNKNOWN" : f(x.maxEquityUsdg)} · ` +
+        `lifetime result ${p.lifetimeResultUsdg === null ? "UNKNOWN" : f(p.lifetimeResultUsdg)} · ` +
         `net contributions ${p.netContributionsUsdg === null ? "UNKNOWN" : f(p.netContributionsUsdg)}`,
     );
     if (p.ambiguous) {

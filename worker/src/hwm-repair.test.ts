@@ -27,6 +27,7 @@ const facts = (over: Partial<TenantCapitalFacts> = {}): TenantCapitalFacts => ({
   sweptAtCostUsdg: 5.0,
   sweptUnpriceable: 0,
   ratchetedProfitUsdg: 0,
+  maxEquityUsdg: 24.915968,
   scanComplete: true,
   scanNote: null,
   ...over,
@@ -115,10 +116,27 @@ describe("a real drawdown survives the repair", () => {
         withdrawalsUsdg: 50,
         sweptAtCostUsdg: 0,
         ratchetedProfitUsdg: 20,
+        // THE SERIES HAS TO SUPPORT THE CLAIM. This book really was marked at
+        // 120, so 20 of profit in its peak is evidence rather than residue —
+        // which is exactly the difference the check below turns on.
+        maxEquityUsdg: 120,
       }),
     );
     assert.equal(p.proposedHwmUsdg, 70);
     assert.match(p.reason, /\+ 20\.000000 profit already in the peak/);
+  });
+
+  it("REFUSES A PROFIT CLAIM THE EQUITY SERIES NEVER SAW", () => {
+    // Shogun and Dave both carry this: fee histories claiming 24.915968 and
+    // 98.401485 of profit on books that were never marked anywhere near that
+    // high — residue of the era when a redeploy booked the whole balance as a
+    // fresh contribution. Folding it into the derivation under-repairs;
+    // ignoring it would erase a real earner's peak. Neither is this tool's call.
+    const p = planHwmRepair(facts({ ratchetedProfitUsdg: 24.915968, maxEquityUsdg: 24.915968 }));
+    assert.equal(p.ambiguous, true);
+    assert.equal(p.proposedHwmUsdg, null);
+    assert.match(p.reason, /never been marked above 24.915968/);
+    assert.match(p.reason, /Lifetime result from the chain is 0.000000/);
   });
 
   it("never raises a peak, whatever the derivation says", () => {
