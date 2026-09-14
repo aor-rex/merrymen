@@ -119,7 +119,7 @@ export interface RecoverPlan {
    * empty" about an owner whose whole book was class tokens.
    */
   classVault: Address | null;
-  classHoldings: { token: Address; symbol: string; raw: bigint; amount: string }[];
+  classHoldings: { token: Address; symbol: string; raw: bigint; amount: string; decimals: number }[];
   /**
    * Why the class list may be short. Null when it is complete.
    *
@@ -553,9 +553,23 @@ export async function planRecovery(opts: {
         token: h.token,
         symbol: h.symbol,
         raw: h.raw,
-        // 18dp is the launchpad's shape, and it is a DISPLAY figure here — the
-        // sweep moves the whole balance and never uses this number.
-        amount: formatUnits(h.raw, 18),
+        decimals: h.decimals,
+        /**
+         * THE TOKEN'S OWN DECIMALS, not the launchpad's.
+         *
+         * This hard-coded 18, which was right while a vault could only hold Pons
+         * launch tokens and became wrong the moment the enumeration also asked
+         * about the quote asset. USDG is 6dp, so a real 5.785344 USDG was shown
+         * to an owner as 0.000000000005785344 USDG — the correct money,
+         * misstated by twelve orders of magnitude, on the screen where they
+         * decide whether to sign.
+         *
+         * The old comment was right that the sweep never uses this number —
+         * `sweep(token)` takes no amount and moves the whole balance. That is
+         * precisely what made it dangerous: a disclosure defect with no
+         * execution symptom, which nothing downstream could have caught.
+         */
+        amount: formatUnits(h.raw, h.decimals),
       }));
       if (scan.failed) {
         classNote =
@@ -885,7 +899,11 @@ export async function recoverFunds(opts: {
         continue;
       }
       const known = plan.classHoldings.find((h) => h.token.toLowerCase() === token.toLowerCase());
-      live.push({ token, symbol: known?.symbol ?? `${token.slice(0, 6)}…${token.slice(-4)}`, raw });
+      live.push({
+        token,
+        symbol: known?.symbol ?? `${token.slice(0, 6)}…${token.slice(-4)}`,
+        raw,
+      });
     }
     const sweepable = planClassSweep(live);
     if (requireClass && sweepable.length === 0) {

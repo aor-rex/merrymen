@@ -115,8 +115,8 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
         // appears in no ClassBuy/ClassSell/Swept event — so it reaches this list
         // only because the candidate set unions the token registry in.
         classHoldings: [
-          { token: TOKEN, symbol: "DOGGOS", raw: 1n, amount: "1,063,408.141815" },
-          { token: USDG, symbol: "USDG", raw: 5785344n, amount: "5.785344" },
+          { token: TOKEN, symbol: "DOGGOS", raw: 1n, amount: "1,063,408.141815", decimals: 18 },
+          { token: USDG, symbol: "USDG", raw: 5785344n, amount: "5.785344", decimals: 6 },
         ],
         classNote: null,
         gasWei: 1_000_000_000_000_000n,
