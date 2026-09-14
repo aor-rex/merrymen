@@ -247,6 +247,22 @@ const CLASS_MAX_READS = 8;
  * plus real slippage and refuses what is much worse than both.
  */
 const CLASS_MAX_ROUND_TRIP_BPS = 600;
+
+/**
+ * How far BELOW the graduation exit this route will still open a position.
+ *
+ * Ten percentage points of curve. The exit sells at
+ * `classExitAtGraduationPct` because the vault refuses a graduated curve by
+ * name, so a position bought just under that threshold has almost nowhere to
+ * live: it is either sold again within a tick or two, paying two lots of 99bps
+ * curve fees for nothing, or it graduates before the sell lands and becomes
+ * unsellable through the vault entirely.
+ *
+ * A margin rather than a second setting, so the entry ceiling tracks whatever
+ * the owner sets the exit to and the two can never be configured into
+ * contradiction.
+ */
+const CLASS_ENTRY_GRADUATION_MARGIN_BPS = 1_000;
 import {
   CURVE_GUARD_DEFAULTS,
   curveFloorDrawdownBps,
@@ -934,6 +950,53 @@ async function main() {
     if (impact > cfg.maxImpactBps) return refuse(`a ${Number(spend) / 1e6} USDG buy would move it ${impact}bps, over the ${cfg.maxImpactBps}bps ceiling`);
     const floor = curveMinOut(quoted, cfg.slippageBps);
     if (floor === null || floor <= 0n) return refuse("no minimum-output floor could be set, so the buy would be unprotected");
+
+    /**
+     * ROOM TO LIVE IN, BEFORE THE EXIT'S OWN DEADLINE.
+     *
+     * The gap this closes: every check on this path asked whether the trade is
+     * good, and none asked whether it can be got OUT of. `PonsClassVault.sell`
+     * reverts `CurveGraduated()` by name, so a position whose curve graduates
+     * stops being sellable through the vault and needs the owner's own sweep —
+     * and graduation is the SUCCESS case, so the better the token does the
+     * sooner its exit closes.
+     *
+     * `proposeClassExits` already sells at `classExitAtGraduationPct` for
+     * exactly this reason. But entry had no ceiling at all, so the route would
+     * happily buy at 84% against an 85% exit: a position with one percent of a
+     * curve to live in, whose most likely outcomes are an immediate forced sale
+     * or a graduation that traps it.
+     *
+     * Derived from the exit rather than configured separately, so the two
+     * cannot drift and no new setting has to be plumbed. An owner who lowers
+     * the exit automatically lowers the entry ceiling with it, which is the
+     * direction that stays safe.
+     *
+     * Measured with `curveDepthFraction` — the same function the exit uses, so
+     * "how far along is this curve" has one answer on this route rather than
+     * two that disagree at the boundary.
+     */
+    const exitAtBps = cfg.classExitAtGraduationPct * 100;
+    const entryCeilingBps = exitAtBps - CLASS_ENTRY_GRADUATION_MARGIN_BPS;
+    const progress = curveDepthFraction(leg.reserves);
+    if (progress === null) {
+      // Unknown is not "early". A curve whose progress cannot be read is one
+      // whose deadline cannot be read either.
+      return refuse("how close it is to graduating could not be read, and a position that graduates cannot be sold from the vault");
+    }
+    const progressBps = Math.round(progress * 10_000);
+    if (entryCeilingBps <= 0) {
+      return refuse(
+        `the graduation exit is set to ${cfg.classExitAtGraduationPct}%, which leaves no room to enter below it`,
+      );
+    }
+    if (progressBps > entryCeilingBps) {
+      return refuse(
+        `it is ${(progressBps / 100).toFixed(1)}% of the way to graduating, past the ` +
+          `${(entryCeilingBps / 100).toFixed(1)}% this route will enter at — the vault cannot sell a graduated curve, ` +
+          `and the exit fires at ${cfg.classExitAtGraduationPct}%`,
+      );
+    }
 
     // THE ON-RAMP CHECK THE WALL CANNOT PROVIDE. Everywhere else `no-exit`
     // refuses a buy the key could not sell; here the key CAN sell, so the
