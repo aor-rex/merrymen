@@ -3894,3 +3894,34 @@ export async function positionsExplained(agentId: string, tokens: readonly strin
     return false;
   }
 }
+
+/**
+ * Correct a class position's hold clock to when the chain says it opened.
+ *
+ * SEPARATE FROM `upsertClassPosition` ON PURPOSE. That function excludes the
+ * clock, and its comment says why: a re-record on a top-up must not rejuvenate a
+ * position past its exit. This is the one legitimate exception — restoring a
+ * clock that a container rebuild reset is the opposite of rejuvenating it — so
+ * it gets its own narrow function rather than a flag on the general one.
+ *
+ * ONLY EVER EARLIER. Guarded in SQL rather than by the caller: a write that
+ * could move a clock FORWARD is a write that could postpone an exit, and the
+ * whole point of the hold timer is that it cannot be postponed.
+ */
+export async function setClassFirstSeen(
+  agentId: string,
+  token: string,
+  firstSeen: number,
+): Promise<void> {
+  if (!Number.isFinite(firstSeen) || firstSeen <= 0) return;
+  try {
+    await getDb()
+      .prepare(
+        `UPDATE class_positions SET first_seen = ?
+          WHERE agent_id = ? AND LOWER(token) = LOWER(?) AND first_seen > ?`,
+      )
+      .run(Math.floor(firstSeen), agentId, token, Math.floor(firstSeen));
+  } catch (e) {
+    console.error("[store] class first_seen update failed:", e);
+  }
+}

@@ -265,6 +265,16 @@ const CLASS_MAX_ROUND_TRIP_BPS = 600;
 const CLASS_ENTRY_GRADUATION_MARGIN_BPS = 1_000;
 
 /**
+ * How far a stored hold clock may sit ahead of the chain before it is corrected.
+ *
+ * The estimate it is compared against comes from a block count at 0.101 s/block,
+ * which drifts; ten minutes is comfortably wider than that error and far
+ * narrower than the six-hour hold the clock governs. A row inside the tolerance
+ * costs no RPC.
+ */
+const CLASS_CLOCK_DRIFT_SEC = 600;
+
+/**
  * How far back the class route looks for a candidate to enter.
  *
  * HOISTED so discovery can reach it. The candidate table is a cache of factory
@@ -304,6 +314,7 @@ import {
   classPositionCurves,
   classPositions,
   writeClassLedger,
+  setClassFirstSeen,
   upsertClassPosition,
   getBasis,
   setBasis,
@@ -1304,6 +1315,141 @@ async function main() {
    * which is what lets a restart loop, a re-arm and a replayed block range all
    * converge instead of compounding.
    */
+  /**
+   * RESTORE THE COLUMNS A REBUILT CHILD LOSES, FROM THE CHAIN.
+   *
+   * `class_positions` is written by two producers. `upsertClassPosition` writes
+   * the CANDIDATE columns — symbol, decimals, quote_token, first_seen — at buy
+   * time, from the intent. `writeClassLedger` writes the MONEY columns from the
+   * vault's own events. A child rebuilds its sqlite on redeploy, and only the
+   * second one runs on the way back up.
+   *
+   * So a restarted agent came back holding a position it could not sell:
+   *
+   *   quote_token NULL   `proposeClassExits` refuses the row outright — both
+   *                      legs are needed to route a sell, and it says so.
+   *   first_seen  "now"   the store stamps it on insert, so the six-hour hold
+   *                      clock restarted on every redeploy. A position could
+   *                      never age out as long as deploys kept happening.
+   *
+   * Both are recoverable because the chain still knows. The curve names its own
+   * pair token; the ERC-20 names its symbol and decimals; and the ClassBuy that
+   * opened the position is in a block with a timestamp, which is the true start
+   * of the hold clock and does not move when a container does.
+   *
+   * WRITES ONLY WHAT IS MISSING. A row that already carries these keeps them —
+   * this repairs a gap, it does not restate what the buy path recorded. And
+   * every read is individually tolerant: a curve that will not answer leaves
+   * quote_token null for the next tick to retry, rather than failing the whole
+   * reconciliation and losing the money columns too.
+   *
+   * Bounded by the position count, which `classMaxPositions` caps at 3.
+   */
+  async function rehydrateClassRow(
+    agentId: string,
+    p: { token: string; curve: string | null; openedAtBlock: bigint | null },
+    client: PublicClient,
+  ): Promise<void> {
+    try {
+      const existing = (await classPositions(agentId))?.find(
+        (r) => r.token.toLowerCase() === p.token.toLowerCase(),
+      );
+      const needsLegs = !existing?.quoteToken || existing.symbol === null;
+
+      /**
+       * IS THE STORED CLOCK LATER THAN THE CHAIN SAYS IT SHOULD BE?
+       *
+       * `first_seen` defaults to `unixepoch()`, so a rebuilt row stamps NOW —
+       * not zero — and a naive "is it missing" test would never fire. The
+       * question is not whether it is absent but whether it is WRONG, and the
+       * chain is the authority: the position opened when its ClassBuy landed.
+       *
+       * Estimated first from the block number at the measured 0.101 s/block, so
+       * a row whose clock is already right costs no RPC. Only a row that looks
+       * materially younger than its own entry block is worth an exact read —
+       * `CLASS_CLOCK_DRIFT_SEC` of tolerance absorbs the estimate's own error.
+       */
+      const headNow = p.openedAtBlock === null ? null : await client.getBlockNumber();
+      const estimatedOpenedAt =
+        headNow === null || p.openedAtBlock === null
+          ? null
+          : Math.floor(Date.now() / 1000) - Number(headNow - p.openedAtBlock) / 10;
+      const needsClock =
+        existing !== undefined &&
+        estimatedOpenedAt !== null &&
+        existing.firstSeen - estimatedOpenedAt > CLASS_CLOCK_DRIFT_SEC;
+
+      if (!needsLegs && !needsClock) return;
+
+      let quoteToken: string | null = existing?.quoteToken ?? null;
+      let symbol: string | null = existing?.symbol ?? null;
+      let decimals: number = existing?.decimals ?? 18;
+
+      if (needsLegs && p.curve) {
+        try {
+          quoteToken =
+            quoteToken ??
+            ((await client.readContract({
+              address: p.curve as `0x${string}`,
+              abi: [
+                { type: "function", name: "pairToken", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+              ] as const,
+              functionName: "pairToken",
+            })) as string);
+        } catch {
+          /* the next tick retries; a null quote_token is refused, never guessed */
+        }
+        for (const [field, fn] of [
+          ["symbol", "symbol"],
+          ["decimals", "decimals"],
+        ] as const) {
+          try {
+            const v = await client.readContract({
+              address: p.token as `0x${string}`,
+              abi: [
+                { type: "function", name: fn, stateMutability: "view", inputs: [], outputs: [{ type: fn === "symbol" ? "string" : "uint8" }] },
+              ] as never,
+              functionName: fn,
+            });
+            if (field === "symbol") symbol = symbol ?? (v as string);
+            else decimals = Number(v);
+          } catch {
+            /* a nameless token is still tradable; the row falls back to its address */
+          }
+        }
+      }
+
+      await upsertClassPosition(agentId, {
+        token: p.token,
+        symbol,
+        decimals,
+        curve: p.curve,
+        quoteToken,
+      });
+
+      /**
+       * THE CLOCK, FROM THE BLOCK THAT OPENED THE POSITION.
+       *
+       * Written separately because `upsertClassPosition` deliberately excludes
+       * the clock — its own comment says a re-record on a top-up must not
+       * rejuvenate a position past its exit. That rule is right and this is its
+       * one exception: restoring a clock that a rebuild reset is the opposite of
+       * rejuvenating it.
+       */
+      if (needsClock && p.openedAtBlock !== null) {
+        try {
+          const block = await client.getBlock({ blockNumber: p.openedAtBlock });
+          await setClassFirstSeen(agentId, p.token, Number(block.timestamp));
+        } catch {
+          /* leave it; the next tick retries rather than inventing a start time */
+        }
+      }
+    } catch {
+      // Never fatal. This repairs a row; failing it must not cost the caller the
+      // money columns it just reconciled from chain.
+    }
+  }
+
   async function reconcileClassFromChain(
     agentId: string,
     vault: `0x${string}`,
@@ -1344,6 +1490,8 @@ async function main() {
           exitTx: p.exitTx,
           state: p.state,
         });
+        // THE OTHER HALF OF THE ROW, WITHOUT WHICH THE POSITION CANNOT BE SOLD.
+        await rehydrateClassRow(agentId, p, client);
       }
 
       const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
