@@ -857,6 +857,8 @@ async function main() {
     choice: { pick: { symbol: string } | null; refused: { reason: string; kind: string }[] };
     holding: number;
     buying: boolean;
+    /** The launchpad tape could not be read this pass, so no entry may qualify. */
+    activityUnknown?: boolean;
   }): void {
     const by = (k: string) => a.choice.refused.filter((r) => r.kind === k).length;
     const depthOut = by("depth");
@@ -890,6 +892,12 @@ async function main() {
       scanning = `Scanning the launchpad — no new tokens have appeared yet.`;
     } else if (a.choice.pick) {
       scanning = `Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`;
+    } else if (a.activityUnknown) {
+      // BEFORE the depth and impact arms. When the tape is unreadable every
+      // candidate is refused on activity regardless of how deep or cheap it
+      // was, so reporting "nothing has enough liquidity" would name a reason
+      // that is not the one that stopped it.
+      scanning = `Still scanning — recent market activity could not be verified yet.`;
     } else if (passedDepth <= 0) {
       scanning = `Still scanning — nothing currently has enough real liquidity.`;
     } else if (passedImpact <= 0) {
@@ -1040,6 +1048,7 @@ async function main() {
         choice: { pick: null, refused: [] },
         holding: held.length,
         buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+        activityUnknown: classActivity === null,
       });
       return [];
     }
@@ -1130,17 +1139,23 @@ async function main() {
     const nowSecForActivity = Math.floor(Date.now() / 1000);
     if (nowSecForActivity - classActivityAt >= CLASS_ACTIVITY_TTL_SEC) {
       const tape = await readCurveActivity(active.client, MAX_ACTIVITY_BLOCKS);
-      // A refused query leaves the PREVIOUS answer in place rather than wiping
-      // it to null: a stale tally is still a measurement, and five minutes of
-      // staleness is a smaller error than losing the signal entirely. The
-      // timestamp only advances on success, so the next pass retries.
-      if (tape !== null) {
-        classActivity = tape;
-        classActivityAt = nowSecForActivity;
-      } else if (classActivity === null) {
-        // Never measured at all. Distinct from "measured and empty".
-        classActivityAt = nowSecForActivity;
-      }
+      /**
+       * A REFUSED READ MAKES THE SIGNAL UNKNOWN. IT DOES NOT MAKE IT OPTIONAL.
+       *
+       * The first version of this kept the previous tally and stood the floor
+       * down when there was none, reasoning that refusing every candidate on a
+       * transient RPC error was "broken in effect". That was wrong, and the
+       * asymmetry is the reason: NOT buying is always a safe action. An agent
+       * that declines for five minutes has lost nothing; an agent that buys
+       * because a required check temporarily disappeared has bought something
+       * nobody verified.
+       *
+       * So a failed refresh clears the tape. The signal reads unknown, the
+       * scorer refuses every candidate on it, and the owner is told the reason
+       * in those words. Scanning continues and the next pass retries.
+       */
+      classActivity = tape;
+      classActivityAt = nowSecForActivity;
     }
 
     const exitBpsForScore = cfg.classExitAtGraduationPct * 100;
@@ -1150,18 +1165,19 @@ async function main() {
       minAgeSec: 0,
       maxGraduationBps: Math.max(0, exitBpsForScore - CLASS_ENTRY_GRADUATION_MARGIN_BPS),
       /**
-       * GATED ONLY ON A TAPE WE ACTUALLY READ.
+       * ALWAYS ENFORCED. A signal that stands down when it cannot be read is
+       * not a requirement, it is a suggestion — and the one moment it would
+       * stand down is the moment nothing is known about any curve.
        *
-       * When the tape is a map, a curve missing from it genuinely has no
-       * trades, so the floor applies and refuses it. When the tape is null the
-       * query was REFUSED, and nothing is known about any curve — refusing
-       * every candidate on a transient RPC error would be fail-closed in form
-       * and broken in effect, so the floor stands down and the funnel says so.
+       * Three states, and only one of them buys:
+       *   tape read, curve present with enough trades   pass
+       *   tape read, curve absent                        a measured 0 — refuse
+       *   tape unreadable                                unknown — refuse
        *
-       * ACTIVITY_GATE.minTrades is the measured bar: 12.6% of launches clear
-       * it, and 96% of the ones that go on to graduate.
+       * ACTIVITY_GATE.minTrades is the measured bar rather than an invented
+       * one: 12.6% of launches clear it, and 96% of the ones that graduate.
        */
-      minRecentTrades: classActivity === null ? 0 : ACTIVITY_GATE.minTrades,
+      minRecentTrades: ACTIVITY_GATE.minTrades,
     };
 
     const scored = legs.map((l) => {
@@ -1214,6 +1230,7 @@ async function main() {
       choice,
       holding: held.length,
       buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+      activityUnknown: classActivity === null,
     });
 
     if (legs.length === 0) return [];

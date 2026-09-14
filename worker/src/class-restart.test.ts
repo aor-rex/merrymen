@@ -222,8 +222,17 @@ describe("the activity floor gates only on a tape that was read", () => {
     return CODE.slice(start, CODE.indexOf("async function proposeClassExits", start));
   })();
 
-  it("uses the MEASURED bar, not an invented one", () => {
-    assert.match(ENTRY, /minRecentTrades: classActivity === null \? 0 : ACTIVITY_GATE\.minTrades/);
+  it("IS ALWAYS ENFORCED — an unreadable tape does not stand it down", () => {
+    /**
+     * The first version stood the floor down when the tape could not be read,
+     * reasoning that refusing every candidate on a transient RPC error was
+     * broken in effect. That was wrong, and the asymmetry is why: NOT buying is
+     * always a safe action. An agent that declines for five minutes has lost
+     * nothing; an agent that buys because a required check disappeared has
+     * bought something nobody verified.
+     */
+    assert.match(ENTRY, /minRecentTrades: ACTIVITY_GATE\.minTrades/);
+    assert.doesNotMatch(ENTRY, /minRecentTrades: classActivity === null \? 0/);
   });
 
   it("counts a curve absent from a READ tape as zero, not unknown", () => {
@@ -237,11 +246,24 @@ describe("the activity floor gates only on a tape that was read", () => {
     assert.match(CODE, /const CLASS_ACTIVITY_TTL_SEC = 300;/);
   });
 
-  it("and a refused query keeps the previous tally rather than wiping it", () => {
-    // A stale tally is still a measurement; five minutes of staleness is a
-    // smaller error than losing the signal. The timestamp advances only on
-    // success, so the next pass retries.
-    assert.match(ENTRY, /if \(tape !== null\) \{/);
-    assert.match(ENTRY, /classActivityAt = nowSecForActivity;/);
+  it("and a failed refresh CLEARS the tape rather than keeping a stale one", () => {
+    // Keeping the previous tally would let a buy proceed on a signal this pass
+    // could not confirm.
+    assert.match(ENTRY, /classActivity = tape;/);
+    assert.doesNotMatch(ENTRY, /if \(tape !== null\) \{/);
+  });
+
+  it("and the owner is told the signal is UNVERIFIED, not that the market was quiet", () => {
+    // When the tape is unreadable EVERY candidate is refused on activity,
+    // however deep or cheap it was — so naming depth or impact would report a
+    // reason that did not stop it.
+    assert.match(RAW, /Still scanning — recent market activity could not be verified yet\./);
+    assert.match(CODE, /activityUnknown/);
+  });
+
+  it("and that sentence is reached BEFORE the depth and impact arms", () => {
+    const unknown = CODE.indexOf("a.activityUnknown");
+    const depth = CODE.indexOf("passedDepth <= 0");
+    assert.ok(unknown > 0 && depth > 0 && unknown < depth, "the true reason must win");
   });
 });
