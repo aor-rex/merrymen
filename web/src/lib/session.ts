@@ -79,6 +79,7 @@ import {
   chainForId,
   officialCoinTokens,
   ponsAdapterForSigning,
+  PONS_CLASS_VAULT_FACTORY,
   robinhoodChain,
   
   GRANT_V4,
@@ -417,12 +418,49 @@ async function mintGrant(
   // happen here and not earlier: `sudoOnlyAccount.address` is the vault's owner
   // and the CREATE2 salt, and it is only known now. Throws rather than falling
   // back if the factory cannot be read — see resolveClassVault.
+  /**
+   * THE FACTORY IS A PLATFORM ANSWER, NOT A THING EACH OWNER MUST TYPE.
+   *
+   * This read the address from the tenant's own settings and skipped the whole
+   * vault block when it was absent — which it is for everyone, because nothing
+   * ever asked them for it. So the class route, whose entire purpose is trading
+   * a launch that did not exist at signing, could only be reached by an owner
+   * who had somehow learned a deploy address and pasted it in. Measured: every
+   * tenant on the platform except one has no vault sealed, and a re-sign would
+   * have sealed nothing and told them it succeeded.
+   *
+   * `PONS_CLASS_VAULT_FACTORY` makes the same argument its own docstring makes
+   * for the adapter constant: a deploy fact, decided once per chain by whoever
+   * ran the deploy, identical for every tenant, and about which no tenant has
+   * information the platform lacks.
+   *
+   * THIS IS NOT THE ADAPTER, and the distinction is the whole safety case.
+   * `ponsAdapterForSigning` deliberately refuses to default, because
+   * `tradeExactIn` takes the curve as a CALLER-SUPPLIED argument the wall cannot
+   * pin and hands it a live allowance. A class vault is the opposite shape: the
+   * wall pins the vault itself as a literal target, the vault validates the
+   * curve internally, and `sweep` has no recipient — it pays `owner`, fixed at
+   * construction. Sealing it widens nothing the owner does not already control.
+   *
+   * AND IT STARTS NOTHING. A sealed vault is a capability, not an instruction:
+   * `proposeClassEntries` still requires `classSnipeEnabled`, a non-zero entry
+   * size and room for a position, all of which default off. Re-signing gives an
+   * owner the ABILITY to trade launches autonomously; turning it on stays a
+   * separate, deliberate act.
+   *
+   * A tenant who has set their own factory keeps it — grant-first precedence,
+   * exactly as the adapter path does.
+   */
+  const sealedClassFactory =
+    ponsClassVaultFactory ??
+    ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined);
+
   let ponsClassVaultAddress: `0x${string}` | undefined;
-  if (ponsClassVaultFactory) {
+  if (sealedClassFactory) {
     onStatus("locating your class vault…");
     ponsClassVaultAddress = await resolveClassVault(
       publicClient,
-      ponsClassVaultFactory,
+      sealedClassFactory,
       sudoOnlyAccount.address,
     );
   }
@@ -436,7 +474,7 @@ async function mintGrant(
     // The factory rides with the vault. buildWallPolicies THROWS on a vault
     // without one — two of three class permissions is a key that can reach a
     // vault it can never create.
-    ponsClassVaultFactoryAddress: ponsClassVaultFactory,
+    ponsClassVaultFactoryAddress: sealedClassFactory,
   };
 
   // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
@@ -552,7 +590,7 @@ async function mintGrant(
     ...(ponsClassVaultAddress
       ? {
           ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
-          ponsClassVaultFactoryAddress: ponsClassVaultFactory!.toLowerCase(),
+          ponsClassVaultFactoryAddress: sealedClassFactory!.toLowerCase(),
         }
       : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
