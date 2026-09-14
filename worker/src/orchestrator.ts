@@ -1832,6 +1832,13 @@ async function runHwmRepairIfAsked(): Promise<void> {
   try {
     const { planHwmRepair, repairLines } = await import("./hwm-repair");
     const shared = await makePgDb(url);
+    // THE SCHEMA FIRST, because this pass runs BEFORE `mirrorLedgers`, and the
+    // mirror is the only thing that applies the ledger DDL to the shared
+    // database. On the first boot after a migration this read asked for
+    // `hwm_withdrawn_usdg` a few seconds before anything created it, failed, and
+    // — because the once-per-process guard had already fired — never retried.
+    // Idempotent, and it makes the tool independent of what else ran first.
+    await applyLedgerSchema(shared);
 
     const agentRows = (await shared
       .prepare(
