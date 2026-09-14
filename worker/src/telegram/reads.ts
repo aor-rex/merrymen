@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
@@ -391,7 +392,13 @@ export function readTrades(agentId?: string | null): string {
     if (!rows.length) return "🧾 no trades yet.";
     const icon = (s: string) => (s === "landed" ? "✅" : s === "rejected" ? "🚫" : "⚠️");
     const body = rows
-      .map((r) => `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(r.reject_rule ?? "")})` : ""} · ${r.at}`)
+      // Words, not the slug — same vocabulary as the feed, the chat and the
+      // push. A list of refusals reading `(no-exit) (no-exit) (no-exit)` tells
+      // an owner how OFTEN it happened and nothing about what it was.
+      .map(
+        (r) =>
+          `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(rejectRuleLabel(r.reject_rule) ?? r.reject_rule ?? "")})` : ""} · ${r.at}`,
+      )
       .join("\n");
     return `🧾 <b>recent trades</b>\n${body}`;
   } catch {
@@ -701,7 +708,13 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
     if (!t) return nothingYet();
     const lines = [
       `🧾 <b>my last move</b>`,
-      `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` (${esc(t.reject_rule)})` : ""}`,
+      // "my last move" is the one an owner asks after a refusal, so it is the
+      // worst place of all to answer with the slug. Remedy included: unlike the
+      // push, this fires only when he asks, so it cannot become noise.
+      `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` — ${esc(rejectRuleLabel(t.reject_rule) ?? t.reject_rule)} (${esc(t.reject_rule)})` : ""}`,
+      ...(t.reject_rule && rejectRuleRemedy(t.reject_rule)
+        ? [`• ${esc(rejectRuleRemedy(t.reject_rule)!)}`]
+        : []),
     ];
     if (t.tx_hash) lines.push(`• tx: <code>${esc(t.tx_hash)}</code>`);
     // The real reasoning: the trade's OWN decision row, joined by decision_id.

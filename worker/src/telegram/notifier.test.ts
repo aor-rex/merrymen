@@ -50,14 +50,69 @@ test("a sponsor failure is not reported as the wall refusing", () => {
   }
 });
 
-test("a real wall refusal still says so", () => {
-  // The unsponsored path, and the overwhelmingly common one. It must not move.
+test("a real wall refusal still says so, and now says WHAT", () => {
+  // The unsponsored path, and the overwhelmingly common one. It must still
+  // blame the wall — but it used to interpolate the raw rule, so this assertion
+  // pinned `(per-trade-cap)` as the whole explanation. That is the bare slug
+  // this channel was reported for.
   const line = tradeLine(
     { id: 2, kind: "swap", amount_usdg: 25, status: "rejected", reject_rule: "per-trade-cap", tx_hash: null },
     null,
   );
-  assert.match(line, /the wall turned back a swap \(per-trade-cap\)/);
+  assert.match(line, /the wall turned back a swap/);
+  assert.match(line, /past the per-trade cap/, "the sentence, not the slug");
+  assert.match(line, /\(per-trade-cap\)/, "the slug survives for support triage");
   assert.doesNotMatch(line, /sponsor/);
+});
+
+/**
+ * THE REPORT THIS CHANNEL WAS ACTUALLY FIXED FOR.
+ *
+ * A beta owner pasted `refused: no-exit` and asked what it meant "if my agent
+ * tries to buy some custom token i added". The chat arm in index.ts was
+ * converted to the vocabulary; this one was not — and the chat arm only fires
+ * when the owner TYPES an order. His question was about the autonomous tick,
+ * which writes a rejected row that the poller turns into this push. So the one
+ * surface that had been fixed was the one his question does not reach.
+ */
+test("DAVE'S CASE — an autonomous no-exit refusal explains itself and says how to fix it", () => {
+  const row = {
+    id: 3,
+    kind: "swap",
+    amount_usdg: 25,
+    status: "rejected",
+    reject_rule: "no-exit",
+    tx_hash: null,
+  };
+  const first = tradeLine(row, null, true);
+  assert.doesNotMatch(
+    first,
+    /turned back a swap \(no-exit\)/,
+    "the bare slug as the whole explanation is the bug",
+  );
+  assert.match(first, /cannot sell that token/, "what went wrong, in words");
+  assert.match(first, /\/grant/, "and what to do about it — this is the owner's own bot");
+  assert.match(first, /\(no-exit\)/, "slug kept for triage");
+  assert.match(first, /stayed home/, "and it still says nothing was spent");
+
+  // REPEATS MUST NOT REPEAT THE INSTRUCTION. The strategist re-proposes the
+  // same uncovered leg every tick, so the refusal recurs; telling him to
+  // re-sign every time turns a fix into a flood.
+  const again = tradeLine(row, null, false);
+  assert.match(again, /cannot sell that token/, "still explains itself");
+  assert.doesNotMatch(again, /\/grant/, "but the remedy is said once per rule");
+});
+
+test("an unknown rule still reaches the owner rather than vanishing", () => {
+  // A rule minted next year has no entry. It must degrade to the old shape,
+  // not to silence or to an empty sentence.
+  const line = tradeLine(
+    { id: 4, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "a-rule-from-next-year", tx_hash: null },
+    null,
+    true,
+  );
+  assert.match(line, /a-rule-from-next-year/);
+  assert.match(line, /stayed home/);
 });
 
 /**

@@ -19,6 +19,7 @@
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { explorerFor, type PriceQuote } from "../../../packages/core/src/index";
+import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { homePaths } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
@@ -115,9 +116,16 @@ interface TradeRowLite {
   tx_hash: string | null;
 }
 
-/** Exported for the same reason tradeDigestLine is: it is a pure string rule
- *  that decides what a failure is BLAMED on, and that deserves a test. */
-export function tradeLine(t: TradeRowLite, explorer: string | null): string {
+/**
+ * Exported for the same reason tradeDigestLine is: it is a pure string rule
+ * that decides what a failure is BLAMED on, and that deserves a test.
+ *
+ * `withRemedy` is the caller's decision, not this function's, because it
+ * depends on what was pushed LAST — see `TelegramState.lastRemedyRule`. Keeping
+ * it a parameter is what lets the dedupe live in the poll loop while this stays
+ * a pure function of a row.
+ */
+export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy = false): string {
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
@@ -137,12 +145,46 @@ export function tradeLine(t: TradeRowLite, explorer: string | null): string {
     if (t.reject_rule?.startsWith("sponsor-")) {
       return `⛽ a ${esc(t.kind)} didn't go out — the gas sponsor declined it (${esc(t.reject_rule)}), which is ours to fix. ${t.amount_usdg.toFixed(2)} USDG stayed home`;
     }
-    return `🛡 the wall turned back a ${esc(t.kind)} (${esc(t.reject_rule ?? "policy")}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+    /**
+     * THE SLUG IS NOT AN EXPLANATION, AND THIS IS THE CHANNEL IT REACHED HIM ON.
+     *
+     * A beta owner pasted `refused: no-exit` back to us and asked what it meant
+     * "if my agent tries to buy some custom token i added". The chat arm in
+     * index.ts was converted to the vocabulary and this one was not — and the
+     * chat arm only fires when the owner TYPES an order. His question was about
+     * the autonomous tick, which writes a rejected row that this poller turns
+     * into a push. So the one surface that was fixed is the one surface his
+     * question does not reach, and the bare word kept going out.
+     *
+     * Same vocabulary as the public feed and the chat, so the three cannot
+     * drift. This is the owner's own bot, so it carries the remedy with /grant —
+     * held to once per rule, because the refusal repeats every tick and the
+     * instruction does not need to.
+     */
+    const label = rejectRuleLabel(t.reject_rule);
+    const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
+    const slug = t.reject_rule ?? "policy";
+    if (!label) {
+      return `🛡 the wall turned back a ${esc(t.kind)} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+    }
+    return (
+      `🛡 the wall turned back a ${esc(t.kind)} — ${esc(label)}.` +
+      `${fix ? ` ${esc(fix)}` : ""}` +
+      ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(slug)})`
+    );
   }
   // "reverted" status covers both an on-chain revert AND a pre-submission failure
   // (bundler/gas/RPC). reject_rule carries the specific reason — show it rather than
   // always claiming an on-chain revert.
-  const why = t.reject_rule ? ` — ${esc(t.reject_rule)}` : "";
+  // Through the vocabulary for the same reason as above; the slug survives as a
+  // parenthetical because support triages on it and an unknown rule must stay
+  // traceable.
+  const revertLabel = rejectRuleLabel(t.reject_rule);
+  const why = t.reject_rule
+    ? revertLabel
+      ? ` — ${esc(revertLabel)} (${esc(t.reject_rule)})`
+      : ` — ${esc(t.reject_rule)}`
+    : "";
   return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
@@ -217,8 +259,19 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             )
             .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
           for (const t of rows) {
-            await sendMessage({ token }, chatId, tradeLine(t, explorer));
-            deps.stateRef.set({ ...deps.stateRef.get(), lastNotifiedTradeId: t.id });
+            // THE REMEDY ON CHANGE, THE REFUSAL EVERY TIME. A strategist that
+            // keeps proposing the same uncovered leg produces one rejected row
+            // per tick; the owner needs to see that it is still happening, and
+            // needs to be told how to fix it once.
+            const prev = deps.stateRef.get();
+            const rule = t.status === "rejected" ? t.reject_rule : null;
+            const withRemedy = rule !== null && rule !== prev.lastRemedyRule;
+            await sendMessage({ token }, chatId, tradeLine(t, explorer, withRemedy));
+            deps.stateRef.set({
+              ...deps.stateRef.get(),
+              lastNotifiedTradeId: t.id,
+              ...(withRemedy ? { lastRemedyRule: rule } : {}),
+            });
           }
         } else {
           // Quiet mode: batch trade pings into ONE summary every periodMin minutes.
