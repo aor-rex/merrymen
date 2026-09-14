@@ -16,7 +16,7 @@
  * locally and only the signed op reaches the bundler.
  */
 
-import { findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { classSweepCandidates, findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
 import { readClassLog } from "./venues/class-log";
 import {
   createPublicClient,
@@ -514,10 +514,36 @@ export async function planRecovery(opts: {
       const head = await publicClient.getBlockNumber();
       const from = head > CLASS_RECOVERY_LOOKBACK ? head - CLASS_RECOVERY_LOOKBACK : 0n;
       const scan = await readClassLog(publicClient, lookup.vault, from, head);
-      const candidates = [...new Set(scan.events.map((e) => e.token))].map((token) => ({
-        token,
-        symbol: `${token.slice(0, 10)}…`,
-      }));
+      /**
+       * TWO SOURCES, BECAUSE THE LOGS CANNOT NAME THE QUOTE ASSET.
+       *
+       * `ClassBuy`/`ClassSell`/`Swept` carry the CLASS token in `token` and the
+       * quote only as an amount — the quote asset's address appears in no event
+       * this contract emits. So a vault holding stranded USDG enumerated from
+       * logs alone reads as holding nothing but its class tokens, and the sweep
+       * that follows moves nothing but those.
+       *
+       * That is not hypothetical. Shogun's vault holds 1,063,408.141815 DOGGOS
+       * and 5.785344 USDG; the DOGGOS came from a ClassBuy and the USDG from a
+       * refund leg that did not land, so only the first was ever disclosed. An
+       * owner confirming that plan is told about one of the two assets they are
+       * being asked to recover.
+       *
+       * The registry list is the same one the ACCOUNT sweep already enumerates,
+       * which is the right answer twice over: it certainly contains the quote
+       * asset, and "the assets we check on the account" is a rule that stays
+       * true as the registry changes rather than a hard-coded USDG address that
+       * would go stale on the next chain.
+       *
+       * Costs one balanceOf per registry token against the vault. An owner is
+       * waiting at a prompt, but they are waiting to be told the truth about
+       * what they own, and `readClassHoldings` already degrades a failed read to
+       * `partial` rather than dropping the token.
+       */
+      const candidates = classSweepCandidates(
+        scan.events.map((e) => e.token),
+        tokens,
+      );
       const contents = await readClassHoldings({
         client: publicClient,
         vault: lookup.vault,

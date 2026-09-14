@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { classSweepCandidates, findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
 const VAULT = "0x00000000000000000000000000000000000000c0" as const;
@@ -180,5 +180,62 @@ describe("planning the sweep", () => {
 
   it("an all-empty vault plans nothing rather than an empty batch", async () => {
     assert.deepEqual(planClassSweep([{ token: PEPE, symbol: "PEPE", raw: 0n }]), []);
+  });
+});
+
+/**
+ * THE ASSET THE LOGS CANNOT NAME.
+ *
+ * `ClassBuy`/`ClassSell`/`Swept` carry the class token and the quote only as an
+ * AMOUNT — the quote asset's address is in no event this contract emits. So a
+ * candidate list built from logs alone can never contain USDG, and a vault
+ * holding stranded quote enumerates as holding only its class tokens. That is
+ * what an owner is shown, and the sweep moves exactly what was shown.
+ *
+ * Measured on mainnet: Shogun's vault holds 1,063,408.141815 DOGGOS and
+ * 5.785344 USDG. Only the DOGGOS was ever disclosed.
+ */
+describe("what to ask the vault about", () => {
+  const REGISTRY = [
+    { address: "0x5fc5360d0400a0fd4f2af552add042d716f1d168", symbol: "USDG" },
+    { address: "0x0000000000000000000000000000000000000ee1", symbol: "WIF" },
+  ];
+
+  it("INCLUDES THE QUOTE ASSET, which appears in no log event", () => {
+    const out = classSweepCandidates([PEPE], REGISTRY);
+    const usdg = out.find((c) => c.symbol === "USDG");
+    assert.ok(usdg, "a vault holding stranded USDG would otherwise enumerate as holding none");
+    assert.equal(usdg.token, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+  });
+
+  it("keeps the log-derived token, which the registry cannot name", () => {
+    const out = classSweepCandidates([PEPE], REGISTRY);
+    const pepe = out.find((c) => c.token === PEPE);
+    assert.ok(pepe, "the class token is the one the vault was built to hold");
+    // A launch token is not in the registry, so the short address is the only
+    // name available — better than omitting it.
+    assert.match(pepe.symbol, /^0x[0-9a-f]{8}…$/);
+  });
+
+  it("and log tokens come first, so a registry entry cannot rename one", () => {
+    const out = classSweepCandidates([WIF], REGISTRY);
+    const wif = out.filter((c) => c.token.toLowerCase() === WIF.toLowerCase());
+    assert.equal(wif.length, 1, "a token in both lists is asked about once");
+    assert.match(wif[0]!.symbol, /…$/, "the log entry wins");
+  });
+
+  it("dedupes case-insensitively, because addresses arrive in both cases", () => {
+    const out = classSweepCandidates(
+      [PEPE, PEPE.toUpperCase() as `0x${string}`],
+      [{ address: PEPE.toUpperCase(), symbol: "PEPE" }],
+    );
+    assert.equal(out.filter((c) => c.token.toLowerCase() === PEPE.toLowerCase()).length, 1);
+  });
+
+  it("and an empty vault history still asks about the registry", () => {
+    // The case that matters after a rebuild: no logs in the window, but the
+    // vault may still hold quote. An empty answer here would be a false "empty".
+    const out = classSweepCandidates([], REGISTRY);
+    assert.equal(out.length, 2);
   });
 });

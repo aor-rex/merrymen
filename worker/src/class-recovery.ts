@@ -154,6 +154,50 @@ export type ClassContents =
  * prints "there may be more here than this shows" rather than an empty list, for
  * the same reason `planRecovery` carries `unreadable` at all.
  */
+/**
+ * WHAT TO ASK THE VAULT ABOUT — from its logs AND from the token registry.
+ *
+ * THE LOGS CANNOT NAME THE QUOTE ASSET. `ClassBuy`/`ClassSell`/`Swept` carry
+ * the CLASS token in `token` and the quote only as an amount; the quote asset's
+ * address appears in no event this contract emits. So a candidate list built
+ * from logs alone can never include USDG, and a vault holding stranded quote
+ * enumerates as holding nothing but its class tokens — which is what an owner
+ * is then shown, and what the sweep then moves.
+ *
+ * Measured: Shogun's vault holds 1,063,408.141815 DOGGOS and 5.785344 USDG. The
+ * DOGGOS came from a ClassBuy; the USDG from a refund leg that did not land.
+ * Only the first was ever disclosed.
+ *
+ * The registry list is the same one the ACCOUNT sweep enumerates, which is right
+ * twice over: it certainly contains the quote asset, and "the assets we already
+ * check on the account" stays true as the registry changes, where a hard-coded
+ * USDG address would go stale on the next chain.
+ *
+ * Log-derived tokens come FIRST and win the symbol, because a class token's
+ * real symbol is not in the registry and the short-address placeholder is
+ * better than nothing; a registry token keeps its proper name.
+ */
+export function classSweepCandidates(
+  logTokens: readonly `0x${string}`[],
+  registry: readonly { address: string; symbol: string }[],
+): { token: `0x${string}`; symbol: string }[] {
+  const seen = new Set<string>();
+  const out: { token: `0x${string}`; symbol: string }[] = [];
+  for (const token of logTokens) {
+    const k = token.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ token, symbol: `${token.slice(0, 10)}…` });
+  }
+  for (const t of registry) {
+    const k = t.address.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ token: t.address as `0x${string}`, symbol: t.symbol });
+  }
+  return out;
+}
+
 export async function readClassHoldings(args: {
   client: Pick<PublicClient, "readContract">;
   vault: `0x${string}`;
