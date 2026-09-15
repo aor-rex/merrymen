@@ -22,7 +22,9 @@
       // but does nothing" costs somebody their money.
       "@merrymen/recover": ["worker/src/recover.ts"],
       "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
-      "@merrymen/identity-store": ["worker/src/identity-store.ts"]
+      "@merrymen/identity-store": ["worker/src/identity-store.ts"],
+      "@merrymen/home": ["worker/src/home.ts"],
+      "@merrymen/settings-store": ["worker/src/settings-store.ts"]
     }
   },
   "include": ["worker/src", "packages/core/src"]
