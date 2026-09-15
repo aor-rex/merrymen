@@ -423,8 +423,10 @@ export async function readPoolPrice(
   }
 }
 
-/** Raw cash units at `cashDecimals` → USD at 6dp, given USD per whole cash unit. */
-function cashRawToUsdg(rawCash: bigint, cashDecimals: number, cashPriceUsd8: bigint): bigint {
+/** Raw cash units at `cashDecimals` → USD at 6dp, given USD per whole cash unit.
+ *  Exported so the v4 price path scales depth the SAME way — the comment at the
+ *  weth-route call site exists because doing this by hand lands 1e12 out. */
+export function cashRawToUsdg(rawCash: bigint, cashDecimals: number, cashPriceUsd8: bigint): bigint {
   if (rawCash <= 0n || cashPriceUsd8 <= 0n) return 0n;
   // raw / 10^cashDecimals × price8 / 1e8 × 1e6  →  divide by 10^(cashDecimals + 2)
   return (rawCash * cashPriceUsd8) / 10n ** BigInt(cashDecimals + 2);

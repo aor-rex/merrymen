@@ -598,3 +598,347 @@ describe("checkPolicy — the withdrawal allowlist mirrors the on-chain pin", ()
     assert.equal(!v.ok && v.rule, "per-trade-cap");
   });
 });
+
+
+/**
+ * STAGE 4 — THE MIRROR WAS LOOSER THAN THE CHAIN FOR CURVE TRADES.
+ *
+ * Every asset rule used to sit inside `if (intent.kind === "swap")`, so a curve
+ * trade reached the bundler having passed no asset check at all. The chain would
+ * still refuse it — the wall pins both legs ONE_OF the sealed list — but
+ * limits.ts records that the mirror going LOOSER than the chain is the one
+ * direction that is never safe, and the cost of finding out on chain is a wasted
+ * UserOp and a `gas-unreadable` refusal that names nothing.
+ */
+describe("curve trades are judged off-chain, not discovered on-chain", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+  const MEME = "0x1111111111111111111111111111111111111111";
+  const CURVE = "0x2222222222222222222222222222222222222222";
+  const ADAPTER = "0x3333333333333333333333333333333333333333";
+  const STOCK = "0x4444444444444444444444444444444444444444";
+
+  const curveIntent = (over: Record<string, unknown> = {}) =>
+    ({
+      kind: "curve-trade",
+      target: ADAPTER,
+      curve: CURVE,
+      assetIn: USDG,
+      assetOut: MEME,
+      amountInRaw: 10_000_000n,
+      minAmountOutRaw: 1n,
+      notionalUsdg: 10_000_000n,
+      ...over,
+    }) as never;
+
+  const limits = (over: Record<string, unknown> = {}) =>
+    ({
+      allowedTargets: [ADAPTER],
+      allowedAssets: [USDG, MEME],
+      sellableAssets: [USDG, MEME, STOCK],
+      quoteAssets: [USDG, STOCK],
+      knownCurves: [CURVE],
+      cashToken: USDG,
+      maxTradeUsdg: 1_000_000_000n,
+      maxDailyUsdg: 1_000_000_000n,
+      maxOpsPerDay: 100,
+      ...over,
+    }) as never;
+
+  const state = () =>
+    ({ spentTodayUsdg: 0n, opsToday: 0, equityUsdg: 1_000_000_000n, highWaterMarkUsdg: 0n }) as never;
+
+  it("refuses an asset the GRANT does not cover", () => {
+    const v = checkPolicy(
+      curveIntent({ assetOut: "0x9999999999999999999999999999999999999999" }),
+      limits(),
+      state(),
+    );
+    assert.equal(v.ok, false);
+    assert.equal((v as { rule: string }).rule, "asset-allowlist");
+  });
+
+  it("checks the GRANT list, not the settings list — the whole point of the fix", () => {
+    // allowedAssets is [USDG, ...watchTokens] and watchTokens hot-reload from
+    // SETTINGS with no signature. sellableAssets comes from the grant. An owner
+    // who adds a token in /settings and does not re-sign must still be refused
+    // here, or the fix reproduces the bug it is closing.
+    const v = checkPolicy(
+      curveIntent(),
+      limits({ allowedAssets: [USDG, MEME], sellableAssets: [USDG] }),
+      state(),
+    );
+    assert.equal(v.ok, false, "settings-derived reach must not authorise a curve buy");
+    assert.equal((v as { rule: string }).rule, "asset-allowlist");
+  });
+
+  it("refuses a curve nothing vouches for", () => {
+    // The curve is the one argument the wall CANNOT pin, so off-chain is the
+    // only place it can be constrained at all.
+    const v = checkPolicy(curveIntent({ curve: "0x8888888888888888888888888888888888888888" }), limits(), state());
+    assert.equal(v.ok, false);
+    assert.equal((v as { rule: string }).rule, "curve-provenance");
+  });
+
+  it("refuses a non-positive size instead of signing it", () => {
+    for (const over of [{ amountInRaw: 0n }, { notionalUsdg: 0n }, { amountInRaw: -1n }]) {
+      const v = checkPolicy(curveIntent(over), limits(), state());
+      assert.equal(v.ok, false, Object.keys(over).join(",") + "=" + Object.values(over).map(String).join(","));
+      assert.equal((v as { rule: string }).rule, "non-positive");
+    }
+  });
+
+  it("allows a legal curve buy", () => {
+    assert.equal(checkPolicy(curveIntent(), limits(), state()).ok, true);
+  });
+
+  /**
+   * THE CLASS ROUTE — where "both legs must be enumerated" stops being possible.
+   *
+   * A sniped token did not exist when the grant was signed, so it can never be
+   * in `sellableAssets`. The vault is what makes that safe rather than a trap:
+   * it holds the token, so exiting needs no per-token approve, and the wall pins
+   * the VAULT as the target rather than trying to pin a token nobody has heard
+   * of. These tests pin the three things that has to mean off-chain.
+   *
+   * Every case here differs from the block above by ONE field — `target`. That
+   * is deliberate: the class relaxation must be reachable only through the vault
+   * the grant sealed, and an identical trade through the ordinary adapter must
+   * still be refused. The pair below proves both halves.
+   */
+  describe("the class route", () => {
+    const VAULT = "0x7777777777777777777777777777777777777777";
+    const CLASS_TOKEN = "0x9999999999999999999999999999999999999999";
+    const OTHER_CLASS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const classLimits = (over: Record<string, unknown> = {}) =>
+      limits({ allowedTargets: [ADAPTER, VAULT], ponsClassVault: VAULT, ...over });
+
+    it("buys a token that did not exist at signing — the capability", () => {
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, true, "the class vault is the whole point; this must be reachable");
+    });
+
+    it("sells one back out — the exit, which is what the vault exists for", () => {
+      // assetIn is the un-enumerated leg on this shape. If only `assetOut` were
+      // allowed to be un-enumerated, entering would work and exiting would not:
+      // the no-exit trap, rebuilt inside the thing that was supposed to remove it.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetIn: CLASS_TOKEN, assetOut: USDG }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, true, "an exit must always be attemptable");
+    });
+
+    it("refuses the identical trade through the ordinary adapter", () => {
+      // The relaxation belongs to the vault, not to the venue. Through the
+      // adapter the token would land in the ACCOUNT, where selling it needs a
+      // per-token approve the wall cannot express — so this refusal is the
+      // no-exit rule doing its job one call earlier.
+      const v = checkPolicy(curveIntent({ assetOut: CLASS_TOKEN }), classLimits(), state());
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+
+    it("refuses when NEITHER leg is in the grant", () => {
+      // One un-enumerated leg is the class token. Two means nothing in the trade
+      // is anchored to the signature at all — rolling junk into junk.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetIn: CLASS_TOKEN, assetOut: OTHER_CLASS }),
+        classLimits(),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+
+    it("refuses a class trade when the launch feed is UNREADABLE, not just when the curve is unknown", () => {
+      // THE INVERSION, and the only place in this file where it applies.
+      // `knownCurves: undefined` means "the rule cannot run" everywhere else and
+      // the trade proceeds on the rules that can. A class trade has no such
+      // rules left — its output leg is un-enumerated by design — so an absent
+      // feed is a refusal. A check that did not run must never read as a pass.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        classLimits({ knownCurves: undefined }),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "curve-provenance");
+    });
+
+    it("leaves an ORDINARY curve trade untouched when the feed is unreadable", () => {
+      // The counterpart to the case above, and what keeps that inversion from
+      // quietly becoming a fleet-wide fail-closed change nobody asked for.
+      const v = checkPolicy(curveIntent(), classLimits({ knownCurves: undefined }), state());
+      assert.equal(v.ok, true);
+    });
+
+    it("ignores the class rules entirely when the grant sealed no vault", () => {
+      // ABSENT IS THE SECURE DEFAULT: a grant signed before this feature existed
+      // gets the strict both-legs rule, with nothing to opt into and nothing to
+      // configure.
+      const v = checkPolicy(
+        curveIntent({ target: VAULT, assetOut: CLASS_TOKEN }),
+        limits({ allowedTargets: [ADAPTER, VAULT] }),
+        state(),
+      );
+      assert.equal(v.ok, false);
+      assert.equal((v as { rule: string }).rule, "asset-allowlist");
+    });
+  });
+});
+
+/**
+ * THE BREAKER'S EXIT EXEMPTION — and the trap in widening it.
+ *
+ * The wall pins BOTH legs ONE_OF the same sealed list, so "assetOut is sellable"
+ * is true of every curve trade ever built, buys included. Testing that would mark
+ * the whole venue exempt and switch the breaker off exactly where risk is
+ * highest. The real discriminator is that sellableAssets = builtinGrantTargets u
+ * grantTokens: a launched memecoin arrives as an owner-added EXTRA, while USDG
+ * and the stock tokens are BUILT IN.
+ */
+describe("drawdown breaker and curve exits", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+  const MEME = "0x1111111111111111111111111111111111111111";
+  const CURVE = "0x2222222222222222222222222222222222222222";
+  const ADAPTER = "0x3333333333333333333333333333333333333333";
+  const STOCK = "0x4444444444444444444444444444444444444444";
+
+  const lim = {
+    allowedTargets: [ADAPTER],
+    allowedAssets: [USDG, MEME, STOCK],
+    sellableAssets: [USDG, MEME, STOCK],
+    quoteAssets: [USDG, STOCK],
+    knownCurves: [CURVE],
+    cashToken: USDG,
+    maxTradeUsdg: 1_000_000_000n,
+    maxDailyUsdg: 1_000_000_000n,
+    maxOpsPerDay: 100,
+    maxDrawdownBps: 500,
+  } as never;
+
+  // Deep in a drawdown: equity is half the high-water mark.
+  const drawdown = {
+    spentTodayUsdg: 0n,
+    opsToday: 0,
+    equityUsdg: 500_000_000n,
+    highWaterMarkUsdg: 1_000_000_000n,
+    equityKnown: true,
+  } as never;
+
+  const trade = (assetIn: string, assetOut: string) =>
+    ({
+      kind: "curve-trade",
+      target: ADAPTER,
+      curve: CURVE,
+      assetIn,
+      assetOut,
+      amountInRaw: 10_000_000n,
+      minAmountOutRaw: 1n,
+      notionalUsdg: 10_000_000n,
+    }) as never;
+
+  it("lets a stock-quoted curve position OUT during a drawdown", () => {
+    // 42.8% of curves are quoted in a stock token. The cashToken-only test
+    // blocked the exit for nearly half the venue at the moment it matters most.
+    assert.equal(checkPolicy(trade(MEME, STOCK), lim, drawdown).ok, true);
+  });
+
+  it("still lets a USDG-quoted position out", () => {
+    assert.equal(checkPolicy(trade(MEME, USDG), lim, drawdown).ok, true);
+  });
+
+  it("does NOT treat a curve BUY as an exit", () => {
+    // The failure mode of a careless widening: every leg is sellable, so a naive
+    // test exempts entries too and the breaker stops existing for this venue.
+    const v = checkPolicy(trade(USDG, MEME), lim, drawdown);
+    assert.equal(v.ok, false, "buying deeper into a drawdown must still be blocked");
+    assert.equal((v as { rule: string }).rule, "drawdown-breaker");
+  });
+});
+
+/**
+ * A REFUSAL AN OWNER CAN ACT ON.
+ *
+ * `detail` is printed VERBATIM into the owner's event feed by index.ts. The
+ * daily-cap refusal said `would exceed daily cap 50000000` — a raw 6dp bigint,
+ * no units, no remaining balance, no reset time. "Fifty million" is what the
+ * owner of a 50 USDG agent read, up to three times a tick, all day.
+ */
+describe("cap refusals are written for the person who has to read them", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+  const STOCK = "0x4444444444444444444444444444444444444444";
+  const ROUTER = "0x3333333333333333333333333333333333333333";
+
+  const capLimits = () =>
+    ({
+      allowedTargets: [ROUTER],
+      allowedAssets: [USDG, STOCK],
+      sellableAssets: [USDG, STOCK],
+      cashToken: USDG,
+      perTradeUsdg: 10_000_000n,
+      dailyUsdg: 50_000_000n,
+      maxOpsPerDay: 100,
+      maxDrawdownBps: 10_000,
+      expiresAt: 2_000_000_000,
+    }) as never;
+
+  const capBuy = (notional: bigint) =>
+    ({
+      kind: "swap",
+      target: ROUTER,
+      sellToken: USDG,
+      buyToken: STOCK,
+      sellAmountRaw: notional,
+      notionalUsdg: notional,
+    }) as never;
+
+  const capState = (spent: bigint) =>
+    ({
+      spentTodayUsdg: spent,
+      opsToday: 0,
+      equityUsdg: 1_000_000_000n,
+      highWaterMarkUsdg: 0n,
+      nowSec: 1_000_000_000,
+    }) as never;
+
+  it("the daily-cap refusal contains no bare 6dp integer", () => {
+    const v = checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n));
+    assert.equal(v.ok, false);
+    assert.equal((v as { rule: string }).rule, "daily-cap");
+    const detail = (v as { detail: string }).detail;
+    assert.ok(
+      !/\b\d{7,}\b/.test(detail),
+      `a raw micro-USDG figure reached the owner: ${detail}`,
+    );
+  });
+
+  it("and names what was spent, what the budget was, and what this trade wanted", () => {
+    const v = checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n));
+    const detail = (v as { detail: string }).detail;
+    for (const part of ["49.00 USDG", "50.00 USDG", "5.00 USDG"]) {
+      assert.ok(detail.includes(part), `expected ${part} in: ${detail}`);
+    }
+  });
+
+  it("says the exit is never blocked by it, because that is the question this prompts", () => {
+    const detail = (checkPolicy(capBuy(5_000_000n), capLimits(), capState(49_000_000n)) as { detail: string }).detail;
+    assert.match(detail, /[Ee]xits are never blocked/);
+  });
+
+  it("the per-trade refusal is legible too, and names the re-sign", () => {
+    const v = checkPolicy(capBuy(25_000_000n), capLimits(), capState(0n));
+    assert.equal((v as { rule: string }).rule, "per-trade-cap");
+    const detail = (v as { detail: string }).detail;
+    assert.ok(!/\b\d{7,}\b/.test(detail), `raw figure in: ${detail}`);
+    assert.ok(detail.includes("25.00 USDG") && detail.includes("10.00 USDG"));
+    // The remedy differs from the daily cap's: this one is sealed in the
+    // signature, so settings cannot move it.
+    assert.match(detail, /re-sign/);
+  });
+});

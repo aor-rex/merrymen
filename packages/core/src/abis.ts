@@ -112,6 +112,28 @@ export const CHAINLINK_ABI = [
     inputs: [],
     outputs: [{ type: "uint8" }],
   },
+  /**
+   * One historical round, by id.
+   *
+   * The id is PHASE-ENCODED: the high 64 bits identify the aggregator behind
+   * the proxy and the low 64 the round within it, so walking history means
+   * decrementing only the low half. Cross the phase boundary and the answers
+   * come back from a different aggregator with a different scale — which is
+   * what the magnitude guard in read-feed-history exists to catch.
+   */
+  {
+    type: "function",
+    name: "getRoundData",
+    stateMutability: "view",
+    inputs: [{ name: "_roundId", type: "uint80" }],
+    outputs: [
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" },
+    ],
+  },
 ] as const;
 
 /**
@@ -140,6 +162,119 @@ export const V4SELFSWAP_ABI = [
       { name: "fee", type: "uint24" },
       { name: "tickSpacing", type: "int24" },
       { name: "hooks", type: "address" },
+      { name: "amountIn", type: "uint128" },
+      { name: "minAmountOut", type: "uint128" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+] as const;
+
+/**
+ * PonsSelfTrade — the bonding-curve adapter. See contracts/PonsSelfTrade.sol.
+ *
+ * ALL-STATIC, and that is the whole reason the shape looks like this. The call
+ * policy maps args[i] to calldata offset i*32 with a flat positional rule and
+ * no ABI arity check, so a signature with no struct, no `bytes` and no dynamic
+ * array makes the policy's view of the calldata and the ABI's view the same
+ * thing by construction. wall.ts carries the cautionary tale next to the
+ * SwapRouter02 permissions: one leading `bytes` moved `exactInput`'s recipient
+ * from word 3 to word 2, and reasoning that out instead of proving it is how a
+ * policy ends up constraining the wrong word while looking strict.
+ *
+ * There is no recipient argument. It is msg.sender, in bytecode.
+ */
+/**
+ * PonsClassVault — the per-account holder that makes a CLASS position exitable.
+ *
+ * NOTE THE SHAPE, because it is what the wall relies on: the class token is not
+ * an argument to EITHER call. `buy` names the FUNDING asset (which stays
+ * enumerated) and derives the token from the curve; `sell` names no asset at
+ * all, because the vault can only sell what it already holds and can only pay
+ * its own owner. So there is no token word for the policy to leave unpinned —
+ * the class capability comes from WHERE the token lives, not from a loosened
+ * constraint.
+ *
+ * `sweep` is deliberately absent. It moves a position back to the account, which
+ * is a RECOVERY action taken with the owner key — and the owner key is not bound
+ * by the wall. Granting it to the session key would only let an agent move a
+ * token into the account, where it cannot be sold for want of an approve.
+ *
+ * uint256 amounts, matching PonsClassVault.sol exactly — its sibling above uses
+ * uint128 and matches ITS contract. A mismatch here changes the selector and the
+ * permission silently matches nothing.
+ */
+export const PONS_CLASS_VAULT_ABI = [
+  {
+    type: "function",
+    name: "buy",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "quoteAsset", type: "address" },
+      { name: "quoteIn", type: "uint256" },
+      { name: "minTokensOut", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "tokensOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "sell",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "tokensIn", type: "uint256" },
+      { name: "minQuoteOut", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [{ name: "quoteOut", type: "uint256" }],
+  },
+] as const;
+
+/**
+ * PonsClassVaultFactory.deploy — the one call that CREATES a class vault.
+ *
+ * WHY THE WALL NEEDS THIS AT ALL. A vault address is a CREATE2 prediction; the
+ * contract does not exist until somebody calls this. Deployment is permissionless
+ * (anyone may pay to create anyone's vault), so the session key needs no
+ * privilege — only PERMISSION, which is a different thing and the wall's entire
+ * business.
+ *
+ * Leaving it ungranted is not the safe option, and the reason is EVM semantics
+ * rather than policy: a CALL to an address with no code SUCCEEDS with empty
+ * returndata. So a class buy against an undeployed vault would not revert — the
+ * USDG approve would land, the `buy` would no-op, and the trade would report
+ * `landed`. A ledger row for a purchase that bought nothing.
+ *
+ * Kept in this file rather than beside `vaultFor` in classvault.ts: one constant
+ * imported by BOTH the wall (which derives the pinned selector) and the worker
+ * (which encodes the call), so the selector the policy matches and the selector
+ * the call carries cannot drift. That drift is the failure the note above
+ * PONS_CLASS_VAULT_ABI describes for the uint128/uint256 width.
+ *
+ * All-static, one address word, so the call policy's positional offsets and the
+ * ABI agree by construction — see the note on PONS_SELFTRADE_ABI.
+ */
+export const PONS_CLASS_VAULT_FACTORY_DEPLOY_ABI = [
+  {
+    type: "function",
+    name: "deploy",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "owner_", type: "address" }],
+    outputs: [{ name: "vault", type: "address" }],
+  },
+] as const;
+
+export const PONS_SELFTRADE_ABI = [
+  {
+    type: "function",
+    name: "tradeExactIn",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "curve", type: "address" },
+      { name: "assetIn", type: "address" },
+      { name: "assetOut", type: "address" },
       { name: "amountIn", type: "uint128" },
       { name: "minAmountOut", type: "uint128" },
       { name: "deadline", type: "uint256" },

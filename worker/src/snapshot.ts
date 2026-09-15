@@ -7,6 +7,7 @@
  */
 
 import { createPublicClient, http, parseAbi, type PublicClient } from "viem";
+import { chainRead } from "./rpc-meter";
 import {
   CASH,
   CHAINLINK_ABI,
@@ -25,11 +26,11 @@ const VAULT_READS = parseAbi([
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
 
-let mainnet = createPublicClient({ chain: robinhoodChain, transport: http() });
+let mainnet = createPublicClient({ chain: robinhoodChain, transport: chainRead(undefined) });
 
 /** Point safety reads at a custom mainnet RPC (settings/env); undefined = chain default. */
 export function setMainnetRpc(url?: string): void {
-  mainnet = createPublicClient({ chain: robinhoodChain, transport: http(url) });
+  mainnet = createPublicClient({ chain: robinhoodChain, transport: chainRead(url) });
 }
 
 /**
@@ -47,47 +48,119 @@ export interface MarketSafety {
   /** Symbols whose Chainlink feed is >2h old (expected on weekends — 24/5 feeds). */
   staleFeeds: Set<string>;
   /**
+   * Is the US equity market closed right now?
+   *
+   * WHY THIS IS A SEPARATE FACT FROM `staleFeeds`. A stale stock feed has two
+   * completely different causes with two completely different remedies: the
+   * market is shut (nothing is wrong, wait), or our own read path is broken
+   * (something is wrong, act). Both produce an identical `staleFeeds` entry,
+   * and the sentence the owner was shown asserted the second one unconditionally
+   * — "This is a fact about the feeds, not about the market." On a Saturday that
+   * is precisely backwards, and Saturday is two sevenths of the week.
+   *
+   * Derived here, beside the staleness it qualifies, rather than in a strategy:
+   * it is a property of the clock and the feed's schedule, and two strategies
+   * working it out separately is how they come to disagree.
+   *
+   * A CALENDAR APPROXIMATION, and it does not pretend otherwise: regular hours
+   * Mon–Fri 13:30–20:00 UTC, with no holidays and no half-days. Wrong on roughly
+   * nine days a year, and wrong in the safe direction — it says "open" on
+   * Thanksgiving, which degrades to today's sentence rather than inventing a new
+   * wrong one. It never gates a trade; it only chooses which true sentence to
+   * show.
+   */
+  marketShut: boolean;
+  /**
    * Latest USD price per symbol (8dp), stale or not — for valuation. Chainlink
    * only as it leaves this function; the tick merges pool-derived quotes in for
    * feedless tokens, which is why each entry carries its own `source`.
    */
   prices: Map<string, PriceQuote>;
   sequencerUp: boolean;
-  blockNumber: bigint;
+  /** Chain height, or null when the block could not be read. Null is not zero. */
+  blockNumber: bigint | null;
+  /**
+   * Symbols whose feed we COULD NOT READ, as distinct from feeds that answered
+   * and were old.
+   *
+   * THE ASYMMETRY THIS FIXES WAS IN THIS FILE. Twenty lines below,
+   * `readAccountBalances` already carries `unread: string[]` and explains why;
+   * this function put an unreadable feed into `staleFeeds` instead — and
+   * `staleFeeds` is a claim about the ORACLE. Attributing our own rate limit to
+   * Chainlink is exactly the mistake delivery.ts, read-candles.ts and the
+   * three-way policy probe were each written to prevent.
+   */
+  unread: string[];
+  /**
+   * True when the market could not be read well enough to trade on.
+   *
+   * The tick fails CLOSED on this, the same way it already does for
+   * `unreadBook`. Nothing about which trades are allowed changes: an
+   * unreadable market already produced no trade, by throwing the whole tick.
+   * The difference is that it now produces no trade AND a heartbeat AND a
+   * reason with a name.
+   */
+  unreadable: boolean;
 }
 
 export async function readMarketSafety(): Promise<MarketSafety> {
   const withFeed = STOCK_TOKENS.filter((t) => t.chainlinkFeed !== null);
 
+  // GUARDED PER LEG, like readAccountBalances below and unlike this function
+  // before it. An unguarded Promise.all here threw the whole tick on a single
+  // rate-limited eth_getBlockByNumber — one line before the heartbeat was
+  // written — so a busy provider read as a dead worker and the orchestrator
+  // SIGKILLed a process that was working. 14.6% of ticks died that way, and
+  // every death fed the restart loop that caused the rate limiting.
   const [block, pausedResults, feedResults] = await Promise.all([
-    mainnet.getBlock({ blockTag: "latest" }),
-    mainnet.multicall({
-      contracts: STOCK_TOKENS.map(
-        (t) => ({ address: t.address, abi: STOCK_ABI, functionName: "tokenPaused" }) as const,
-      ),
-    }),
-    mainnet.multicall({
-      contracts: withFeed.map(
-        (t) =>
-          ({ address: t.chainlinkFeed!, abi: CHAINLINK_ABI, functionName: "latestRoundData" }) as const,
-      ),
-    }),
+    mainnet.getBlock({ blockTag: "latest" }).catch(() => null),
+    mainnet
+      .multicall({
+        contracts: STOCK_TOKENS.map(
+          (t) => ({ address: t.address, abi: STOCK_ABI, functionName: "tokenPaused" }) as const,
+        ),
+      })
+      .catch(() => null),
+    mainnet
+      .multicall({
+        contracts: withFeed.map(
+          (t) =>
+            ({ address: t.chainlinkFeed!, abi: CHAINLINK_ABI, functionName: "latestRoundData" }) as const,
+        ),
+      })
+      .catch(() => null),
   ]);
 
   const now = Math.floor(Date.now() / 1000);
 
+  const unread: string[] = [];
+
+  // A PAUSE WE COULD NOT READ IS NOT AN UNPAUSED TOKEN. The whole multicall
+  // failing means we know nothing about any of them, which is a reason to
+  // refuse the tick rather than to trade as though every token were live.
   const pausedTokens = new Set<string>();
-  STOCK_TOKENS.forEach((t, i) => {
-    const r = pausedResults[i];
-    if (r?.status === "success" && (r.result as boolean)) pausedTokens.add(t.address.toLowerCase());
-  });
+  if (pausedResults === null) {
+    unread.push("token-pause-state");
+  } else {
+    STOCK_TOKENS.forEach((t, i) => {
+      const r = pausedResults[i];
+      if (r?.status === "success" && (r.result as boolean)) pausedTokens.add(t.address.toLowerCase());
+      else if (r?.status !== "success") unread.push(t.symbol);
+    });
+  }
 
   const staleFeeds = new Set<string>();
   const prices = new Map<string, PriceQuote>();
+  if (feedResults === null) {
+    withFeed.forEach((t) => unread.push(t.symbol));
+  } else
   withFeed.forEach((t, i) => {
     const r = feedResults[i];
     if (r?.status !== "success") {
-      staleFeeds.add(t.symbol);
+      // UNREAD, not stale. See the note on `unread` above: "the feed is old" and
+      // "we could not ask the feed" have different causes and different
+      // remedies, and only one of them is Chainlink's.
+      unread.push(t.symbol);
       return;
     }
     const [, answer, , updatedAt] = r.result as readonly [bigint, bigint, bigint, bigint, bigint];
@@ -98,11 +171,38 @@ export async function readMarketSafety(): Promise<MarketSafety> {
     if (answer > 0n) prices.set(t.symbol, { price8: answer, stale, source: "chainlink" });
   });
 
+  // See MarketSafety.marketShut. Regular US equity hours, no holiday calendar.
+  const marketShut = (() => {
+    const d = new Date(now * 1000);
+    const day = d.getUTCDay();
+    if (day === 0 || day === 6) return true;
+    const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+    return minutes < 13 * 60 + 30 || minutes >= 20 * 60;
+  })();
+
   // Sequencer heuristic until the Chainlink sequencer-uptime feed address is
   // confirmed for 4663: a healthy sequencer produces blocks continuously.
-  const sequencerUp = now - Number(block.timestamp) < 120;
+  //
+  // AN UNREAD BLOCK IS NOT A DOWN SEQUENCER. Reporting `false` here would have
+  // the tick announce "sequencer DOWN — all trading paused" to every owner on
+  // the strength of our own 429, so the unreadable flag carries it instead.
+  const sequencerUp = block === null ? false : now - Number(block.timestamp) < 120;
 
-  return { pausedTokens, staleFeeds, prices, sequencerUp, blockNumber: block.number };
+  // Unreadable when the block did not answer, or when the pause state is
+  // entirely unknown, or when NO feed answered at all. A handful of missing
+  // feeds is ordinary and stays a per-symbol fact.
+  const unreadable = block === null || pausedResults === null || (withFeed.length > 0 && prices.size === 0);
+
+  return {
+    pausedTokens,
+    staleFeeds,
+    marketShut,
+    prices,
+    sequencerUp,
+    blockNumber: block === null ? null : block.number,
+    unread,
+    unreadable,
+  };
 }
 
 export interface AccountBalances {
@@ -179,4 +279,76 @@ export async function readAccountBalances(
   }
 
   return { ethWei, cashUsdg, vaultUsdg, unread };
+}
+
+/** What a custody contract holds for this account, per token. */
+export interface CustodyBalances {
+  /** Raw balance per token address (lowercased). Present only for tokens that ANSWERED. */
+  balances: Map<string, bigint>;
+  /**
+   * Empty means every figure above is an observation.
+   *
+   * "class" here, not a per-token list, and deliberately: the caller's response
+   * is all-or-nothing — hold the tick — so a partial answer is no more useful
+   * than none, and naming the tokens would invite someone to book the ones that
+   * did answer.
+   */
+  unread: string[];
+}
+
+/**
+ * WHAT THE CLASS VAULT HOLDS.
+ *
+ * The Morpho vault's sibling, and the differences are the whole story.
+ *
+ * Morpho: the ACCOUNT holds shares, so discovery starts from `balanceOf(account)`
+ * and the work is CONVERSION — `convertToAssets` is a second step that can fail
+ * independently of the balance read, which is why `sharesKnown` exists.
+ *
+ * Here: the account holds NOTHING. Discovery cannot start from it at all, so the
+ * caller supplies the candidate list from `class_positions` and this function
+ * only asks the chain what is actually there. And there is no conversion — a
+ * class token is an ERC-20 with a price problem, not a wrapper, so it is valued
+ * by the same pipeline as every other memecoin the book already carries.
+ *
+ * FAILURE IS NEVER A ZERO. A reverted call and a dead RPC are both "we don't
+ * know", and the caller's `unread` handling holds the tick rather than writing a
+ * phantom crater — exactly the discipline `readAccountBalances` above records
+ * having been added the hard way.
+ */
+export async function readClassCustody(
+  client: PublicClient,
+  vault: `0x${string}`,
+  tokens: readonly `0x${string}`[],
+): Promise<CustodyBalances> {
+  const balances = new Map<string, bigint>();
+  // Nothing to ask about is not a failed read. An agent with a vault and no
+  // recorded positions genuinely holds nothing, and saying "unread" here would
+  // hold every tick of every class-enabled agent forever.
+  if (tokens.length === 0) return { balances, unread: [] };
+
+  const results = await client
+    .multicall({
+      contracts: tokens.map((token) => ({
+        address: token,
+        abi: ERC20_READS,
+        functionName: "balanceOf" as const,
+        args: [vault] as const,
+      })),
+    })
+    .catch(() => null);
+
+  if (results === null) return { balances, unread: ["class"] };
+
+  // ONE failed token holds the whole tick. A partial custody read produces a
+  // partial book, and the two things downstream that consume it — the equity
+  // sum and the stranded-basis sweep — are both wrong in a destructive
+  // direction when a holding is missing: the first craters, the second deletes.
+  let anyFailed = false;
+  results.forEach((r, i) => {
+    if (r.status === "success") balances.set(tokens[i]!.toLowerCase(), r.result as bigint);
+    else anyFailed = true;
+  });
+
+  return { balances, unread: anyFailed ? ["class"] : [] };
 }

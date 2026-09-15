@@ -20,6 +20,9 @@ function ready(over: Partial<PreflightInput> = {}): PreflightInput {
     usdg: 500,
     ethWei: 10n ** 16n, // 0.01 ETH
     bundlerReachable: true,
+    missingPolicyContracts: [],
+    deadPolicy: false,
+    accountDeployed: true,
     ...over,
   };
 }
@@ -53,7 +56,27 @@ describe("preflight — the things that stop a trade", () => {
     const input = ready({ grant: { ...ready().grant!, chainId: 46630 } as never });
     const chain = preflight(input).find((c) => c.id === "chain")!;
     assert.equal(chain.level, "blocker");
-    assert.match(chain.detail!, /practice only/i);
+    assert.match(chain.detail!, /cannot trade/i);
+  });
+
+  it("A DEAD POLICY IS A BLOCKER, and it is not the same check as the contract probe", () => {
+    // The gap this closes. `missingPolicyContracts` probes the addresses this
+    // code seals TODAY, and every one of them is deployed — so a grant carrying
+    // the removed rate-limit policy passed preflight green while being unable to
+    // land a single UserOperation. Measured 2026-08-30: RATE_LIMIT_POLICY_CONTRACT
+    // has zero bytes on 4663 AND 46630.
+    //
+    // Both facts are asserted together on purpose: the contracts check must stay
+    // `ok` here, because that is exactly the shape that fooled the command.
+    const input = ready({ deadPolicy: true });
+    const checks = preflight(input);
+    const dead = checks.find((c) => c.id === "dead-policy")!;
+    assert.equal(dead.level, "blocker");
+    assert.equal(checks.find((c) => c.id === "policy-contracts")!.level, "ok");
+    assert.equal(verdict(checks).ready, false);
+    // The remedy is the whole value of the message: an owner who reads a
+    // funding instruction and acts on it has spent money on a dead account.
+    assert.match(dead.detail!, /re-sign/i);
   });
 
   it("an expired grant is a blocker", () => {
@@ -161,5 +184,160 @@ describe("the symbol lists this depends on", () => {
     for (const sym of ["QQQ", "NVDA", "TSLA"]) {
       assert.ok(STOCK_TOKENS.some((t) => t.symbol === sym), `${sym} missing from the registry`);
     }
+  });
+});
+
+describe("preflight — when a sponsor pays the gas", () => {
+  it("zero ETH stops being a blocker, because it stops being true", () => {
+    // Unsponsored this is the one condition that guarantees failure. Sponsored,
+    // the account trades perfectly well on an empty ETH balance, and failing the
+    // whole preflight over it would report a working install as broken.
+    const gas = preflight(ready({ ethWei: 0n, sponsored: true })).find((c) => c.id === "gas")!;
+    assert.equal(gas.level, "warn");
+    assert.equal(verdict(preflight(ready({ ethWei: 0n, sponsored: true }))).ready, true);
+  });
+
+  it("still says it, because the way OUT is not sponsored", () => {
+    // Recovery pays its own fee from the balance it is sweeping, so an owner who
+    // never adds any ETH can trade for months and then find they cannot
+    // withdraw. This is the only screen that will ever mention that.
+    const gas = preflight(ready({ ethWei: 0n, sponsored: true })).find((c) => c.id === "gas")!;
+    assert.match(gas.title, /moving money OUT is not/i);
+    assert.match(gas.detail!, /withdraw/i);
+    assert.doesNotMatch(gas.detail!, /there is no paymaster/);
+  });
+
+  it("does NOT excuse having nothing to trade with", () => {
+    // With the fee covered, no USDG is the only real blocker left — and it is
+    // still a blocker.
+    const v = verdict(preflight(ready({ ethWei: 0n, usdg: 0, sponsored: true })));
+    assert.equal(v.ready, false);
+    assert.ok(idsAt(ready({ ethWei: 0n, usdg: 0, sponsored: true }), "blocker").includes("cash"));
+  });
+
+  it("UNSPONSORED is untouched — zero ETH is still a blocker", () => {
+    // The default, and every install that has not opted in.
+    for (const [label, over] of [
+      ["sponsored absent", { ethWei: 0n }],
+      ["sponsored false", { ethWei: 0n, sponsored: false }],
+    ] as const) {
+      const gas = preflight(ready(over)).find((c) => c.id === "gas")!;
+      assert.equal(gas.level, "blocker", label);
+      assert.match(gas.detail!, /there is no paymaster/);
+    }
+  });
+
+  it("an UNREADABLE balance is still a warning, sponsored or not", () => {
+    // Sponsorship says nothing about whether the RPC answered.
+    assert.ok(idsAt(ready({ ethWei: null, sponsored: true }), "warn").includes("gas"));
+  });
+});
+
+/**
+ * THE DEFAULTS SPEND THE DAY'S BUDGET IN TWO MINUTES.
+ *
+ * `buyPerTickUsdg` and `tickSeconds` are settings; `caps.dailyUsdg` is sealed in
+ * the signature. Nothing cross-validates them, so the shipped pairing — 25 USDG
+ * a tick, 60s, a 50 USDG cap — spends the whole allowance before the third tick
+ * and then refuses every buy for the remaining 1,438 minutes.
+ *
+ * The cap is right and stays. The arithmetic is checkable before an owner funds
+ * anything, which beats discovering it from a feed full of refusals.
+ */
+describe("the tick rate is checked against the daily cap", () => {
+  const grantWith = (dailyUsdg: number) =>
+    ({
+      smartAccount: "0x0000000000000000000000000000000000000001",
+      chainId: 4663,
+      expiresAt: NOW + 10 * 86_400,
+      caps: { perTradeUsdg: 10, dailyUsdg, expiryDays: 14, maxDrawdownPct: 15, maxOpsPerDay: 24 },
+      grantFeatures: [],
+    }) as never;
+
+  const run = (settings: Record<string, unknown>, dailyUsdg: number) =>
+    preflight(
+      ready({ settings: { ...ready().settings, ...settings } as never, grant: grantWith(dailyUsdg) }),
+    ).find((c) => c.id === "daily-budget-rate");
+
+  it("warns on the SHIPPED DEFAULTS — 25 a tick, 60s, a 50 cap", () => {
+    const c = run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50);
+    assert.ok(c, "the shipped pairing must not pass silently");
+    assert.equal(c!.level, "warn");
+  });
+
+  it("names both remedies, and that they cost differently", () => {
+    // One is a setting that takes effect next tick; the other is sealed in the
+    // signature and needs a re-sign. Telling an owner to "raise the cap" without
+    // that is telling them to do the expensive one.
+    const c = run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50)!;
+    assert.match(c.detail ?? "", /buyPerTickUsdg/);
+    assert.match(c.detail ?? "", /re-sign/);
+  });
+
+  it("says exits are never blocked, because that is the question it prompts", () => {
+    assert.match(run({ buyPerTickUsdg: 25, tickSeconds: 60 }, 50)!.detail ?? "", /[Ss]elling is never blocked/);
+  });
+
+  it("stays quiet on a sanely-paired agent", () => {
+    // 5 USDG every 5 minutes against a 500 cap: about eight hours of budget.
+    assert.equal(run({ buyPerTickUsdg: 5, tickSeconds: 300 }, 500), undefined);
+  });
+
+  it("cannot fire without a grant to read the cap from", () => {
+    const c = preflight(
+      ready({ settings: { ...ready().settings, buyPerTickUsdg: 25, tickSeconds: 60 } as never, grant: null }),
+    ).find((x) => x.id === "daily-budget-rate");
+    assert.equal(c, undefined, "an unknown cap must not produce an invented ratio");
+  });
+});
+
+/**
+ * A BLOCKER THAT FIRES FOR AN OWNER WHO DID EVERYTHING RIGHT.
+ *
+ * The `sellable` check resolved basket symbols against `STOCK_TOKENS` alone, so
+ * a custom token found no match, fell into the `!token` arm, and was reported as
+ * "this key cannot sell CATE" — whether the grant covered it or not. On the one
+ * screen whose whole job is to say what is wrong.
+ *
+ * This is the proactive half of the `no-exit` report from the beta: the rule
+ * fires at trade time, and the two places that could have warned in advance both
+ * looked only at the shipped registry.
+ */
+describe("a custom token in the basket is judged by the grant, not by the registry", () => {
+  const CATE = "0xcacacacacacacacacacacacacacacacacacacace";
+
+  it("COVERED BY THE GRANT IS NOT A BLOCKER", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["CATE"], customTokens: [{ symbol: "CATE", address: CATE }] },
+      grant: { ...ready().grant, grantTokens: [CATE] } as never,
+    });
+    const sellable = checks.find((c) => c.id === "sellable");
+    assert.ok(sellable);
+    assert.notEqual(sellable.level, "blocker", "the key can sell it — saying otherwise is a false alarm");
+  });
+
+  it("but NOT covered still is, and still names it", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["CATE"], customTokens: [{ symbol: "CATE", address: CATE }] },
+      grant: { ...ready().grant, grantTokens: [] } as never,
+    });
+    const sellable = checks.find((c) => c.id === "sellable");
+    assert.ok(sellable);
+    assert.equal(sellable.level, "blocker");
+    assert.match(sellable.title, /CATE/);
+    // The slug stays inside the operator-facing detail — it is what support
+    // triages on, and this string is not the owner's chat reply.
+    assert.match(sellable.detail!, /no-exit/);
+  });
+
+  it("and a symbol in neither list is uncovered, because it names nothing", () => {
+    const checks = preflight({
+      ...ready(),
+      settings: { ...ready().settings, basketSymbols: ["GHOST"], customTokens: [] },
+      grant: { ...ready().grant, grantTokens: [] } as never,
+    });
+    assert.equal(checks.find((c) => c.id === "sellable")?.level, "blocker");
   });
 });

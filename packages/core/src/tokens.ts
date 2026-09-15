@@ -81,10 +81,42 @@ export interface PriceQuote {
   price8: bigint;
   /** Chainlink feed older than 2h. Expected on weekends (feeds run 24/5). */
   stale: boolean;
-  /** "broker" = Robinhood get_equity_quotes on the Agentic-account rail. */
-  source: "chainlink" | "pool" | "broker";
+  /**
+   * "broker" = Robinhood get_equity_quotes on the Agentic-account rail.
+   * "v4" = a Uniswap v4 pool. Its own class for the same reason "curve" is:
+   * v4 moved TWAP into hooks, so a vanilla pool has no oracle and the spot-vs-
+   * TWAP divergence check cannot be run. It passed a DEPTH floor, an LP-FEE
+   * ceiling and a round-trip cost check instead — good enough to value a
+   * holding, and still inside the scout budget on the buy side.
+   * "curve" = a Pons bonding curve. A DIFFERENT EVIDENTIAL CLASS from "pool":
+   * a pool quote passed a depth floor AND a spot-vs-TWAP divergence band, and
+   * a curve quote passed neither because a curve has no oracle to diverge
+   * from. It is good enough to value something already held; it is not good
+   * enough to authorise a new buy, and the scout ceiling still applies to it.
+   */
+  source: "chainlink" | "pool" | "broker" | "curve" | "v4";
   /** For pool prices: route + depth, so a human can judge the number. */
   detail?: string;
+  /**
+   * Depth behind this price, raw USDG (6dp) — the same unit as
+   * `PriceGuard.minLiquidityUsdg` and `Discovery.liquidityUsdg`.
+   *
+   * OPTIONAL, AND ABSENCE IS A REAL VALUE. Chainlink and broker quotes have no
+   * depth concept at all, and downstream is written so that null SKIPS the
+   * liquidity-drain check while 0 FIRES it — so collapsing "I could not read
+   * depth" into "the pool is empty" would turn a missing fact into a forced
+   * liquidation. Never write 0n to mean unknown.
+   *
+   * This exists because the number used to be recovered by running a regex over
+   * `detail`, which is prose formatted with `toLocaleString`. On any host whose
+   * locale groups with dots or uses non-Latin digits — de-DE, fr-FR, ru-RU,
+   * ar-EG — that match failed for every pool over $1,000, silently emptying the
+   * depth map. Two live consequences: trencher's rug defence was off, and the
+   * trench entry baseline was stamped 0 through an ON CONFLICT DO NOTHING
+   * upsert, so it stayed 0 for the position's whole life. A number should never
+   * have been round-tripped through a sentence.
+   */
+  liquidityUsdg?: bigint;
 }
 
 /** Reject anything that isn't a plausible ERC-20 entry before it can reach a
@@ -218,3 +250,154 @@ export const STOCK_ABI = [
   { type: "event", name: "Transfer", inputs: [{ name: "from", type: "address", indexed: true }, { name: "to", type: "address", indexed: true }, { name: "value", type: "uint256", indexed: false }] },
   { type: "event", name: "UIMultiplierUpdated", inputs: [{ name: "oldMultiplier", type: "uint256", indexed: false }, { name: "newMultiplier", type: "uint256", indexed: false }, { name: "effectiveAtTimestamp", type: "uint256", indexed: false }] },
 ] as const;
+
+/**
+ * Short provenance tag for a price, for anywhere a human or a model reads one.
+ *
+ * Exists because the display sites all used to ask `source === "pool"` with an
+ * implicit else meaning "Chainlink-grade". That is fine while there are two
+ * sources and silently wrong the moment there are four: a bonding-curve mark
+ * would have rendered with the feed's colour, no tag, and — worst of the three
+ * — no marker in the ledger string handed to the strategist, which would then
+ * narrate an unoracled number as if a feed had published it.
+ *
+ * Chainlink returns "" because it is the baseline every other source is being
+ * distinguished FROM; tagging it would put a label on every row and so label
+ * nothing.
+ */
+export function priceSourceTag(source: string): string {
+  switch (source) {
+    case "pool":
+      return "pool px";
+    case "broker":
+      return "broker px";
+    case "curve":
+      // Deliberately not "pool px". A curve price passed no divergence band and
+      // has no oracle behind it; showing it as a pool price would overstate
+      // what is known about it.
+      return "curve px";
+    default:
+      return "";
+  }
+}
+
+/**
+ * One sentence explaining what a price source's tag means.
+ *
+ * Kept beside `priceSourceTag` so a tag can never be shown with the wrong
+ * explanation. That is not hypothetical: widening a `=== "pool"` test to
+ * `!== "chainlink"` without touching the label showed a bonding-curve mark as
+ * "pool px" under a tooltip asserting it had passed depth AND divergence
+ * checks — two guards that cannot even run on a curve.
+ */
+export function priceSourceNote(source: string): string {
+  switch (source) {
+    case "pool":
+      return "pool px = a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim.";
+    case "broker":
+      return "broker px = the venue's own last-trade print, not a Chainlink feed.";
+    case "curve":
+      return "curve px = read straight off a bonding curve. There is no oracle behind it and no divergence check — the reserves are the entire market, so one trade can move it a long way.";
+    default:
+      return "";
+  }
+}
+
+/**
+ * The four research desks Brain can run. Merrymen decides this, never the model.
+ *
+ * A desk is a set of analyst lenses: an equity has earnings, a memecoin has
+ * liquidity and a crowd. Running a fundamentals analyst on a memecoin produces
+ * confident text about nothing, which is worse than no analyst at all — it
+ * arrives looking like evidence.
+ */
+export type InstrumentClass = "equity-token" | "crypto-native" | "memecoin" | "stablecoin";
+
+/**
+ * Which desk this token gets, from what the token actually IS.
+ *
+ * THE RULE IS THE TABLE. `STOCK_TOKENS` is the issuer-backed set: Chainlink
+ * feeds, ERC-8056 multipliers, and a price that updates 24/5 because the
+ * underlying market is open 24/5. Anything else on this chain arrived from
+ * discovery — no feed, no multiplier, priced from a DEX pool, and trading
+ * around the clock. That distinction is not a taxonomy preference; it decides
+ * whether "the price is stale" means "the market is shut" or "something is
+ * wrong".
+ *
+ * WHY ADDRESS AND NOT SYMBOL. A discovered token may call itself AAPL. The
+ * address is the identity, and matching on the name would let a launchpad token
+ * pick its own research desk.
+ *
+ * Unknown address ⇒ `memecoin`, which is the CAUTIOUS arm rather than the
+ * lenient one: it routes to liquidity and on-chain lenses and away from
+ * fundamentals, which is the right treatment for something nobody has verified.
+ */
+export function instrumentClassOf(address: string): InstrumentClass {
+  const a = address.trim().toLowerCase();
+  const known = STOCK_TOKENS.find((t) => t.address.toLowerCase() === a);
+  if (!known) return "memecoin";
+  switch (known.kind) {
+    case "stock":
+    case "etf":
+      return "equity-token";
+    case "memecoin":
+      return "memecoin";
+  }
+}
+
+/**
+ * WHICH KINDS OF THING THE OWNER WANTS TRADED.
+ *
+ * Asked for in the beta by several people at once: "there should be an option
+ * mode for stocks only, crypto only, combo, or meme coin only" — and, from
+ * someone whose agent kept answering about a basket of stocks he did not care
+ * about, "i still can't understand how let the agent trade tokens and not only
+ * stocks".
+ *
+ * THREE VALUES, NOT FOUR, and the missing fourth is deliberate.
+ * `instrumentClassOf` can only ever return `equity-token` or `memecoin` — the
+ * rule is "in STOCK_TOKENS ⇒ equity, else memecoin", so `crypto-native` and
+ * `stablecoin` are declared arms it never produces. Shipping "crypto only" and
+ * "meme coins only" as separate modes would be two names for one filter: a
+ * control that cannot do what its label says. The picker still offers a
+ * meme-coin card; it writes `crypto` plus the switches that already govern
+ * buying things nobody can price, and says so on the card.
+ */
+export type AssetMode = "all" | "stocks" | "crypto";
+
+/**
+ * May this asset mode trade this token?
+ *
+ * ADDRESS-KEYED, inheriting the reason `instrumentClassOf` gives above: "A
+ * discovered token may call itself AAPL. The address is the identity, and
+ * matching on the name would let a launchpad token pick its own research desk."
+ * Symbol-keyed, a coin named NVDA would pick its own asset mode.
+ *
+ * WHAT THIS MUST NEVER BE USED FOR: deciding what to WATCH. `snap.holdings` is
+ * the watch set intersected with real balances, and every mechanical exit —
+ * stop-loss, take-profit — iterates it. Filtering the watch set would strip a
+ * held position of its exits AND drop equity by that position's value in one
+ * tick, against a high-water mark that only ratchets up, tripping the drawdown
+ * breaker. A settings checkbox that bricks a live account. This filters what may
+ * be BOUGHT; a class switched off stays watched, priced, valued and sellable.
+ */
+export function assetModeAllows(mode: AssetMode, address: string): boolean {
+  if (mode === "all") return true;
+  const equity = instrumentClassOf(address) === "equity-token";
+  return mode === "stocks" ? equity : !equity;
+}
+
+/**
+ * Does this instrument's price come from a market that closes?
+ *
+ * A tokenised equity tracks a 24/5 Chainlink feed, so outside US market hours
+ * its price is legitimately hours old and `staleFeeds` says so. A pool-priced
+ * token trades continuously and a stale reading there means the POOL stopped
+ * being readable — a fault, not a weekend.
+ *
+ * The same flag, two entirely different facts. Anything reasoning about
+ * staleness has to know which one it is looking at.
+ */
+export function tradesAroundTheClock(address: string): boolean {
+  return instrumentClassOf(address) !== "equity-token";
+}

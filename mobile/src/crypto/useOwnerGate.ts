@@ -19,16 +19,19 @@ import { readOwner } from "./keystore";
  */
 export function useOwnerGate(): { checked: boolean } {
   const segments = useSegments();
-  const [checked, setChecked] = useState(false);
+  // Seeded from PREVIEW rather than set inside the effect. There is nothing to
+  // check in preview mode — the gate is skipped outright — so the answer is
+  // already known at first render, and an effect that immediately setState'd it
+  // to true only bought a second render to say what the first one could have.
+  // PREVIEW is a module constant (Metro even constant-folds it away in release),
+  // so it cannot change after mount and is safe as an initial value.
+  const [checked, setChecked] = useState(PREVIEW);
 
   useEffect(() => {
     // Design review in a browser, where there is no keystore to pass. Compiled
     // out of release builds — see dev/preview.ts. Nothing is faked: the key is
     // still absent, so signing still fails.
-    if (PREVIEW) {
-      setChecked(true);
-      return;
-    }
+    if (PREVIEW) return;
 
     let alive = true;
     void (async () => {

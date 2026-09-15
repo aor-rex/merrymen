@@ -20,16 +20,17 @@
 
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { homePaths } from "@merrymen/home";
 import {
   chainForId,
   explorerFor,
+  isHostedMode,
   pimlicoBundlerUrl,
   robinhoodChain,
   type MerrymenSettings,
   type StoredGrant,
 } from "@merrymen/core";
-import { planRecovery, recoverFunds } from "@merrymen/recover";
+import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,8 +68,24 @@ function rpcFor(settings: MerrymenSettings, chainId: number): string | undefined
   return chainId === robinhoodChain.id ? settings.rpcMainnet : settings.rpcTestnet;
 }
 
+/**
+ * In hosted mode the server holds no owner key by construction, so there is
+ * nothing for a server-side recover to read or sweep. Recovery runs entirely in
+ * the browser (import the owner key -> rebuild the sudo account -> owner-signed
+ * withdraw straight to the bundler), which the client already knows how to do
+ * with the localStorage grant. The route refuses rather than accept an owner key
+ * over the wire — accepting one would re-open the exact fund-drain path the
+ * hosted custody boundary exists to close.
+ */
+const HOSTED_RECOVERY = {
+  error: "recovery is client-side in hosted mode",
+  detail: "The server never holds your owner key, so it cannot sweep. Use in-browser recovery with the key you backed up.",
+  clientSide: true,
+};
+
 /** Context for the active grant so the panel can render without asking for a key. */
 export async function GET() {
+  if (isHostedMode()) return NextResponse.json({ hasStoredKey: false, ...HOSTED_RECOVERY });
   const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
 
   if (!grant || !isKey(grant.demoOwnerPrivateKey)) {
@@ -82,7 +99,7 @@ export async function GET() {
   try {
     const plan = await planRecovery({
       chain: chainForId(chainId),
-      ownerPrivateKey: grant.demoOwnerPrivateKey,
+      owner: ownerFromPrivateKey(grant.demoOwnerPrivateKey),
       rpcUrl: rpcFor(settings, chainId),
       expectedSmartAccount: grant.smartAccount,
       // The owner's own tokens, including every quarantined scout buy. Without
@@ -109,6 +126,12 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // HOSTED: never accept an owner key over the wire and never sweep server-side.
+  // This is the fund-drain endpoint the audit flagged — a public URL where the
+  // only guard was localhost. Closed by construction: the server has no key and
+  // will not take one.
+  if (isHostedMode()) return NextResponse.json(HOSTED_RECOVERY, { status: 403 });
+
   let body: { mode?: string; to?: unknown; ownerKey?: unknown; chainId?: unknown };
   try {
     body = (await req.json()) as typeof body;
@@ -136,7 +159,7 @@ export async function POST(req: Request) {
     if (mode === "plan") {
       const plan = await planRecovery({
         chain: chainForId(chainId),
-        ownerPrivateKey: ownerKey,
+        owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expected,
         extraTokens: settings.customTokens ?? [],
@@ -166,7 +189,7 @@ export async function POST(req: Request) {
     }
     const res = await recoverFunds({
       chain: chainForId(chainId),
-      ownerPrivateKey: ownerKey,
+      owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
       rpcUrl,
       to: body.to,

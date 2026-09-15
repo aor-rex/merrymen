@@ -12,9 +12,14 @@
 # merrymen
 
 **Trading agents you never have to trust.** merrymen is a self-hosted band of
-agents for Robinhood Chain: your keys never leave your machine, and every cap
-you set — per-trade, daily, ops/day, drawdown, key expiry — is enforced by your
-account contract **on-chain**, not by promises. Inside that wall your band works
+agents for Robinhood Chain: your keys never leave your machine, and the caps that
+matter most — **per-trade size, which assets, which contracts, and when the key
+dies** — are enforced by your account contract **on-chain**, not by promises.
+(The daily total, the drawdown breaker and the trades-per-day count are enforced
+by the worker, not the chain, so the chain-side ceiling is per-trade until the
+key expires. Said plainly because a project whose pitch is verification cannot
+round up — and this list was itself wrong until 2026-08-30, when ops/day turned
+out to rest on a policy contract that is not deployed on this chain.) Inside that wall your band works
 Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — while you name your
 merryman, chat with it and steer it from Telegram (it can even run your PC), and
 watch every trade on a local dashboard.
@@ -35,15 +40,29 @@ Anyone can ship a trading agent, and platforms will ship their own. A
 first-party agent is **custodial by construction**: their servers, their keys,
 their discretion — the safety story is a terms-of-service. merrymen inverts it:
 
-- **Your machine.** The agent, its memory, and its ledger live in `~/.merrymen`.
-  There is no server-side anything.
-- **Your keys.** Minted locally, backed up by you, never transmitted.
-- **The chain enforces the caps.** The session key's limits live in the account
-  contract; even a fully compromised agent cannot spend past the wall.
+- **Your machine, if you self-host.** The agent, its memory and its ledger live
+  in `~/.merrymen`, and there is no server-side anything. Hosted at
+  app.merrymen.dev the worker and the ledger are ours — what does not change is
+  the next line.
+- **Your keys, either way.** Minted in your browser, backed up by you, never
+  transmitted. The hosted server refuses to accept an owner key at all and
+  refuses to boot if one is found at rest, so a database dump of ours cannot
+  move your funds. The honest limit: that key sits in plain text in your
+  browser's local storage, so the trust is in this origin rather than in our
+  servers — not nowhere.
+- **The chain enforces the caps that bound a loss.** The session key may only
+  call contracts it names, may only move assets you sealed into it, may not send
+  native ETH at all, and dies on schedule — all in the account contract. A
+  compromised agent cannot reach an asset you did not name or a contract you did
+  not approve. It can still make bad trades inside those bounds; no wall fixes
+  judgement.
 - **Verifiable, not claimed.** The dashboard links every address and cap to the
-  block explorer, and its **prove the wall** button fires malicious intents
-  (an oversized trade, a "send everything to 0xevil" transfer, an expired key)
-  through the live policy so you can watch each one bounce.
+  block explorer, and its **prove the wall** button fires malicious intents (an
+  oversized trade, a "send everything to 0xevil" transfer, an expired key)
+  through the policy so you can watch each one bounce. Note what that does and
+  does not show: it exercises the worker's own copy of the rules, so it proves
+  the software agrees with itself. The chain-side proof is a real refused
+  UserOp — see docs/.
 - **The numbers are auditable too, not just the wall.** Every fact that moves
   money is mirrored into a hash-chained journal, so an edited record breaks
   every hash after it and a deleted one leaves a visible gap. `merrymen export`
@@ -54,6 +73,39 @@ their discretion — the safety story is a terms-of-service. merrymen inverts it
   counted.
 
 You verify; it trades.
+
+---
+
+## Check it yourself
+
+Two commands. The second reads nothing but the file you hand it — not
+`~/.merrymen`, not the settings, not the machine that produced it — so it is
+checking the record against the **chain**, not against the operator.
+
+```bash
+npm run export -- --agent <address> > ledger.jsonl
+```
+
+```bash
+npm run verify -- ledger.jsonl
+```
+
+`verify` re-fetches every receipt from a public RPC and re-derives what moved
+from the logs, using its own implementation rather than sharing code with the
+writer — so a bug in the writer cannot be confirmed by the reader. It returns
+**INDETERMINATE**, not PASS, when a transaction cannot be refetched: a check it
+could not run is not a check that passed.
+
+Two limits, said out loud rather than discovered:
+
+- **Epoch 1 is not exportable.** The rows before flow tracking existed cannot be
+  reconciled against deposits, so the exportable record begins at the epoch
+  boundary opened by the first arm after that. `export` emits no records for it
+  and says so on stderr, rather than presenting rows it cannot stand behind.
+- **A `Transfer` log is written by the token contract.** The verifier and the
+  writer are independent implementations, but they read the same source, so a
+  lying token would be confirmed by both. The post-buy `balanceOf` check
+  (`worker/src/delivery.ts`) is what makes their agreement mean something.
 
 ---
 
@@ -137,22 +189,31 @@ Open `localhost:3100/grant`. There's nothing to connect — merrymen generates a
 fresh account, shows you the owner key to **back up** (lose it and the funds are
 gone), and lets you fund it. **Pick your ground:**
 
-- **testnet · 46630** (default) — the sandbox. Free **gas** from the faucet, and
+- **testnet · 46630** — the sandbox, one click away and no longer the default. Free **gas** from the faucet, and
   the grant, the caps, the policy checks, the live prices and the journal all run
   for real. Two things don't: the token registry is mainnet-only, so **any USDG
   you send to testnet reads as 0 and is never used**, and the trading venues
   aren't deployed there, so swaps simulate and no-route by design. Send gas, not
   capital — paper mode is already trading a simulated book at live prices.
-- **mainnet · 4663** — **real funds.** Real USDG, real Stock Tokens, real
+- **mainnet · 4663** (default) — **real funds.** Real USDG, real Stock Tokens, real
   execution. The page makes you acknowledge it first: keys are generated and
   stored **in plain text on your machine** (TEE custody is on the roadmap), so
   treat the account like a hot wallet — your caps are the seatbelt, start small.
   No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
 
-The caps you set — per-trade, daily, ops/day, drawdown breaker, key expiry — are
-enforced **by the account contract on every operation**, not by promises. The
-worker can tighten within them but can never widen them without a new signed
-grant.
+Per-trade size, the asset and contract allowlists, a zero native-ETH limit and
+the key's expiry are enforced **by the account contract on every operation**.
+The daily total, the drawdown breaker and the trades-per-day count live in the
+worker — they tighten what the chain already allows, and a compromised worker
+could ignore them, which is why the chain-side ceiling is the honest number to
+plan against: **per-trade size, until the key expires**. The worker can tighten
+within the wall but can never widen it without a new signed grant.
+
+Trades-per-day was on the on-chain list here until 2026-08-30. It rested on
+ZeroDev's rate-limit policy, and `eth_getCode` shows that contract has no code on
+Robinhood Chain — mainnet or testnet — while the timestamp and call policies both
+do. A policy pointing at an empty address is not a bound, so it was removed and
+this sentence corrected rather than left to flatter the design.
 
 > **Going live is one key.** To sign real trades, paste a free [Pimlico](https://dashboard.pimlico.io)
 > API key in `/settings` — merrymen builds the bundler URL for your wallet's chain

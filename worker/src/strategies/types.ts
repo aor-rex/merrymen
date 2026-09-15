@@ -8,6 +8,7 @@
 import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
 import type { TokenDepth } from "../venues/depth-cache";
+import type { Why } from "./reasons";
 
 /** One current holding, as the strategy sees it. */
 export interface Holding {
@@ -18,6 +19,42 @@ export interface Holding {
   valueUsdg: bigint;
   /** The holding's Chainlink feed is stale (market closed) right now. */
   priceStale: boolean;
+  /**
+   * WHAT WAS PAID FOR IT, from the cost-basis ledger. 6dp, like valueUsdg.
+   *
+   * NULL IS NOT ZERO, and here the difference is the whole point. A holding
+   * carried only today's value, so a strategy could see what a position is
+   * worth and never what it cost — which makes "am I happy with my profit"
+   * a question the agent could not answer about itself, and there is no
+   * take-profit or stop-loss without it. The one-shot strategist has no other
+   * route to this: cost basis reached a model only through the desk tool loop,
+   * which is off by default.
+   *
+   * Null when the ledger has no basis for it — a position funded in kind, or
+   * one whose fills predate the basis columns. Rendering that as 0 would tell a
+   * model the entire holding is profit, which is the original accounting bug in
+   * miniature, so it must travel as absent all the way to the prompt.
+   */
+  costUsdg?: bigint | null;
+  /**
+   * THIS POSITION'S OWN FLOOR, in bps below cost, graded once when it was
+   * opened. Undefined or null means none was stamped, and the owner's single
+   * `stopLossBps` applies unchanged — which is what every position had before
+   * grading existed and what every position still gets when the grade could
+   * not be made.
+   *
+   * It travels on the HOLDING rather than in config because that is the only
+   * thing here that is per position. The alternative — a second map threaded
+   * beside `holdings` — would let the two drift, and a floor attached to the
+   * wrong symbol is worse than no floor.
+   *
+   * NEVER read on its own: `stopLossBps` decides WHETHER a floor is armed at
+   * all, and this decides only WHERE. An owner who has armed nothing must not
+   * acquire a stop because a grade was computed.
+   */
+  stopFloorBps?: number | null;
+  /** The sentence the grade was given for, so a fill can say why it fired there. */
+  stopFloorWhy?: string | null;
 }
 
 export interface Snapshot {
@@ -50,6 +87,16 @@ export interface Snapshot {
   pausedTokens: Set<string>;
   /** Chainlink staleness per symbol; stale = underlying market closed (nights/weekends). */
   staleFeeds: Set<string>;
+  /**
+   * Is the US equity market closed? See MarketSafety.marketShut.
+   *
+   * It qualifies `staleFeeds` and nothing else — a stale feed with this true is
+   * a closed market, and with it false is our own read path. Never gate a trade
+   * on it: the feed staleness is the operative fact, this only decides which
+   * true sentence the owner is shown. Optional so fixtures need not carry it,
+   * and absent reads as "not established", which renders the old wording.
+   */
+  marketShut?: boolean;
   sequencerUp: boolean;
   /**
    * USDG (6dp) still spendable today: the grant's daily cap minus what's already
@@ -79,8 +126,51 @@ export interface Snapshot {
   depth?: ReadonlyMap<string, TokenDepth>;
 }
 
+/**
+ * What a strategy proposed, and why — the reasons paired positionally with the
+ * intents that carry them.
+ *
+ * PARALLEL ARRAYS rather than a reason on the intent itself, because
+ * `policy.ts` states that free text lives only in the decisions table and never
+ * on a TradeIntent: nothing the wall inspects may take a string that originated
+ * outside it. The strategist already pairs its proposals with its reasoning this
+ * exact way, so this is the existing shape, not a new one.
+ *
+ * `why[i]` may be null — a strategy can propose something it has nothing to say
+ * about, and null is the honest value for that.
+ */
+export interface Tick {
+  intents: TradeIntent[];
+  why: (Why | null)[];
+  /**
+   * WHY THIS TICK PROPOSED NOTHING — unpaired, because there is no intent to
+   * pair it with.
+   *
+   * `why` is positionally paired with `intents`, so a tick that produces no
+   * intents can carry no reason at all, and an empty tick is exactly what a
+   * healthy quiet tick looks like too. That silence cost a weekend: every
+   * basket agent skipped every leg on a stale feed and reported nothing, and
+   * the owners read it as a broken product.
+   *
+   * Only the strategy knows WHY it proposed nothing; the caller can see the
+   * empty array and nothing else. Optional, so every existing strategy and
+   * fixture is unchanged.
+   */
+  idle?: Why;
+}
+
 export interface Strategy {
   name: string;
-  /** Async allowed: the LLM strategist awaits a model at decision windows. */
-  tick(snap: Snapshot): TradeIntent[] | Promise<TradeIntent[]>;
+  /**
+   * Async allowed: the LLM strategist awaits a model at decision windows.
+   *
+   * A bare array is still valid and means 'no reasons' — which is what a
+   * tenant's own strategy file returns, and why one can never publish prose.
+   */
+  tick(snap: Snapshot): TradeIntent[] | Tick | Promise<TradeIntent[] | Tick>;
+}
+
+/** Normalise either return shape. The one place that knows about both. */
+export function takeTick(r: TradeIntent[] | Tick): Tick {
+  return Array.isArray(r) ? { intents: r, why: r.map(() => null) } : r;
 }

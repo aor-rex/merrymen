@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["dom", "dom.iterable", "esnext"],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
@@ -13,12 +17,27 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "plugins": [{ "name": "next" }],
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
     "paths": {
       "@/*": ["./src/*"],
       "@merrymen/core": ["../packages/core/src/index.ts"],
       "@merrymen/policy": ["../worker/src/policy.ts"],
       "@merrymen/recover": ["../worker/src/recover.ts"],
+      "@merrymen/grant-store": ["../worker/src/grant-store.ts"],
+      "@merrymen/command-files": ["../worker/src/command-files.ts"],
+      "@merrymen/settings-store": ["../worker/src/settings-store.ts"],
+      "@merrymen/thesis": ["../worker/src/thesis-policy.ts"],
+      "@merrymen/feed-history": ["../worker/src/read-feed-history.ts"],
+      "@merrymen/identity-store": ["../worker/src/identity-store.ts"],
+      "@merrymen/follow-store": ["../worker/src/follow-store.ts"],
+      "@merrymen/llm": ["../worker/src/llm.ts"],
+      "@merrymen/settings": ["../worker/src/settings.ts"],
+      "@merrymen/home": ["../worker/src/home.ts"],
+      "@merrymen/db": ["../worker/src/db.ts"],
       "@merrymen/backtest": ["../worker/src/backtest.ts"],
       "@merrymen/backtest-scenario": ["../worker/src/backtest-scenario.ts"],
       "@merrymen/limits": ["../worker/src/limits.ts"],
@@ -27,6 +46,14 @@
       "@merrymen/strategies/*": ["../worker/src/strategies/*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    "next-env.d.ts",
+    ".next-build/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }

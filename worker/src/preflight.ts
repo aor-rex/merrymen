@@ -60,11 +60,30 @@ export interface PreflightInput {
     paperTradingEnabled?: boolean;
     basketSymbols?: string[];
     buyPerTickUsdg?: number;
+    /** Seconds between ticks. Paired with buyPerTickUsdg it IS the spend rate. */
+    tickSeconds?: number;
     idleFloorUsdg?: number;
+    /**
+     * The owner's own tokens, needed to resolve a basket symbol that is not in
+     * the shipped registry — see the `sellable` check below, which reported
+     * every one of them as unsellable whether the grant covered it or not.
+     */
+    customTokens?: { symbol: string; address: string }[];
     /** RPC overrides, if the owner set them — the CLI reads balances through these. */
     rpcMainnet?: string;
     rpcTestnet?: string;
   };
+  /**
+   * Is a sponsor paying this agent's TRADING gas?
+   *
+   * Not read from `settings` above, because sponsorship resolves from the
+   * settings file OR the environment and this shape is the raw file. The caller
+   * resolves it the same way the worker does and passes the answer.
+   *
+   * Absent means no, which is the default and every deployment that has not
+   * opted in.
+   */
+  sponsored?: boolean;
   grant: StoredGrant | null;
   nowSec: number;
   /** Read from the grant's chain. null = could not be read, which is not zero. */
@@ -72,6 +91,38 @@ export interface PreflightInput {
   ethWei: bigint | null;
   /** null = not probed (no bundler configured at all). */
   bundlerReachable: boolean | null;
+  /**
+   * Names of WALL_POLICY_CONTRACTS entries with no code on the grant chain.
+   * `[]` means all present; `null` means the probe could not run — which says
+   * nothing about the contracts and must never read as "absent".
+   */
+  missingPolicyContracts: string[] | null;
+  /**
+   * Does THIS grant seal the dead rate-limit policy?
+   *
+   * A DIFFERENT QUESTION FROM THE ONE ABOVE, and the gap between them is why
+   * this command reported a healthy install for a grant that could never
+   * validate. `missingPolicyContracts` probes the three singletons this code
+   * seals TODAY. It cannot see what an OLDER signature sealed — and a signature
+   * is frozen, so the only grants that carry the dead policy are exactly the
+   * ones no probe of current addresses will ever look at.
+   *
+   * Passed as data rather than computed here, like the probe above:
+   * `grantHasDeadRateLimit` lives in `session-account.ts`, which imports the
+   * whole ZeroDev SDK, and this module's entire value is being pure enough to
+   * test without a chain.
+   */
+  deadPolicy: boolean;
+  /**
+   * Does the smart account have code on the grant chain? `null` = not probed.
+   *
+   * Not a blocker in either direction: an account with no code is the normal
+   * state of one that has never traded, and 4337 deploys it with the first
+   * operation. It is here because it changes what the FIRST operation costs and
+   * because it is the only observable that distinguishes "the wall is signed"
+   * from "the wall has been evaluated by a chain".
+   */
+  accountDeployed: boolean | null;
 }
 
 const ok = (id: string, title: string): Check => ({ id, level: "ok", title });
@@ -121,12 +172,86 @@ export function preflight(input: PreflightInput): Check[] {
       level: "blocker",
       title: `grant is on chain ${g.chainId} — it cannot trade`,
       detail:
-        "Testnet is practice only. Every token and router address merrymen knows is a MAINNET " +
+        "Testnet cannot trade. Every token and router address merrymen knows is a MAINNET " +
         `deployment, so a funded testnet balance reads as 0 and swaps only simulate. Re-sign at ` +
         `/grant and pick mainnet ${TRADEABLE_CHAIN_ID} (it asks you to confirm, deliberately).`,
     });
   } else {
     out.push(ok("chain", `mainnet ${TRADEABLE_CHAIN_ID} — real funds`));
+  }
+
+  // ── the contracts the wall itself is built on ────────────────────────
+  // A ZeroDev policy is an address plus its data, and the addresses are the
+  // library's defaults for a deployment it assumes exists. On this chain one of
+  // them did not: RATE_LIMIT_POLICY_CONTRACT has zero bytes on 4663 AND 46630,
+  // measured 2026-08-30, while the timestamp policy, the call policy and the
+  // ECDSA signer all carry real bytecode. Every grant built before that
+  // discovery sealed a pointer into empty space.
+  //
+  // A BLOCKER, unlike the arm-time warn that mirrors it. The whole job of this
+  // command is to answer "can this thing trade", and the honest answer when the
+  // wall's own validator contracts are absent is no — the failure would
+  // otherwise arrive as a UserOp that will not validate, reported by nothing,
+  // at the price of a prefund per attempt.
+  //
+  // `null` means the probe did not run (no RPC, or the CLI could not reach the
+  // chain). That is NOT the same as absent, and it must not read as one.
+  if (input.missingPolicyContracts === null) {
+    out.push({
+      id: "policy-contracts",
+      level: "warn",
+      title: "couldn't check the contracts the wall is built on",
+      detail:
+        "The signature seals the addresses of the ZeroDev policy contracts it validates against. " +
+        "This run could not read the chain to confirm they are deployed, so it is unverified rather " +
+        "than fine. Re-run when the RPC is reachable.",
+    });
+  } else if (input.missingPolicyContracts.length > 0) {
+    out.push({
+      id: "policy-contracts",
+      level: "blocker",
+      title: `the wall depends on contracts with no code on chain ${g.chainId}`,
+      detail:
+        `${input.missingPolicyContracts.join(", ")} — every UserOp this grant signs is validated ` +
+        "against them, so nothing can land until this is resolved. This is a merrymen bug, not " +
+        "something you configured: report it rather than working around it.",
+    });
+  } else {
+    out.push(ok("policy-contracts", "the wall's validator contracts are deployed"));
+  }
+
+  // THE ONE CONDITION NO AMOUNT OF SETUP CAN CLEAR.
+  //
+  // Ahead of expiry, funding and sizing, because it invalidates every one of
+  // them: an owner who reads "fund 50 USDG" and does it has spent real money on
+  // an account whose every operation will still fail validation. Measured
+  // 2026-08-30 — RATE_LIMIT_POLICY_CONTRACT has zero bytes on 4663 AND 46630.
+  if (input.deadPolicy) {
+    out.push({
+      id: "dead-policy",
+      level: "blocker",
+      title: "this key was signed before a wall fix and CANNOT trade",
+      detail:
+        "It seals a rate-limit policy whose contract has no code on this chain, so Kernel has " +
+        "nothing to call and every operation fails validation. A signature is frozen: no deploy, " +
+        "no funding and no setting fixes it. Re-signing is free and instant — open the wallet page " +
+        "and use 're-sign this key'. Your funds are untouched, and Paper still works.",
+    });
+  }
+
+  if (input.accountDeployed === false) {
+    out.push({
+      id: "account",
+      level: "warn",
+      title: "this account has never operated",
+      detail:
+        "A smart account is counterfactual until its first operation deploys it, so this is normal " +
+        "for a new install. Two consequences worth knowing before you fund it: the first operation " +
+        "costs meaningfully more than the ones after it, and no chain has yet evaluated the " +
+        "permissions this key was signed under.",
+    });
+  } else if (input.accountDeployed === true) {
+    out.push(ok("account", "the account is deployed"));
   }
 
   const secsLeft = g.expiresAt - input.nowSec;
@@ -155,9 +280,27 @@ export function preflight(input: PreflightInput): Check[] {
   // and report a leg three times the real size, which is the opposite of the
   // warning this check exists to give.
   const basket = s.basketSymbols?.length ? s.basketSymbols : [...DEFAULT_BASKET_SYMBOLS];
+  /**
+   * RESOLVED AGAINST THE OWNER'S TOKENS TOO, not just the shipped registry.
+   *
+   * This looked only in `STOCK_TOKENS`, so a custom token in the basket found
+   * no match and fell straight into `!token` — reported as "this key cannot
+   * sell CATE" whether the grant covered it or not. A blocker that fires for an
+   * owner who has done everything correctly, on the one screen that exists to
+   * tell them what is wrong.
+   *
+   * The union is the same one `watchTokensFor` builds, so the check and the
+   * runtime agree about what a basket symbol means. A symbol that resolves to
+   * NOTHING in either list is still uncovered — that case is real, and it means
+   * the basket names something the agent has never heard of.
+   */
+  const known = new Map<string, string>([
+    ...STOCK_TOKENS.map((t) => [t.symbol, t.address] as const),
+    ...(s.customTokens ?? []).map((t) => [t.symbol, t.address] as const),
+  ]);
   const uncovered = basket.filter((sym) => {
-    const token = STOCK_TOKENS.find((t) => t.symbol === sym);
-    return !token || !sellable.has(token.address.toLowerCase());
+    const address = known.get(sym);
+    return !address || !sellable.has(address.toLowerCase());
   });
   if (uncovered.length) {
     out.push({
@@ -205,6 +348,25 @@ export function preflight(input: PreflightInput): Check[] {
       level: "warn",
       title: "couldn't read the account's ETH",
       detail: "Check the RPC. Without ETH the account cannot pay for a single operation.",
+    });
+  } else if (input.ethWei === 0n && input.sponsored) {
+    // SPONSORED: zero ETH no longer stops a trade, so calling it a blocker would
+    // fail a deployment that works. It is still worth saying, because the way
+    // OUT is not sponsored — recovery pays its own fee from the balance it is
+    // sweeping — so an owner who never adds any ETH can trade for months and
+    // then find they cannot withdraw.
+    //
+    // A warning, not an ok: the account is one step short of complete, and this
+    // is the only screen that will ever mention it.
+    out.push({
+      id: "gas",
+      level: "warn",
+      title: "no ETH — trading is sponsored, but moving money OUT is not",
+      detail:
+        `A sponsor pays the network fee on this agent's trades, so an empty ETH balance does not ` +
+        "stop it trading. Sweeping funds back to your own wallet is a different path and pays " +
+        `its own way, so send a dollar or two of ETH to ${g.smartAccount} before you need to ` +
+        "withdraw.",
     });
   } else if (input.ethWei === 0n) {
     out.push({
@@ -277,6 +439,44 @@ export function preflight(input: PreflightInput): Check[] {
         "and that deposit counts against the daily spend cap — so it can eat most of the day's " +
         "allowance before any trading happens. Raise idleFloorUsdg above your deposit to stop it.",
     });
+  }
+
+  // ── THE TICK RATE AGAINST THE DAILY CAP ─────────────────────────────────
+  //
+  // Two files that never meet: `buyPerTickUsdg` and `tickSeconds` live in
+  // settings, `caps.dailyUsdg` is sealed in the signature, and nothing
+  // cross-validates them. On the shipped defaults — 25 USDG a tick, 60s, a 50
+  // USDG cap — the day's entire budget is spent in TWO MINUTES and every
+  // proposal for the remaining 1,438 is refused at `daily-cap`.
+  //
+  // The cap is correct and must stay; it is a sane starting wall. What is wrong
+  // is the PAIRING, and it is arithmetic, so it can be checked before an owner
+  // funds anything rather than discovered from a feed full of refusals.
+  //
+  // The neighbouring `idle-sweep` check has exactly this shape — it warns that
+  // the vault deposit eats the same allowance — and this is its sibling.
+  const tickSeconds = s.tickSeconds ?? 60;
+  // Optional all the way down, and not merely for tidiness: preflight is one
+  // function returning many checks, so a throw here takes every OTHER check
+  // with it — an owner debugging a missing bundler key would get a stack trace
+  // instead of the answer. `caps` is required on the type and absent on real
+  // partial grants that reach this shape.
+  const dailyCap = input.grant?.caps?.dailyUsdg ?? null;
+  if (dailyCap !== null && dailyCap > 0 && perTick > 0 && tickSeconds > 0) {
+    const minutesOfBudget = (dailyCap / perTick) * (tickSeconds / 60);
+    if (minutesOfBudget < 60) {
+      out.push({
+        id: "daily-budget-rate",
+        level: "warn",
+        title: `today's budget lasts about ${Math.max(1, Math.round(minutesOfBudget))} minute(s) at this tick rate`,
+        detail:
+          `${perTick} USDG every ${tickSeconds}s against a ${dailyCap} USDG daily cap spends the ` +
+          `whole allowance in roughly ${Math.max(1, Math.round(minutesOfBudget))} minute(s), after which every buy is ` +
+          `refused at daily-cap until the 24h window rolls. Selling is never blocked by it. ` +
+          `Two remedies and they cost differently: lower buyPerTickUsdg (a setting, takes effect ` +
+          `next tick) or raise the daily cap (sealed in the signature, needs a re-sign at /grant).`,
+      });
+    }
   }
 
   return out;

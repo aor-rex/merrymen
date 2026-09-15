@@ -17,6 +17,14 @@ const config: HardhatUserConfig = {
         version: "0.8.28",
         settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "cancun" },
       },
+      // Same reason: PonsSelfTrade's re-entrancy flag is also `bool private
+      // transient`. Per-file again rather than a global flip, so the two
+      // already-deployable breaker contracts keep producing the bytecode that
+      // was verified on-chain.
+      "contracts/PonsSelfTrade.sol": {
+        version: "0.8.28",
+        settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "cancun" },
+      },
     },
   },
   // Deploy targets: Robinhood Chain testnet 46630 / mainnet 4663.

@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PublicClient } from "viem";
-import { positionValueUsdg, readPositions, valuationMultiplierFor } from "./positions";
-import type { StockToken } from "../../packages/core/src/index";
+import {
+  UI_MULTIPLIER_ONE,
+  curveMarkedSymbols,
+  mayRatchetHwm,
+  positionValueUsdg,
+  readPositions,
+  valuationMultiplierFor,
+  type Position,
+} from "./positions";
+import type { PriceQuote, StockToken } from "../../packages/core/src/index";
 
 const ONE = 10n ** 18n; // 1.0 in both raw-balance (18dp) and multiplier terms
 const usd = (v: number) => BigInt(Math.round(v * 1e8)); // Chainlink 8dp
@@ -356,5 +364,48 @@ describe("valuationMultiplierFor — the unit each price source implies", () => 
       price8: usd(250), // post-split per-share price
     });
     assert.equal(value, 250_000_000n, "$250, not the double-counted $500");
+  });
+});
+
+/**
+ * No curve mark may set a high-water mark.
+ *
+ * This rule regressed the first time it was written: the guard was applied to
+ * the fee and the database write but not to the in-memory peak the drawdown
+ * BREAKER divides by. A curve spike then a revert therefore halted every
+ * non-exit intent on a drawdown that never happened, for the rest of the
+ * process — and because the inflated peak was never persisted, nothing but a
+ * restart cleared it. Naming the rule is what makes it testable.
+ */
+describe("mayRatchetHwm", () => {
+  const pos = (symbol: string, source: PriceQuote["source"]): Position => ({
+    symbol,
+    token: `0x${"1".repeat(40)}`,
+    rawBalance: 10n ** 18n,
+    uiMultiplier: UI_MULTIPLIER_ONE,
+    decimals: 18,
+    price8: 100_000_000n,
+    priceStale: false,
+    priceSource: source,
+    valueUsdg: 1_000_000n,
+  });
+
+  it("allows a book with no curve marks in it", () => {
+    assert.equal(mayRatchetHwm([]), true);
+    assert.equal(mayRatchetHwm([pos("NVDA", "chainlink"), pos("CATE", "pool")]), true);
+  });
+
+  it("refuses as soon as ONE holding is valued off a curve", () => {
+    // Not proportional and not per-position: equity is a single total, so one
+    // unoracled mark inside it makes the whole figure unfit to set a peak.
+    assert.equal(mayRatchetHwm([pos("NVDA", "chainlink"), pos("PONSY", "curve")]), false);
+  });
+
+  it("names which holdings caused it, for the log", () => {
+    assert.deepEqual(curveMarkedSymbols([pos("A", "pool"), pos("B", "curve"), pos("C", "curve")]), ["B", "C"]);
+  });
+
+  it("treats a broker price as ordinary — it has a venue behind it", () => {
+    assert.equal(mayRatchetHwm([pos("AAPL", "broker")]), true);
   });
 });

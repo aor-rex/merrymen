@@ -10,17 +10,24 @@
 
 import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths, merrymenHome } from "@/lib/home";
+import { homePaths, merrymenHome } from "@merrymen/home";
 import {
+  HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
+  SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  isHostedMode,
   isValidCustomToken,
+  officialCoinsFor,
+  robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
 } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
+import { getSettingsStore } from "@merrymen/settings-store";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +55,15 @@ export interface SettingsView {
   values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey" | "bitqueryApiKey" | "merrymenToken">;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
+  /**
+   * THE VERIFIED COINS ACTUALLY LISTED ON THIS CHAIN, which is a different fact
+   * from whether the setting is on. official-coins.ts: "An empty list is the
+   * honest state for a chain with no verified listing, and is a different fact
+   * from official coins are turned off — which is a setting." The screen had
+   * only the setting, so it affirmed "coins are in your basket" on a chain where
+   * the list is empty. A constant read; it costs nothing.
+   */
+  officialCoins: string[];
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
@@ -71,7 +87,10 @@ async function listCustomStrategies(): Promise<string[]> {
   }
 }
 
-async function readStored(): Promise<MerrymenSettings> {
+async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettings> {
+  // Hosted: a tenant's settings live in the per-tenant store, not the global
+  // settings.json (which the child workers each have their own copy of).
+  if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
     return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
@@ -105,8 +124,11 @@ function redactUrl(u: unknown): string | undefined {
   }
 }
 
-export async function GET() {
-  const stored = await readStored();
+export async function GET(req: Request) {
+  // Hosted: show the signed-in tenant's own settings (a signed-out caller sees
+  // defaults — nothing personal, no secrets). Self-hosted: the single file.
+  const tenant = isHostedMode() ? tenantOf(req) : null;
+  const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
   const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
@@ -130,6 +152,7 @@ export async function GET() {
     values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
+    officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
   };
@@ -139,7 +162,10 @@ export async function GET() {
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
 const NUM_FIELDS: Record<string, [number, number]> = {
-  slippageBps: [1, 5_000],
+  // Imported, never a literal. This entry and the worker's own clamp are two
+  // enforcement points for one rule, and they read 5_000 and 5_000 while the
+  // rule they were meant to express was never written down anywhere.
+  slippageBps: [1, SLIPPAGE_BPS_MAX],
   // 0 is a MEANINGFUL low bound here, not a typo: it is the impact guard's
   // off switch, and the guard's own rejection message tells owners to raise
   // this setting — which was impossible while it was missing from this list.
@@ -147,6 +173,19 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   perfFeeBps: [0, 5_000],
   tickSeconds: [15, 3_600],
   buyPerTickUsdg: [1, 100_000],
+  // SELL A LEG ONCE IT IS THIS FAR AHEAD OF WHAT IT COST. 0 disables it, which
+  // is the default — this is the only exit the default strategy has, and until
+  // an owner names a number it accumulates and never realises anything.
+  //
+  // ABSENT FROM THIS LIST IS THE SAME AS NOT EXISTING. The setting was added to
+  // core and read by the worker, and a PUT carrying it was silently dropped
+  // here — so it was unreachable from the app and could only ever have been set
+  // by an env var nobody has. Same failure `maxImpactBps` records two lines up.
+  takeProfitBps: [0, 1_000_000],
+  // The strategist floor. 0 is off and the default; 10_000 bps is 100%, which
+  // is also off. A tight floor on a small ticket pays the chain to churn — gas
+  // is 0.44-0.78 USDG a leg, so a 10 USDG round trip is 9-16% of notional.
+  strategistStopLossBps: [0, 10_000],
   idleFloorUsdg: [0, 1_000_000],
   gapEnterBudgetUsdg: [1, 1_000_000],
   paperStartUsdg: [1, 10_000_000],
@@ -161,14 +200,56 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // but that is the owner explicitly accepting a price anyone can push.
   minPoolLiquidityUsdg: [0, 100_000_000],
   maxPriceDivergenceBps: [10, 10_000],
+  // The size floor for a memecoin. 0 is the off switch and the default, so a
+  // tenant who never touches it sees exactly the discovery feed they saw before.
+  memecoinMinFdvUsd: [0, 1_000_000_000_000],
   // Scout ceilings. 0 is a meaningful floor — it's the off switch for the
   // budget independently of the enable flag, so both have to allow it.
   discoveryIntervalMin: [1, 1440],
+  // How many model calls one research session may make before it must decide.
+  // Bounded here as well as defaulted, because this number IS the cost of
+  // deskEnabled and an owner turning that on should be able to size it.
+  deskMaxSteps: [1, 12],
   scoutBudgetUsdg: [0, 1_000_000],
   scoutPerTokenUsdg: [0, 1_000_000],
+  // THE CLASS ROUTE. Bounded here as well as defaulted, for the reason
+  // deskMaxSteps is: these numbers ARE the exposure an owner is choosing.
+  //
+  // And present here at all because this handler is the only writer of the
+  // hosted tenant store — a field missing from this file is silently dropped
+  // while the PUT returns {ok:true}, which is exactly what happened to
+  // ponsAdapterAddress and made its deploy script and runbook impossible to
+  // follow.
+  classPerEntryUsdg: [0, 1_000_000],
+  classMaxPositions: [0, 1_000],
+  classMinDepthUsdg: [0, 10_000_000],
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
+  // THE CONSENT FLAG, and it must be here or the "Start live trading" control
+  // is a button that returns {ok:true} and changes nothing — the exact silent
+  // drop this file's own comment above warns about, on the one field where
+  // failing silently means an owner believes they went live and did not.
+  //
+  // Tenant-settable ON PURPOSE, and therefore deliberately absent from core's
+  // host-only allowlist beside sponsorGasEnabled: this is the owner's decision
+  // about the owner's money, and the one thing the house must not decide for
+  // them.
+  "liveTradingEnabled",
+  // LET THE STRATEGIST RESEARCH BEFORE IT DECIDES, instead of answering in one
+  // shot from a fixed blob of numbers — it can pull depth, check what a
+  // position cost, and read back its own past decisions before it commits.
+  //
+  // Unreachable from the app until now: in core, read by the worker, and absent
+  // from this list, so a PUT carrying it came back ignored. It is the setting
+  // that turns an agent from one that answers into one that THINKS, and no
+  // owner could turn it on. Third field tonight with the same shape —
+  // takeProfitBps and this one were both real capabilities nobody could reach.
+  //
+  // Off by default and it stays off by default: it costs up to `deskMaxSteps`
+  // model calls per window instead of one, and the scout consumed a day's
+  // shared token allowance on 2026-08-31 doing exactly this kind of loop.
+  "deskEnabled",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",
@@ -177,7 +258,19 @@ const BOOL_FIELDS = [
   "telegramAgentEnabled",
   "telegramAgentAutoShell",
   "virtualsEnabled",
+  "trencherLiveEnabled",
   "scoutEnabled",
+  // BUYING A TOKEN NOBODY ENUMERATED. See MerrymenSettings.classSnipeEnabled
+  // for what this actually permits. It is a SECOND decision on top of sealing a
+  // class vault at /grant — the signature says the key could reach class
+  // tokens, this says go and do it — and both are required.
+  "classSnipeEnabled",
+  // THE ONLY ONE HERE THAT IS ON BY DEFAULT, so this entry is what lets an owner
+  // turn something OFF rather than on — and a field missing from this list is
+  // dropped with an {ok:true}, which for an opt-OUT means the owner's refusal is
+  // discarded and the page tells them it saved. See
+  // MerrymenSettings.officialCoinsEnabled.
+  "officialCoinsEnabled",
   "discoveryEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
@@ -195,11 +288,32 @@ export async function PUT(req: Request) {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
 
+  let tenant: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    // ── hosted settings lockdown ─────────────────────────────────────────
+    // This route has no auth self-hosted (the localhost middleware is the
+    // perimeter), so on a public URL it must gain one AND refuse the fields a
+    // tenant may not own. Without the auth check, anyone could repoint the
+    // bundler or flip on PC-control; without the field strip, an authenticated
+    // tenant still could.
+    tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    // Drop every house-key + remote-execution field before the handler sees it.
+    // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
+    // fields, and rejecting the whole payload for their mere presence would break
+    // saving strategy/basket. The forbidden fields simply do not take effect.
+    for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete (body as Record<string, unknown>)[k];
+  }
+
   const errors: string[] = [];
-  const stored = await readStored();
+  const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
 
+  // Every settings key this request actually processed. Used at the end to
+  // name what was DROPPED — see the note above the `ignored` computation.
+  const touched = new Set<string>();
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
+    touched.add(key as string);
     if (value === undefined) delete next[key];
     else next[key] = value;
   };
@@ -279,14 +393,60 @@ export async function PUT(req: Request) {
   }
 
   // ── enums ───────────────────────────────────────────────────────────────
+  if ("agentName" in body) {
+    const v = body.agentName;
+    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), duplicated
+    // deliberately rather than imported: this runs in the web tier and the soul
+    // module touches the filesystem. If the two ever disagree the worker wins
+    // and silently keeps the old name, so the shapes must match exactly.
+    //
+    // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
+    // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
+    // the shared regex admits internal double spaces — so "Little  John" was
+    // kept verbatim here and collapsed to "Little John" by the soul. The two
+    // then never agree, which makes `cfg.agentName !== getName()` true forever:
+    // harmless while the reconcile only ran on re-arm, an identity-file rewrite
+    // every tick once it runs unconditionally. Normalise once, at the door.
+    const norm = typeof v === "string" ? v.trim().replace(/\s+/g, " ") : v;
+    if (norm === "" || norm === null || norm === undefined) {
+      setOrClear("agentName", undefined);
+    } else if (typeof norm !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(norm)) {
+      errors.push("name: letters and numbers to start, up to 24 characters");
+    } else {
+      setOrClear("agentName", norm);
+    }
+  }
+
+  if ("xHandle" in body) {
+    // X's own rule: 1-15 of [A-Za-z0-9_]. One leading @ is stripped because that
+    // is how people write it and refusing over a sigil is pedantry; anything else
+    // is REFUSED rather than sanitised, so we never store a handle the owner did
+    // not type. It is unverified either way — nothing checks they own it — which
+    // is exactly why nothing may ever look an agent up by it.
+    const v = body.xHandle;
+    const norm = typeof v === "string" ? v.trim().replace(/^@/, "") : v;
+    if (norm === "" || norm === null || norm === undefined) {
+      setOrClear("xHandle", undefined);
+    } else if (typeof norm !== "string" || !/^[A-Za-z0-9_]{1,15}$/.test(norm)) {
+      errors.push("x handle: letters, numbers and underscores, up to 15 characters");
+    } else {
+      setOrClear("xHandle", norm);
+    }
+  }
+
   if ("strategy" in body) {
     const v = body.strategy;
     if (v === "" || v === null || v === undefined) {
       setOrClear("strategy", undefined);
     } else if (typeof v === "string" && BUILTIN_STRATEGIES.includes(v)) {
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
-    } else if (typeof v === "string" && (await listCustomStrategies()).includes(v)) {
+    } else if (!isHostedMode() && typeof v === "string" && (await listCustomStrategies()).includes(v)) {
+      // Custom strategy files are self-hosted ONLY. Hosted, the loader refuses to
+      // execute them (registry.ts fail-closed); rejecting the name here too means
+      // the control plane never even stores it — the write-time half of the gate.
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
+    } else if (isHostedMode()) {
+      errors.push("strategy: only built-in strategies are available on hosted merrymen");
     } else {
       errors.push(`strategy: not a builtin and no strategies/${String(v)}.ts file exists`);
     }
@@ -313,6 +473,30 @@ export async function PUT(req: Request) {
     else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
       setOrClear("v4AdapterAddress", v.trim());
     else errors.push("v4AdapterAddress: must be a 0x… address");
+  }
+  // THE PONS ADAPTER. Absent from this allowlist until now, which made the
+  // deploy script's own instruction ("paste the address into /settings") and
+  // docs/owner-runbook-pons.md impossible to follow: this handler is the only
+  // writer of the hosted tenant store, and an unknown key returned {ok:true}
+  // with the field silently dropped. See the unknown-key rejection below —
+  // silent success is why a documented-but-unwired field went unnoticed.
+  if ("ponsAdapterAddress" in body) {
+    const v = body.ponsAdapterAddress;
+    if (v === "" || v === null || v === undefined) setOrClear("ponsAdapterAddress", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("ponsAdapterAddress", v.trim());
+    else errors.push("ponsAdapterAddress: must be a 0x… address");
+  }
+  // THE CLASS VAULT FACTORY, which follows the note above rather than
+  // rediscovering it: the field is here so /settings can actually write it, and
+  // it is the FACTORY rather than a vault because a vault is CREATE2-salted with
+  // one smart account — the signer derives each account's own from this.
+  if ("ponsClassVaultFactory" in body) {
+    const v = body.ponsClassVaultFactory;
+    if (v === "" || v === null || v === undefined) setOrClear("ponsClassVaultFactory", undefined);
+    else if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v.trim()))
+      setOrClear("ponsClassVaultFactory", v.trim());
+    else errors.push("ponsClassVaultFactory: must be a 0x… address");
   }
   // $MERRYMEN holder wallet — a read-only address for the Merry Circle fee tier.
   if ("holderAddress" in body) {
@@ -343,7 +527,7 @@ export async function PUT(req: Request) {
     if (v === "" || v === null || v === undefined) setOrClear("groqModel", undefined);
     else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
       setOrClear("groqModel", v.trim());
-    else errors.push("groqModel: must be a model id like llama-3.3-70b-versatile");
+    else errors.push("groqModel: must be a model id like qwen/qwen3.8-27b");
   }
   // AI provider selection — an id from the catalog (or "custom"), blank = legacy auto.
   if ("llmProvider" in body) {
@@ -382,6 +566,26 @@ export async function PUT(req: Request) {
     } else if (v === "" || v === null || v === undefined) setOrClear("telegramTranscribeBase", undefined);
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("telegramTranscribeBase", v.trim());
     else errors.push("telegramTranscribeBase: must be an http(s) URL");
+  }
+
+  /**
+   * ── asset mode ────────────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, because it is a string enum and fits neither `BOOL_FIELDS`
+   * nor `NUM_FIELDS`. A field missing from every branch here is "silently
+   * dropped while the PUT returns {ok:true}" — this file's own warning, earned
+   * three times already — and this is the one where the owner would be told
+   * their agent had changed what it trades when it had not.
+   *
+   * Deliberately NOT in `HOSTED_FORBIDDEN_SETTING_FIELDS`: which kinds of thing
+   * to trade is the owner's decision about the owner's money, unlike the house
+   * keys and the sponsorship flag that list exists to protect.
+   */
+  if ("assetMode" in body) {
+    const v = body.assetMode;
+    if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
+    else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
+    else errors.push("assetMode: must be all, stocks or crypto");
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
@@ -454,12 +658,49 @@ export async function PUT(req: Request) {
     }
   }
 
+  // NAME WHAT WE DROPPED, so a documented-but-unwired field cannot hide again.
+  //
+  // This handler is an allowlist with no else, and it is the ONLY writer of the
+  // hosted tenant store. A key it does not know about produced {ok:true} and
+  // vanished. Not hypothetical: deploy-ponsselftrade.ts and the Pons runbook both
+  // told the owner to save `ponsAdapterAddress` here, and for as long as that
+  // branch was missing the instruction was impossible to follow and said so to
+  // nobody.
+  //
+  // REPORTED, NOT REJECTED, deliberately. A 400 on unknown keys is the stricter
+  // fix and would break every client that round-trips a settings blob containing
+  // a field this build does not know — an older dashboard tab open against a
+  // newer server, every hosted tenant at once. Trading a silent drop for a
+  // fleet-wide save failure is a bad trade. Visibility is the property that was
+  // actually missing.
+  //
+  // A key that FAILED validation is not ignored — it is in `errors`, which is
+  // already loud — so those are excluded rather than reported twice.
+  const errored = new Set(errors.map((e) => e.split(":")[0]?.trim()).filter(Boolean));
+  const ignored = Object.keys(body).filter((k) => !touched.has(k) && !errored.has(k));
+  if (ignored.length > 0) {
+    console.warn(`[settings] ignored unknown keys: ${ignored.join(", ")}`);
+  }
+
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
-  await mkdir(DATA_DIR, { recursive: true });
-  // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-  // owner-only perms (0600), not the default world-readable 0644.
-  await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(SETTINGS_FILE, 0o600).catch(() => {});
-  return NextResponse.json({ ok: true, appliesWithin: "one worker tick" });
+  if (tenant) {
+    // Hosted: the tenant's own settings go to the per-tenant store (sealed at
+    // rest), and the orchestrator hands the child worker a settings.json from it
+    // within a reconcile tick.
+    await getSettingsStore().put(tenant, next);
+  } else {
+    await mkdir(DATA_DIR, { recursive: true });
+    // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
+    // owner-only perms (0600), not the default world-readable 0644.
+    await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+    await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  }
+  return NextResponse.json({
+    ok: true,
+    appliesWithin: "one worker tick",
+    // Present only when something was dropped, so a caller can tell the
+    // difference between 'saved' and 'saved, minus the field you cared about'.
+    ...(ignored.length > 0 ? { ignored } : {}),
+  });
 }

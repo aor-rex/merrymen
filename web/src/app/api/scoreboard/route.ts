@@ -5,14 +5,13 @@
  * with the same weight as landed ones.
  */
 
-import { existsSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
+import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
+import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { hostedAgentFor } from "@/lib/agent-for";
 
 export const dynamic = "force-dynamic";
-
-const DB_FILE = homePaths.db();
 
 export interface ScoreboardEquityPoint {
   equity_usdg: number;
@@ -49,27 +48,48 @@ export interface ScoreboardResponse {
   agents: ScoreboardAgent[];
 }
 
-export async function GET() {
-  if (!existsSync(DB_FILE)) {
-    return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
+export async function GET(req: Request) {
+  // Self-hosted, this board is a transparency product: EVERY agent, publicly.
+  // Hosted, that same query is a customer-list dump — every tenant's smart
+  // account, caps, equity curve, P&L and fees. So hosted scopes to the caller's
+  // OWN account; no session → nothing.
+  //
+  // Scoped through the GRANT STORE, not `agents.owner_address`. Hosted, that
+  // column holds the owner key the BROWSER generated and is never the tenant, so
+  // the comparison it replaced matched zero rows for every hosted user — an
+  // empty board that read as 'no agents' rather than as a broken join.
+  let tenant: `0x${string}` | null = null;
+  let scopeAccount: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
+    // Signed in with no grant yet is an EMPTY board. Leaving the scope null here
+    // would fall through to the unscoped query — the customer-list dump.
+    scopeAccount = await hostedAgentFor(req);
+    if (!scopeAccount) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
   }
 
-  const db = new DatabaseSync(DB_FILE, { readOnly: true });
-  try {
+  // Reads go through the ledger driver (read-only sqlite self-hosted, shared
+  // Postgres hosted). A missing/locked db → null → an empty board, never a 500.
+  // The SQL is dialect-neutral: timestamps are raw epoch formatted by fmtEpoch.
+  return withReadDb(async (db) => {
+    if (!db) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
     let rows: Record<string, unknown>[] = [];
     try {
-      rows = db
+      rows = (await db
         .prepare(
+          // LOWER on both sides: `smart_account` is stored checksummed, and the
+          // grant store returns it the same way — a bare `=` would miss on case.
           `SELECT smart_account, name, status, chain_id, caps, granted_at, expires_at,
                   COALESCE(hwm_usdg, 0) AS hwm_usdg, COALESCE(accrued_fee_usdg, 0) AS accrued_fee_usdg
-           FROM agents ORDER BY created_at DESC`,
+           FROM agents ${scopeAccount ? "WHERE LOWER(smart_account) = ?" : ""} ORDER BY created_at DESC`,
         )
-        .all() as Record<string, unknown>[];
+        .all(...(scopeAccount ? [scopeAccount.toLowerCase()] : []))) as Record<string, unknown>[];
     } catch {
       return NextResponse.json({ source: "sqlite", agents: [] } satisfies ScoreboardResponse);
     }
 
-    const agents: ScoreboardAgent[] = rows.map((row) => {
+    const agents: ScoreboardAgent[] = await Promise.all(rows.map(async (row) => {
       const account = row.smart_account as string;
 
       // WHICH RUN. Everything before the accounting fix stays epoch 1 — no flow
@@ -85,9 +105,9 @@ export async function GET() {
       let epochWhere = "";
       let epochArg: number[] = [];
       try {
-        const e = db
+        const e = (await db
           .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
-          .get(account) as { epoch: number } | undefined;
+          .get(account)) as { epoch: number } | undefined;
         epochWhere = " AND epoch = ?";
         epochArg = [e?.epoch ?? 1];
       } catch {
@@ -96,13 +116,16 @@ export async function GET() {
 
       let equity: ScoreboardEquityPoint[] = [];
       try {
-        equity = db
+        const erows = (await db
           .prepare(
-            `SELECT equity_usdg, datetime(at, 'unixepoch') AS at
+            `SELECT equity_usdg, at, mode
              FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 500)
              ORDER BY at ASC, id ASC`,
           )
-          .all(account, ...epochArg) as unknown as ScoreboardEquityPoint[];
+          .all(account, ...epochArg)) as { equity_usdg: number; at: number; mode: string | null }[];
+        // ONE SERIES, ONE BOOK. Both the practice book and the funded one write
+        // to `equity`, and the practice book opens at 1,000 USDG.
+        equity = sameBookAsLatest(erows).map((r) => ({ equity_usdg: r.equity_usdg, at: fmtEpoch(r.at) }));
       } catch {
         /* table not created yet */
       }
@@ -117,13 +140,13 @@ export async function GET() {
       // as performance.
       let contributed: number | null = null;
       try {
-        const row = db
+        const row = (await db
           .prepare(
             `SELECT COUNT(*) AS n,
                     COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
                FROM flows WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account, ...epochArg) as { n: number; net: number } | undefined;
+          .get(account, ...epochArg)) as { n: number; net: number } | undefined;
         contributed = !row || row.n === 0 ? null : row.net;
       } catch {
         /* flows arrives with a worker migration */
@@ -134,13 +157,13 @@ export async function GET() {
       let gasUsdg = 0;
       let gasUnpriced = 0;
       try {
-        const row = db
+        const row = (await db
           .prepare(
             `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                     SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
                FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
           )
-          .get(account, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
+          .get(account, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
         gasUsdg = row?.usdg ?? 0;
         gasUnpriced = row?.unpriced ?? 0;
       } catch {
@@ -149,9 +172,9 @@ export async function GET() {
 
       let latestEquity: number | null = null;
       try {
-        const row = db
+        const row = (await db
           .prepare(`SELECT equity_usdg FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1`)
-          .get(account, ...epochArg) as { equity_usdg: number } | undefined;
+          .get(account, ...epochArg)) as { equity_usdg: number } | undefined;
         latestEquity = row?.equity_usdg ?? null;
       } catch {
         /* table not created yet */
@@ -169,9 +192,23 @@ export async function GET() {
       // to be read into memory. NULL when there are no rows — an epoch with no
       // equity history has no drawdown to report, and 0.00% would read as
       // "flawless" rather than "nothing happened yet".
+      //
+      // AND OVER ONE BOOK. The practice book opens at 1,000 USDG and the funded
+      // one holds whatever the owner sent; both write to `equity`, and a peak
+      // taken from the practice one against a trough in the funded one is a
+      // drawdown of 95% that nobody suffered — published, on a page that ranks
+      // people. Filtered in SQL rather than in JS because this query
+      // deliberately never reads the series into memory.
+      //
+      // COALESCE against a sentinel rather than `IS`: it means the same thing in
+      // SQLite and in Postgres, and rows written before the column exists are
+      // unattributable, so they group with each other and with nothing else.
+      const sameBook =
+        ` AND COALESCE(mode, 'unattributed') = COALESCE(` +
+        `(SELECT mode FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1), 'unattributed')`;
       let maxDdBps: number | null = null;
       try {
-        const dd = db
+        const dd = (await db
           .prepare(
             `SELECT MAX(CASE WHEN peak > 0 AND equity_usdg < peak
                              THEN CAST(((peak - equity_usdg) / peak) * 10000 AS INTEGER)
@@ -181,9 +218,9 @@ export async function GET() {
                               ORDER BY at ASC, id ASC
                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                             ) AS peak
-                       FROM equity WHERE agent_id = ?${epochWhere})`,
+                       FROM equity WHERE agent_id = ?${epochWhere}${sameBook})`,
           )
-          .get(account, ...epochArg) as { bps: number | null } | undefined;
+          .get(account, ...epochArg, account, ...epochArg)) as { bps: number | null } | undefined;
         maxDdBps = dd?.bps ?? null;
       } catch {
         /* pre-migration ledger, or a SQLite without window functions */
@@ -191,7 +228,7 @@ export async function GET() {
 
       let trades = { landed: 0, rejected: 0, reverted: 0, volume_usdg: 0 };
       try {
-        const t = db
+        const t = (await db
           .prepare(
             `SELECT
                SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
@@ -200,7 +237,7 @@ export async function GET() {
                COALESCE(SUM(CASE WHEN status = 'landed' AND kind != 'vault-withdraw' THEN amount_usdg ELSE 0 END), 0) AS volume
              FROM trades WHERE agent_id = ?${epochWhere}`,
           )
-          .get(account, ...epochArg) as { landed: number; rejected: number; reverted: number; volume: number };
+          .get(account, ...epochArg)) as { landed: number; rejected: number; reverted: number; volume: number };
         trades = {
           landed: t.landed ?? 0,
           rejected: t.rejected ?? 0,
@@ -239,10 +276,8 @@ export async function GET() {
         max_drawdown_bps: maxDdBps,
         trades,
       };
-    });
+    }));
 
     return NextResponse.json({ source: "sqlite", agents } satisfies ScoreboardResponse);
-  } finally {
-    db.close();
-  }
+  });
 }

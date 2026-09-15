@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyBalance, sweepList } from "./recover";
+import { readFileSync } from "node:fs";
+import { classifyBalance, nativeSweep, sweepList } from "./recover";
 import { CASH, MORPHO, STOCK_TOKENS } from "../../packages/core/src/index";
 
 /**
@@ -144,4 +145,110 @@ test("THE COLLAPSE: a failed probe and a codeless address must not be the same v
   assert.notDeepEqual(codeless, broken, "absent and unreadable must remain distinguishable");
   assert.equal(codeless.kind, "absent");
   assert.equal(broken.kind, "unreadable");
+});
+
+/**
+ * The native-ETH sweep, and why its reserve errs large.
+ *
+ * ETH used to be abandoned by recovery on the reasoning that it only pays for
+ * the sweep's own gas. That is true on testnet and wrong the moment someone
+ * funds a real account — and worse, an account holding ETH and no tokens was
+ * reported as having nothing to recover, which is the exact shape of "I funded
+ * it and merrymen says it's empty".
+ *
+ * The reserve is the load-bearing number. Too small and the operation cannot be
+ * paid for, so nothing moves at all — tokens included. Too large and some dust
+ * stays. These tests pin that asymmetry.
+ */
+
+test("an account with only gas money keeps it — nothing is swept below the reserve", () => {
+  const gasPrice = 1_000_000_000n; // 1 gwei
+  const { sweep, reserve } = nativeSweep(500_000_000_000_000n, gasPrice); // 0.0005 ETH
+  assert.equal(sweep, 0n, "must not strand the op by taking its gas money");
+  assert.equal(reserve, 500_000_000_000_000n, "all of it stays");
+});
+
+test("a funded account sweeps everything above the reserve", () => {
+  const gasPrice = 1_000_000_000n; // 1 gwei
+  const held = 10n ** 18n; // 1 ETH
+  const { sweep, reserve } = nativeSweep(held, gasPrice);
+  assert.equal(sweep + reserve, held, "every wei is accounted for — swept or reserved");
+  assert.ok(sweep > 0n, "a whole ETH is well clear of any sane reserve");
+  // 900k gas x 1 gwei x 2 = 0.0018 ETH held back.
+  assert.equal(reserve, 1_800_000_000_000_000n);
+});
+
+test("the reserve scales with gas price, so a spike cannot make the op unaffordable", () => {
+  const held = 10n ** 18n;
+  const cheap = nativeSweep(held, 1_000_000_000n).reserve;
+  const dear = nativeSweep(held, 100_000_000_000n).reserve; // 100 gwei
+  assert.ok(dear > cheap, "a dearer chain keeps more back");
+  assert.equal(dear, cheap * 100n);
+});
+
+test("sweep + reserve always equals what was held, at any price", () => {
+  // The invariant that matters: recovery must never invent or lose wei.
+  for (const held of [0n, 1n, 10n ** 15n, 10n ** 18n, 10n ** 21n]) {
+    for (const price of [0n, 1n, 10n ** 9n, 10n ** 12n]) {
+      const { sweep, reserve } = nativeSweep(held, price);
+      assert.equal(sweep + reserve, held, `held=${held} price=${price}`);
+      assert.ok(sweep >= 0n && reserve >= 0n, "no negative legs");
+    }
+  }
+});
+
+/**
+ * NOT EVERY REVERT IS A TOKEN REFUSING TO MOVE.
+ *
+ * The per-leg simulation skips a reverting token and sweeps the rest, which is
+ * right when every leg is `token.transfer(...)`: one broken ERC-20 must not
+ * strand the others. Once a leg can be `vault.sweep(token)` the same regex
+ * swallows a revert that means the opposite — `NotOwner()` says we are asking
+ * the WRONG VAULT, so nothing there would move and the recovery would report
+ * success over an untouched class book.
+ *
+ * That is the exact failure this path exists to prevent, so it aborts.
+ */
+test("a NotOwner() revert aborts the sweep instead of being skipped", () => {
+  // The classifier is the regex order in recoverFunds; asserted here as the
+  // rule rather than through a live bundler, which this file has no seam for.
+  const notOwner = "execution reverted: custom error 'NotOwner()'";
+  const ordinary = "execution reverted: ERC20: transfer amount exceeds balance";
+
+  // Both match the generic revert test — which is exactly why the specific one
+  // has to be checked FIRST.
+  assert.match(notOwner, /revert|execution reverted/i);
+  assert.match(ordinary, /revert|execution reverted/i);
+
+  assert.match(notOwner, /NotOwner/, "the abort condition must be recognisable");
+  assert.ok(!/NotOwner/.test(ordinary), "an ordinary token failure must still be skippable");
+});
+
+test("recoverFunds checks NotOwner BEFORE the generic revert skip", () => {
+  // Order is the whole fix: reversed, the generic branch swallows it and the
+  // sweep reports success while the class book is untouched.
+  const src = readFileSync(new URL("./recover.ts", import.meta.url), "utf8");
+  const notOwnerAt = src.indexOf("/NotOwner/.test(msg)");
+  const genericAt = src.indexOf("/revert|execution reverted/i.test(msg)");
+  assert.ok(notOwnerAt > 0, "the NotOwner guard must exist");
+  assert.ok(genericAt > 0);
+  assert.ok(notOwnerAt < genericAt, "NotOwner must be tested before the generic skip");
+});
+
+/**
+ * "NOTHING TO RECOVER" MUST NOT BE SAID OVER AN UNREADABLE BALANCE.
+ *
+ * recover-cli already refuses to: it writes "that is NOT a zero balance" to
+ * stderr and puts `unreadable` on the wire. The CLI parent read the balances,
+ * ignored the list, and printed "holds no ETH, USDG or tokens" on stdout — two
+ * answers to one question, and the confident one was wrong. An owner told their
+ * account is empty stops looking for the money.
+ */
+test("the CLI gates its empty message on the unreadable list", () => {
+  const src = readFileSync(new URL("../../cli/bin.mjs", import.meta.url), "utf8");
+  const at = src.indexOf("nothing to recover —");
+  assert.ok(at > 0, "the empty message must still exist");
+  const before = src.slice(Math.max(0, at - 900), at);
+  assert.match(before, /plan\.result\.unreadable/, "the parent must read the child's unreadable list");
+  assert.match(before, /NOT a zero balance/, "and must say so rather than claiming empty");
 });

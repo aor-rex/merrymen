@@ -1,0 +1,778 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { describe, it } from "node:test";
+import { wrapSqlite } from "./db";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
+
+/**
+ * THE HOLE THIS FILLS, and why exactly-once is the whole point.
+ *
+ * `childEnv` strips DATABASE_URL from every worker child, so a child writes
+ * sqlite inside its own container while the web service reads a Postgres nothing
+ * ever wrote to. The result was total and invisible: no tape, no positions, no
+ * equity, no events and no reasoning on the hosted dashboard, for anyone,
+ * whatever the agent was doing — while balances still showed, because the web
+ * reads those from the chain. It looked like a working dashboard with a quiet
+ * agent.
+ *
+ * Source ids are unique only WITHIN one child's database — two tenants both have
+ * event id 1 — so the id cannot be the destination key. Rows and their watermark
+ * therefore move in ONE transaction. Insert-then-save duplicates the trade tape
+ * every time a deploy lands mid-copy, which on a ledger is worse than lagging.
+ */
+
+const SRC = [
+  "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
+  "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, gas_units TEXT, fill_cash_usdg REAL, epoch INTEGER DEFAULT 1, created_at INTEGER);",
+  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, at INTEGER);",
+  "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
+  "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
+  // `hold_kind` is on here because a migrated database has it, and this fixture
+  // is a model of that database. It caught the column the moment it was added —
+  // the mirror's SELECT named it, this schema did not, and the copy silently
+  // moved zero rows. Which is the failure the comment further down records
+  // having already happened once with price_source.
+  "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, at INTEGER);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
+  "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
+  "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
+  // THE GRADED FLOOR, which this fixture has never had — so the snapshot pass
+  // threw "no such table: position_floors" on every run, the outer catch
+  // swallowed it into `failed.snapshots`, and everything AFTER it in that block
+  // silently never ran. No test asserted on it, so nothing went red; the copy
+  // was simply not happening, in a fixture whose whole job is to model the
+  // shared database. Found by adding a table below it and watching the new
+  // assertion fail for the previous table's reason.
+  "CREATE TABLE position_floors (agent_id TEXT, mode TEXT, symbol TEXT, stop_bps INTEGER, rung INTEGER, why TEXT, at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
+  // The class book. Money the ACCOUNT does not hold — it sits in a separate
+  // contract — so it appears in no other table here, and without the mirror the
+  // shared ledger cannot see a class position at all.
+  "CREATE TABLE class_positions (agent_id TEXT, token TEXT, symbol TEXT, decimals INTEGER DEFAULT 18, curve TEXT, quote_token TEXT, first_seen INTEGER, vault TEXT, entry_tx TEXT, exit_tx TEXT, cost_usdg TEXT, qty_raw TEXT, proceeds_usdg TEXT, opened_at_block TEXT, state TEXT DEFAULT 'open', swept_raw TEXT, PRIMARY KEY (agent_id, token));",
+].join("\n");
+
+/** The destination, with the same shape a Postgres ledger has. */
+// The shared side carries the identity index the child does not: it is where
+// two writers meet — the mirror copying a child up, and the accounting repair
+// writing chain-derived rows directly — so it is where a duplicate log has to
+// be impossible rather than merely unlikely.
+const FLOW_IDENTITY =
+  "CREATE UNIQUE INDEX flows_chain_identity ON flows (chain_id, agent_id, tx_hash, log_index) " +
+  "WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL;";
+
+const DEST = SRC + MIRROR_STATE_DDL + FLOW_IDENTITY;
+
+const mem = (ddl: string) => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(ddl);
+  return wrapSqlite(db);
+};
+
+const seedChild = () => {
+  const raw = new DatabaseSync(":memory:");
+  raw.exec(SRC);
+  // Columns named rather than positional: this row grew three fields and a
+  // positional INSERT would have to be rewritten for each one.
+  //
+  // EPOCH 2 ON PURPOSE. The agent is on its second run, so a mirror that drops
+  // the column leaves the shared row at its DEFAULT 1 — which is exactly the
+  // failure this fixture has to be able to see.
+  raw.exec(
+    `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps,
+                         granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas,
+                         live_blocker, x_handle, epoch, hwm_usdg, accrued_fee_usdg)
+     VALUES ('0xagent','Robin','0xowner','0xsk',4663,'{}',1,2,'armed',3,'live',99,1,'no-gas','much_miller',2,150.5,7.25)`,
+  );
+  for (let i = 1; i <= 5; i++) {
+    raw.exec(
+      `INSERT INTO events (agent_id, level, message, created_at) VALUES ('0xagent','ok','e${i}',${100 + i})`,
+    );
+    raw.exec(
+      `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, gas_usdg, epoch, created_at)
+       VALUES ('0xagent','swap','0xt',${i},'landed',0.25,2,${100 + i})`,
+    );
+  }
+  raw.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
+  raw.exec("INSERT INTO cost_basis VALUES ('0xagent','live','PEPE','1','6.0',9)");
+  raw.exec(
+    "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)" +
+      " VALUES ('0xagent','1000',90.0,0.0,10.0,100.0,2,'live',120)",
+  );
+  // A deposit and a withdrawal. Without these the shared ledger has no flow
+  // term at all, contributions read as UNKNOWN, and P&L is null forever.
+  raw.exec(
+    "INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, at)" +
+      " VALUES ('0xagent','in',80.0,'0xdeadbeef',555,4,'chain-log',2,110)",
+  );
+  raw.exec(
+    "INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, source, epoch, at)" +
+      " VALUES ('0xagent','out',5.0,'0xfeedface',556,'transfer-intent',2,111)",
+  );
+  raw.exec(
+    "INSERT INTO fee_accruals (agent_id, profit_usdg, fee_usdg, hwm_before_usdg, hwm_after_usdg, epoch, at)" +
+      " VALUES ('0xagent',20.0,2.0,130.5,150.5,2,115)",
+  );
+  raw.exec(
+    // COLUMNS NAMED, deliberately. A bare `VALUES (...)` binds by position, so
+    // every migration that adds a column to `decisions` silently shifts the
+    // meaning of every value after it — `hold_kind` landing in `at` is exactly
+    // what happened here, and SQLite only caught it because the counts stopped
+    // matching. With the columns named, a future migration is a no-op for these
+    // fixtures instead of a puzzle.
+    "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+      " VALUES ('d1','0xagent','strategist','PEPE','buy',5,'looked cheap','{}',9)",
+  );
+  return wrapSqlite(raw);
+};
+
+const count = async (db: ReturnType<typeof mem>, table: string): Promise<number> => {
+  const r = (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()) as { n: number };
+  return Number(r.n);
+};
+
+describe("the ledger mirror", () => {
+  it("carries price_source across — a curve mark must not arrive as an oracle", async () => {
+    // The positions SELECT omitted price_source, and the destination schema
+    // defaults it to 'chainlink'. So the weakest mark this system produces — a
+    // bonding-curve price — arrived in the shared ledger wearing an oracle's
+    // name and rendered on the dashboard as oracle-grade. The whole point of the
+    // column is that the three sources are NOT equally good evidence.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const row = (await shared.prepare("SELECT price_source FROM positions").get()) as {
+      price_source: string;
+    };
+    assert.equal(row.price_source, "curve");
+  });
+
+  it("copies a child's ledger up", async () => {
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(r.copied.events, 5);
+    assert.equal(r.copied.trades, 5);
+    assert.equal(r.copied.decisions, 1);
+    assert.equal(r.copied.positions, 1);
+    assert.equal(await count(shared, "events"), 5);
+  });
+
+  it("IS EXACTLY-ONCE — running twice does not duplicate the tape", async () => {
+    // The property the whole design turns on. A trade shown twice is worse than
+    // a trade shown late, and the orchestrator runs this every 15 seconds.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const second = await mirrorTenant({ tenant: "0xten", child, shared });
+    // Zero, not absent. An absent count is indistinguishable from a table
+    // nobody looked at, which is exactly how a stalled cursor hid in
+    // production for as long as it did.
+    assert.equal(second.copied.events, 0, "nothing new to copy, and it says so");
+    assert.equal(await count(shared, "events"), 5, "events must not double");
+    assert.equal(await count(shared, "trades"), 5, "trades must not double");
+  });
+
+  it("picks up only what is NEW on the next pass", async () => {
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child
+      .prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?,?,?,?)")
+      .run("0xagent", "warn", "e6", 200);
+    const r = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(r.copied.events, 1);
+    assert.equal(await count(shared, "events"), 6);
+  });
+
+  it("keeps two tenants' ledgers apart despite colliding source ids", async () => {
+    // Both children have event id 1. If the source id were the destination key
+    // the second tenant's tape would collide with the first's — which is why
+    // the watermark is keyed by (tenant, table) and the id is not carried over.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xaaa", child: seedChild(), shared });
+    await mirrorTenant({ tenant: "0xbbb", child: seedChild(), shared });
+    assert.equal(await count(shared, "events"), 10, "both tenants' events must survive");
+  });
+
+  it("REPLACES positions rather than merging — a closed position is gone", async () => {
+    // An upsert alone would leave a sold coin on the dashboard forever, because
+    // the source DELETES the row rather than zeroing it.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("DELETE FROM positions WHERE symbol = ?").run("PEPE");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "positions"), 0, "a closed position must disappear too");
+  });
+
+  it("carries a renamed agent forward", async () => {
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("UPDATE agents SET name = ? WHERE smart_account = ?").run("Little John", "0xagent");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const row = (await shared
+      .prepare("SELECT name FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { name: string };
+    assert.equal(row.name, "Little John");
+  });
+
+  it("survives a table that is missing at the source", async () => {
+    // A child mid-migration, or an older worker. One table's worth of lag is
+    // not a reason to abandon the rest of that tenant's ledger.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(
+      "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, level TEXT, message TEXT, created_at INTEGER);",
+    );
+    raw.exec("INSERT INTO events (agent_id, level, message, created_at) VALUES ('0xa','ok','only',1)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(raw), shared: mem(DEST) });
+    assert.equal(r.copied.events, 1);
+    // A table that does not EXIST is a failure, not an empty one — the SELECT
+    // throws — so it has no count and is named in `failed` instead. That
+    // distinction is the point: "could not read" and "nothing to read" must
+    // never render the same, here or anywhere else in this codebase.
+    assert.equal(r.copied.trades, undefined);
+    assert.ok(r.failed?.trades, "an unreadable table is reported as failed");
+  });
+
+  it("CARRIES THE FLOW TERM — without it a deposit reads as a gain", async () => {
+    // `flows` was never in LOG_TABLES, and the shared database HAS the table
+    // because applyLedgerSchema creates it. So the contributions query succeeded,
+    // returned zero rows, and equity.ts — which refuses to publish a number it
+    // cannot back — returned null. Every hosted agent's P&L was a dash, forever,
+    // and no error was raised anywhere to say so.
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(r.copied.flows, 2, "both the deposit and the withdrawal must travel");
+
+    const net = (await shared
+      .prepare(
+        `SELECT COUNT(*) AS n,
+                COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+           FROM flows WHERE agent_id = ?`,
+      )
+      .get("0xagent")) as { n: number; net: number };
+    // n > 0 is the whole point: it is what turns contributions from UNKNOWN into
+    // a figure, which is what turns P&L from null into a number.
+    assert.equal(Number(net.n), 2);
+    assert.equal(Number(net.net), 75);
+
+    // The tx hash is what makes a flow evidence rather than an inference.
+    const dep = (await shared
+      .prepare("SELECT tx_hash, block_number, log_index, source FROM flows WHERE direction = 'in'")
+      .get()) as { tx_hash: string; block_number: number; log_index: number; source: string };
+    assert.equal(dep.tx_hash, "0xdeadbeef");
+    assert.equal(Number(dep.block_number), 555);
+    // Without the index a re-read of the final block cannot tell this transfer
+    // from another in the same transaction.
+    assert.equal(Number(dep.log_index), 4);
+    assert.equal(dep.source, "chain-log");
+  });
+
+  it("carries who pays the gas, which only the worker knows", async () => {
+    // The dashboard cannot resolve this for itself: sponsorship is worker config
+    // and hosted the web service is a different container with a different
+    // environment. A web-side guess reads false on a fleet whose deploy docs say
+    // the web service needs no bundler key — telling every sponsored owner to go
+    // send ETH they do not need. Same class of bug as `mode`, same fix.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT sponsor_gas FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { sponsor_gas: number | null };
+    assert.equal(Number(a.sponsor_gas), 1);
+  });
+
+  it("CARRIES WHAT IS BLOCKING THE LIVE RAIL, so a funding screen can act on it", async () => {
+    // Same channel and same reason as `sponsor_gas` above: only the child
+    // resolves it, from its own balances, chain and executor. A column the
+    // child writes and the mirror drops is a column the hosted dashboard can
+    // never see — which is how every hosted tenant read IDLE for weeks.
+    //
+    // Measured once the fleet stopped being SIGKILLed mid-tick: no-gas 12,
+    // wrong-chain 9, dead-policy 6, no-cash 2. The largest bucket is agents
+    // funded with USDG and no ETH, whose owners were reading "Send USDG to your
+    // agent's account" and doing exactly that.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT live_blocker FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { live_blocker: string | null };
+    assert.equal(a.live_blocker, "no-gas");
+  });
+
+  it("carries the owner's handle, so a public page can credit somebody", async () => {
+    // It rides the agents row rather than tenant settings, which are sealed — a
+    // public feed must never decrypt a tenant to render a name.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT x_handle FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { x_handle: string | null };
+    assert.equal(a.x_handle, "much_miller");
+  });
+
+  it("carries the agent's epoch, high-water mark and accrued fee", async () => {
+    // All three were dropped. `epoch` is the dangerous one: both web routes
+    // filter every query on it, and while nothing carried it the shared row sat
+    // at DEFAULT 1 and so did every mirrored trade — so the filter matched
+    // everything and two separate runs were spliced into one book. The other two
+    // are read with COALESCE(..., 0), so an absent high-water mark and accrued
+    // fee did not render as unknown; they rendered as a confident zero.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const a = (await shared
+      .prepare("SELECT epoch, hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { epoch: number; hwm_usdg: number; accrued_fee_usdg: number };
+    assert.equal(Number(a.epoch), 2, "the agent is on its SECOND run — 1 here is the default, not the truth");
+    assert.equal(Number(a.hwm_usdg), 150.5);
+    assert.equal(Number(a.accrued_fee_usdg), 7.25);
+
+    // And the rows must agree with it, or the epoch filter finds nothing.
+    const t = (await shared
+      .prepare("SELECT COUNT(*) AS n FROM trades WHERE agent_id = ? AND epoch = ?")
+      .get("0xagent", 2)) as { n: number };
+    assert.equal(Number(t.n), 5);
+    const e = (await shared
+      .prepare("SELECT COUNT(*) AS n FROM equity WHERE agent_id = ? AND epoch = ?")
+      .get("0xagent", 2)) as { n: number };
+    assert.equal(Number(e.n), 1);
+  });
+
+  it("carries gas priced in USDG, so 'net of gas' is a claim we can back", async () => {
+    // gas_wei travelled and gas_usdg did not, so hosted summed 0.00 of gas AND
+    // counted every landed fill as unpriceable — a warning stamped on every book
+    // that was really about our own missing column.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const g = (await shared
+      .prepare(
+        `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
+                SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
+           FROM trades WHERE agent_id = ? AND status = 'landed'`,
+      )
+      .get("0xagent")) as { usdg: number; unpriced: number };
+    assert.equal(Number(g.usdg), 1.25, "5 fills at 0.25");
+    assert.equal(Number(g.unpriced), 0);
+  });
+
+  it("carries what a position COST, not just what it is worth", async () => {
+    // positions says the holding is worth 10.00 now; without the basis there is
+    // no entry price and no P&L, so a feed can say an agent holds something and
+    // not whether that is up or down.
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(r.copied.cost_basis, 1);
+    const b = (await shared
+      .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND symbol = ?")
+      .get("0xagent", "PEPE")) as { qty_raw: string; cost_usdg: string };
+    assert.equal(String(b.cost_usdg), "6.0");
+  });
+
+  it("CARRIES THE CLASS BOOK, which no other table can hold", async () => {
+    // A class position sits in a separate CONTRACT, so it is in neither
+    // `positions` (read from the account's own balances) nor `cost_basis`
+    // (written by a path the class executor never takes). Without this the
+    // shared ledger cannot see it at all, and an owner's equity is missing a
+    // real holding with nothing saying so.
+    const child = seedChild();
+    await child
+      .prepare(
+        `INSERT INTO class_positions (agent_id, token, symbol, decimals, curve, quote_token, first_seen,
+           vault, entry_tx, cost_usdg, qty_raw, opened_at_block, state)
+         VALUES ('0xagent','0xtok','WAGMI',18,'0xcurve','0xusdg',1000,'0xvault','0xentry','4870000','400000000000000000000',NULL,'open')`,
+      )
+      .run();
+    const shared = mem(DEST);
+    const r = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(JSON.stringify(r.failed ?? {}), "{}", "the snapshot pass must not throw");
+    assert.equal(r.copied.class_positions, 1);
+    const row = (await shared
+      .prepare("SELECT cost_usdg, qty_raw, vault, entry_tx, state FROM class_positions WHERE agent_id = ? AND token = ?")
+      .get("0xagent", "0xtok")) as Record<string, string>;
+    // The ACTUAL cost, as TEXT — a bigint through a REAL column loses precision
+    // at 2^53, which an 18dp memecoin quantity passes in its first token.
+    assert.equal(String(row.cost_usdg), "4870000");
+    assert.equal(String(row.qty_raw), "400000000000000000000");
+    assert.equal(String(row.vault), "0xvault", "recovery needs the vault address");
+    assert.equal(String(row.entry_tx), "0xentry", "and the audit trail needs the entry");
+    assert.equal(String(row.state), "open");
+  });
+
+  it("a rebuilt child does not delete the class book it has merely forgotten", async () => {
+    // Same hazard as cost_basis, and worse: this is the ONLY durable record of
+    // what a class position cost, and the container it lives in is rebuilt on
+    // every redeploy.
+    const child = seedChild();
+    await child
+      .prepare(
+        `INSERT INTO class_positions (agent_id, token, symbol, decimals, curve, quote_token, first_seen, vault, cost_usdg, state)
+         VALUES ('0xagent','0xtok','WAGMI',18,'0xcurve','0xusdg',1000,'0xvault','4870000','open')`,
+      )
+      .run();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "class_positions"), 1);
+
+    // The child comes back empty AND with its id space restarted — the evidence
+    // this file already uses to tell a rebuild from a genuine close.
+    const rebuilt = mem(SRC);
+    await rebuilt
+      .prepare(
+        `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at)
+         VALUES ('0xagent','a','0xown','0xsk',4663,'{}',1,2,'armed',1)`,
+      )
+      .run();
+    await mirrorTenant({ tenant: "0xten", child: rebuilt, shared });
+    assert.equal(
+      await count(shared, "class_positions"),
+      1,
+      "a wiped container must not erase the only record of what a position cost",
+    );
+  });
+
+  it("drops a basis whose position closed", async () => {
+    // Deleted at the source, so an upsert alone would leave it here forever and
+    // the feed would show P&L on something the agent no longer holds.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("DELETE FROM cost_basis WHERE symbol = ?").run("PEPE");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "cost_basis"), 0);
+  });
+
+  it("A LIVE FILL DOES NOT FREEZE AT 'submitted'", async () => {
+    // The bug: a live trade is written as `submitted` when the UserOp goes out,
+    // then UPDATED IN PLACE when it lands. The log-table watermark is on id, so
+    // the first write was copied and the second never was — the row keeps its
+    // id and the cursor is already past it. Hosted, every successful trade
+    // stayed "sent, waiting on the chain" forever, and since the scoreboard and
+    // the feed both filter status = 'landed', every fill was invisible to them.
+    const child = seedChild();
+    const shared = mem(DEST);
+    const now = Math.floor(Date.now() / 1000);
+    await child
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',42,'0xop1','submitted',2,?)`,
+      )
+      .run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const before = (await shared
+      .prepare("SELECT status FROM trades WHERE user_op_hash = ?")
+      .get("0xop1")) as { status: string };
+    assert.equal(before.status, "submitted", "it arrives unresolved, as it should");
+
+    // It lands at the source, in place, keeping its id.
+    await child
+      .prepare("UPDATE trades SET status = 'landed', tx_hash = ?, gas_usdg = ? WHERE user_op_hash = ?")
+      .run("0xtx1", 0.31, "0xop1");
+    const r = await mirrorTenant({ tenant: "0xten", child, shared });
+
+    const after = (await shared
+      .prepare("SELECT status, tx_hash, gas_usdg FROM trades WHERE user_op_hash = ?")
+      .get("0xop1")) as { status: string; tx_hash: string; gas_usdg: number };
+    assert.equal(after.status, "landed");
+    assert.equal(after.tx_hash, "0xtx1");
+    assert.equal(Number(after.gas_usdg), 0.31);
+    assert.equal(r.copied.trades_resolved, 1);
+  });
+
+  it("the resolution pass is idempotent and never rewrites a settled row", async () => {
+    // `AND status = 'submitted'` on the destination is the entire correctness
+    // argument: it is the same key and guard addTrade uses at the source, so
+    // this pass can only convert a submitted row into its resolution. Drop it
+    // and every pass starts overwriting settled history from a rolling window.
+    const child = seedChild();
+    const shared = mem(DEST);
+    const now = Math.floor(Date.now() / 1000);
+    await child
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',42,'0xop2','submitted',2,?)`,
+      )
+      .run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child
+      .prepare("UPDATE trades SET status = 'landed', tx_hash = ? WHERE user_op_hash = ?")
+      .run("0xtx2", "0xop2");
+
+    const first = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(first.copied.trades_resolved, 1);
+
+    const second = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(second.copied.trades_resolved, undefined, "nothing left to resolve");
+    assert.equal(await count(shared, "trades"), 6, "and nothing was duplicated");
+  });
+
+  it("KEEPS EVERY DECISION — the tape is not a top-500 sample any more", async () => {
+    // decisions used to copy `ORDER BY at DESC LIMIT 500` with no cursor, so a
+    // child that wrote more than a batch between passes lost the overflow
+    // permanently. That was dashboard furniture once. It is now the content
+    // other agents read, and a dropped thesis is a peer input that never
+    // arrives — so completeness is a correctness property, not a nicety.
+    const child = seedChild();
+    const shared = mem(DEST);
+    for (let i = 0; i < 600; i++) {
+      await child
+        .prepare(
+          "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+            " VALUES (?, '0xagent','strategist','PEPE','buy',5,?,'{}',?)",
+        )
+        .run(`x${i}`, `reason ${i}`, 1000 + i);
+    }
+    // Two passes: the first fills a batch, the second collects the rest.
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "decisions"), 601, "600 seeded plus the fixture's d1");
+  });
+
+  it("the decisions cursor re-reads its own second, so a tie is never skipped", async () => {
+    // `at` is not unique. A cursor resuming exactly at its watermark would drop
+    // every row sharing that second with the last one it copied.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await child
+      .prepare(
+        "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+          " VALUES ('t1','0xagent','strategist','A','buy',1,'first','{}',5000)",
+      )
+      .run();
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    // A second decision written in the SAME second, after the cursor moved.
+    await child
+      .prepare(
+        "INSERT INTO decisions (id, agent_id, source, symbol, action, size_usdg, reason, signals_json, at)" +
+          " VALUES ('t2','0xagent','strategist','B','buy',1,'same second','{}',5000)",
+      )
+      .run();
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const got = (await shared.prepare("SELECT COUNT(*) AS n FROM decisions WHERE at = 5000").get()) as { n: number };
+    assert.equal(Number(got.n), 2, "both rows from that second survived");
+  });
+
+  it("RECOVERS WHEN THE CHILD LEDGER IS REBUILT BENEATH THE WATERMARK", async () => {
+    // The bug this pins cost the entire fleet its trade tape, indefinitely, and
+    // reported success the whole time.
+    //
+    // mirror_state lives in shared Postgres; `last_id` is an id in the CHILD's
+    // sqlite. Those two do not have the same lifetime — a child home sits on the
+    // orchestrator container's own filesystem with no volume behind it, so a
+    // redeploy destroys the ledger and AUTOINCREMENT restarts at 1 under a
+    // watermark that still reads five. `id > from` then matches nothing for
+    // ever, and the empty path recorded neither a count nor a failure.
+    //
+    // Nothing in this suite could have caught it: all the other cases reuse one
+    // seedChild(), so the source is never reborn.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "trades"), 5, "the first incarnation arrived");
+
+    // The redeploy: a brand-new ledger, ids restarting at 1.
+    const rebornRaw = new DatabaseSync(":memory:");
+    rebornRaw.exec(SRC);
+    for (let i = 1; i <= 2; i++) {
+      rebornRaw.exec(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, epoch, created_at)
+         VALUES ('0xagent','swap','0xt',${i},'paper',1,${900 + i})`,
+      );
+    }
+    const reborn = wrapSqlite(rebornRaw);
+
+    const r = await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    assert.equal(r.copied.trades, 2, "rows written after the rebuild must arrive");
+    assert.equal(r.restarted?.trades?.was, 5, "and the rewind is reported, not silent");
+    assert.equal(await count(shared, "trades"), 7);
+
+    // And still exactly-once against the NEW ledger.
+    const again = await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    assert.equal(again.copied.trades, 0, "no second delivery");
+    assert.equal(await count(shared, "trades"), 7);
+  });
+
+  it("does NOT rewind while the ledger is merely idle", async () => {
+    // The rewind must be impossible to trigger within one incarnation: this
+    // file's exactly-once property rests solely on the watermark, so a spurious
+    // rewind duplicates the tape — and a trade shown twice is worse than one
+    // shown late.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const second = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(second.restarted, undefined, "an idle pass is not a rebuild");
+    assert.equal(await count(shared, "trades"), 5, "and nothing was copied twice");
+  });
+
+  it("survives re-copying a flow row it already carried", async () => {
+    // THE TRAP THAT SITS ACROSS THE chain_id FIX.
+    //
+    // The watermark was the only exactly-once mechanism here, and that was safe
+    // precisely BECAUSE no unique constraint existed to violate — a re-copied
+    // row landed as a silent duplicate. Populating chain_id makes the identity
+    // index bite, and the rebirth path deliberately rewinds to id 0 after a
+    // redeploy. Without ON CONFLICT the first re-copied flow raises a unique
+    // violation, the whole batch rolls back, the watermark never moves, and
+    // `flows` stops mirroring for that tenant FOREVER while every other table
+    // keeps going — the same silent stall that already cost this fleet its
+    // entire trade tape once.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    raw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const child = wrapSqlite(raw);
+    const shared = mem(DEST);
+
+    const first = await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(first.copied["flows"], 1);
+    assert.equal(await count(shared, "flows"), 1);
+
+    // A REBIRTH: the child's ledger is rebuilt, the watermark's row is gone, and
+    // the mirror rewinds to 0 and re-reads the same log.
+    const rebornRaw = new DatabaseSync(":memory:");
+    rebornRaw.exec(SRC);
+    rebornRaw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const second = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(rebornRaw), shared });
+
+    assert.equal(second.failed?.["flows"], undefined, "the batch must not fail");
+    assert.equal(await count(shared, "flows"), 1, "one deposit, copied twice, is still one deposit");
+  });
+
+  it("carries the chain a flow's transaction is on", async () => {
+    // A tx hash is unique only WITHIN a chain, and this codebase runs 4663 and
+    // 46630 against one schema. Dropping the column on the way up left every
+    // mirrored row's chain NULL, and NULLs are distinct in a unique index — so
+    // the constraint could never fire on the shared side no matter what the
+    // child wrote.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    raw.exec(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES ('0xagent', 'in', 10, '0xdeposit', 100, 0, 'chain-log', 1, 4663, 1)`,
+    );
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(raw), shared });
+    const f = (await shared.prepare("SELECT chain_id FROM flows").get()) as { chain_id: number };
+    assert.equal(Number(f.chain_id), 4663);
+  });
+
+  it("carries the positions leg of the equity identity", async () => {
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const e = (await shared
+      .prepare("SELECT cash_usdg, vault_usdg, positions_usdg, equity_usdg FROM equity")
+      .get()) as { cash_usdg: number; vault_usdg: number; positions_usdg: number; equity_usdg: number };
+    assert.equal(Number(e.positions_usdg), 10);
+    // The mirrored row must still decompose into the numbers that made it.
+    assert.equal(
+      Number(e.cash_usdg) + Number(e.vault_usdg) + Number(e.positions_usdg),
+      Number(e.equity_usdg),
+    );
+  });
+
+  it("AND WHICH BOOK THE MARK IS OF, or the shared ledger cannot tell two apart", async () => {
+    // The same omission as `positions_usdg` above, with a worse consequence. The
+    // child stamps every mark 'paper' or 'live'; a column list that drops it
+    // lands every mirrored row with mode NULL in the shared ledger — and the
+    // shared ledger is the one the web tier reads. The split would then exist in
+    // a child nobody can query, while the daily change, the chart, the growth
+    // index and the published drawdown all went on measuring the step from a
+    // practice book's opening 1,000 USDG to a funded book's real equity as
+    // performance. One owner was shown "−$950.17 today" that way.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const e = (await shared.prepare("SELECT mode FROM equity").get()) as { mode: string | null };
+    assert.equal(e.mode, "live");
+  });
+});
+
+/**
+ * THE ENTRY PRICE A RESTART DESTROYED.
+ *
+ * The child's sqlite lives in the container and is rebuilt on every redeploy —
+ * this file's own rewind detector says so out loud. Positions survive that,
+ * because the next tick re-reads them from the chain. A cost basis cannot: it is
+ * history, and the shared ledger holds the only copy.
+ *
+ * So the wholesale delete, which is correct for an agent the child has something
+ * to say about, was wrong as an inference from silence. Observed end to end on a
+ * real book: two entry prices recovered from their receipts at 11:13, and gone
+ * again at 12:37 because a container restarted. A holding with no entry price is
+ * one both mechanical exits refuse, so the owner's stop-loss and take-profit
+ * went inert on a live position — displayed, armed, unable to act.
+ */
+describe("an empty child is not a flat book", () => {
+  it("A REBUILT CHILD DOES NOT DELETE THE ENTRY PRICES IT HAS FORGOTTEN", async () => {
+    // Copy a book up, then hand the mirror a NEW child with the same agent and
+    // an id space that starts again — which is what a redeployed container is.
+    // The rewind detector already sees it; this is what it must now protect.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "the basis was mirrored");
+
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    // It still holds the position — it just cannot say what it cost any more.
+    reborn.exec("INSERT INTO positions VALUES ('0xagent','PEPE','0xp','1','1',2.0,0,'curve',10.0,9)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.ok(r.restarted, "the rewind must be detected — that is the signal this rests on");
+
+    const b = (await shared.prepare("SELECT cost_usdg FROM cost_basis WHERE symbol = 'PEPE'").get()) as
+      | { cost_usdg: string }
+      | undefined;
+    assert.ok(b, "the only surviving copy of the entry price must not be deleted by a restart");
+  });
+
+  it("and it re-inserts what it DOES remember without colliding", async () => {
+    // The delete is conditional now, so the insert has to merge. A collision
+    // would throw the whole snapshot into the catch and leave the shared ledger
+    // stale for a different reason.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    reborn.exec("INSERT INTO cost_basis VALUES ('0xagent','live','PEPE','2','7.0',20)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.equal(r.failed?.snapshots, undefined, "the snapshot copy must not have thrown");
+    const b = (await shared.prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE symbol = 'PEPE'").get()) as {
+      qty_raw: string;
+      cost_usdg: string;
+    };
+    assert.equal(String(b.qty_raw), "2", "the newer reading wins");
+    assert.equal(String(b.cost_usdg), "7.0");
+  });
+});
+
+describe("a rebuilt child does not empty the book it has merely forgotten", () => {
+  it("KEEPS THE SHARED POSITIONS WHEN THE REBUILT CHILD HAS NONE YET", async () => {
+    // Positions are re-derived from the chain every tick, so this heals itself
+    // — but the tick after a redeploy is the one most likely to fail on a cold
+    // RPC pool, and until the next good read the owner is shown an empty book.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    assert.equal(await count(shared, "positions"), 1, "the position was mirrored");
+
+    const reborn = new DatabaseSync(":memory:");
+    reborn.exec(SRC);
+    reborn.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent','Robin',2)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(reborn), shared });
+    assert.ok(r.restarted, "the rewind must be detected — that is the signal this rests on");
+    assert.equal(await count(shared, "positions"), 1, "a forgotten book is not an empty one");
+  });
+
+  it("BUT A BOOK THAT REALLY SOLD EVERYTHING STILL CLEARS", async () => {
+    // The half that must not regress: no rewind, no rows, so the child has
+    // genuinely read the chain and found nothing. A closed position that
+    // lingers is the bug the delete exists for.
+    const child = seedChild();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    await child.prepare("DELETE FROM positions WHERE symbol = ?").run("PEPE");
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    assert.equal(await count(shared, "positions"), 0, "a flat book must clear");
+  });
+});

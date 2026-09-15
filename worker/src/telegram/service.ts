@@ -30,7 +30,7 @@ import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicB
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -43,6 +43,7 @@ import {
   readReport,
   readStatus,
   readTrades,
+  readWallet,
   readWhyEvidence,
   type StatusContext,
 } from "./reads";
@@ -60,6 +61,7 @@ import {
   setName as setSoulName,
   soulPromptBlock,
   identityBlock,
+  narratorIdentityBlock,
   recallForPrompt,
 } from "../soul";
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
@@ -114,6 +116,21 @@ const LINK_MAX_FAILS = 5;
 const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
+/** Escape a name so it can sit inside a RegExp. */
+function escapeRe(v: string): string {
+  return v.replace(/[.*+?^${}()|[\]\\]/g, (m) => `\\${m}`);
+}
+
+/**
+ * The opener this deployment's agent used to recite, matched by ITS name.
+ *
+ * Rebuilt per call rather than cached: `getName()` follows the owner's
+ * settings, so a rename must not leave the scrub hunting the old identity.
+ */
+function soulHeaderRe(): RegExp {
+  return new RegExp(`^\\s*${escapeRe(getName())}\\s+here\\s*[\u2014-]\\s*born\\b[^.!?\\n]*[.!?\\n]\\s*`, "i");
+}
+
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
@@ -137,6 +154,29 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // done?" shares no words with anything on disk, so without carrying the last
   // turn's ids forward the thread is lost the moment the topic isn't restated.
   const stickyIds = new Map<number, Set<string>>();
+  /**
+   * THERE IS NO BARE-AMOUNT TRADE CONTEXT HERE, AND THAT IS DELIBERATE.
+   *
+   * The change this file came from carried one: a chat-keyed map that let a
+   * message consisting of nothing but "5" become a live buy. It was primed by
+   * REGEX-MATCHING THE BOT'S OWN OUTBOUND PROSE, took its ticker from the first
+   * one-to-six-letter word of an earlier message, resolved the side with
+   * `/sell/.test() ? "sell" : "buy"` — so "should I sell before I buy more?"
+   * primes a sell — and then called `deps.trade` with no confirmation step at
+   * all, while the sibling `transfer` case parks and waits for `/confirm`.
+   * It had no expiry and was keyed by chat rather than by sender.
+   *
+   * The problem it was solving is real and is solved below without any of that:
+   * a bare number must not reach the classifier, because a reasoning model
+   * spends its whole budget dumping chain-of-thought at it. A deterministic
+   * nudge costs no tokens and states no trade.
+   *
+   * If a ticker+amount follow-up is wanted, it belongs in its own change: park
+   * it through `deps.setPending` with `CONFIRM_TTL_SEC`, key it by
+   * `msg.fromId`, re-display side, symbol and amount on the confirm, and carry
+   * them from the `Command` the classifier actually emitted — never re-derive
+   * a ticker or a direction from prose.
+   */
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
 
@@ -146,31 +186,48 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * from disk — before this, every restart silently wiped the thread and the
    * merryman greeted a mid-conversation owner like a stranger.
    */
-  const historyFor = (chatId: number): { role: "user" | "assistant"; content: string }[] => {
+  const historyFor = async (chatId: number): Promise<{ role: "user" | "assistant"; content: string }[]> => {
     let h = history.get(chatId);
     if (!h) {
-      h = recentChatTurns(chatId, HISTORY_TURNS * 2).map((t) => ({ role: t.role, content: t.content }));
+      h = (await recentChatTurns(chatId, HISTORY_TURNS * 2)).map((t) => {
+        let c = t.role === "assistant" ? stripThinkingBlock(t.content) : t.content;
+        // SCRUB THE OLD SOUL HEADER OUT OF STORED HISTORY.
+        //
+        // Before identity moved into the system prompt, every reply opened by
+        // reciting it — "<name> here — born 2026-…". Those turns are on disk,
+        // and a few-shot prompt built from them teaches the new model to recite
+        // it again, so the fix would undo itself one conversation at a time.
+        //
+        // BUILT FROM THE AGENT'S OWN NAME, not a literal. It was hardcoded to
+        // one tenant's, so on every other deployment it scrubbed nothing while
+        // claiming to.
+        if (t.role === "assistant") c = c.replace(soulHeaderRe(), "").trim();
+        // NO `|| t.content` TAIL. A turn that was ENTIRELY the old header
+        // scrubs to nothing, and restoring it whole is the one case the scrub
+        // exists for. Empty turns are dropped just below.
+        return { role: t.role, content: c };
+      }).filter((t) => t.content.length > 0);
       history.set(chatId, h);
       // Restore the last turn's recalled ids too, so a pronoun sent right after
       // a restart still lands on whatever the merryman was just talking about.
-      const lastWithIds = [...recentChatTurns(chatId, 4)].reverse().find((t) => t.memoryIds?.length);
+      const lastWithIds = [...(await recentChatTurns(chatId, 4))].reverse().find((t) => t.memoryIds?.length);
       if (lastWithIds?.memoryIds?.length) stickyIds.set(chatId, new Set(lastWithIds.memoryIds));
     }
     return h;
   };
 
-  const pushHistory = (
+  const pushHistory = async (
     chatId: number,
     role: "user" | "assistant",
     content: string,
     memoryIds?: string[],
-  ): void => {
+  ): Promise<void> => {
     const trimmed = content.slice(0, 600);
-    const h = historyFor(chatId);
+    const h = await historyFor(chatId);
     h.push({ role, content: trimmed });
     while (h.length > HISTORY_TURNS * 2) h.shift();
     history.set(chatId, h);
-    appendChatTurn(chatId, { role, content: trimmed, memoryIds }); // write-through
+    await appendChatTurn(chatId, { role, content: trimmed, memoryIds }); // write-through
   };
 
   const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
@@ -341,7 +398,22 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       next.add(msg.chatId);
       patchSettingsFile({ telegramAllowlist: [...next] });
       state = rotateLinkCode(
-        { ...state, ownerId: state.ownerId ?? msg.fromId, linkedAt: state.linkedAt ?? now() },
+        {
+          ...state,
+          ownerId: state.ownerId ?? msg.fromId,
+          linkedAt: state.linkedAt ?? now(),
+          // AND IN THE ONE FILE NOBODY OVERWRITES. patchSettingsFile above
+          // wrote the chat into the child’s settings.json, which hosted the
+          // orchestrator replaces wholesale from the tenant store every 15
+          // seconds — so the link above, on its own, is undone before the
+          // owner can send a second command, and the code that bought it has
+          // already been consumed by this very rotation. This file is
+          // child-owned; the parent reads it and unions these ids back into
+          // the stored allowlist, which is what makes the link durable.
+          linkedChats: state.linkedChats.includes(msg.chatId)
+            ? state.linkedChats
+            : [...state.linkedChats, msg.chatId],
+        },
         token,
       );
       stateRef.set(state);
@@ -359,14 +431,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       grantHasTransfer: deps.grantHasTransfer(),
       reads: {
         status: () => readStatus(statusCtx()),
-        positions: () => readPositions(),
+        positions: () => readPositions(statusCtx().agentId),
         depth: (symbol: string) => deps.readDepth(symbol),
-        pnl: () => readPnl(),
-        trades: () => readTrades(),
+        pnl: () => readPnl(statusCtx().agentId),
+        trades: () => readTrades(statusCtx().agentId),
         report: () => readReport(statusCtx()),
         brag: () => readBrag(statusCtx()),
+        // NEVER WIRED, SO NEVER CALLED. `readWallet` has existed and been
+        // correct the whole time; executor.ts:147 reads
+        // `deps.reads.wallet ? … : WALLET_TEXT`, and with this key absent every
+        // one of /wallet, /fund, /grant, /recover, /restore and /reconnect fell
+        // through to the static signpost — which tells the reader to open
+        // http://localhost:3100 "on the machine running merrymen". On the
+        // hosted fleet there is no such machine, so the instruction cannot be
+        // followed at all, and "fund your agent" is the commonest thing anyone
+        // is ever told to do.
+        wallet: () => readWallet(statusCtx().agentId),
         why: async () => {
-          const ev = readWhyEvidence();
+          const ev = readWhyEvidence(statusCtx().agentId);
           const llm = resolveLlm(cfg);
           if (!ev.hasTrade || !llm) return ev.text;
           return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
@@ -451,7 +533,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // knew about you") untrue.
       forgetOwner: () => {
         forgetOwner();
-        clearChatTurns(msg.chatId);
+        void clearChatTurns(msg.chatId); // fire-and-forget; the in-memory wipe below is immediate
         history.delete(msg.chatId);
         stickyIds.delete(msg.chatId);
       },
@@ -550,6 +632,24 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
     if (!cmd) {
+      // A BARE NUMBER NEVER REACHES THE CLASSIFIER — and never becomes a trade.
+      //
+      // "5" carries no ticker, no side and no verb, so there is nothing for a
+      // classifier to classify; what a reasoning model does with it is spend
+      // the whole completion budget on chain-of-thought and return empty
+      // content. So it is answered here, deterministically, for no tokens.
+      //
+      // The answer is a nudge and nothing else. See the note on the absent
+      // ask-amount context above for what this deliberately does not do.
+      const bareMatch = msg.text.trim().match(/^\s*(\d+(?:\.\d+)?)\s*(usdg|usd)?\s*$/i);
+      if (bareMatch) {
+        const n = Number(bareMatch[1]);
+        if (Number.isFinite(n) && n > 0) {
+          cmd = { kind: "chat", reply: `to trade, tell me a ticker and a USDG amount, e.g. 'buy 10 of QQQ' — you sent just "${msg.text.trim()}"` };
+        }
+      }
+    }
+    if (!cmd) {
       const llm = resolveLlm(cfg);
       if (llm) {
         const st = stateRef.get();
@@ -558,9 +658,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
         const liveState = readLlmState(statusCtx());
-        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: historyFor(msg.chatId) };
+        const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;
+        // Strip any thinking dump that slipped through llmText (defense in depth)
+        if (cmd.kind === "chat" && typeof cmd.reply === "string") {
+          const stripped = stripThinkingBlock(cmd.reply);
+          if (stripped !== cmd.reply) cmd = { kind: "chat", reply: stripped || cmd.reply };
+        }
         // The get-to-know-you side-channel: the model proposes a fact, the
         // sanitizer disposes (drops addresses/keys/markup, dedupes, caps). Only the
         // OWNER may write it — else a group member could poison/evict owner memory.
@@ -576,10 +681,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           const recalled = recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
           // Read BEFORE this turn is written, so it's the gap since they last
           // spoke rather than zero.
-          const gap = describeGap(lastChatTurnAt(msg.chatId), now());
+          const gap = describeGap(await lastChatTurnAt(msg.chatId), now());
+          // Hermes-style tiering: stable identity (name+stage+tone, no numbers) in system,
+          // volatile (gap+recalled+liveState) in user STATE — so model follows role, doesn't narrate it.
+          const narratorIdentity = narratorIdentityBlock(st.linkedAt, st.messageCount, now());
           const chatCtx = {
             state: [
-              `SOUL:\n${identity}`,
               gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
               recalled.block,
               "",
@@ -587,10 +694,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
             ]
               .filter(Boolean)
               .join("\n"),
-            history: historyFor(msg.chatId),
-          };
-          const fluent = await narrateChat(msg.text, chatCtx, llm);
-          if (fluent) cmd = { kind: "chat", reply: fluent };
+            history: await historyFor(msg.chatId),
+            narratorIdentity,
+          } as unknown as { state: string; history: { role: "user" | "assistant"; content: string }[] };
+          const fluent = await narrateChat(msg.text, chatCtx as never, llm);
+          let strippedFluent = fluent ? stripThinkingBlock(fluent) : "";
+          if (strippedFluent) cmd = { kind: "chat", reply: strippedFluent };
+          else if (fluent && !strippedFluent) {
+            // Whole reply was thinking — fall back to classifier's (already stripped) reply
+          }
           // Carry what was surfaced into the next turn so a pronoun follow-up
           // ("is it done?") keeps the thread instead of losing it to zero word
           // overlap. Persisted on the turn below, so it survives a restart too.
@@ -600,7 +712,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
-      pushHistory(msg.chatId, "user", msg.text);
+      // UNCONDITIONAL. This was guarded by a "same as the last user message?"
+      // check, to avoid a double-push from a bare-amount branch that also wrote
+      // history. That branch is gone, and the guard it needed silently dropped
+      // a legitimately repeated message — an owner who says "ok" twice loses the
+      // second one from the thread, which is exactly the kind of quiet edit to
+      // somebody's own words this file should not make.
+      await pushHistory(msg.chatId, "user", msg.text);
     }
 
     // Sender-level authz for state-changing commands. In a GROUP the chatId is a
@@ -626,7 +744,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
 
     // Natural-language multi-step task → the agent loop (same gates as /agent).
     if (cmd.kind === "agent") {
-      pushHistory(msg.chatId, "assistant", "starting an agent task");
+      await pushHistory(msg.chatId, "assistant", "starting an agent task");
       await startAgent(cmd.task);
       return;
     }
@@ -640,8 +758,20 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
-    if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply);
+    if (!slash) await pushHistory(msg.chatId, "assistant", stripThinkingBlock(reply.replace(/<[^>]+>/g, "")), turnMemoryIds);
+    // THE LAST-RESORT STRIP FAILS CLOSED.
+    //
+    // It was `strippedReply || reply` — so a reply that was ENTIRELY
+    // chain-of-thought stripped to "" and the raw thinking was sent instead,
+    // which is the one case the strip exists for. A model that answered only in
+    // its reasoning channel has not answered; say that.
+    const strippedReply = stripThinkingBlock(reply);
+    await sendMessage(
+      { token },
+      msg.chatId,
+      strippedReply ||
+        "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
+    );
   };
 
   const pollOnce = async (): Promise<void> => {

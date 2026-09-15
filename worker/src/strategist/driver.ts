@@ -17,9 +17,29 @@ export interface Signals {
   cashUsdg: number;
   vaultUsdg: number;
   equityUsdg: number;
-  holdings: { symbol: string; valueUsdg: number; priceStale: boolean }[];
+  /**
+   * What is held, what it is worth, and — when the ledger knows — what it cost.
+   *
+   * `costUsdg` and `pnlUsdg` are ABSENT rather than zero when there is no cost
+   * basis on record. Zero would tell the model the whole position is profit,
+   * which is the original accounting bug in miniature; absent is a fact it can
+   * reason about instead of a number it would act on.
+   */
+  holdings: {
+    symbol: string;
+    valueUsdg: number;
+    priceStale: boolean;
+    costUsdg?: number;
+    pnlUsdg?: number;
+  }[];
   prices: { symbol: string; usd: number; stale: boolean }[];
   tradableSymbols: string[];
+  /**
+   * The mechanical floor sitting below the model, in bps. ABSENT when none is
+   * armed — never 0, which would read as a floor at break-even rather than as
+   * no floor at all. Same discipline `costUsdg` follows.
+   */
+  stopLossBps?: number;
   maxPerActionUsdg: number;
   utcHour: number;
   utcDay: number;
@@ -60,6 +80,17 @@ vault yield automatically — you do not manage the vault.
 Propose portfolio actions via the propose_trades tool. Discipline rules:
 - Only trade symbols from tradableSymbols. Sizes are in USDG and must respect maxPerActionUsdg.
 - Prefer few, deliberate actions; propose holds when nothing is attractive.
+- A FLOOR MAY SIT BELOW YOU. When \`stopLossBps\` is present, a mechanical rule sells a holding
+  outright once it is that far below what it cost. It only ever FORCES an exit and never prevents
+  one, so cutting earlier is always available to you. It is a backstop for the case where you were
+  wrong and had not noticed — never a level to hold a losing position down to because it is there.
+- YOU ARE ALSO RESPONSIBLE FOR LEAVING. A holding may carry \`costUsdg\` and \`pnlUsdg\` — what
+  it cost and what it is up or down since. Use them: take a profit that is worth taking, cut
+  a loss that is running, and leave a position whose reason has stopped being true. A position
+  you never close is not a decision you deferred, it is a decision you made.
+  Where \`costUsdg\` is ABSENT the ledger has no entry price for that holding — you do not know
+  whether you are up on it, and you must not assume you are. Say so rather than sizing off it.
+  \`priceStale\` means the market for it is closed, so the P&L beside it is last week's number.
 - There is no order book on this chain, so you cannot see one. When \`depth\` is present it is
   the next best thing and a different thing: pool liquidity. Per symbol it gives the USDG you
   could trade before moving the price more than 0.5%, and the nearest prices where liquidity
@@ -87,10 +118,24 @@ const PROPOSE_TOOL = {
             action: { type: "string", enum: ["buy", "sell", "hold"] },
             symbol: { type: "string" },
             sizeUsdg: { type: "number" },
-            reason: { type: "string" },
+            reason: {
+              type: "string",
+              // UNDESCRIBED UNTIL NOW, WHICH IS WHY THE FEED READ LIKE A LEDGER.
+              // This string IS the thesis for every tenant not running the desk
+              // — which is most of them — and the schema asked for it without
+              // saying what it was for, so models returned a restatement of the
+              // action ("buy NVDA") or nothing. Same wording as the desk's
+              // thesis field so the two rails sound like one agent.
+              description:
+                "One sentence for THIS action, in your own voice, citing the figures that decided " +
+                "it. This is published — write it for a reader who was not here. Grounded only in " +
+                "what you were shown; no invented numbers and no predictions you cannot support.",
+            },
           },
           // "reason" optional: Groq validates arguments server-side and llama
-          // sometimes omits it; parseProposals defaults it to "" anyway.
+          // sometimes omits it; parseProposals defaults it to "" anyway. The
+          // description above guides it without requiring it — making it
+          // required would break the provider production actually runs on.
           required: ["action", "symbol", "sizeUsdg"],
           additionalProperties: false,
         },

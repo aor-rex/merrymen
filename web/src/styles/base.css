@@ -1,0 +1,288 @@
+/**
+ * The shell every new surface sits in.
+ *
+ * EVERY RULE IS SCOPED UNDER .mm — and unlike console.css, which claimed the
+ * same thing in its header and was wrong for thirty selectors with no build
+ * error, this claim is enforced by styles/scoped.test.ts.
+ *
+ * The scoping is what lets the old sheets stay live during the migration. One
+ * class beats globals.css's bare element selectors (a, button, html, body), so
+ * both systems can render on the same page and the new one wins where they
+ * overlap, without a single !important.
+ */
+
+.mm {
+  background: var(--mm-bg);
+  color: var(--mm-tx);
+  font-family: var(--mm-sans);
+  font-size: var(--mm-t-lead);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* The app has its own vertical rhythm; globals.css's body padding is for the
+     old shell and must not add to it. */
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.mm *,
+.mm *::before,
+.mm *::after {
+  box-sizing: border-box;
+}
+
+/* Names, handles and symbols are owner-typed and launcher-supplied. One long
+   word must never set the width of the page — globals.css records that bare
+   `1fr` tracks were most of the dashboard's 413px of mobile overflow. */
+.mm :where(h1, h2, h3, p, span, b, div) {
+  overflow-wrap: anywhere;
+}
+
+.mm a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.mm a:hover {
+  color: var(--mm-wire);
+}
+
+/*
+ * A RESET WITH NO SPECIFICITY, which is what a reset should be.
+ *
+ * This was `.mm button`, and a descendant selector scores higher than a single
+ * class — so it beat every .mm-* class that tried to style a button, silently.
+ * Proven on one page: an <a class="mm-btn primary"> drew its border and a
+ * <button class="mm-btn primary"> beside it drew none, from the same rule.
+ * Order could not fix it; specificity always won.
+ *
+ * :where() contributes zero, so any class at all now takes precedence and a
+ * bare <button> still gets normalised.
+ */
+:where(.mm) button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+/* Mono is for numbers and identifiers, always, and always tabular — a feed
+   whose figures jitter between polls is a feed nobody trusts. */
+.mm .mono {
+  font-family: var(--mm-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* There was no visible focus ring anywhere in the product. */
+.mm :focus-visible {
+  outline: 2px solid var(--mm-wire);
+  outline-offset: 2px;
+  border-radius: var(--mm-r-chip);
+}
+
+.mm ::selection {
+  background: color-mix(in srgb, var(--mm-wire) 30%, transparent);
+}
+
+/* ── the reading column ──────────────────────────────────────────────────── */
+
+.mm-wrap {
+  width: 100%;
+  max-width: var(--mm-col);
+  margin: 0 auto;
+  padding: 0 var(--mm-4);
+}
+
+/* Wide content scrolls inside itself. The page body never scrolls sideways. */
+.mm-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── section kicker ──────────────────────────────────────────────────────── */
+
+.mm-kicker {
+  font-family: var(--mm-mono);
+  font-size: var(--mm-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+  color: var(--mm-dim);
+}
+
+/* ── chips ───────────────────────────────────────────────────────────────── */
+
+.mm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mm-1);
+  font-family: var(--mm-mono);
+  font-size: var(--mm-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: var(--mm-r-chip);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.mm-chip.up {
+  color: var(--mm-up);
+  background: color-mix(in srgb, var(--mm-up) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mm-up) 26%, transparent);
+}
+.mm-chip.down {
+  color: var(--mm-down);
+  background: color-mix(in srgb, var(--mm-down) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mm-down) 26%, transparent);
+}
+.mm-chip.warn {
+  color: var(--mm-warn);
+  background: color-mix(in srgb, var(--mm-warn) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mm-warn) 26%, transparent);
+}
+.mm-chip.wire {
+  color: var(--mm-wire);
+  background: color-mix(in srgb, var(--mm-wire) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mm-wire) 26%, transparent);
+}
+/*
+ * THIS DID NOT FULLY HAPPEN.
+ *
+ * A second axis, orthogonal to the first: a chip's COLOUR says what kind of
+ * thing it was, its EDGE says whether it actually occurred. The badge
+ * vocabulary spends three of its five kinds on things that are provisional or
+ * non-events and had no way to draw the difference — hue separation has already
+ * failed at 10px.
+ *
+ * It is also what frees --mm-warn to mean exactly one thing, which is the
+ * precondition for spending a masthead on it. And it is not a new invention
+ * here: .mm-trade.sim was already dashed, with the comment "A PRETEND FILL MUST
+ * NOT LOOK LIKE A REAL ONE". This finishes a convention that was half-made.
+ */
+.mm-chip.unsettled {
+  border-style: dashed;
+}
+
+/* Outline only, no fill: the quietest thing that is still a label. */
+.mm-chip.quiet {
+  color: var(--mm-dim);
+  border-color: var(--mm-edge-2);
+}
+
+/* ── buttons ─────────────────────────────────────────────────────────────── */
+
+.mm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--mm-2);
+  min-block-size: 40px;
+  padding: 0 var(--mm-4);
+  border-radius: var(--mm-r-chip);
+  border: 1px solid var(--mm-edge-2);
+  background: var(--mm-surface-2);
+  color: var(--mm-tx);
+  font-size: var(--mm-t-body);
+  font-weight: 600;
+  transition:
+    background-color var(--mm-fast) var(--mm-ease),
+    border-color var(--mm-fast) var(--mm-ease),
+    color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-btn:hover {
+  background: var(--mm-surface-3);
+  border-color: var(--mm-wire-dim);
+  color: var(--mm-tx);
+}
+
+.mm-btn.primary {
+  border-color: color-mix(in srgb, var(--mm-wire) 40%, transparent);
+  background: color-mix(in srgb, var(--mm-wire) 14%, transparent);
+  color: var(--mm-wire);
+}
+
+.mm-btn.primary:hover {
+  background: color-mix(in srgb, var(--mm-wire) 22%, transparent);
+}
+
+.mm-btn[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── motion ──────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .mm *,
+  .mm *::before,
+  .mm *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── the loading frame ───────────────────────────────────────────────────── */
+
+/*
+ * Sized to the real blocks. A placeholder that does not match what replaces it
+ * produces a jolt on arrival, and a jolt reads as slower than the wait it hid.
+ */
+.mm-skel-head {
+  padding: var(--mm-5) 0 var(--mm-4);
+}
+
+.mm-skel-head i {
+  display: block;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+.mm-skel-head .t {
+  width: 180px;
+  height: 26px;
+}
+
+.mm-skel-head .s {
+  width: 120px;
+  height: 13px;
+  margin-top: 8px;
+}
+
+.mm-skel-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--mm-3);
+  padding-bottom: var(--mm-5);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-skel-strip i {
+  display: block;
+  height: 46px;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+/* Announced to a screen reader, drawn for nobody. */
+.mm-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .mm-skel-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--mm-4) var(--mm-3);
+  }
+}

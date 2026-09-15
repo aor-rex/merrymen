@@ -6,14 +6,22 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import {
-  GRANT_MULTIHOP,
   GRANT_V4,
   GRANT_V4_ADAPTER,
+  GRANT_PONS_ADAPTER,
+  GRANT_PONS_CLASS,
+  resolveClassVault,
   TRADEABLE_V2,
   buildWallPolicies,
+  buildCallPermissions,
+  wallShape,
+  wallSignable,
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
+  officialCoinTokens,
+  ponsAdapterForSigning,
+  assertDerivedAccount,
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
@@ -61,6 +69,24 @@ export async function signGrant(args: {
    * lockstep rule: the marker is minted by the permission, never ahead of it.
    */
   v4AdapterAddress?: `0x${string}`;
+  /**
+   * The deployed PonsSelfTrade adapter to seal into the wall, or absent for no
+   * bonding-curve route. A SECOND, SEPARATE opt-in from the v4 adapter. Like
+   * its sibling above, the phone passes nothing today, so phone grants
+   * honestly carry no Pons marker -- the marker is minted by the permission,
+   * never ahead of it.
+   */
+  ponsAdapterAddress?: `0x${string}`;
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * A FACTORY, NOT A VAULT. The vault is per-account, salted with the smart
+   * account this call is about to derive, so nobody upstream could name it.
+   * Resolved below from the account, by the same core helper the dashboard
+   * calls — two signers, one vault. Like its two siblings above, the phone
+   * passes nothing today, so phone grants honestly carry no class marker.
+   */
+  ponsClassVaultFactory?: `0x${string}`;
   rpcUrl?: string;
   onProgress?: SignProgress;
 }): Promise<SignedGrant> {
@@ -121,18 +147,109 @@ export async function signGrant(args: {
     plugins: { sudo: ecdsaValidator },
   });
 
+  // BEFORE THE WALL PINS VALUE TO IT. createKernelAccount resolves this with a
+  // live getSenderAddress eth_call and answers the zero address, without
+  // throwing, when the Kernel factory does not respond on this chain. The wall
+  // below would then pin its swap recipient and vault receiver to zero, the
+  // assertion further down would be satisfied by two zeros, and the phone would
+  // seal a grant for an account nobody owns. Identical guard to
+  // web/src/lib/session.ts - the two signers must refuse the same things.
+  assertDerivedAccount(sudoOnlyAccount.address, "the smart account could not be derived");
+
   say("assembling the wall");
   // Uniswap v4 is OFF — see WallOptions.allowUniswapV4. Kept in lockstep with
   // the GRANT_V4 marker below, and identical to web/src/lib/session.ts: the
   // phone and the dashboard must seal the same wall or the worker cannot tell
   // what a signature actually carries.
   const allowUniswapV4: boolean = false;
+
+  // THE CLASS VAULT, from the account derived immediately above — its owner and
+  // its CREATE2 salt, so this is the first moment the address exists to be
+  // asked for. Throws rather than falling back if the factory cannot be read;
+  // identical helper, identical refusal, on both signers.
+  let ponsClassVaultAddress: `0x${string}` | undefined;
+  if (args.ponsClassVaultFactory) {
+    say("locating your class vault");
+    ponsClassVaultAddress = await resolveClassVault(
+      publicClient,
+      args.ponsClassVaultFactory,
+      sudoOnlyAccount.address,
+    );
+  }
+
+  /**
+   * The platform's official listings, plus whatever the caller passed, plus the
+   * chain's deployed Pons adapter when the caller named none.
+   *
+   * THE PHONE NEEDS THIS MORE THAN THE BROWSER DOES, not less. The web signer
+   * can at least read /settings; this file's own note records that "the phone
+   * passes nothing today, so phone grants honestly carry no Pons marker", and
+   * `onboarding/grant.tsx` passes three fields with no tokens and no adapter. So
+   * without a default resolved HERE, a phone-signed grant can never reach a
+   * curve — and the owner's only symptom is an agent that never trades when the
+   * equity market is shut.
+   *
+   * Both defaults are signing-time only. The worker trades whatever address the
+   * signature sealed, never the constant.
+   */
+  const sealedTokens = [...officialCoinTokens(chain.id), ...(args.extraTokens ?? [])];
+  const sealedPonsAdapter = ponsAdapterForSigning(chain.id, args.ponsAdapterAddress);
+
+  const wallOpts = {
+    extraTokens: sealedTokens,
+    allowUniswapV4,
+    v4AdapterAddress: args.v4AdapterAddress,
+    ponsAdapterAddress: sealedPonsAdapter,
+    ponsClassVaultAddress,
+    // Rides with the vault. buildWallPolicies THROWS on a vault without a
+    // factory — two of three class permissions is a key that can reach a vault
+    // it can never create, and a CALL to a codeless address succeeds silently.
+    ponsClassVaultFactoryAddress: args.ponsClassVaultFactory,
+  };
+
+  // CAN THIS WALL EVER BE INSTALLED? The same question the other signer asks,
+  // through the same function, over the same permission objects — because a cap
+  // only one signer enforces is not a cap. Both signers already move in lockstep
+  // on what they MINT (signer-lockstep.test.ts); this is the same rule applied
+  // to what they REFUSE.
+  // AND ON THE SAME FACT ABOUT THE ACCOUNT. `deploying` was hardcoded inside
+  // `wallSignable`, so both signers charged every re-sign for a CREATE2 and an
+  // initCode it will never pay. A cap only one signer gets right is not a cap,
+  // and neither is a cap both get wrong the same way.
+  //
+  // Unreadable counts as undeployed: over-charging refuses a wall the owner can
+  // retry, under-charging mints one the executor refuses forever.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
+  const sealedForWall = (wallOpts.extraTokens ?? []) as readonly unknown[];
+  const signable = wallSignable(
+    wallShape(buildCallPermissions(args.caps, sudoOnlyAccount.address, wallOpts)),
+    {
+      deploying: !alreadyDeployed,
+      basket: {
+        count: sealedForWall.length,
+        shapeWith: (n) =>
+          wallShape(
+            buildCallPermissions(args.caps, sudoOnlyAccount.address, {
+              ...wallOpts,
+              extraTokens: sealedForWall.slice(0, n) as never,
+            }),
+          ),
+      },
+    },
+  );
+  if (!signable.ok) throw new Error(signable.why);
+
   const { policies, now, expiresAt } = buildWallPolicies({
     caps: args.caps,
     smartAccount: sudoOnlyAccount.address,
-    extraTokens: args.extraTokens,
-    allowUniswapV4,
-    v4AdapterAddress: args.v4AdapterAddress,
+    ...wallOpts,
   });
 
   say("attaching the permissions");
@@ -157,6 +274,7 @@ export async function signGrant(args: {
   // Same premise check the dashboard makes: the wall's recipient pins are only
   // correct while the permission plugin leaves the address alone. Fail before
   // sealing, never after.
+  assertDerivedAccount(account.address, "the permissioned account could not be derived");
   if (account.address.toLowerCase() !== sudoOnlyAccount.address.toLowerCase()) {
     throw new Error(
       `refusing to sign: the permission plugin changed the account address ` +
@@ -186,12 +304,24 @@ export async function signGrant(args: {
       // off-chain mirror looser than the chain. See the note in session.ts.
       grantFeatures: [
         TRADEABLE_V2,
-        GRANT_MULTIHOP,
         ...(allowUniswapV4 ? [GRANT_V4] : []),
         ...(args.v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+        ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
+        // From the RESOLVED VAULT, never from `args.ponsClassVaultFactory` —
+        // the factory is the request, the vault address is the evidence. See
+        // the same line in web/src/lib/session.ts.
+        ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
-      grantTokens: usableExtraTokens(args.extraTokens).map((t) => t.address.toLowerCase()),
+      ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
+      ...(ponsClassVaultAddress
+        ? {
+            ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
+            // Both, or the worker has a marker and a vault it cannot create.
+            ponsClassVaultFactoryAddress: args.ponsClassVaultFactory!.toLowerCase(),
+          }
+        : {}),
+      grantTokens: usableExtraTokens(sealedTokens).map((t) => t.address.toLowerCase()),
       demoSessionPrivateKey: sessionPrivateKey,
     },
     sessionPrivateKey,

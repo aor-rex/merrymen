@@ -15,6 +15,7 @@ import {
   MERRYMEN_GATEWAY_BITQUERY,
   parsePoolEvent,
   resolveBitquery,
+  bitqueryAuthHeaders,
 } from "./bitquery";
 
 describe("resolveBitquery — whose quota is this?", () => {
@@ -155,5 +156,41 @@ describe("parsePoolEvent — the v4 PoolKey, all five fields or none", () => {
     })!;
     assert.ok(p);
     assert.equal(p.key, undefined);
+  });
+});
+
+/**
+ * The auth header, which had exactly one right answer and used to send both.
+ *
+ * Bitquery has two credential generations: a legacy V1 key for `X-API-KEY` and a
+ * V2 OAuth token (`ory_at_…`) for `Authorization: Bearer`. Sending both with the
+ * same value works for a V1 key and hands a V2 endpoint two conflicting
+ * credentials — which comes back as an opaque 402, reads as a billing problem,
+ * and sends you to the wrong console. gateway/lib/core.mjs shipped this fix after
+ * that exact misdiagnosis ("the opaque 402 we spent a deploy chasing"); the
+ * worker kept sending both, so discovery could return nothing on a good key
+ * while looking configured.
+ */
+describe("bitquery auth headers", () => {
+  it("a V2 OAuth token goes in Authorization: Bearer, and ONLY there", () => {
+    const h = bitqueryAuthHeaders("ory_at_abc123");
+    assert.equal(h.Authorization, "Bearer ory_at_abc123");
+    assert.equal(h["X-API-KEY"], undefined, "two credentials is what caused the 402");
+    assert.equal(Object.keys(h).length, 1);
+  });
+
+  it("a legacy V1 key goes in X-API-KEY, and ONLY there", () => {
+    const h = bitqueryAuthHeaders("BQY-legacy-key");
+    assert.equal(h["X-API-KEY"], "BQY-legacy-key");
+    assert.equal(h.Authorization, undefined);
+    assert.equal(Object.keys(h).length, 1);
+  });
+
+  it("never emits both headers, whatever the key looks like", () => {
+    // The single property worth pinning: the failure was silent and looked like
+    // billing, so nothing downstream would have caught a regression here.
+    for (const key of ["ory_at_x", "plain", "", "ORY_AT_upper", "0x1234", "ory_at_"]) {
+      assert.equal(Object.keys(bitqueryAuthHeaders(key)).length, 1, `two headers for ${JSON.stringify(key)}`);
+    }
   });
 });

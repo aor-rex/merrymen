@@ -1,0 +1,19 @@
+# Deps + build output are produced inside the image, never copied in.
+node_modules
+**/node_modules
+web/.next
+.next
+
+# Local state, never an artifact — a hosted deploy keeps state in Postgres.
+.data
+**/.merrymen
+children
+tenants
+tenant-settings
+
+# VCS + scratch
+.git
+.gitignore
+*.log
+contracts/artifacts
+contracts/cache

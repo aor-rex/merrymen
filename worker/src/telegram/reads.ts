@@ -10,6 +10,11 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
+// RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
+// the note in service.ts). isHostedMode decides whether a missing agent id may
+// fall back to the single-tenant guess, or must refuse.
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
 function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -62,6 +67,23 @@ function currentAgentId(db: DatabaseSync): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The agent whose numbers these are. The caller passes the process's OWN agent
+ * (active.agentId — under process-per-tenant that IS this tenant), and once the
+ * ledger is shared across tenants that passed id is the ONLY correct answer.
+ *
+ * currentAgentId is a SELF-HOSTED fallback for the idle case — no armed grant,
+ * reporting on the last agent in a single-tenant DB. It must NEVER run hosted:
+ * "the newest agent in the table" there is some other tenant, so a null id on a
+ * shared ledger returns null (→ a "no agent" answer) rather than leaking a
+ * neighbour's book.
+ */
+function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
+  if (passed) return passed;
+  if (isHostedMode()) return null;
+  return currentAgentId(db);
 }
 
 /**
@@ -130,6 +152,13 @@ function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number)
 }
 
 export interface StatusContext {
+  /**
+   * The process's own agent (active.agentId), or null when idle. Optional so the
+   * self-hosted callers and the tests that predate multi-tenancy still typecheck;
+   * when present it scopes every figure to this tenant, which is what keeps one
+   * tenant's book off another's screen once the ledger is shared.
+   */
+  agentId?: string | null;
   /** The merryman's user-given name (soul IDENTITY.md). */
   name: string;
   strategy: string;
@@ -160,7 +189,7 @@ export function readStatus(ctx: StatusContext): string {
       // Say the quiet part out loud: people fund testnet, see 0, and think it's
       // broken. It isn't — the token registry is mainnet-only, so on-chain reads
       // there always return 0, and practice never spends those funds anyway.
-      lines.push(`• chain: testnet 46630 — <b>practice only</b> (no real swaps)`);
+      lines.push(`• chain: testnet 46630 — <b>simulated only</b> (no real swaps)`);
       lines.push(
         `• ℹ️ testnet funds you send are <b>not used and not shown</b> — merrymen only knows mainnet ` +
           `token addresses, so a funded balance reads 0 here. It paper-trades a simulated ` +
@@ -183,9 +212,17 @@ export function readStatus(ctx: StatusContext): string {
   const db = openRO();
   if (db) {
     try {
-      const eq = db
-        .prepare("SELECT equity_usdg, datetime(at,'unixepoch') AS at FROM equity ORDER BY at DESC, id DESC LIMIT 1")
-        .get() as { equity_usdg: number; at: string } | undefined;
+      const agentId = resolveAgent(db, ctx.agentId);
+      // Scoped to this tenant's latest equity row — an unfiltered ORDER BY at
+      // DESC would surface whichever tenant last wrote an equity row on a shared
+      // ledger. No agent resolved → no equity line, never a neighbour's number.
+      const eq = agentId
+        ? (db
+            .prepare(
+              "SELECT equity_usdg FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 1",
+            )
+            .get(agentId) as { equity_usdg: number } | undefined)
+        : undefined;
       if (eq) lines.push(`• equity: ${eq.equity_usdg.toFixed(2)} USDG`);
     } catch {
       /* table not ready */
@@ -195,15 +232,17 @@ export function readStatus(ctx: StatusContext): string {
   return lines.join("\n");
 }
 
-export function readPositions(): string {
+export function readPositions(agentId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet — the band hasn't ridden.";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "📖 no open positions — all in cash/vault.";
     const rows = db
       .prepare(
-        "SELECT symbol, value_usdg, price_usd, price_stale, price_source FROM positions ORDER BY value_usdg DESC",
+        "SELECT symbol, value_usdg, price_usd, price_stale, price_source FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC",
       )
-      .all() as {
+      .all(who) as {
       symbol: string;
       value_usdg: number;
       price_usd: number;
@@ -217,12 +256,14 @@ export function readPositions(): string {
         // a Chainlink-priced one. Marking it inline means the owner never has
         // to remember which is which.
         const src =
-          r.price_source === "pool" ? " (pool px)" : r.price_source === "broker" ? " (broker px)" : "";
+          priceSourceTag(r.price_source) ? ` (${priceSourceTag(r.price_source)})` : "";
         const stale = r.price_stale ? " (px 24/5)" : "";
         return `• ${esc(r.symbol)}: $${r.value_usdg.toFixed(2)}${stale}${src} @ $${r.price_usd.toFixed(2)}`;
       })
       .join("\n");
-    const anyPool = rows.some((r) => r.price_source === "pool");
+    // Any non-feed price, not just a pool one — a curve mark needs the same
+    // footnote, and more so.
+    const anyPool = rows.some((r) => priceSourceTag(r.price_source) !== "");
     const note = anyPool
       ? "\n<i>pool px = a Uniswap time-averaged price, not a Chainlink feed — it passed the depth and divergence checks, but it's a thinner claim.</i>"
       : "";
@@ -234,12 +275,12 @@ export function readPositions(): string {
   }
 }
 
-export function readPnl(): string {
+export function readPnl(passedId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
-    const agentId = currentAgentId(db);
-    if (!agentId) return "📈 no agent yet — grant one at localhost:3100/grant.";
+    const agentId = resolveAgent(db, passedId);
+    if (!agentId) return `📈 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const epoch = agentEpoch(db, agentId);
     const eq = db
       .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
@@ -337,19 +378,27 @@ export function readPnl(): string {
   }
 }
 
-export function readTrades(): string {
+export function readTrades(agentId?: string | null): string {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "🧾 no trades yet.";
     const rows = db
       .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades ORDER BY created_at DESC, id DESC LIMIT 8",
+        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 8",
       )
-      .all() as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
+      .all(who) as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
     if (!rows.length) return "🧾 no trades yet.";
     const icon = (s: string) => (s === "landed" ? "✅" : s === "rejected" ? "🚫" : "⚠️");
     const body = rows
-      .map((r) => `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(r.reject_rule ?? "")})` : ""} · ${r.at}`)
+      // Words, not the slug — same vocabulary as the feed, the chat and the
+      // push. A list of refusals reading `(no-exit) (no-exit) (no-exit)` tells
+      // an owner how OFTEN it happened and nothing about what it was.
+      .map(
+        (r) =>
+          `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(rejectRuleLabel(r.reject_rule) ?? r.reject_rule ?? "")})` : ""} · ${r.at}`,
+      )
       .join("\n");
     return `🧾 <b>recent trades</b>\n${body}`;
   } catch {
@@ -424,19 +473,36 @@ function localMidnightUnix(now = new Date()): number {
 const trend = (delta: number) => (delta > 0.005 ? "📈" : delta < -0.005 ? "📉" : "➡️");
 
 /** The daily campfire report — also served on demand by /report. */
-export function readReport(ctx: StatusContext): string {
+/**
+ * The campfire report.
+ *
+ * `publicSafe` STRIPS THE BALANCE SHEET. This report goes two places: to the
+ * owner over Telegram, where their own numbers are exactly what they asked
+ * for, and — via virtuals-streamer — to a PUBLIC terminal, where they are
+ * somebody's account balance on the internet.
+ *
+ * That second path has been live and unredacted: exact equity, the biggest
+ * holding with its dollar value, and the last event verbatim, which is where
+ * the strategist's own prose lands and where a policy refusal naming a
+ * recipient allowlist can land too.
+ *
+ * What survives publicly is what makes a report worth reading without saying
+ * how much money anybody has: the PERCENTAGE moves, which position is the
+ * biggest without its size, and how the wall did today.
+ */
+export function readReport(ctx: StatusContext, publicSafe = false): string {
   const db = openRO();
   const lines: string[] = ["🔥 <b>campfire report</b>"];
   if (!db) return "🔥 no ledger yet — the band hasn't ridden. Nothing to report.";
   try {
-    const agentId = currentAgentId(db);
-    if (!agentId) return "🔥 no agent yet — grant one at localhost:3100/grant.";
+    const agentId = resolveAgent(db, ctx.agentId);
+    if (!agentId) return `🔥 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const midnight = localMidnightUnix();
     const all = equitySeries(db, agentId);
     const today = equitySeries(db, agentId, midnight);
     if (all.length >= 1) {
       const eq = all[all.length - 1]!.equity_usdg;
-      lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
+      if (!publicSafe) lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
     }
     // Both windows net out capital that crossed the boundary inside them, so a
     // deposit doesn't read as a day's winnings.
@@ -448,7 +514,10 @@ export function readReport(ctx: StatusContext): string {
         (netContributions(db, agentId, midnight) ?? 0);
       const base = today[0]!.equity_usdg;
       const pct = base > 0 ? (d / base) * 100 : 0;
-      lines.push(`• today: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      // The percentage says how it did; the dollar figure says how big the book
+      // is. Publicly, only the first is anybody else's business.
+      const move = publicSafe ? "" : ` ${usd(d)}`;
+      lines.push(`• today: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     } else {
       lines.push(`• today: not enough ticks yet`);
     }
@@ -458,7 +527,8 @@ export function readReport(ctx: StatusContext): string {
     } else if (all.length >= 1) {
       const d = all[all.length - 1]!.equity_usdg - contributed;
       const pct = contributed > 0 ? (d / contributed) * 100 : 0;
-      lines.push(`• all-time: ${trend(d)} ${usd(d)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      const move = publicSafe ? "" : ` ${usd(d)}`;
+      lines.push(`• all-time: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
     }
     // Positions — biggest and smallest holdings.
     try {
@@ -469,7 +539,9 @@ export function readReport(ctx: StatusContext): string {
         .all(agentId) as { symbol: string; value_usdg: number }[];
       if (pos.length) {
         const top = pos[0]!;
-        lines.push(`• biggest holding: ${esc(top.symbol)} ($${top.value_usdg.toFixed(2)})${pos.length > 1 ? ` of ${pos.length} positions` : ""}`);
+        // Which position is biggest is a view. What it is worth is a balance.
+        const size = publicSafe ? "" : ` (${top.value_usdg.toFixed(2)})`;
+        lines.push(`• biggest holding: ${esc(top.symbol)}${size}${pos.length > 1 ? ` of ${pos.length} positions` : ""}`);
       } else {
         lines.push(`• book: all in cash/vault`);
       }
@@ -494,7 +566,11 @@ export function readReport(ctx: StatusContext): string {
           "SELECT message FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .get(agentId) as { message: string } | undefined;
-      if (ev) lines.push(`• last word from camp: ${esc(ev.message.slice(0, 160))}`);
+      // NEVER PUBLICLY. This is the newest event verbatim, and events carry the
+      // strategist's own prose (which can quote the signals it was handed) and
+      // policy refusals that name allowlisted recipients. The public feed has a
+      // whitelist for exactly this text; there is no version of it here.
+      if (ev && !publicSafe) lines.push(`• last word from camp: ${esc(ev.message.slice(0, 160))}`);
     } catch {
       /* no events table yet */
     }
@@ -510,8 +586,8 @@ export function readBrag(ctx: StatusContext): string {
   const db = openRO();
   if (!db) return "🏹 no ledger yet — nothing to brag about (yet).";
   try {
-    const agentId = currentAgentId(db);
-    if (!agentId) return "🏹 no agent yet — grant one at localhost:3100/grant.";
+    const agentId = resolveAgent(db, ctx.agentId);
+    if (!agentId) return `🏹 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const all = equitySeries(db, agentId);
     if (all.length < 2) return "🏹 the band just saddled up — give it a few ticks, then we'll brag.";
     const first = all[0]!;
@@ -530,8 +606,8 @@ export function readBrag(ctx: StatusContext): string {
     let best = "";
     try {
       const b = db
-        .prepare("SELECT kind, amount_usdg FROM trades WHERE status='landed' ORDER BY amount_usdg DESC LIMIT 1")
-        .get() as { kind: string; amount_usdg: number } | undefined;
+        .prepare("SELECT kind, amount_usdg FROM trades WHERE agent_id = ? AND status='landed' ORDER BY amount_usdg DESC LIMIT 1")
+        .get(agentId) as { kind: string; amount_usdg: number } | undefined;
       if (b) best = `\n• best shot: ${esc(b.kind)} ${b.amount_usdg.toFixed(2)} USDG`;
     } catch {
       /* no trades */
@@ -554,29 +630,103 @@ export function readBrag(ctx: StatusContext): string {
  * events recorded around it. Works with no LLM; the service may hand this to
  * Claude for an in-character retelling.
  */
-export function readWhyEvidence(): { text: string; hasTrade: boolean } {
+/**
+ * WHY THE AGENT IS NOT TRADING — the question `/why` is actually asked.
+ *
+ * `/why` explains the LAST TRADE. An owner whose agent has never traded is
+ * exactly the owner who types it, and the honest-but-useless answer they got
+ * was "I haven't made a trade yet — nothing to explain." The reason is known:
+ * `liveBlocker()` decides it every tick and it is written to `agents.live_blocker`.
+ * It simply had no route into Telegram — /status does not carry it either, so
+ * the one place an owner can learn why their agent is idle is the dashboard,
+ * and the bot they are already talking to changes the subject.
+ *
+ * Returns null when there is no verdict to give: no ledger, no agent, an
+ * un-migrated column, or a blocker string we do not recognise. Null means "I
+ * have nothing to add", never "nothing is wrong".
+ */
+export function readLiveBlocker(agentId?: string | null): string | null {
+  const db = openRO();
+  if (!db) return null;
+  try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return null;
+    const row = db
+      .prepare("SELECT live_blocker FROM agents WHERE smart_account = ?")
+      .get(who) as { live_blocker: string | null } | undefined;
+    const rule = row?.live_blocker?.trim();
+    if (!rule) return null;
+    const said = liveBlockerText(rule as never);
+    // liveBlockerText falls through to a generic string for anything it does
+    // not know; an unrecognised rule is better reported as its own name than
+    // dressed up in a sentence that does not fit it.
+    return said && said.length > 0 ? said : rule;
+  } catch {
+    // Pre-migration ledger has no live_blocker column. Unknown, not clear.
+    return null;
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+export function readWhyEvidence(agentId?: string | null): { text: string; hasTrade: boolean } {
   const db = openRO();
   if (!db) return { text: "no ledger yet — I haven't made a trade to explain.", hasTrade: false };
+  /**
+   * The no-trade answer, with the blocker when we have one. Built here so both
+   * early returns below give the same reply — the first draft fixed only the
+   * second, and the "no agent resolved" path kept the dead end.
+   */
+  const nothingYet = (): { text: string; hasTrade: boolean } => {
+    const why = readLiveBlocker(agentId);
+    if (!why) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
+    return {
+      text: [
+        "🧾 I haven't made a trade yet — but I know why.",
+        "",
+        `• ${esc(why)}`,
+        "",
+        `Fix it at <b>${esc(dashboardBase())}</b> — the banner on your agent says which button.`,
+      ].join("\n"),
+      hasTrade: false,
+    };
+  };
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return nothingYet();
     const t = db
       .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades ORDER BY id DESC LIMIT 1",
+        "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
       )
-      .get() as
+      .get(who) as
       | { kind: string; amount_usdg: number; status: string; reject_rule: string | null; tx_hash: string | null; created_at: string | number; decision_id: string | null }
       | undefined;
-    if (!t) return { text: "🧾 I haven't made a trade yet — nothing to explain.", hasTrade: false };
+    if (!t) return nothingYet();
     const lines = [
       `🧾 <b>my last move</b>`,
-      `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` (${esc(t.reject_rule)})` : ""}`,
+      // "my last move" is the one an owner asks after a refusal, so it is the
+      // worst place of all to answer with the slug. Remedy included: unlike the
+      // push, this fires only when he asks, so it cannot become noise.
+      `• ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG — ${esc(t.status)}${t.reject_rule ? ` — ${esc(rejectRuleLabel(t.reject_rule) ?? t.reject_rule)} (${esc(t.reject_rule)})` : ""}`,
+      ...(t.reject_rule && rejectRuleRemedy(t.reject_rule)
+        ? [`• ${esc(rejectRuleRemedy(t.reject_rule)!)}`]
+        : []),
     ];
     if (t.tx_hash) lines.push(`• tx: <code>${esc(t.tx_hash)}</code>`);
     // The real reasoning: the trade's OWN decision row, joined by decision_id.
     // This is exact — no more guessing with a time window.
     const d = t.decision_id
       ? (db
-          .prepare("SELECT source, action, symbol, size_usdg, reason, dropped_rule FROM decisions WHERE id = ?")
-          .get(t.decision_id) as
+          // AND agent_id: decisions.id is a global autoincrement, so an unscoped
+          // WHERE id = ? could surface another tenant's decision row (their
+          // strategy's reasoning) if a decision_id ever collided across the
+          // shared ledger. Pinning the tenant makes that structurally impossible.
+          .prepare("SELECT source, action, symbol, size_usdg, reason, dropped_rule FROM decisions WHERE id = ? AND agent_id = ?")
+          .get(t.decision_id, who) as
           | { source: string; action: string | null; symbol: string | null; size_usdg: number | null; reason: string | null; dropped_rule: string | null }
           | undefined)
       : undefined;
@@ -593,9 +743,9 @@ export function readWhyEvidence(): { text: string; hasTrade: boolean } {
           typeof t.created_at === "number" ? t.created_at : Math.floor(new Date(t.created_at).getTime() / 1000);
         const evs = db
           .prepare(
-            "SELECT message FROM events WHERE created_at BETWEEN ? AND ? ORDER BY created_at DESC, id DESC LIMIT 4",
+            "SELECT message FROM events WHERE agent_id = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC, id DESC LIMIT 4",
           )
-          .all(tradeUnix - 900, tradeUnix + 900) as { message: string }[];
+          .all(who, tradeUnix - 900, tradeUnix + 900) as { message: string }[];
         if (evs.length) {
           lines.push(`• what was on my mind (approx):`);
           for (const e of evs) lines.push(`  · ${esc(e.message.slice(0, 140))}`);
@@ -611,13 +761,15 @@ export function readWhyEvidence(): { text: string; hasTrade: boolean } {
 }
 
 /** Recent event-feed lines (for the LLM's context). */
-export function readRecentEvents(limit = 5): string {
+export function readRecentEvents(agentId?: string | null, limit = 5): string {
   const db = openRO();
   if (!db) return "(no events)";
   try {
+    const who = resolveAgent(db, agentId);
+    if (!who) return "(no events)";
     const rows = db
-      .prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events ORDER BY created_at DESC, id DESC LIMIT ?")
-      .all(limit) as { level: string; message: string; at: string }[];
+      .prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(who, limit) as { level: string; message: string; at: string }[];
     if (!rows.length) return "(no events)";
     return rows.map((r) => `[${r.at}] ${r.level}: ${r.message}`).join("\n");
   } catch {
@@ -636,14 +788,14 @@ export function readLlmState(ctx: StatusContext): string {
   return [
     strip(readStatus(ctx)),
     "",
-    strip(readPositions()),
+    strip(readPositions(ctx.agentId)),
     "",
-    strip(readPnl()),
+    strip(readPnl(ctx.agentId)),
     "",
-    strip(readTrades()),
+    strip(readTrades(ctx.agentId)),
     "",
     "RECENT EVENTS:",
-    readRecentEvents(5),
+    readRecentEvents(ctx.agentId, 5),
   ].join("\n");
 }
 
@@ -653,7 +805,7 @@ export function readLlmState(ctx: StatusContext): string {
  * key must never touch a chat app), so this is a signpost to the local dashboard
  * rather than a dead end.
  */
-export const WALLET_TEXT = [
+const WALLET_TEXT_LINES = [
   "🏹 <b>your wallet lives in the dashboard</b> — not in chat.",
   "",
   "Open <b>http://localhost:3100/grant</b> on the machine running merrymen:",
@@ -666,7 +818,77 @@ export const WALLET_TEXT = [
   "Heads-up: the address you funded is a <b>smart account</b>, not a MetaMask wallet — importing your owner key into MetaMask shows a different, empty address. That’s normal; your funds are safe at the account address.",
   "",
   "Why not here? Your owner key never touches chat — wallet actions stay on your machine.",
-].join("\n");
+];
+
+/** The signpost alone, for callers with no ledger to read. */
+export const WALLET_TEXT = WALLET_TEXT_LINES.join("\n");
+
+/**
+ * `/wallet`, leading with the ONE fact that resolves the confusion: the address.
+ *
+ * A user imported his owner key into MetaMask, saw an empty wallet, and told us
+ * “I don't see my money… which is not the wallet I've sent tokens to.” Every
+ * observable fact in that message is correct; only the conclusion is wrong.
+ *
+ * The explanation already existed — in the grant page, the recovery panel, the
+ * README, and the last line of the signpost below. He hit it anyway, and his own
+ * message shows why: he was holding two addresses and nothing put them side by
+ * side and said which was which. A paragraph about smart accounts does not
+ * answer “is MY money gone”. His own address, printed, does.
+ *
+ * So the address leads and the concept follows it, rather than the other way
+ * round. This is also why it became a function — the static export could not
+ * reach the ledger to know the address.
+ */
+/**
+ * WHERE THIS OWNER'S DASHBOARD ACTUALLY IS.
+ *
+ * Every signpost in this file was written for a self-hosted operator and hard-
+ * coded `http://localhost:3100`. On the hosted fleet that is not merely
+ * unhelpful, it is wrong: there is no server on the reader's machine, so the
+ * instruction cannot be followed at all. `/wallet`, `/fund`, `/grant`,
+ * `/recover`, `/restore` and `/reconnect` all land on that text, and "fund your
+ * agent" is the single commonest thing anyone is ever told to do.
+ *
+ * Order: an explicit env override wins, then hosted-mode (the orchestrator sets
+ * MERRYMEN_HOSTED on every child), then the self-hosted default — which stays
+ * exactly what it was, because for a self-hosted operator it was always right.
+ */
+export function dashboardBase(): string {
+  const override = process.env.MERRYMEN_DASHBOARD_URL?.trim();
+  if (override) return override.replace(/\/+$/, "");
+  return isHostedMode() ? "https://app.merrymen.dev" : "http://localhost:3100";
+}
+
+export function readWallet(agentId?: string | null, dashboardUrl?: string): string {
+  const base = dashboardUrl ?? dashboardBase();
+  const signpost = WALLET_TEXT_LINES.map((l) =>
+    l.split("http://localhost:3100").join(base),
+  );
+  const db = openRO();
+  if (!db) return signpost.join("\n");
+  let who: string | null = null;
+  try {
+    who = resolveAgent(db, agentId);
+  } catch {
+    /* pre-migration ledger — the signpost still stands on its own */
+  } finally {
+    db.close();
+  }
+  if (!who) return signpost.join("\n");
+  return [
+    "🏹 <b>your agent's account</b> — this is where your money is:",
+    `<code>${esc(who)}</code>`,
+    "",
+    "That address is a <b>smart account</b>. Your owner key CONTROLS it but is not",
+    "it — import the key into MetaMask and MetaMask shows the KEY's own address,",
+    "which is empty and always will be. Nothing is lost; there are two addresses",
+    "and that is the other one. Compare what MetaMask shows against the address",
+    "above.",
+    "",
+    ...signpost,
+  ].join("\n");
+}
 
 export const HELP_TEXT = [
   "🏹 <b>merryman — commands</b>",

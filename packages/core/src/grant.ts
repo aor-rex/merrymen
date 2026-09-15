@@ -88,6 +88,114 @@ export function grantV4Adapter(
   return a.toLowerCase() as `0x${string}`;
 }
 
+/**
+ * grantFeatures marker meaning "this signature can call the PonsSelfTrade
+ * adapter" — the contract that makes a bonding curve constrainable by the wall.
+ *
+ * DISTINCT FROM GRANT_V4_ADAPTER, and the distinction is the point. The two
+ * adapters reach different venues, carry different risks, and are granted by
+ * separate opt-ins; one marker covering both would tell the worker a route
+ * exists that the signature does not carry. It would also make the owner's
+ * only choice all-or-nothing.
+ *
+ * What this marker does NOT mean, so nobody reads more into it than is there:
+ * it does not mean native-quoted curves are reachable — they are 53.6% of the
+ * launchpad and the adapter is non-payable, so they are not — and it does not
+ * mean the wall vouches for the curve, which it structurally cannot.
+ */
+export const GRANT_PONS_ADAPTER = "pons-adapter";
+
+/**
+ * The Pons adapter address this signature can actually call, or null.
+ *
+ * BOTH the marker and a valid address are required, for the same reason
+ * grantV4Adapter demands both: a marker alone is a claim, not evidence, and a
+ * claim the wall does not back means the worker builds a UserOp the account
+ * contract refuses — gas spent to be told no, with a revert reason that
+ * explains nothing. The address is per-deploy and sealed into the signature at
+ * signing time; the worker must call THIS address, never whatever settings says
+ * at tick time.
+ */
+export function grantPonsAdapter(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsAdapterAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_ADAPTER)) return null;
+  const a = grant.ponsAdapterAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
+/**
+ * The CLASS permission: this signature can trade Pons tokens it never named.
+ *
+ * DISTINCT FROM GRANT_PONS_ADAPTER, and the distinction carries the whole
+ * security difference. `pons-adapter` lets the agent trade the curve tokens the
+ * owner ENUMERATED at signing time. This one lets it trade tokens that did not
+ * exist when the grant was signed — which is what a sniper needs and what no
+ * enumerated list can express. An owner may hold the first without the second,
+ * and the separate marker is what makes that choice available.
+ *
+ * WHAT THE OWNER IS ACTUALLY OPTING INTO, said plainly because a marker name
+ * cannot say it: an agent that may convert up to the per-trade USDG cap,
+ * repeatedly until expiry, into ANY token reachable through a curve — one
+ * nobody enumerated or reviewed. What still bounds it: the funding leg stays
+ * the enumerated quote asset, the amount stays under the capped USDG approve,
+ * and the vault can pay nobody but the account. What does NOT bound it: the
+ * chain cannot check the curve's provenance (a curve self-reports its factory
+ * and the Pons factory publishes no registry), so for the class case the CHAIN
+ * IS LOOSER THAN THE OFF-CHAIN MIRROR and `knownCurves` is the only provenance
+ * gate. That inversion is the price of the capability.
+ */
+export const GRANT_PONS_CLASS = "pons-class";
+
+/**
+ * The per-account class vault this signature can call, or null.
+ *
+ * BOTH the marker and a valid address are required, for exactly the reason
+ * grantPonsAdapter demands both: a marker alone is a claim, not evidence.
+ *
+ * WHY AN ADDRESS AT ALL, when the vault is derivable from the owner: because
+ * the wall pins it as a literal `target`, and the worker must call THE ADDRESS
+ * THE SIGNATURE SEALED rather than one it re-derives at tick time. A derivation
+ * that drifted — a different factory, a changed init code — would send the
+ * agent's money to a contract the wall never authorised, and the failure would
+ * look like a revert with no explanation. Sealing it makes the two agree by
+ * construction.
+ */
+export function grantPonsClassVault(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_CLASS)) return null;
+  const a = grant.ponsClassVaultAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
+/**
+ * The FACTORY this signature's `deploy` permission was sealed against, or null.
+ *
+ * SAME MARKER as the vault, deliberately, and not a second one. `wall.ts` emits
+ * all three class permissions from one branch, so a separate marker would allow
+ * a grant that claims a class route, can buy through a vault, and has no way to
+ * CREATE the vault it buys through — "a marker alone is a claim" wearing a new
+ * costume. One decision, one marker, three permissions.
+ *
+ * The address is sealed for the same reason the vault's is: the worker must call
+ * the factory the SIGNATURE covers, not one it re-derives or reads from settings.
+ * A settings-sourced factory would let a settings write redirect where a vault
+ * gets created — and since the vault address is a CREATE2 function OF the
+ * factory, that silently moves the account's custody somewhere the wall never
+ * pinned.
+ */
+export function grantPonsClassVaultFactory(
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultFactoryAddress"> | null | undefined,
+): `0x${string}` | null {
+  if (!grant?.grantFeatures?.includes(GRANT_PONS_CLASS)) return null;
+  const a = grant.ponsClassVaultFactoryAddress;
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) return null;
+  return a.toLowerCase() as `0x${string}`;
+}
+
 export const GRANT_TRANSFER = "transfer";
 
 /**
@@ -142,6 +250,126 @@ export interface GrantCaps {
   maxOpsPerDay: number;
 }
 
+/**
+ * The message both signatures are made over when a tenant claims an account.
+ *
+ * SHARED ON PURPOSE. The browser signs this text and the server reconstructs it
+ * to recover the signatures; if the two ever built it differently every claim
+ * would fail with nothing obviously wrong. One definition, imported by both —
+ * the same reason the wall itself lives in this package.
+ *
+ * DELIBERATELY NOT CONFUSABLE WITH THE LOGIN CHALLENGE (`challengeMessage` in
+ * web/src/lib/auth.ts). Both are plain `personal_sign` over the same key, so if
+ * the texts could be mistaken for one another a signature captured for one
+ * purpose could be replayed as the other. The opening line names a different
+ * action in different words, and every bound value appears literally — EIP-191
+ * has no domain separator to carry them.
+ *
+ * Each field earns its place:
+ *   origin  — a claim signed for one deployment cannot be replayed at another
+ *   nonce   — server-issued, expiring, single-use; stops replay of this claim
+ *   owner   — the key being vouched for
+ *   account — the smart account claimed, i.e. which ledger partition is at stake
+ *   chainId — merrymen runs testnet 46630 and mainnet 4663; without it one
+ *             signature would bind on both
+ */
+/**
+ * WHICH SECURITY MODEL A BINDING WAS MADE UNDER. Never inferred.
+ *
+ * Both versions prove the same two things — that the person is who they say
+ * they are, and that they hold the key the account derives from — but they
+ * prove them with different evidence, and the evidence is not interchangeable:
+ *
+ *   legacy-wallet-owner-v1  the login wallet signs (authentication) and a
+ *                           SEPARATE browser-held owner key co-signs the same
+ *                           text (owner authority). Two keys, two signatures.
+ *
+ *   privy-did-owner-v1      a verified Privy access token carries the DID
+ *                           (authentication) and the embedded owner wallet
+ *                           signs the challenge (owner authority). One key may
+ *                           serve as both the identity anchor and the owner —
+ *                           the proofs are still separate, because one of them
+ *                           is a JWT the server verified and the other is a
+ *                           signature over a server-issued nonce.
+ *
+ * They are versioned rather than merged because a validator that accepted both
+ * shapes would have to decide, per request, which evidence it was looking at —
+ * and the wrong guess in either direction is a downgrade. A binding whose
+ * version this deployment does not recognise is refused, not best-guessed.
+ */
+export type BindingVersion = "legacy-wallet-owner-v1" | "privy-did-owner-v1";
+
+/**
+ * What an absent `version` means, and why that is a fact rather than a guess.
+ *
+ * Every grant signed before this field existed was made under the two-signature
+ * browser-owner model, because that was the only model there was. So absent
+ * resolves to legacy by CONSTRUCTION, not by falling through a default — and it
+ * resolves to the STRICTER of the two, which needs two independent signatures.
+ * An unrecognised version string is a refusal.
+ */
+export const DEFAULT_BINDING_VERSION: BindingVersion = "legacy-wallet-owner-v1";
+
+export function isBindingVersion(v: unknown): v is BindingVersion {
+  return v === "legacy-wallet-owner-v1" || v === "privy-did-owner-v1";
+}
+
+/** What a claim binds, by version. `did` exists on exactly the arm that needs it. */
+export type BindingClaim =
+  | {
+      version?: "legacy-wallet-owner-v1";
+      origin: string;
+      nonce: string;
+      owner: `0x${string}`;
+      smartAccount: `0x${string}`;
+      chainId: number;
+    }
+  | {
+      version: "privy-did-owner-v1";
+      origin: string;
+      nonce: string;
+      owner: `0x${string}`;
+      smartAccount: `0x${string}`;
+      chainId: number;
+      /** The Privy DID the access token was verified to carry. */
+      did: string;
+    };
+
+export function bindingMessage(args: BindingClaim): string {
+  if (args.version === "privy-did-owner-v1") {
+    // THE DID IS IN THE SIGNED TEXT. Without it the owner signature would say
+    // "this key authorizes account X" and name no identity at all — it would
+    // verify just as well when replayed under somebody else's login. Under the
+    // legacy version the second signature carries that job; here the text does.
+    return [
+      `${args.origin} wants you to authorize a merrymen agent account.`,
+      "",
+      "You are linking the agent wallet below to your merrymen identity. It moves no funds.",
+      "",
+      `Agent account: ${args.smartAccount.toLowerCase()}`,
+      `Owner key: ${args.owner.toLowerCase()}`,
+      `Identity: ${args.did}`,
+      `Chain ID: ${args.chainId}`,
+      `URI: ${args.origin}`,
+      `Nonce: ${args.nonce}`,
+    ].join("\n");
+  }
+  // THE LEGACY TEXT IS FROZEN, BYTE FOR BYTE. Grants signed by a browser that
+  // has not reloaded are still in flight, and a signature is over the exact
+  // bytes — change a space here and every one of them stops verifying.
+  return [
+    `${args.origin} wants you to authorize a merrymen agent account.`,
+    "",
+    "You are linking the agent wallet below to this login. It moves no funds.",
+    "",
+    `Agent account: ${args.smartAccount.toLowerCase()}`,
+    `Owner key: ${args.owner.toLowerCase()}`,
+    `Chain ID: ${args.chainId}`,
+    `URI: ${args.origin}`,
+    `Nonce: ${args.nonce}`,
+  ].join("\n");
+}
+
 export interface StoredGrant {
   smartAccount: `0x${string}`;
   owner: `0x${string}`;
@@ -176,6 +404,91 @@ export interface StoredGrant {
    * the only reader and requires the GRANT_V4_ADAPTER marker alongside it.
    */
   v4AdapterAddress?: string;
+  /**
+   * The PonsSelfTrade adapter this signature's `tradeExactIn` permission was
+   * sealed against, lowercased. Per-deploy and per-chain like its v4 sibling,
+   * so it lives on the grant rather than in a registry constant — see
+   * grantPonsAdapter, which is the only reader and requires the
+   * GRANT_PONS_ADAPTER marker alongside it.
+   */
+  ponsAdapterAddress?: string;
+  /**
+   * The PonsClassVault this signature's class `buy`/`sell` permissions were
+   * sealed against, lowercased. PER ACCOUNT, not per deploy — unlike its two
+   * adapter siblings, every account has its own vault, so this address is
+   * unique to this grant.
+   *
+   * It is knowable before the vault exists (CREATE2, owner as salt), which is
+   * the only reason a class permission can be written at all: the wall has to
+   * name the target at signing time, and at signing time the vault has usually
+   * not been deployed. See grantPonsClassVault, its only reader, which requires
+   * the GRANT_PONS_CLASS marker alongside it.
+   */
+  ponsClassVaultAddress?: string;
+  /**
+   * The PonsClassVaultFactory this signature's `deploy` permission was sealed
+   * against, lowercased.
+   *
+   * A DEPLOY CONSTANT, unlike the vault above — the same address for every
+   * account on a chain. Sealed anyway, because the vault address is a CREATE2
+   * function OF this one: a factory read from settings could silently relocate
+   * where the account's custody gets created, to somewhere the wall never
+   * pinned. See grantPonsClassVaultFactory.
+   */
+  ponsClassVaultFactoryAddress?: string;
+  /**
+   * HOSTED ONLY — the two signatures that bind this account to a tenant.
+   *
+   * The account's owner key is generated in the browser, so `owner` can never
+   * equal the signed-in wallet and the server cannot authorize on it directly.
+   * Instead the browser proves the pairing with two signatures over ONE
+   * server-issued nonce:
+   *
+   *   wallet — the signed-in wallet authorizes this (owner, smartAccount) pair.
+   *            Proves INTENT: this tenant meant to claim this account.
+   *   owner  — the generated owner key signs the same message, locally.
+   *            Proves POSSESSION: whoever claimed it actually holds the key.
+   *
+   * BOTH are required, and the second is the load-bearing one. With only the
+   * wallet signature the server's checks reduce to functions of PUBLIC
+   * addresses — anyone could authorize someone else's pair and squat their
+   * ledger partition, which keys on smart_account. The co-signature is what
+   * makes the claim unforgeable. See verifyGrantBinding in web/src/lib/auth.ts.
+   *
+   * Both are `personal_sign` (EIP-191), deliberately: it carries no domain and
+   * no chainId, so it needs no network switch and works in wallets that cannot
+   * reach this chain at all — Phantom among them, which supports Robinhood
+   * Chain for assets but refuses dApp connections on it.
+   *
+   * Absent on self-hosted grants, where localhost is the perimeter and there is
+   * no tenant to bind to.
+   */
+  binding?: {
+    /**
+     * Which security model this claim was made under. ABSENT MEANS LEGACY, and
+     * that is a statement about history rather than a default: the field did
+     * not exist when those grants were signed, and the only model that existed
+     * then was the two-signature one. See DEFAULT_BINDING_VERSION.
+     */
+    version?: BindingVersion;
+    /** The nonce the signature(s) were made over. Server-issued, single-use. */
+    nonce: string;
+    /**
+     * personal_sign by the signed-in wallet — must recover to the tenant.
+     * LEGACY ONLY. Under `privy-did-owner-v1` authentication is the verified
+     * access token, so there is no second signature and this is absent.
+     */
+    walletSignature?: `0x${string}`;
+    /** personal_sign by the owner key — must recover to `owner`. Both versions. */
+    ownerSignature: `0x${string}`;
+    /**
+     * The Privy DID this account is being bound to, echoed so the server can
+     * reconstruct the signed text. NEVER TRUSTED AS AN IDENTITY — the server
+     * compares it to the DID it verified out of the access token and refuses on
+     * any difference. `privy-did-owner-v1` only.
+     */
+    did?: string;
+  };
   /** TESTNET ONLY — production signers live in a TEE, never serialized. */
   demoSessionPrivateKey: `0x${string}`;
   /**
@@ -246,19 +559,38 @@ export function tokenCoverage(
 }
 
 /**
- * Registry symbols the owner has selected that this grant cannot sell.
+ * Basket symbols the owner has selected that this grant cannot sell.
  *
- * The settings UI offers every symbol in the registry, but only the ones baked
- * into the signature can be approved for a sell — and approving USDG is generic,
- * so the buy side works regardless. That asymmetry is what let someone pick AAPL
- * and end up holding it forever. Reported, and refused at the wall.
+ * Only the tokens baked into the signature can be approved for a sell —
+ * approving USDG is generic, so the buy side works regardless. That asymmetry is
+ * what let someone pick AAPL and end up holding it forever. Reported, and
+ * refused at the wall by the `no-exit` rule.
+ *
+ * IT LOOKED ONLY AT THE REGISTRY, which made the warning structurally incapable
+ * of firing for the case that needs it most. The settings screen has offered
+ * CUSTOM symbols as basket entries since `route.ts` widened its validator, and a
+ * custom token found no match in `STOCK_TOKENS` and simply fell out of the
+ * filter — so the red "update your trading permissions to buy or sell X" banner
+ * never appeared for a memecoin, which is exactly the token an owner is most
+ * likely to have added after signing.
+ *
+ * `customTokens` DEFAULTS TO EMPTY on purpose. The two existing callers —
+ * `Wallet.tsx` and the worker's coverage note — already union in
+ * `tokenCoverage()` themselves, and passing custom tokens here as well would
+ * report every one of them twice. Only the Settings screen, which had no such
+ * compensation, passes them.
  */
 export function uncoveredBasketSymbols(
   basketSymbols: readonly string[],
   grant: Pick<StoredGrant, "grantFeatures" | "grantTokens"> | null | undefined,
+  customTokens: readonly { symbol: string; address: string }[] = [],
 ): string[] {
   const sellable = sellableAssets(grant ?? null);
-  return STOCK_TOKENS.filter(
-    (t) => basketSymbols.includes(t.symbol) && !sellable.has(t.address.toLowerCase()),
-  ).map((t) => t.symbol);
+  const known = [
+    ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address })),
+    ...customTokens,
+  ];
+  return known
+    .filter((t) => basketSymbols.includes(t.symbol) && !sellable.has(t.address.toLowerCase()))
+    .map((t) => t.symbol);
 }

@@ -69,3 +69,141 @@ export const MORPHO = {
   ethenaSteakhouseUsdgVault: "0xbEeFF0fb1Dc19344A87b8479dAb60A2e16160737",
   graphqlApi: "https://blue-api.morpho.org/graphql",
 } as const;
+
+/**
+ * PonsClassVaultFactory, per chain. NOT YET DEPLOYED ANYWHERE.
+ *
+ * Both entries are `null`, and that is the honest state rather than a
+ * placeholder waiting to be forgotten: `contracts/deployments.json` does not
+ * exist in this checkout, so nothing here — not this factory, not PonsSelfTrade,
+ * not V4SelfSwap — has been deployed from it.
+ *
+ * WHY A CONSTANT AT ALL, when the grant already seals the factory it was signed
+ * against. Because RECOVERY may have no grant. `merrymen recover` accepts a
+ * pasted owner key with nothing else, and it can also run against an ARCHIVED
+ * grant — so the vault has to be derivable from the owner key alone, and the
+ * only missing input is the factory. Without this, an owner who lost their
+ * machine could not reach class positions they still own.
+ *
+ * A DEPLOY CONSTANT, never a setting, and the distinction matters more here than
+ * for the adapters: recovery signs with the sudo validator and is NOT bound by
+ * the wall, so a settings-supplied factory would let a settings write redirect
+ * where a recovery goes looking — and since the vault address is a CREATE2
+ * function of the factory, that points the sweep at a contract holding nothing
+ * while the real position sits elsewhere.
+ *
+ * `null` means "no class route on this chain", which is a different fact from
+ * "the factory answered zero" and must stay distinguishable from it.
+ */
+export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> = Object.freeze({
+  /**
+   * Robinhood Chain mainnet. Deployed 2026-09-11, 5,248 bytes.
+   *
+   * Verified independently of the deploy script's own report, and the decisive
+   * check was NOT that the code exists but that `vaultFor` predicts exactly what
+   * `deploy` produces — measured equal for three separate owner addresses. The
+   * wall pins the vault as a literal target BEFORE the contract exists, and a
+   * CALL to a codeless address SUCCEEDS with empty returndata: Kernel's batch
+   * executor checks `success` without decoding, so a mismatch here would let the
+   * USDG approve land, the buy no-op, and the trade report `landed` — a ledger
+   * row for a purchase that bought nothing. Also checked: `deploy(address(0))`
+   * reverts (ZeroOwner), and the factory is non-payable.
+   */
+  4663: "0x48a560371230ece659b2ba40fb19e8335866ab3d",
+  /** Robinhood Chain testnet — not deployed. */
+  46630: null,
+});
+
+/**
+ * PonsSelfTrade — the adapter that makes a Pons bonding curve constrainable by
+ * the permission wall. Per chain, `null` where it is not deployed.
+ *
+ * WHY A CONSTANT, when `ponsAdapterAddress` is already a setting. Because the
+ * setting could never be a platform answer. Its own docstring calls it "A HINT,
+ * never the authority", and the delivery path proves the point: the web
+ * `GET /api/settings` returns the stored blob with no default merged in, the
+ * phone signer has no settings fetch wired at all, and the worker's
+ * `MERRYMEN_PONS_ADAPTER_ADDRESS` sits on the far side of the boundary where it
+ * can only raise a drift warning. So every owner who never pasted an address
+ * signed a grant with no Pons route, and the weekend curve fallback — shipped,
+ * tested, and the documented remedy for all 24 equity feeds going stale — could
+ * not fire for anybody on the platform.
+ *
+ * A DEPLOY FACT, which is what makes a constant right rather than merely
+ * convenient: this address is decided once per chain by whoever ran the deploy,
+ * it is identical for every tenant, and no tenant has information about it that
+ * the platform lacks. That is the same argument PONS_CLASS_VAULT_FACTORY makes
+ * above, and the two should be read together.
+ *
+ * PRECEDENCE IS GRANT-FIRST, EVERYWHERE. The worker calls whatever address the
+ * signature SEALED (`grantPonsAdapter`), never this. This is consulted only when
+ * a grant is being MINTED, as the default a signer offers when the owner has not
+ * named one — so a redeploy can never redirect an existing grant's trades, and
+ * a settings entry still wins over it for an owner who has a reason to differ.
+ *
+ * `null` means "no curve route on this chain", which is a different fact from
+ * "the adapter answered zero" and must stay distinguishable from it.
+ */
+export const PONS_SELF_TRADE: Readonly<Record<number, string | null>> = Object.freeze({
+  /**
+   * Robinhood Chain mainnet. Deployed 2026-09-11, 3,095 bytes.
+   *
+   * Verified against the chain independently of the deploy script's own report:
+   * chain id 4663; selector `0xc0cfd48c` — `tradeExactIn(address,address,
+   * address,uint128,uint128,uint256)`, the exact shape PONS_SELFTRADE_ABI pins,
+   * uint128 and not uint256 — present in the bytecode; and a value-bearing call
+   * reverts, which is the property that lets the wall keep `valueLimit: 0n`.
+   */
+  4663: "0xe9dbd4b1e53f1c6d887ab8251d74e3745ac08019",
+  /** Robinhood Chain testnet — not deployed. */
+  46630: null,
+});
+
+/**
+ * The adapter a NEW signature should carry: the owner's own choice, or nothing.
+ *
+ * THIS DELIBERATELY DOES NOT FALL BACK TO `PONS_SELF_TRADE`, and the reason is a
+ * threat-model change rather than a bug in the adapter.
+ *
+ * It briefly did fall back, so that the weekend curve fallback could work
+ * without every owner pasting an address. What that missed: the curve is a
+ * caller-supplied argument that the wall CANNOT pin — ~475 new curve addresses
+ * an hour, so there is no set to enumerate — and `PonsSelfTrade.tradeExactIn`
+ * gives that address a live ERC-20 allowance over the pulled input
+ * (PonsSelfTrade.sol:225) before calling it. Meanwhile the stock-token and
+ * owner-extra `approve` permissions carry NO amount condition
+ * (wall.ts:485, `args: [{ONE_OF: spenders}, null]`), and the adapter is in
+ * `spenders`.
+ *
+ * So a COMPROMISED SESSION KEY — not a third party, and not an honest agent —
+ * can approve the adapter for an unbounded amount of an enumerated asset, call
+ * `tradeExactIn` naming a contract it controls as the "curve", and have that
+ * contract take the tokens. The output check is satisfied by returning one wei
+ * of another enumerated asset, since `minAmountOut` is unpinned. The on-chain
+ * ops cap that would have bounded repetition does not exist: RateLimitPolicy is
+ * codeless on 4663, so `maxOpsPerDay` is worker-enforced only (wall.ts:871-897).
+ *
+ * That converts a worker compromise from "can churn the portfolio" — every sale
+ * already being permitted, with `transfer` pinned to registered withdrawal
+ * addresses — into "can exfiltrate the portfolio". V4SelfSwap does not have this
+ * shape: it pins its PoolManager as an immutable, because there is exactly one
+ * singleton to trust. A Pons curve has no singleton, which is the whole reason
+ * the argument is unpinnable.
+ *
+ * The adapter stays deployed and remains reachable for an owner who sets
+ * `ponsAdapterAddress` themselves — an explicit, informed choice for curve
+ * tokens they have vetted. What is withdrawn is the SILENT default, which would
+ * have widened every grant signed from now on without the owner choosing it.
+ *
+ * Returns `undefined` rather than a zero address for "none", because every
+ * signer treats the field as optional-and-absent and a zero would mint a marker
+ * plus a permission pinned at nowhere.
+ */
+export function ponsAdapterForSigning(
+  chainId: number,
+  fromSettings?: string | null,
+): `0x${string}` | undefined {
+  void chainId;
+  if (!fromSettings || !/^0x[0-9a-fA-F]{40}$/.test(fromSettings)) return undefined;
+  return fromSettings.toLowerCase() as `0x${string}`;
+}

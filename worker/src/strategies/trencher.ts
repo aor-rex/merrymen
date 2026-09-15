@@ -20,7 +20,8 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy } from "./types";
+import type { Snapshot, Strategy, Tick } from "./types";
+import type { Why } from "./reasons";
 
 /** What the tick knows about a token it might enter. All chain-derived. */
 export interface Candidate {
@@ -47,6 +48,14 @@ export interface OpenPosition {
   entryLiquidityUsd: number;
   entrySec: number;
   costUsdg: bigint;
+  /**
+   * Raw quantity from the cost-basis ledger.
+   *
+   * Needed because an exit sometimes has to be sized WITHOUT a priced holding:
+   * a position nobody can value this tick is absent from snap.holdings, and
+   * that is precisely the position most urgent to leave.
+   */
+  qtyRaw: bigint;
 }
 
 export interface TrencherConfig {
@@ -114,7 +123,15 @@ export function shouldEnter(c: Candidate, cfg: TrencherConfig, nowSec: number): 
   return { enter: true };
 }
 
-export type ExitVerdict = { exit: false } | { exit: true; why: string };
+/**
+ * `cause` and `pct` ride alongside `why` so the public feed can render a
+ * sentence of its own from the CODE rather than quoting this one. The string
+ * stays exactly as it is — it is what the owner reads in their notes.
+ */
+export type ExitCause = "unpriceable" | "drain" | "stop" | "take" | "aged";
+export type ExitVerdict =
+  | { exit: false }
+  | { exit: true; why: string; cause: ExitCause; pct?: number };
 
 /**
  * Should this be closed? ANY condition is enough.
@@ -130,7 +147,7 @@ export function shouldExit(
 ): ExitVerdict {
   // Can't price it any more. Whatever happened, the window to leave is closing.
   if (now.price8 === null || now.price8 <= 0n) {
-    return { exit: true, why: "can't be priced any more — leaving while there's still a route" };
+    return { exit: true, why: "can't be priced any more — leaving while there's still a route", cause: "unpriceable" };
   }
   // Liquidity walking out is the shape a rug actually takes, and it precedes
   // the price move rather than following it.
@@ -140,13 +157,13 @@ export function shouldExit(
     now.liquidityUsd < pos.entryLiquidityUsd * cfg.liquidityDrainFraction
   ) {
     const pct = Math.round((1 - now.liquidityUsd / pos.entryLiquidityUsd) * 100);
-    return { exit: true, why: `${pct}% of the liquidity has left since entry` };
+    return { exit: true, why: `${pct}% of the liquidity has left since entry`, cause: "drain", pct };
   }
   const bps = priceMoveBps(pos.entryPrice8, now.price8);
-  if (bps <= -cfg.stopLossBps) return { exit: true, why: `down ${Math.abs(bps / 100).toFixed(1)}% from entry` };
-  if (bps >= cfg.takeProfitBps) return { exit: true, why: `up ${(bps / 100).toFixed(1)}% from entry` };
+  if (bps <= -cfg.stopLossBps) return { exit: true, why: `down ${Math.abs(bps / 100).toFixed(1)}% from entry`, cause: "stop", pct: bps / 100 };
+  if (bps >= cfg.takeProfitBps) return { exit: true, why: `up ${(bps / 100).toFixed(1)}% from entry`, cause: "take", pct: bps / 100 };
   if (now.nowSec - pos.entrySec > cfg.maxHoldSec) {
-    return { exit: true, why: `held ${Math.round((now.nowSec - pos.entrySec) / 3600)}h — past the window` };
+    return { exit: true, why: `held ${Math.round((now.nowSec - pos.entrySec) / 3600)}h — past the window`, cause: "aged" };
   }
   return { exit: false };
 }
@@ -162,11 +179,19 @@ export interface TrencherDeps {
   swapRouter: `0x${string}`;
   usdgToken: `0x${string}`;
   /** Candidates the discovery pass surfaced and the tick could price. */
-  candidates: () => readonly Candidate[];
+  candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
   /** What's currently held from previous entries. */
-  open: () => readonly OpenPosition[];
+  open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
   /** Live depth for a held token, when it's still readable. */
   liquidityOf: (token: `0x${string}`) => number | null;
+  /**
+   * Symbols HELD but which produced no price this tick.
+   *
+   * Passed in rather than inferred from absence, because absence from
+   * snap.holdings has two causes -- unpriceable, or the ledger drifting from
+   * the chain -- and only one of them should trigger a sell.
+   */
+  unpriceable?: () => ReadonlySet<string>;
   onNote?: (level: "ok" | "warn", message: string) => void;
 }
 
@@ -181,21 +206,33 @@ export interface TrencherDeps {
 export function makeTrencher(deps: TrencherDeps): Strategy {
   return {
     name: "trencher",
-    async tick(snap: Snapshot): Promise<TradeIntent[]> {
+    async tick(snap: Snapshot): Promise<Tick> {
       const nowSec = Math.floor(Date.now() / 1000);
       const intents: TradeIntent[] = [];
-      if (!snap.sequencerUp) return intents;
+      const why: (Why | null)[] = [];
+      if (!snap.sequencerUp) return { intents, why };
 
       // ── exits first, always ────────────────────────────────────────────
-      const openNow = deps.open();
+      const openNow = await deps.open();
+      const unpriceable = deps.unpriceable?.() ?? new Set<string>();
       for (const pos of openNow) {
         const held = snap.holdings.get(pos.symbol);
-        if (!held || held.rawBalance <= 0n) continue;
+        // A HELD-BUT-UNPRICEABLE position is the case this loop used to drop,
+        // and it is the one shouldExit's first branch was written for. Such a
+        // position is absent from snap.holdings — readPositions only reports
+        // what it could value — so `if (!held) continue` made that branch
+        // unreachable, and the exit designed for "the venue went dark" could
+        // never fire. The ledger still knows the quantity, which is enough to
+        // sell.
+        const stillUnpriceable = unpriceable.has(pos.symbol);
+        if (!held || held.rawBalance <= 0n) {
+          if (!stillUnpriceable || pos.qtyRaw <= 0n) continue;
+        }
         const quote = snap.prices.get(pos.symbol);
         const verdict = shouldExit(
           pos,
           {
-            price8: quote?.price8 ?? null,
+            price8: stillUnpriceable ? null : (quote?.price8 ?? null),
             liquidityUsd: deps.liquidityOf(pos.token),
             nowSec,
           },
@@ -208,14 +245,25 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           target: deps.swapRouter,
           sellToken: pos.token,
           buyToken: deps.usdgToken,
-          sellAmountRaw: held.rawBalance, // the whole position; partials leave a tail
-          notionalUsdg: held.valueUsdg,
+          // The whole position; partials leave a tail. From the ledger when
+          // there is no priced holding to read it from.
+          sellAmountRaw: held?.rawBalance ?? pos.qtyRaw,
+          // Cost is the honest stand-in for a position with no mark — the same
+          // substitution quarantine makes when it carries an unvaluable
+          // holding into equity at what was paid for it.
+          notionalUsdg: held?.valueUsdg ?? pos.costUsdg,
+        });
+        why.push({
+          code: "trench-exit",
+          symbol: pos.symbol,
+          cause: verdict.cause,
+          pct: verdict.pct,
         });
       }
 
       // ── entries, only with what's left ─────────────────────────────────
       const heldSymbols = new Set(openNow.map((p) => p.symbol));
-      for (const c of deps.candidates()) {
+      for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
         const size = deps.cfg.perEntryUsdg;
@@ -241,13 +289,21 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           sellAmountRaw: size,
           notionalUsdg: size,
         });
+        why.push({
+          code: "trench-enter",
+          symbol: c.symbol,
+          liqUsd: c.liquidityUsd,
+          fdvUsd: c.fdvUsd,
+          ageSec: c.ageSec,
+          usdgRaw: size,
+        });
         // One entry per tick. A discovery burst shouldn't become a burst of
         // simultaneous positions in tokens that all launched from the same
         // deployer minutes apart.
         break;
       }
 
-      return intents;
+      return { intents, why };
     },
   };
 }

@@ -1,0 +1,331 @@
+/**
+ * The feed, and the card it is made of.
+ *
+ * Every selector is scoped under .mm — enforced by styles/scoped.test.ts, not
+ * merely claimed in this comment, because the sheet this replaces made exactly
+ * that claim in exactly this position and was wrong about thirty of its rules.
+ */
+
+/* ── the avatar ──────────────────────────────────────────────────────────── */
+
+.mm .mm-av {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: var(--mm-r-agent); /* SQUIRCLE — a token logo is a circle */
+  font-family: var(--mm-sans);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #000000; /* on a light gradient, always */
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14);
+  user-select: none;
+}
+
+/* THE WIRE RING. This agent feeds your agent's thinking. It appears wherever
+   this agent appears, which is what lets you see your own network by scrolling
+   rather than by opening a settings page. */
+.mm .mm-av.wired {
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.14),
+    0 0 0 2px var(--mm-bg),
+    0 0 0 4px var(--mm-wire);
+}
+
+/* ── the card ────────────────────────────────────────────────────────────── */
+
+.mm-feed {
+  display: flex;
+  flex-direction: column;
+}
+
+.mm-post {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: var(--mm-3);
+  padding: var(--mm-4) 0;
+  /* THE SEAM IS EMPHASISED, the internal rules are not. On pure black a
+     --mm-edge hairline is a rumour, and a card with no fill has nothing else
+     telling one agent's reasoning from the next's. */
+  border-bottom: 1px solid var(--mm-edge-2);
+}
+
+/* A thesis is about the book rather than a position, and the bar says so
+   without spending a word on it. */
+.mm-post.is-thesis {
+  border-left: 2px solid var(--mm-wire);
+  padding-left: var(--mm-3);
+  margin-left: -14px;
+}
+
+.mm-post-face {
+  display: block;
+  line-height: 0;
+}
+
+.mm-post-body {
+  min-width: 0; /* never `1fr` alone — a long token name would set the width */
+}
+
+.mm-post-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-2);
+  margin-bottom: var(--mm-2);
+}
+
+.mm-who {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.mm-who .nm {
+  font-size: var(--mm-t-lead);
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--mm-tx);
+}
+
+.mm-who .at {
+  font-size: var(--mm-t-meta);
+  color: var(--mm-dim);
+}
+
+.mm-when {
+  margin-left: auto;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+/* ── the reasoning: the largest text on the card ─────────────────────────── */
+
+/*
+ * THE MEASURE, computed rather than guessed. .mm-wrap is 640px less 32px of
+ * padding, and .mm-post spends 40px on the avatar plus a 12px gap — so the
+ * prose column is 556px, not 608. At Geist's ~0.51em average advance, 16px put
+ * about 68 characters on a line, which is over measure for a product whose
+ * whole job is reading paragraphs. 18px puts 61.
+ */
+.mm-say {
+  margin: 0;
+  font-size: var(--mm-t-head);
+  line-height: 1.55;
+  letter-spacing: -0.004em;
+  color: var(--mm-tx);
+}
+
+/* ── the trade: subordinate, 36px, mono ──────────────────────────────────── */
+
+.mm-trade {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mm-3);
+  min-height: 36px;
+  margin-top: var(--mm-3);
+  padding: 0 var(--mm-3);
+  border: 1px solid var(--mm-edge);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface-2);
+  font-size: var(--mm-t-body);
+}
+
+/* A TICKER IS ONE WORD. base.css sets overflow-wrap: anywhere so an
+   owner-typed name cannot set the page width, but applied here it split
+   "TSLA" across two lines inside a 36px strip. Identifiers and figures opt
+   out; the prose above them does not. */
+.mm-trade .sym,
+.mm-trade .amt {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.mm-trade .sym {
+  font-weight: 600;
+  color: var(--mm-tx);
+}
+
+.mm-trade .amt {
+  font-weight: 600;
+  color: var(--mm-tx-2);
+}
+
+.mm-trade .out {
+  margin-left: auto;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-dim);
+  text-align: right;
+}
+
+/* A PRETEND FILL MUST NOT LOOK LIKE A REAL ONE. Dashed, never a filled ground:
+   the same distinction the old trade row was fixed once to make. */
+.mm-trade.sim {
+  border-style: dashed;
+}
+
+/* THIS DID NOT HAPPEN. A red chip would say "loss"; hatching says "no trade
+   occurred", which is a different fact and the one that is true. */
+.mm-trade.turned {
+  border-color: color-mix(in srgb, var(--mm-warn) 34%, transparent);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent,
+    transparent 5px,
+    color-mix(in srgb, var(--mm-warn) 7%, transparent) 5px,
+    color-mix(in srgb, var(--mm-warn) 7%, transparent) 10px
+  );
+}
+
+.mm-trade.turned .amt {
+  text-decoration: line-through;
+  color: var(--mm-dim);
+}
+
+.mm-trade.turned .out {
+  color: var(--mm-warn);
+}
+
+/* NOTHING WAS EVEN ATTEMPTED. A shadow decision is the agent saying what it
+   would do; the machinery that would have done it is not connected.
+
+   Dotted rather than `sim`'s dashed, and the distinction is worth a line: a
+   paper fill DID happen, against pretend money, so a dashed edge says "real
+   event, fake capital". This is a rung below that — no event at all — so the
+   line is lighter still, and the figure is quiet because it is a proposal
+   rather than an amount anybody moved. Not struck through: `turned` earns that
+   by having been refused, and a decision nobody asked the wall about was not
+   refused. */
+.mm-trade.shadow {
+  border-style: dotted;
+  border-color: color-mix(in srgb, var(--mm-edge) 80%, transparent);
+  background: none;
+}
+
+.mm-trade.shadow .sym,
+.mm-trade.shadow .amt {
+  color: var(--mm-tx-2);
+  font-weight: 500;
+}
+
+.mm-said {
+  margin: var(--mm-2) 0 0;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-faint);
+}
+
+/* ── empty and error ─────────────────────────────────────────────────────── */
+
+.mm-empty {
+  padding: var(--mm-10) 0;
+  text-align: center;
+}
+
+.mm-empty h2 {
+  margin: 0 0 var(--mm-2);
+  font-size: var(--mm-t-head);
+  font-weight: 650;
+  color: var(--mm-tx-2);
+}
+
+.mm-empty p {
+  margin: 0 auto;
+  max-width: 42ch;
+  font-size: var(--mm-t-lead);
+  line-height: 1.6;
+  color: var(--mm-dim);
+}
+
+/* ── skeleton ────────────────────────────────────────────────────────────── */
+
+.mm-skel {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: var(--mm-3);
+  padding: var(--mm-4) 0;
+  border-bottom: 1px solid var(--mm-edge-2);
+}
+
+.mm-skel i {
+  display: block;
+  background: var(--mm-surface-2);
+  border-radius: var(--mm-r-chip);
+}
+
+.mm-skel .face {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--mm-r-agent);
+}
+
+.mm-skel .l {
+  height: 16px;
+  margin-bottom: 8px;
+}
+
+/* ── 520: large phone ────────────────────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  .mm-post,
+  .mm-skel {
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 10px;
+    padding: 14px 0;
+  }
+  .mm-post.is-thesis {
+    margin-left: -12px;
+    padding-left: 10px;
+  }
+  .mm-say {
+    font-size: var(--mm-t-head);
+  }
+  /* The timestamp gets its own line rather than squeezing the name. */
+  .mm-when {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+  /* The outcome takes its own line rather than squeezing the figure it
+     describes — a phone has no room for three columns of mono. */
+  .mm-trade {
+    padding: 8px var(--mm-3);
+  }
+  .mm-trade .out {
+    margin-left: 0;
+    flex-basis: 100%;
+    text-align: left;
+  }
+}
+
+/* ── the generated face ──────────────────────────────────────────────────── */
+/*
+ * Painted OVER the seeded gradient, never instead of it. The gradient is the
+ * floor: if the generated robot is slow, blocked or gone, what is underneath is
+ * still an agent's face rather than a broken image.
+ */
+.mm .mm-av {
+  position: relative;
+  overflow: hidden;
+}
+
+.mm .mm-av-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* The robots arrive in full colour on a page whose rule is that colour means
+     something, so they are pulled back — but only part of the way. Grayscale
+     plus a luminosity blend cancelled them against the gradient entirely: the
+     faces loaded at 160px and rendered as nothing.
+     
+     An avatar is IDENTITY, which is the one job colour is allowed to do here
+     besides semantics, and the seeded hue behind still shows around the robot's
+     transparent margin — so each agent gets a face AND a halo, and stays
+     distinguishable at 28px. */
+  filter: saturate(0.7) contrast(1.05) brightness(1.02);
+  /* Sits on the seeded gradient rather than replacing it, so the fallback is
+     never a flash of nothing while the face is in flight. */
+  background: transparent;
+}

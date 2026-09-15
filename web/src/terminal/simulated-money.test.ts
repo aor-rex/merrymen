@@ -1,0 +1,174 @@
+/**
+ * NO SURFACE MAY PRINT A BALANCE UNDER A LABEL IT DID NOT CHECK.
+ *
+ * The incident: an account holding 0.000000 USDG on chain displayed "Available
+ * cash $964" while the worker refused every trade with `no-cash`. Both halves
+ * were correct. With no real money `canTradeForReal` is false, the agent drops
+ * to paper, and the paper book's balance is what the account line then reports.
+ * Nothing lied — the screen rendered practice money in the same shape as
+ * deposited money, and the reader supplied the only meaning available to them.
+ * They waited a day and told the group chat the product was broken.
+ *
+ * The fix is not a caption. Someone who has already read a large number as
+ * their deposit does not go on to read the small print under it, so the LABEL
+ * itself has to change, and it has to change everywhere at once. That makes
+ * this a property of how the terminal is WRITTEN, not of one render: a new
+ * balance added next month with a hardcoded label would reopen the incident
+ * while every render test still passed.
+ *
+ * Source scans, in the idiom of app/settings/honesty.test.ts.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { describe, it } from "node:test";
+import { REAL_LABEL, SIMULATED_LABEL, autonomyOf } from "@merrymen/core";
+
+const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+/** Comments stripped — this codebase argues in prose beside the code it argues about. */
+const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+
+/** Every terminal surface that prints the owner's own balance. */
+const SURFACES = {
+  "Desktop.tsx": strip(read("./Desktop.tsx")),
+  "screens/Agent.tsx": strip(read("./screens/Agent.tsx")),
+  "App.tsx": strip(read("./App.tsx")),
+};
+
+describe("practice money can never wear the label real money wears", () => {
+  it("no surface hardcodes the real-money label", () => {
+    // `REAL_LABEL` is a promise about where the money is. It may only be made by
+    // `autonomyOf`, which has looked at the chain balance and the rail.
+    for (const [file, src] of Object.entries(SURFACES)) {
+      assert.ok(
+        !src.includes(`"${REAL_LABEL}"`) && !src.includes(`>${REAL_LABEL}<`),
+        `${file} hardcodes "${REAL_LABEL}" — it must render autonomy.moneyLabel instead`,
+      );
+    }
+  });
+
+  it("every balance in the terminal is labelled from the autonomy verdict", () => {
+    // Count the label slots, not the renders: a balance whose label is a literal
+    // is exactly the bug, and it would otherwise be invisible to a render test.
+    const desktop = SURFACES["Desktop.tsx"];
+    const agent = SURFACES["screens/Agent.tsx"];
+    assert.equal(
+      (desktop.match(/autonomy\.moneyLabel/g) ?? []).length,
+      2,
+      "Desktop has two balance surfaces — the header and the portfolio panel",
+    );
+    assert.equal(
+      (agent.match(/autonomy\.moneyLabel/g) ?? []).length,
+      1,
+      "the agent screen's cash row must take its label from the verdict",
+    );
+  });
+
+  it("simulated balances are marked in the markup, not only in words", () => {
+    // Belt and braces: the label carries the meaning, the class carries the
+    // visual weight. A number that looks authoritative is read as authoritative
+    // however it is captioned.
+    for (const file of ["Desktop.tsx", "screens/Agent.tsx"] as const) {
+      assert.match(SURFACES[file], /autonomy\.simulated/, `${file} must mark simulated money`);
+    }
+  });
+
+  it("the verdict is computed once, from the CHAIN balance and not the book", () => {
+    // `glance.cashUsd` is the book, and in paper mode the book IS the simulated
+    // balance — so deciding "is this real" from it would ask the lie whether it
+    // is lying. /api/grants reads balanceOf in a multicall; that is the input.
+    const app = SURFACES["App.tsx"];
+    assert.match(app, /autonomyOf\(/, "App must compute the verdict");
+    assert.match(app, /balances\.cashUsdg/, "real cash must come from the chain read");
+    assert.ok(
+      !/realCashUsd:\s*[^,\n]*glance/.test(app),
+      "the verdict must not be decided from the book's own cash figure",
+    );
+    assert.equal((app.match(/autonomyOf\(/g) ?? []).length, 2, "one live verdict, one empty-shell verdict");
+  });
+});
+
+describe("an owner who needs to re-sign is told so where the money is", () => {
+  it("the renewal is rendered, and only when the owner alone can clear it", () => {
+    const desktop = SURFACES["Desktop.tsx"];
+    assert.match(desktop, /needsOwnerAction/, "the CTA must be gated on the verdict, not on mode");
+    // THE SENTENCE COMES FROM THE VERDICT NOW, and this assertion moved with it.
+    //
+    // It used to require the literal "free permission renewal" in this file.
+    // That pinned the surface to ONE sentence for every owner-clearable rule,
+    // which is exactly the defect a tester hit: told to renew a key whose
+    // problem was the network, he renewed, nothing changed, and the banner
+    // returned. Requiring the hardcoded string here would have kept the fix out.
+    assert.match(desktop, /autonomy\.headline/, "the headline takes its words from the verdict");
+    assert.ok(
+      !/free permission renewal/.test(desktop.replace(/\{\/\*[\s\S]*?\*\/\}/g, "")),
+      "no surface may hardcode a remedy — it cannot know which rule it is rendering",
+    );
+    assert.match(desktop, /autonomy\.action\.label/, "the button takes its words from the verdict");
+  });
+
+  it("it routes to the screen where re-signing actually happens", () => {
+    // A tester was once told to "head to the wallet screen", spent minutes
+    // looking, and reported there was no such thing. The button navigates.
+    // ANCHORED TO THE BUTTON, not to the string "/grant".
+    //
+    // The old assertion matched `onScreen({kind:"grant"})`, which existed once
+    // in this file. When the mechanism changed to a URL — `pathForScreen` drops
+    // descriptor fields, so the chain intent could not survive — the obvious
+    // replacement `/\/grant/` also matched the unrelated sidebar link
+    // `<Link href="/grant">`, and would have passed with the CTA deleted
+    // entirely. A regex that survives the removal of the thing it is about is
+    // not a test.
+    assert.match(
+      SURFACES["Desktop.tsx"],
+      /window\.location\.href = mine\.autonomy\.action\?\.chain/,
+      "the CTA itself must navigate to the grant screen",
+    );
+  });
+
+  it("AND IT CARRIES THE NETWORK IT NAMED", () => {
+    // The half that was missing, and the reason a second beta owner re-signed
+    // over and over without ever clearing his banner.
+    //
+    // `wrong-chain` is the one rule whose remedy is a signature on a DIFFERENT
+    // network, and its button says so: "Re-sign on Robinhood Chain". It opened
+    // `{kind:"grant"}`, which `pathForScreen` flattens to the string "/grant" —
+    // so the destination pinned its selector to the testnet grant being
+    // replaced, the prominent control read "re-sign this key (free)", and the
+    // signature minted another testnet grant.
+    const chained = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain" });
+    assert.equal(chained.action?.chain, 4663, "the verdict names the target network");
+    assert.match(
+      SURFACES["Desktop.tsx"],
+      /action\.chain/,
+      "and the surface must carry it rather than dropping it",
+    );
+
+    // ONLY where the network is the problem. Everywhere else the grant screen's
+    // selector is already right, and overriding it is how a mainnet owner would
+    // silently re-sign onto the sandbox — the same bug, mirrored.
+    for (const rule of ["dead-policy", "not-armed", "grant-too-wide"] as const) {
+      assert.equal(
+        autonomyOf({ mode: "paper", liveBlocker: rule }).action?.chain,
+        undefined,
+        `${rule} must not move the selector`,
+      );
+    }
+  });
+
+  it("and it never offers a signature for a problem money would fix", () => {
+    // Offering a re-sign for no-cash sends an owner to sign something that
+    // changes nothing, and leaves the real remedy unnamed.
+    for (const rule of ["no-cash", "no-gas"] as const) {
+      const a = autonomyOf({ mode: "paper", liveBlocker: rule, realCashUsd: 0 });
+      assert.notEqual(a.action?.kind, "renew-grant", rule);
+    }
+    for (const rule of ["dead-policy", "wrong-chain"] as const) {
+      assert.equal(autonomyOf({ mode: "paper", liveBlocker: rule }).action?.kind, "renew-grant", rule);
+    }
+  });
+
+  it("the two labels are the only two, and the simulated one says so plainly", () => {
+    assert.match(SIMULATED_LABEL, /not real money/i);
+    assert.notEqual(SIMULATED_LABEL, REAL_LABEL);
+  });
+});

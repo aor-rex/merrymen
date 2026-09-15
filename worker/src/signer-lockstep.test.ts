@@ -69,3 +69,209 @@ test("both signers persist the sealed address alongside the marker", () => {
     );
   }
 });
+
+test("both signers mint the PONS adapter marker only when the permission was sealed", () => {
+  // Same lockstep rule as GRANT_V4_ADAPTER, and it has to be re-pinned rather
+  // than assumed: the two adapters are separate opt-ins, so a signer could
+  // thread one and forget the other and nothing else would notice. The failure
+  // is the transfer saga again — a marker the wall does not back means the
+  // worker builds a UserOp the account contract refuses.
+  // PINNED BY RELATIONSHIP, NOT BY VARIABLE NAME.
+  //
+  // This used to match the literal `ponsAdapterAddress` in all three places,
+  // which pinned the right property for the wrong reason: it held only while the
+  // value the wall receives happens to be the raw parameter. Once the signers
+  // resolve a platform default (`ponsAdapterForSigning`), the parameter and the
+  // sealed value are DIFFERENT expressions, and a name-matching guard would
+  // either fail on correct code or — far worse — pass while the marker was
+  // minted off the parameter and the wall pinned the default. That is exactly
+  // the drift this test exists to catch, so it now reads the identifier the wall
+  // was actually given and demands the other two sites use that same one.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("GRANT_PONS_ADAPTER"), `${name} must mint the marker`);
+    assert.ok(src.includes("ponsAdapterAddress"), `${name} must thread the sealed address`);
+
+    // The value handed to buildWallPolicies — `ponsAdapterAddress: <ident>,`.
+    // Dots are excluded from the identifier so the persisted
+    // `<ident>.toLowerCase()` site below cannot match here instead.
+    const sealed = /ponsAdapterAddress:\s*([A-Za-z_$][\w$]*)\s*,/.exec(src);
+    assert.ok(sealed, `${name} must pass an adapter address into the wall options`);
+    const ident = sealed[1]!;
+
+    assert.match(
+      src,
+      new RegExp(`${ident}\\s*\\?\\s*\\[GRANT_PONS_ADAPTER\\]\\s*:\\s*\\[\\]`),
+      `${name} must mint GRANT_PONS_ADAPTER off the SAME value the wall sealed (${ident})`,
+    );
+    assert.match(
+      src,
+      new RegExp(`ponsAdapterAddress:\\s*${ident}\\.toLowerCase\\(\\)`),
+      `${name} must persist the value the wall sealed (${ident}) — the marker alone is a claim`,
+    );
+  }
+});
+
+test("both signers seal the platform's official coins, so a listing is reachable", () => {
+  // The token list is baked into the call policy at SIGNING time. A listing the
+  // worker watches, prices and treats as a tradable leg, but which no signer
+  // seals, produces refusals naming a coin the owner never chose and cannot
+  // remove — the worst version of this failure, because the owner has no action
+  // available to them.
+  //
+  // Pinned in BOTH signers for the same reason every rule in this file is: the
+  // phone is a separate seam with no /settings fetch, and it has already been
+  // the one that silently carried nothing.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("officialCoinTokens"), `${name} must merge the official listings`);
+    // Listings FIRST, so usableExtraTokens' de-duplication keeps the verified
+    // address when an owner has separately typed the same coin in by hand.
+    assert.match(
+      src,
+      /\[\s*\.\.\.officialCoinTokens\([^)]*\)\s*,\s*\.\.\.\(?\s*(args\.)?extraTokens/,
+      `${name} must put official listings BEFORE the owner's own tokens`,
+    );
+    // And the merged list — not the raw parameter — is what reaches the policy.
+    const merged = /const\s+(sealedTokens)\b/.exec(src);
+    assert.ok(merged, `${name} must name the merged token list`);
+    assert.match(
+      src,
+      new RegExp(`grantTokens:\\s*usableExtraTokens\\(${merged[1]}\\)`),
+      `${name} must record the MERGED list as covered, or the grant and the wall disagree`,
+    );
+    assert.match(
+      src,
+      new RegExp(`extraTokens:\\s*${merged[1]}`),
+      `${name} must build the wall from the MERGED list`,
+    );
+  }
+});
+
+test("both signers mint the CLASS marker off the resolved vault, not the factory", () => {
+  // The same lockstep rule a third time, with one twist that is easy to get
+  // wrong and impossible to see afterwards.
+  //
+  // The class opt-in is a FACTORY address; what the wall pins is the per-account
+  // VAULT the factory names. Minting GRANT_PONS_CLASS off the factory would mint
+  // it off the REQUEST rather than the result — a grant claiming a class route
+  // whose target the wall may never have pinned. resolveClassVault throws rather
+  // than returning undefined precisely so the two can never disagree, and this
+  // pins the conditional to the resolved value so a later edit cannot quietly
+  // swap in the factory.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(src.includes("GRANT_PONS_CLASS"), `${name} must mint the marker`);
+    assert.ok(src.includes("resolveClassVault"), `${name} must resolve the vault from core`);
+    assert.match(
+      src,
+      /ponsClassVaultAddress\s*\?\s*\[GRANT_PONS_CLASS\]\s*:\s*\[\]/,
+      `${name} must mint GRANT_PONS_CLASS only when a vault was actually resolved`,
+    );
+    assert.ok(
+      !/ponsClassVaultFactory\s*\?\s*\[GRANT_PONS_CLASS\]/.test(src),
+      `${name} must not mint the class marker off the factory — that is the request, not the pin`,
+    );
+    assert.match(
+      src,
+      /ponsClassVaultAddress:\s*ponsClassVaultAddress\.toLowerCase\(\)/,
+      `${name} must persist the sealed vault — the marker alone is a claim`,
+    );
+  }
+});
+
+test("both signers seal the FACTORY alongside the vault", () => {
+  // The vault address is a CREATE2 prediction and the contract does not exist
+  // until the factory is called. A grant carrying the vault and not the factory
+  // is a key that can reach a contract it can never create — and because a CALL
+  // to a codeless address succeeds with empty returndata, its first class buy
+  // would approve USDG, no-op, and report a landed trade that bought nothing.
+  //
+  // buildWallPolicies throws on that combination, so this is the belt to its
+  // braces: it catches a signer that forwards the factory to the wall and then
+  // forgets to RECORD it, which throws nowhere and leaves the worker with a
+  // marker, a vault, and no way to create it.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    // EITHER SPELLING. The web signer now defaults an absent setting to the
+    // platform deploy constant and records the RESOLVED value, so pinning the
+    // raw setting name would forbid the fix that makes a re-sign seal anything
+    // at all. What matters is that the factory RECORDED is the one forwarded,
+    // which the pair of assertions below still enforces.
+    const FACTORY_VAR = /ponsClassVaultFactoryAddress:\s*(args\.)?(ponsClassVaultFactory|sealedClassFactory)/;
+    const FACTORY_PERSISTED =
+      /ponsClassVaultFactoryAddress:\s*(args\.)?(ponsClassVaultFactory|sealedClassFactory)!?\.toLowerCase\(\)/;
+    assert.match(src, FACTORY_VAR, `${name} must forward the factory into the wall`);
+    assert.match(
+      src,
+      FACTORY_PERSISTED,
+      `${name} must persist the sealed factory — the worker reads it to build the deploy call`,
+    );
+  }
+});
+
+test("the factory is recorded only WITH a vault, never on its own", () => {
+  // The pair is the unit. A recorded factory with no vault would be a grant
+  // claiming a class route whose target the wall never pinned — the mirror image
+  // of the case above, and equally a marker without evidence.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/ponsClassVaultFactory\s*\?\s*\{\s*ponsClassVaultFactoryAddress/.test(src),
+      `${name} must not record the factory off its own presence`,
+    );
+    // Both fields live inside the SAME conditional spread, keyed on the vault.
+    const spread = /ponsClassVaultAddress\s*\?\s*\{([\s\S]{0,400}?)\}/.exec(src);
+    assert.ok(spread, `${name} must record both under one condition`);
+    assert.match(spread[1]!, /ponsClassVaultFactoryAddress/, `${name}: the factory must ride with the vault`);
+  }
+});
+
+test("a class route is never implied by another venue's opt-in", () => {
+  // THREE venues, three decisions. Class is the one that most invites being
+  // folded into Pons — it trades the same curves — and folding it in would give
+  // every bonding-curve grant a custodial contract holding its positions,
+  // without the owner ever choosing that.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/ponsAdapterAddress\s*\?\s*\[[^\]]*GRANT_PONS_CLASS/.test(src),
+      `${name} must not mint the class marker off the Pons adapter address`,
+    );
+    assert.ok(
+      !/ponsClassVaultAddress\s*\?\s*\[[^\]]*GRANT_PONS_ADAPTER/.test(src),
+      `${name} must not mint the Pons adapter marker off the class vault`,
+    );
+  }
+});
+
+test("the two adapter opt-ins stay INDEPENDENT in both signers", () => {
+  // One venue must never imply the other. If a future edit collapses them into
+  // a single flag, this fails and demands the author read the wall's note on
+  // why the owner's choice is not all-or-nothing.
+  for (const [name, src] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    assert.ok(
+      !/v4AdapterAddress\s*\?\s*\[GRANT_V4_ADAPTER,\s*GRANT_PONS_ADAPTER\]/.test(src),
+      `${name} must not mint the Pons marker off the v4 address`,
+    );
+    assert.ok(
+      !/ponsAdapterAddress\s*\?\s*\[GRANT_PONS_ADAPTER,\s*GRANT_V4_ADAPTER\]/.test(src),
+      `${name} must not mint the v4 marker off the Pons address`,
+    );
+  }
+});

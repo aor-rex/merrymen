@@ -4,6 +4,14 @@
  * (npm global dir or a checkout) is disposable; upgrades and reinstalls
  * never touch user data. Override with MERRYMEN_HOME for tests/multi-agent.
  *
+ * THE SINGLE DEFINITION. The web tier imports this exact module via the
+ * `@merrymen/home` tsconfig alias — there is no second copy under web/src/lib.
+ * There used to be, and it had drifted: it lacked the telegram/virtuals/paused/
+ * scratch paths and mkdir'd eagerly on every merrymenHome() call. Two copies of
+ * "where the grant lives" means the web tier can read a path the worker never
+ * wrote, which under multi-tenant hosting strands a funded account. So both
+ * sides derive every path from the one map below.
+ *
  * Legacy migration: early versions kept data in <repo>/.data. If that exists
  * and the home file doesn't, files are copied over once, so nothing is lost.
  */

@@ -391,8 +391,9 @@ merrymen kill       # kill switch — destroys the grant`}
           are optional, presets cover the rest). The <strong>1-click desktop app</strong> (.exe/.dmg
           — no terminal at all) also ships now, on the{" "}
           <a className="link" href={`${GITHUB}/releases`} target="_blank" rel="noreferrer">releases page</a>.
-          Either way it&apos;s the same stack on your machine, never a hosted service — your keys
-          stay with you.
+          Either way it&apos;s the same stack — self-host it on your machine, or run it hosted from a
+          URL. Your owner key stays with you regardless; a hosted server only ever holds a capped,
+          revocable session key.
           <br />
           <br />
           To keep it running across logouts and reboots, <code className="inline">merrymen service

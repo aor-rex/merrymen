@@ -3,18 +3,40 @@
  * shared SQLite file the worker writes (.data/merrymen.db).
  */
 
-import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
-import { TRADEABLE_SYMBOLS, type MerrymenSettings } from "@merrymen/core";
+import { homePaths } from "@merrymen/home";
+import { SETTINGS_DEFAULTS, isHostedMode, sameBookAsLatest, type MerrymenSettings } from "@merrymen/core";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { tenantOf } from "@/lib/auth";
+import { withReadDb, fmtEpoch } from "@/lib/ledger";
+import { basisUsdg } from "@/lib/basis-usdg";
+import { getIdentityStore } from "@merrymen/identity-store";
+import { hostedAgentFor } from "@/lib/agent-for";
 
-const DEFAULT_BASKET = [...TRADEABLE_SYMBOLS];
+// The basket the WORKER actually defaults to when none is configured.
+// TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
+// default holding — so a tenant on defaults was shown 14 symbols while their
+// agent traded three.
+const DEFAULT_BASKET = [...SETTINGS_DEFAULTS.basketSymbols];
+
+/**
+ * HOW FAR BACK THE TAPE REACHES.
+ *
+ * The trades select was `LIMIT 30` with no window at all, so for an agent that
+ * has done nothing lately the newest thirty rows are simply its last thirty
+ * refusals — however old. The chat sends this tape to a model, the system
+ * prompt tells the model to ground itself in it, and the rows carry no
+ * timestamp the model can reason about. A tester's agent therefore narrated
+ * months-old `no-gas` and `per-trade-cap` refusals in the present tense, and
+ * was believed, because it was reading its own ledger faithfully.
+ *
+ * The window bounds RECENCY and the limit bounds SIZE. Neither substitutes for
+ * the other, so both stay.
+ */
+const TAPE_WINDOW_SEC = 7 * 24 * 3600;
 
 export const dynamic = "force-dynamic";
-
-const DB_FILE = homePaths.db();
 
 export interface FeedEvent {
   level: "ok" | "warn" | "err";
@@ -40,6 +62,33 @@ export interface PositionRow {
    */
   price_source: string;
   value_usdg: number;
+  /**
+   * What this holding cost, in WHOLE USDG like every other `_usdg` field here.
+   *
+   * The column behind it is not: `cost_basis.cost_usdg` is a decimal string of
+   * the worker's micro-USDG bigint, so it is converted at this boundary rather
+   * than in each browser that reads it — see `basisUsdg`. Sent raw it reads as a
+   * position that cost $8,332,500 and is now worth $8.32.
+   *
+   * NULL when the ledger has no basis for it — never 0, which would say the
+   * position was free and make the whole mark look like profit. It is here
+   * because the chat sends positions to the model, and an agent asked "what did
+   * NVDA cost you" with no basis on the row can only say it does not know —
+   * which is what one did, while the panel beside it listed the position.
+   */
+  cost_usdg?: number | null;
+  /**
+   * THIS POSITION'S OWN STOP, in bps below cost, graded when it was opened.
+   *
+   * NULL for a holding that carries no grade — one opened before grading
+   * existed, or one whose grade could not be made — and those fall back to the
+   * owner's single setting, which is what the whole book used to do. It travels
+   * because the agent is asked "what would make you sell" about a SPECIFIC
+   * holding, and until now it could only answer about the book.
+   */
+  stop_floor_bps?: number | null;
+  /** The sentence that level was graded for, written at entry. */
+  stop_floor_why?: string | null;
 }
 export interface TradeRecord {
   kind: string;
@@ -62,6 +111,7 @@ export interface AgentFinancials {
 /** Live identity: the user-given name (soul, mirrored into the agents table by
  * the worker) + the strategy/basket actually configured in settings.json. */
 export interface AgentIdentity {
+  slug?: string | null;
   name: string;
   strategy: string;
   basket: string[];
@@ -91,45 +141,140 @@ export interface FeedResponse {
    */
   gasUsdg: number;
   gasUnpricedTrades: number;
+  /** Fills that actually landed. Zero means there is no return to measure. */
+  landed: number;
+  /** The worker's verdict on the denominator: true, false, or null for never assessed. */
+  contributionsKnown: boolean | null;
 }
 
-/** The configured strategy + basket, straight from settings.json (live). */
-function readIdentitySettings(): { strategy: string; basket: string[] } {
+type Identity = { strategy: string; basket: string[]; agentName: string | null };
+
+const IDENTITY_FALLBACK: Identity = { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
+
+/** The three identity fields out of a settings blob, whatever store it came from. */
+function pickIdentity(s: MerrymenSettings): Identity {
+  return {
+    strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
+    basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
+    agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
+  };
+}
+
+/**
+ * The configured strategy, basket and name — from WHERE THIS TENANT'S SETTINGS
+ * ACTUALLY LIVE.
+ *
+ * THE BUG THIS EXISTS TO FIX, because it made a working feature look broken.
+ * Hosted, a tenant's settings are written to the per-tenant sealed store
+ * (`getSettingsStore().put(tenant, …)` in api/settings), and NOTHING ever writes
+ * the web container's own `~/.merrymen/settings.json`. This function used to
+ * read that file unconditionally, so on the hosted deploy the read always threw
+ * and every tenant got the fallback below: name null → the console fell back to
+ * the ledger's "Robin", and strategy/basket were the defaults no matter what
+ * they had configured. An owner could rename their agent, watch the save
+ * succeed, reload, and be asked to name it again — four times over, in the
+ * report that found this. The write was never the problem; nobody read it back.
+ *
+ * Self-hosted the file IS the store, which is why this passed local testing.
+ * The `!tenant` early return is load-bearing: it must not fall through to the
+ * file read, or a signed-out caller would be shown container-global config.
+ */
+async function readIdentitySettings(tenant: `0x${string}` | null): Promise<Identity> {
+  if (isHostedMode()) {
+    if (!tenant) return IDENTITY_FALLBACK;
+    try {
+      return pickIdentity((await getSettingsStore().get(tenant)) ?? {});
+    } catch {
+      return IDENTITY_FALLBACK;
+    }
+  }
   try {
+    // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
     const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
-    const s = JSON.parse(raw) as MerrymenSettings;
-    return {
-      strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
-      basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
-    };
+    return pickIdentity(JSON.parse(raw) as MerrymenSettings);
   } catch {
-    return { strategy: "steady-basket", basket: DEFAULT_BASKET };
+    return IDENTITY_FALLBACK;
   }
 }
 
-export async function GET() {
-  if (!existsSync(DB_FILE)) {
-    // No ledger yet — identity still resolves live from settings + default name.
-    return NextResponse.json({
-      source: "none",
-      events: [],
-      equity: [],
-      positions: [],
-      trades: [],
-      financials: null,
-      agent: { name: "Robin", ...readIdentitySettings() },
-      netContributionsUsdg: null,
-      gasUsdg: 0,
-      gasUnpricedTrades: 0,
-    } satisfies FeedResponse);
+/**
+ * The agent's name: what the owner CONFIGURED, else what the ledger recorded.
+ *
+ * The two can disagree for a while, and the settings value has to win. The
+ * worker reconciles a configured name into the soul at arm time, so between
+ * saving one and the worker's next arm the ledger still holds the old name —
+ * and preferring the ledger there makes a rename that genuinely succeeded
+ * revert to "Robin" on the next page load, which reads exactly like a failed
+ * save. Settings is where the owner's intent lives; the soul is the runtime
+ * seat that catches up to it.
+ */
+function resolveAgentName(configured: string | null, fromLedger: string): string {
+  return configured || fromLedger;
+}
+
+/** Name + strategy + basket, with the configured name preferred. */
+async function identityOf(fromLedger: string, tenant: `0x${string}` | null): Promise<AgentIdentity> {
+  const { agentName, ...rest } = await readIdentitySettings(tenant);
+  const identity = tenant ? await getIdentityStore().get(tenant).catch(()=>null) : null;
+  return { name: resolveAgentName(agentName, fromLedger), slug: identity?.slug ?? null, ...rest };
+}
+
+/**
+ * The empty feed — no ledger, no session, or an unreadable db. Never a leak.
+ *
+ * Takes the tenant because identity resolves per-tenant now: a signed-in owner
+ * whose ledger has no rows yet should still see the name and strategy THEY
+ * configured, not the house defaults.
+ */
+async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedResponse> {
+  return {
+    source: "none",
+    events: [],
+    equity: [],
+    positions: [],
+    trades: [],
+    financials: null,
+    // Identity still resolves live from settings + default name.
+    agent: await identityOf("Robin", tenant),
+    netContributionsUsdg: null,
+    gasUsdg: 0,
+    gasUnpricedTrades: 0,
+    landed: 0,
+    contributionsKnown: null,
+  };
+}
+
+export async function GET(req: Request) {
+  // HOSTED: the tenant is the SIWE-authenticated wallet, resolved up front. No
+  // session → nothing to show. The feed must scope to THIS tenant's agent, never
+  // the global "armed or newest" heuristic below (which on a shared ledger is
+  // whichever tenant is armed across the whole fleet).
+  let tenant: `0x${string}` | null = null;
+  // THE TENANT IS NOT THE AGENT, and the grant store is the only index that
+  // maps one to the other. Resolved here rather than in SQL, because the query
+  // this replaced — `WHERE LOWER(owner_address) = <tenant>` — could never match:
+  // hosted, `owner_address` is the owner key the BROWSER generated, so it is
+  // never the tenant. It failed closed, and an empty tape is indistinguishable
+  // from a quiet agent.
+  let hostedAgentId: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    tenant = tenantOf(req);
+    // No session: nothing to scope to, so no per-tenant identity either.
+    if (!tenant) return NextResponse.json(await emptyFeed(null));
+    hostedAgentId = await hostedAgentFor(req);
   }
 
-  // Read-only open so the worker stays the single writer. Tolerate a DB the
-  // worker hasn't fully initialized yet — missing tables read as empty.
-  const db = new DatabaseSync(DB_FILE, { readOnly: true });
-  try {
+  // Reads go through the ledger driver: read-only sqlite (self-hosted) or the
+  // shared Postgres a worker child wrote (hosted). A missing/locked db → null →
+  // an empty feed, never a 500. The SQL below is dialect-neutral: no
+  // datetime('unixepoch') (timestamps are raw epoch, formatted by fmtEpoch) and
+  // no rowid (the tie-break is smart_account, which both backends have).
+  return withReadDb(async (db) => {
+    if (!db) return NextResponse.json(await emptyFeed(tenant));
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
+    /** "paper" | "live" | null — the book the newest equity mark belongs to. */
+    let bookMode: string | null = null;
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
@@ -141,20 +286,28 @@ export async function GET() {
     // the old one's rows in the same tables, and every query below used to read
     // the lot — so two agents' equity curves interleaved and the dashboard's
     // P&L spanned both. Armed wins, else the newest.
+    //
+    // HOSTED scopes to the tenant's OWN account, never the global heuristic: on a
+    // shared ledger "armed or newest across the fleet" is some other customer's
+    // book. Resolved above, through the grant store.
     let agentId: string | null = null;
-    try {
-      const row = db
-        .prepare(
-          // rowid breaks the tie: `status` DEFAULTs to 'armed' so it
-          // discriminates less than it looks, and created_at is whole seconds.
-          // rowid is insertion order — the newest grant wins, deterministically.
-          `SELECT smart_account FROM agents
-            ORDER BY (status = 'armed') DESC, created_at DESC, rowid DESC LIMIT 1`,
-        )
-        .get() as { smart_account: string } | undefined;
-      agentId = row?.smart_account ?? null;
-    } catch {
-      /* no agents table yet */
+    if (tenant) {
+      agentId = hostedAgentId;
+    } else {
+      try {
+        const row = (await db
+          .prepare(
+            // The tie-break: `status` DEFAULTs to 'armed' so it discriminates
+            // less than it looks, and created_at is whole seconds. smart_account
+            // is the final deterministic key (there is no cross-dialect rowid).
+            `SELECT smart_account FROM agents
+              ORDER BY (status = 'armed') DESC, created_at DESC, smart_account DESC LIMIT 1`,
+          )
+          .get()) as { smart_account: string } | undefined;
+        agentId = row?.smart_account ?? null;
+      } catch {
+        /* no agents table yet */
+      }
     }
     // Every query is scoped to that agent. A ledger with no agent row at all
     // (an un-armed first run) has nothing to report anyway.
@@ -170,15 +323,15 @@ export async function GET() {
     //
     // A CLAUSE, not a constant: this app can be running against a database an
     // older worker wrote, where `epoch` does not exist. Referencing a missing
-    // column throws at prepare(), and the surrounding catch would blank the
+    // column throws at query time, and the surrounding catch would blank the
     // whole panel — strictly worse than showing a pre-epoch ledger unfiltered,
     // since every row in one is epoch 1 by definition.
     let epochWhere = "";
     let epochArg: number[] = [];
     try {
-      const erow = db
+      const erow = (await db
         .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
-        .get(scope) as { epoch: number } | undefined;
+        .get(scope)) as { epoch: number } | undefined;
       epochWhere = " AND epoch = ?";
       epochArg = [erow?.epoch ?? 1];
     } catch {
@@ -187,65 +340,133 @@ export async function GET() {
     // `events` and `positions` are deliberately NOT epoch-filtered below:
     // neither table has the column, so agent scoping is all they support.
     try {
-      events = db
+      const rows = (await db
         .prepare(
-          `SELECT level, message, datetime(created_at, 'unixepoch') AS created_at
+          `SELECT level, message, created_at
            FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 40`,
         )
-        .all(scope) as unknown as FeedEvent[];
+        .all(scope)) as { level: FeedEvent["level"]; message: string; created_at: number }[];
+      events = rows.map((r) => ({ level: r.level, message: r.message, created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
     }
     try {
-      equity = db
+      /**
+       * ENOUGH ROWS TO REACH BACK A DAY, WHATEVER THE CADENCE.
+       *
+       * This was 288, which is twenty-four hours only if a row lands every
+       * five minutes. Production ticks every 240s (MERRYMEN_TICK_SECONDS), so
+       * 288 rows spans 19.2 hours — and `chg24` needs a point at or before
+       * twenty-four hours ago (terminal/live.ts, equityDayAgo). It never
+       * found one. "Daily change unavailable" on a working, funded account was
+       * not the agent being new: the window the browser was handed could not
+       * reach that far, and the honest label made a window bug look like an
+       * honest silence, which is the most expensive kind of correct.
+       *
+       * 900 rows is 60 hours at the production cadence and 75 at the default
+       * one, so the daily figure survives a slower tick, a gap in the series,
+       * and the fail-closed paths that skip an equity row entirely.
+       */
+      const rows = (await db
         .prepare(
-          `SELECT cash_usdg, vault_usdg, equity_usdg, datetime(at, 'unixepoch') AS at
-           FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 288)
+          `SELECT cash_usdg, vault_usdg, equity_usdg, at, mode
+           FROM (SELECT * FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 900)
            ORDER BY at ASC, id ASC`,
         )
-        .all(scope, ...epochArg) as unknown as EquityPoint[];
+        .all(scope, ...epochArg)) as {
+        cash_usdg: number;
+        vault_usdg: number;
+        equity_usdg: number;
+        at: number;
+        mode: string | null;
+      }[];
+      // ONE SERIES, ONE BOOK. The paper book opens at 1,000 USDG and the funded
+      // one holds what the owner sent, and both write here — so an agent that
+      // practised and then went live had a curve that stepped between two
+      // different books, and `chg24` read the step as a day's performance. An
+      // owner was shown "−$950.17 today" for a book down 2.7 cents.
+      // WHICH BOOK THE WORKER ACTUALLY RAN, from the mark it wrote — not from
+      // what settings say it should be doing. The two disagree for a tick after
+      // an owner flips the switch, and the cost basis below is keyed on it.
+      bookMode = rows.length ? (rows[rows.length - 1]!.mode ?? null) : null;
+      equity = sameBookAsLatest(rows).map((r) => ({
+        cash_usdg: r.cash_usdg,
+        vault_usdg: r.vault_usdg,
+        equity_usdg: r.equity_usdg,
+        at: fmtEpoch(r.at),
+      }));
     } catch {
       /* table not created yet */
     }
     try {
-      positions = db
+      // WHAT EACH HOLDING COST, joined here because the owner's own agent could
+      // not answer for it. Asked "what did NVDA cost you and when will you
+      // sell", it replied that it held nothing but cash — while the panel beside
+      // the chat listed NVDA and QQQ. The chat sends this payload, and a
+      // position with no basis on it cannot answer either half of that question.
+      //
+      // LEFT JOIN and NULL-tolerant: a holding with no basis on record is a fact
+      // ("I do not know what this cost"), and 0 would say it was free.
+      // `cost_basis` is keyed by BOOK — a paper cost must never price a funded
+      // position — so the mode comes from the newest equity mark, which is the
+      // book the worker actually ran.
+      positions = (await db
         .prepare(
-          `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale,
-                  price_source, value_usdg
-           FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
+          `SELECT p.symbol AS symbol, p.raw_balance AS raw_balance, p.ui_multiplier AS ui_multiplier,
+                  p.price_usd AS price_usd, p.price_stale AS price_stale,
+                  p.price_source AS price_source, p.value_usdg AS value_usdg,
+                  b.cost_usdg AS cost_usdg,
+                  f.stop_bps AS stop_floor_bps, f.why AS stop_floor_why
+             FROM positions p
+             LEFT JOIN cost_basis b
+               ON b.agent_id = p.agent_id AND b.symbol = p.symbol AND b.mode = ?
+             LEFT JOIN position_floors f
+               ON f.agent_id = p.agent_id AND f.symbol = p.symbol AND f.mode = ?
+            WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
         )
-        .all(scope) as unknown as PositionRow[];
+        .all(
+          bookMode === "paper" ? "paper" : "live",
+          bookMode === "paper" ? "paper" : "live",
+          scope,
+        )) as unknown as PositionRow[];
+      // MICRO-USDG → USDG at the boundary, so no browser has to know the column
+      // keeps a different unit from every other money field on this response.
+      positions = positions.map((p) => ({ ...p, cost_usdg: basisUsdg((p as { cost_usdg?: unknown }).cost_usdg) }));
     } catch {
       // price_source arrives with a worker migration. The dashboard can be
       // running against a database the upgraded worker hasn't opened yet, and
       // losing the whole positions panel over a label would be a worse bug than
       // the missing label — so fall back to the shape that always existed.
       try {
-        const legacy = db
+        const legacy = (await db
           .prepare(
             `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg
              FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
           )
-          .all(scope) as unknown as Omit<PositionRow, "price_source">[];
+          .all(scope)) as unknown as Omit<PositionRow, "price_source">[];
         positions = legacy.map((p) => ({ ...p, price_source: "chainlink" }));
       } catch {
         /* table not created yet */
       }
     }
     try {
-      trades = db
+      const rows = (await db
         .prepare(
           `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
-                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas,
-                  datetime(created_at, 'unixepoch') AS created_at
-           FROM trades WHERE agent_id = ?${epochWhere} ORDER BY created_at DESC, id DESC LIMIT 30`,
+                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
+           FROM trades WHERE agent_id = ?${epochWhere} AND created_at > ?
+           ORDER BY created_at DESC, id DESC LIMIT 30`,
         )
-        .all(scope, ...epochArg) as unknown as TradeRecord[];
+        .all(scope, ...epochArg, Math.floor(Date.now() / 1000) - TAPE_WINDOW_SEC)) as (Omit<
+        TradeRecord,
+        "created_at"
+      > & { created_at: number })[];
+      trades = rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           // SCOPED, and with the SAME tie-break the agent resolution above
           // uses. This read was neither: it took the newest row by created_at
@@ -255,7 +476,7 @@ export async function GET() {
           // measured against.
           `SELECT name, hwm_usdg, accrued_fee_usdg FROM agents WHERE smart_account = ?`,
         )
-        .get(scope) as ({ name: string } & AgentFinancials) | undefined;
+        .get(scope)) as ({ name: string } & AgentFinancials) | undefined;
       if (row) {
         financials = { hwm_usdg: row.hwm_usdg, accrued_fee_usdg: row.accrued_fee_usdg };
         if (typeof row.name === "string" && row.name) name = row.name;
@@ -264,29 +485,58 @@ export async function GET() {
       /* columns not migrated yet */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           `SELECT COUNT(*) AS n,
                   COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
              FROM flows WHERE agent_id = ?${epochWhere}`,
         )
-        .get(scope, ...epochArg) as { n: number; net: number } | undefined;
+        .get(scope, ...epochArg)) as { n: number; net: number } | undefined;
       netContributionsUsdg = !row || row.n === 0 ? null : row.net;
     } catch {
       /* flows arrives with a worker migration — null, never zero */
     }
     try {
-      const row = db
+      const row = (await db
         .prepare(
           `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
                   SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
              FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
         )
-        .get(scope, ...epochArg) as { usdg: number; unpriced: number | null } | undefined;
+        .get(scope, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
       gasUsdg = row?.usdg ?? 0;
       gasUnpricedTrades = row?.unpriced ?? 0;
     } catch {
       /* gas_usdg arrives with a worker migration */
+    }
+    // WHAT THE BOOK MAY CLAIM, carried to the one page the owner reads.
+    //
+    // The /you dashboard computed its own P&L inline with no landed-trade guard
+    // and no quality term — a fifth independent copy of the formula. It needs
+    // both of these to route through the shared gate instead.
+    let landed = 0;
+    let contributionsKnown: boolean | null = null;
+    try {
+      const row = (await db
+        .prepare(
+          `SELECT SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed
+             FROM trades WHERE agent_id = ?${epochWhere}`,
+        )
+        .get(scope, ...epochArg)) as { landed: number | null } | undefined;
+      landed = Number(row?.landed ?? 0);
+    } catch {
+      /* older ledger */
+    }
+    try {
+      const row = (await db
+        .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
+        .get(scope)) as { contributions_known: number | null } | undefined;
+      contributionsKnown =
+        row?.contributions_known === null || row?.contributions_known === undefined
+          ? null
+          : Number(row.contributions_known) === 1;
+    } catch {
+      /* the column arrives with a worker migration; unknown until it does */
     }
     return NextResponse.json({
       source: "sqlite",
@@ -295,12 +545,12 @@ export async function GET() {
       positions,
       trades,
       financials,
-      agent: { name, ...readIdentitySettings() },
+      agent: await identityOf(name, tenant),
       netContributionsUsdg,
       gasUsdg,
       gasUnpricedTrades,
+      landed,
+      contributionsKnown,
     } satisfies FeedResponse);
-  } finally {
-    db.close();
-  }
+  });
 }

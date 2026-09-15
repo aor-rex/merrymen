@@ -21,7 +21,11 @@
  * the single worst property a trading UI can have.
  */
 
-const VERSION = "v1";
+// Bump this on any deploy that must force returning browsers off a stale cache:
+// a changed sw.js is picked up on the next navigation, and activate() below drops
+// every cache whose name doesn't carry the current VERSION — so the old
+// merrymen-shell-v1 / merrymen-assets-v1 are purged and the next load is fresh.
+const VERSION = "v4";
 const SHELL = `merrymen-shell-${VERSION}`;
 const ASSETS = `merrymen-assets-${VERSION}`;
 const OFFLINE_URL = "/offline.html";
@@ -30,7 +34,14 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(SHELL);
-      await cache.addAll([OFFLINE_URL, "/icon-192.png", "/manifest.webmanifest"]);
+      // THE OFFLINE PAGE’S OWN TYPEFACE.
+      //
+      // offline.html declares @font-face for /fonts/DMSans-latin.woff2, and the
+      // one moment it renders is the moment the network is gone — so a font
+      // that is not precached is a font that never loads, and the screen we
+      // rebuilt to look like the product falls back to system-ui. Adding it
+      // costs 62KB once, on install.
+      await cache.addAll([OFFLINE_URL, "/icon-192.png", "/manifest.webmanifest", "/fonts/DMSans-latin.woff2"]);
       await self.skipWaiting();
     })(),
   );
@@ -55,6 +66,13 @@ const isImmutableAsset = (url) => {
   // only matters while developing, which is exactly when a pinned stale chunk is
   // most confusing.
   if (url.pathname.startsWith("/_next/static/webpack/")) return false;
+  // On localhost (dev), EVERY /_next/static chunk is rewritten in place on edit
+  // and is not truly content-hashed — cache-first pins a whole stale build (which
+  // silently served an old /app through a dozen rebuilds once). Fetch chunks from
+  // the network in dev; production keeps cache-first, since its chunks are
+  // immutable by hash. API caching is untouched either way.
+  const dev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
+  if (dev && url.pathname.startsWith("/_next/static/")) return false;
   return url.pathname.startsWith("/_next/static/") || /\.(?:woff2?|png|svg|ico)$/.test(url.pathname);
 };
 

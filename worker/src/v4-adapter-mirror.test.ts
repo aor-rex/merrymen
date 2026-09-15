@@ -5,6 +5,7 @@ import { checkPolicy, type AgentState, type TradeIntent } from "./policy";
 import {
   CASH,
   GRANT_V4_ADAPTER,
+  RIALTO,
   UNISWAP,
   buildCallPermissions,
   usdgUnits,
@@ -122,4 +123,40 @@ test("the sealed address is mirrored case-insensitively", () => {
   });
   const limits = limitsFromGrant(grant);
   assert.ok(limits.allowedTargets.map((a) => a.toLowerCase()).includes(ADAPTER));
+});
+
+/**
+ * THE MIRROR MUST NOT BE LOOSER THAN THE CHAIN — Rialto, specifically.
+ *
+ * `RIALTO.routerSnapshot` sat in `allowedTargets` for every grant, while
+ * `buildCallPermissions` only ever emits that permission under `allowRialto` —
+ * which no signer sets. So no grant this repo can produce carries it, and the
+ * worker believed otherwise: it would pass `checkPolicy`, build the UserOp, and
+ * have the chain refuse it. Gas spent to be told no, by a revert naming nothing.
+ *
+ * The rule this file exists for, stated in its own header: looser than the chain
+ * means gas burned to be refused; stricter means a route that looks granted and
+ * never fires. This is the first kind.
+ */
+test("Rialto is not in the mirror, because it is not in any wall we can sign", () => {
+  const grant = {
+    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+    grantFeatures: ["tradeable-v2"],
+  } as never;
+  const targets = limitsFromGrant(grant).allowedTargets.map((a) => a.toLowerCase());
+  assert.ok(
+    !targets.includes(RIALTO.routerSnapshot.toLowerCase()),
+    "the mirror must not claim a target the signature does not carry",
+  );
+
+  // And the wall genuinely does not grant it by default — so the two now agree.
+  const perms = buildCallPermissions(
+    { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+    "0x00000000000000000000000000000000000000a9",
+  ) as unknown as { target: string }[];
+  assert.equal(
+    perms.filter((p) => p.target.toLowerCase() === RIALTO.routerSnapshot.toLowerCase()).length,
+    0,
+    "no Rialto permission by default",
+  );
 });

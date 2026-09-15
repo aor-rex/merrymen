@@ -26,6 +26,21 @@
 
 import { scoutAllows, type ScoutLimits } from "./quarantine";
 
+/**
+ * A 6dp USDG amount, written the way an owner reads it.
+ *
+ * LOCAL, four lines, rather than imported. This module's contract is to stay
+ * import-light — it is the mirror of an on-chain policy and every dependency is
+ * a thing that could make a verdict depend on something the chain cannot see.
+ * A number formatter is not worth breaking that for, and `reasons.ts` (which
+ * has its own) is a rendering layer this file must not reach into.
+ *
+ * `detail` strings from here are printed VERBATIM into the owner's event feed
+ * by index.ts, which is why the units matter: `50000000` is what a 50 USDG
+ * agent was being shown, and nobody reads that as fifty dollars.
+ */
+const money = (v: bigint) => `${(Number(v) / 1e6).toFixed(2)} USDG`;
+
 export interface AgentLimits {
   /** USDG (6dp) ceiling for a single trade. */
   perTradeUsdg: bigint;
@@ -49,6 +64,51 @@ export interface AgentLimits {
    * no grant to reason about. Never leave it undefined on a live path.
    */
   sellableAssets?: readonly string[];
+  /**
+   * Curve addresses this agent has SEEN LAUNCH, from a factory-filtered scan.
+   *
+   * The curve is the one argument the wall cannot pin -- a new address per
+   * token, hundreds an hour -- so wall.ts passes `null` for it and says so
+   * outright. That makes this the only place a curve can be constrained at all.
+   *
+   * What made a curve trustworthy before this was INCIDENTAL: the launch scan
+   * happens to filter on PONS_V2_FACTORY (pons.ts) and discovery copies the
+   * value through. Any future producer that sourced a curve from somewhere else
+   * -- an LLM proposal, a chat message, a poisoned tape -- would silently lose
+   * that property, and nothing would have noticed.
+   *
+   * Optional, like sellableAssets, for fixtures. Absent means the rule cannot
+   * run; it must never mean the rule passed.
+   */
+  knownCurves?: readonly string[];
+  /**
+   * The per-account CLASS VAULT this grant sealed, or absent.
+   *
+   * Its presence is what makes a curve trade a CLASS trade: the vault is the
+   * only target that can reach a token nobody enumerated, so a trade aimed at
+   * it is judged by different rules than one aimed at the adapter — see the
+   * curve-trade branch. Read from the GRANT (grantPonsClassVault: marker AND
+   * sealed address), never from settings, for the same reason every other
+   * mirrored address is.
+   *
+   * ABSENT IS THE SECURE DEFAULT and means every curve trade is judged the old
+   * way: both legs must be enumerated. A fixture that leaves this undefined
+   * gets the strict rules, which is the direction a missing value should fail.
+   */
+  ponsClassVault?: string;
+  /**
+   * The QUOTE side of the book: USDG and the tradeable stock tokens.
+   *
+   * `builtinGrantTargets(grant)` -- deliberately NOT sellableAssets, which also
+   * contains the owner's added extras and therefore the launched memecoins. The
+   * two lists differ by exactly the tokens a curve trade might be ENTERING, so
+   * using the wrong one turns the drawdown breaker's exit exemption into a
+   * blanket exemption for the venue.
+   *
+   * Optional for fixtures. Absent means the exit test falls back to cashToken
+   * alone -- narrower, which is the safe direction for an exemption.
+   */
+  quoteAssets?: readonly string[];
   /**
    * Tickers the agent may trade on the brokerage rail — the broker analog of
    * allowedAssets, since an equity order has no address for that list to
@@ -128,6 +188,44 @@ export type TradeIntent = {
   ticker: string;
   side: "buy" | "sell";
   /** USD notional, 6dp — same unit as USDG, judged by the same caps. */
+  notionalUsdg: bigint;
+} | {
+  /**
+   * A trade on a Pons bonding curve, through the PonsSelfTrade adapter.
+   *
+   * ITS OWN KIND rather than a `swap`, for a reason that is about safety and
+   * not tidiness. A curve has no fee tier, no path and no PoolKey, so it does
+   * not fit the Quote that `swap` dispatches on — and forcing it through would
+   * mean either inventing a sentinel for the native side or having
+   * `asset-allowlist` reject the venue outright, which is a mirror STRICTER
+   * than the chain. A distinct kind also makes the compiler ask every consumer
+   * what a curve trade means to it, the same reasoning that leaves
+   * `equity-order` without a `target`.
+   *
+   * `target` IS here, and it is the ADAPTER — never the curve. The curve is a
+   * call argument the wall cannot pin (a new address per token, ~475 an hour),
+   * so `target-allowlist` covers the one address that IS pinned, unchanged.
+   */
+  kind: "curve-trade";
+  /** The PonsSelfTrade adapter. What the wall pinned and what gets called. */
+  target: `0x${string}`;
+  /** The bonding curve. An argument, vouched for by nobody — see wall.ts. */
+  curve: `0x${string}`;
+  assetIn: `0x${string}`;
+  assetOut: `0x${string}`;
+  /** Raw units of assetIn — what executes. */
+  amountInRaw: bigint;
+  /**
+   * Slippage floor in assetOut units, from the SAME quote that sized this
+   * intent. Carried on the intent rather than recomputed at execution time so
+   * the number the trade is judged against and the number the chain enforces
+   * cannot come from two different readings of a curve that moves 1,546 bps at
+   * p99 over four minutes.
+   *
+   * checkPolicy ignores it, like every other execution detail here.
+   */
+  minAmountOutRaw: bigint;
+  /** USDG-equivalent size (6dp) — what the caps judge. */
   notionalUsdg: bigint;
 });
 
@@ -214,7 +312,154 @@ export function checkPolicy(
     }
   }
 
+  // ── curve trades ────────────────────────────────────────────────────────
+  //
+  // THIS BLOCK EXISTS BECAUSE THE MIRROR WAS LOOSER THAN THE CHAIN.
+  //
+  // Every asset rule below used to sit inside `if (intent.kind === "swap")`,
+  // so a curve trade reached the bundler having passed no asset check at all.
+  // The chain would still refuse it -- wall.ts pins both legs ONE_OF the
+  // sealed list -- but limits.ts:27-41 records that the mirror going LOOSER
+  // than the chain is the one direction that is never safe, and the cost of
+  // discovering it on chain is a wasted UserOp and a `gas-unreadable` refusal
+  // that names nothing.
+  //
+  // GATED ON sellableAssets, NOT allowedAssets, and the distinction is the
+  // whole point. allowedAssets is [USDG, ...watchTokens] and watchTokens comes
+  // from SETTINGS (limits.ts:78), which hot-reload with no signature.
+  // sellableAssets comes from the GRANT (grant.ts:344), which is what the wall
+  // actually sealed. Checking the settings-derived list here would reproduce
+  // exactly the bug this block is closing: an owner adds a token in /settings,
+  // does not re-sign, and gets a curve buy that passes every off-chain check
+  // and reverts at the wall.
+  if (intent.kind === "curve-trade") {
+    // Positivity. equity-order has one of these; curve-trade did not, so a zero
+    // or negative size would sail through every cap below (they are all upper
+    // bounds) and be signed.
+    if (intent.amountInRaw <= 0n || intent.notionalUsdg <= 0n) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `curve trade sized ${intent.amountInRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
+
+    // IS THIS A CLASS TRADE? The TARGET decides, and nothing else does.
+    //
+    // A class trade is one aimed at the per-account vault the grant sealed. The
+    // vault is the only target that can hold a token nobody enumerated and still
+    // sell it back — see PonsClassVault.sol — so the asset rule below reads
+    // differently for it. `target-allowlist` above has already established that
+    // this address is one the grant permits at all; this only asks WHICH of the
+    // permitted targets it is.
+    //
+    // Absent `ponsClassVault` (no class marker, or a grant signed before the
+    // feature existed) this is false for every trade and the strict both-legs
+    // rule is the only rule there is.
+    const isClassTrade =
+      limits.ponsClassVault !== undefined && lc(intent.target) === lc(limits.ponsClassVault);
+
+    if (limits.sellableAssets) {
+      const sellable = limits.sellableAssets.map(lc);
+      const unenumerated = [intent.assetIn, intent.assetOut].filter(
+        (token) => !sellable.includes(lc(token)),
+      );
+
+      if (!isClassTrade && unenumerated.length > 0) {
+        return {
+          ok: false,
+          rule: "asset-allowlist",
+          detail:
+            `asset ${unenumerated[0]} is not in the signed grant, so the wall will refuse this ` +
+            `trade. Add it at /settings and re-sign the grant at /grant to cover it.`,
+        };
+      } else if (isClassTrade && unenumerated.length > 1) {
+        // A CLASS TRADE MAY LEAVE EXACTLY ONE LEG UN-ENUMERATED — the class
+        // token itself, which by definition did not exist when the grant was
+        // signed and so could never have been named in it.
+        //
+        // The other leg is the anchor, and it stays enumerated on BOTH shapes:
+        // on a buy it is the funding asset, which the wall pins ONE_OF the
+        // sealed list (wall.ts, the class `buy` permission); on a sell the wall
+        // pins nothing at all, because the vault can only sell what it holds
+        // and can only pay its own owner — so requiring the proceeds to be a
+        // sealed asset here is a mirror STRICTER than the chain, which is the
+        // one direction that is always safe.
+        //
+        // Both legs un-enumerated is the case that has no honest reading: it is
+        // either funding a class buy out of another class token, or selling one
+        // into another, and both end with the account holding something no rule
+        // above ever vouched for.
+        return {
+          ok: false,
+          rule: "asset-allowlist",
+          detail:
+            `neither ${intent.assetIn} nor ${intent.assetOut} is in the signed grant. A class ` +
+            `trade may leave the class token itself un-enumerated, but the other leg has to be ` +
+            `an asset the grant sealed — otherwise nothing in this trade is anchored to it.`,
+        };
+      }
+    }
+
+    // CURVE PROVENANCE. `intent.target` is the adapter and is covered by the
+    // target allowlist above; `intent.curve` is covered by nothing, on chain or
+    // off. This turns the incidental factory-filter property into an enforced
+    // one, before any producer exists that could source a curve elsewhere.
+    if (limits.knownCurves) {
+      if (!limits.knownCurves.map(lc).includes(lc(intent.curve))) {
+        return {
+          ok: false,
+          rule: "curve-provenance",
+          detail:
+            `curve ${intent.curve} was not seen in a factory-filtered launch, so nothing vouches ` +
+            `for it being a Pons curve at all. The wall cannot pin this argument, which is exactly ` +
+            `why it is checked here.`,
+        };
+      }
+    } else if (isClassTrade) {
+      // FAIL CLOSED, and only here does the inversion matter enough to state.
+      //
+      // Everywhere else in this file an absent list means "the rule cannot run"
+      // and the trade is judged by the rules that can — safe, because some other
+      // rule still names every asset involved. A class trade is the one shape
+      // where that is not true: its output leg is deliberately un-enumerated, so
+      // the factory-filtered launch feed is the ONLY thing that vouches for the
+      // token existing at all. With `knownCurves` undefined, a class trade has
+      // exactly zero provenance, and skipping the check would turn the missing
+      // list into a pass.
+      return {
+        ok: false,
+        rule: "curve-provenance",
+        detail:
+          `a class trade cannot be judged without the launch feed: its output leg is not in the ` +
+          `grant by design, so the curve's provenance is the only thing vouching for it. ` +
+          `knownCurves is unreadable, which is not the same as this curve being known.`,
+      };
+    }
+  }
+
   if (intent.kind === "swap") {
+    // POSITIVITY, AND IT IS NOT DECORATION.
+    //
+    // curve-trade, equity-order and transfer each carry this guard; `swap` —
+    // the oldest and most-travelled branch — never got the line, because until
+    // now every swap was sized by a strategy rather than by a person. An
+    // owner-typed order changes that: a caller now chooses the number.
+    //
+    // A negative size passes EVERY cap below, because every cap below is an
+    // upper bound: `-25000000n > perTradeUsdg` is false, and it goes on to
+    // REDUCE the day's spend against the daily cap — so the accounting is what
+    // gets fooled, not just the trade. It would die eventually in viem's
+    // uint256 encoding, which makes the refusal a stack trace instead of a
+    // rule, on a path where the rule is what the owner is shown.
+    if (intent.sellAmountRaw <= 0n || intent.notionalUsdg <= 0n) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `swap sized ${intent.sellAmountRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
+
     for (const token of [intent.sellToken, intent.buyToken]) {
       if (!limits.allowedAssets.map(lc).includes(lc(token))) {
         return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
@@ -247,27 +492,41 @@ export function checkPolicy(
       }
     }
 
-    // BUYING SOMETHING NOBODY CAN PRICE.
-    //
-    // A token the tick couldn't value is one whose worth is genuinely unknown:
-    // its pool is too new or too thin for a TWAP anyone should trust. The
-    // drawdown breaker cannot protect that money, because protecting it would
-    // mean believing the price it just refused. So the scout BUDGET is the only
-    // control there is, and it has to bite here — before the position exists.
-    //
-    // Sells are untouched: this whole branch only ever inspects buyToken, so
-    // getting OUT of an unpriceable position is never blocked by it.
-    if (scout?.buyUnpriceable) {
-      const verdict = scoutAllows(
-        {
-          spendUsdg: intent.notionalUsdg,
-          existingCostUsdg: scout.existingCostUsdg,
-          quarantinedUsdg: scout.quarantinedUsdg,
-        },
-        scout.limits,
-      );
-      if (!verdict.ok) return { ok: false, rule: "scout-budget", detail: verdict.reason };
-    }
+  }
+
+  // BUYING SOMETHING NOBODY CAN PRICE — AT EITHER VENUE.
+  //
+  // A token the tick couldn't value is one whose worth is genuinely unknown:
+  // its pool is too new or too thin for a TWAP anyone should trust. The
+  // drawdown breaker cannot protect that money, because protecting it would
+  // mean believing the price it just refused. So the scout BUDGET is the only
+  // control there is, and it has to bite here — before the position exists.
+  //
+  // OUT OF THE SWAP BRANCH, where it used to live. A curve trade skipped it
+  // entirely, which was survivable only while the sole producer of one was an
+  // owner typing it into chat — a person spending their own money, deliberately.
+  // The moment the strategist can emit one, this is the difference between a
+  // budgeted buy and an autonomous unbudgeted buy into the least priceable
+  // assets on the chain. A curve mark is also barred from ratcheting the
+  // high-water mark, so the breaker measures that book from a lower reference
+  // and cannot be the backstop instead.
+  //
+  // Sells are untouched at both venues: the caller only ever reports
+  // `buyUnpriceable` about the asset being ACQUIRED, so getting out of an
+  // unpriceable position is never blocked by this.
+  // The two venues that ACQUIRE an asset. Named explicitly rather than relying
+  // on `scout` being undefined elsewhere: a vault movement has no notional to
+  // judge, and a future kind that does should have to opt in here on purpose.
+  if (scout?.buyUnpriceable && (intent.kind === "swap" || intent.kind === "curve-trade")) {
+    const verdict = scoutAllows(
+      {
+        spendUsdg: intent.notionalUsdg,
+        existingCostUsdg: scout.existingCostUsdg,
+        quarantinedUsdg: scout.quarantinedUsdg,
+      },
+      scout.limits,
+    );
+    if (!verdict.ok) return { ok: false, rule: "scout-budget", detail: verdict.reason };
   }
 
   if (intent.kind === "transfer") {
@@ -308,7 +567,50 @@ export function checkPolicy(
     }
   }
 
-  if (state.opsToday >= limits.maxOpsPerDay) {
+  // ── THE ONE EXIT THE CHAIN DOES NOT SIZE ────────────────────────────────
+  //
+  // Computed here rather than below because the SIZE caps need it too, and
+  // this is the narrower question than the breaker's `isExit` further down.
+  //
+  // WHY THIS IS A MIRROR FIX AND NOT A LOOSENED RAIL. The comment under this
+  // one states this file's contract: the per-op ceiling "mirrors the on-chain
+  // call policy EXACTLY, because a stricter mirror rejects trades the chain
+  // would happily allow (a real bug per this file's contract)". It then lists
+  // "swaps & transfers → approve/transfer USDG capped at the PER-TRADE limit",
+  // which is true of the USDG approve — the BUY leg. The SELL leg is a
+  // different permission, and wall.ts emits it with an explicit `null` amount
+  // argument under the comment "No amount condition". So the chain does not
+  // bound the size of a sell, and this file was bounding it anyway.
+  //
+  // WHAT THAT COST. A trencher entry is 5 USDG against a 10 USDG per-trade cap.
+  // Hit the -35% stop and the exit is worth ~3.25 and passes; hit the +100%
+  // take-profit and it is worth ~10.0x and is refused with `per-trade-cap`,
+  // every tick, forever. The agent was structurally able to exit its losers and
+  // structurally unable to exit its winners — the exact inverse of what an
+  // owner asks for, and it would have been invisible as a stuck position rather
+  // than as an error.
+  //
+  // DELIBERATELY NARROWER THAN `isExit` BELOW. A `transfer` is genuinely capped
+  // on chain (wall.ts:421-425, LESS_THAN_OR_EQUAL perTradeUsdg) and an
+  // `equity-order` has no wall permission at all, so neither is exempt here
+  // even though the breaker rightly treats both as exits. The exemption is only
+  // where the chain's own permission carries no amount condition. Buys are
+  // untouched: that cap is real, it is on chain, and it stays.
+  const isUnsizedExit =
+    (intent.kind === "swap" &&
+      limits.cashToken !== undefined &&
+      lc(intent.buyToken) === lc(limits.cashToken)) ||
+    (intent.kind === "curve-trade" &&
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
+
+  // A RATE LIMIT MUST NOT BECOME A LOCK ON THE DOORS — the same sentence the
+  // drawdown breaker below is written under. This one is purely off-chain: the
+  // rate-limit policy contract has no bytecode on 4663 and was removed from the
+  // wall for that reason, so it is a worker-side brake on taking risk. On the
+  // shipped defaults (25 USDG a tick against 24 ops a day) an agent that spent
+  // its budget buying could not sell until the day rolled.
+  if (!isUnsizedExit && state.opsToday >= limits.maxOpsPerDay) {
     return { ok: false, rule: "ops-cap", detail: `${state.opsToday} ops in 24h >= ${limits.maxOpsPerDay}` };
   }
 
@@ -326,18 +628,46 @@ export function checkPolicy(
     // Equity orders count on BOTH sides, like swaps: a sell is still an op and
     // still market exposure, and on this rail these caps are the only wall.
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" ? intent.notionalUsdg : intent.amountUsdg;
+      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+        ? intent.notionalUsdg
+        : intent.amountUsdg;
     const isDeposit = intent.kind === "vault-deposit";
     const perOpCap = isDeposit ? limits.dailyUsdg : limits.perTradeUsdg;
-    if (notional > perOpCap) {
+    // See isUnsizedExit: the chain caps the USDG approve that funds a BUY, and
+    // emits the sell-side approve with no amount condition at all. Capping a
+    // sell here was the mirror being stricter than the chain, which this file's
+    // own contract calls a real bug — and it refused every winning exit.
+    if (!isUnsizedExit && notional > perOpCap) {
       return {
         ok: false,
         rule: isDeposit ? "deposit-cap" : "per-trade-cap",
-        detail: `${notional} > ${perOpCap}`,
+        detail:
+          `this ${money(notional)} ${isDeposit ? "deposit" : "trade"} is over the ` +
+          `${money(perOpCap)} ${isDeposit ? "daily" : "per-trade"} cap. That cap is sealed into ` +
+          `the signature — raising it means re-signing at /grant.`,
       };
     }
-    if (state.spentTodayUsdg + notional > limits.dailyUsdg) {
-      return { ok: false, rule: "daily-cap", detail: `would exceed daily cap ${limits.dailyUsdg}` };
+    // The day's budget is a bound on what may be SPENT. A sell spends nothing —
+    // it returns cash — so counting it against the same allowance meant an
+    // agent that used its budget entering could not leave until the day rolled,
+    // which is the lock-in the breaker below refuses by name.
+    if (!isUnsizedExit && state.spentTodayUsdg + notional > limits.dailyUsdg) {
+      // WRITTEN FOR THE PERSON WHO HAS TO READ IT. This said
+      // `would exceed daily cap 50000000` — a raw 6dp bigint, no units, no
+      // remaining balance, no reset — and index.ts prints the detail verbatim
+      // into the owner's feed. "Fifty million" is what an owner of a 50 USDG
+      // agent saw, up to three times a tick, all day.
+      //
+      // The numbers that answer the actual question are all right here: what
+      // has gone, what the allowance was, and what this trade would have added.
+      return {
+        ok: false,
+        rule: "daily-cap",
+        detail:
+          `spent ${money(state.spentTodayUsdg)} of the ${money(limits.dailyUsdg)} daily budget; ` +
+          `this ${money(notional)} buy would go over it. Exits are never blocked by this — ` +
+          `the budget bounds what may be SPENT, and it rolls 24h from the first spend.`,
+      };
     }
   }
 
@@ -364,7 +694,33 @@ export function checkPolicy(
     (intent.kind === "swap" &&
       limits.cashToken !== undefined &&
       lc(intent.buyToken) === lc(limits.cashToken)) ||
-    (intent.kind === "equity-order" && intent.side === "sell");
+    (intent.kind === "equity-order" && intent.side === "sell") ||
+    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
+    // into cash is. Leaving it out would have the breaker block the one
+    // direction it should never block — getting out of a memecoin — while a
+    // drawdown is in progress, which is precisely when it matters most.
+    // ANY curve trade out of the token and back into something the grant can
+    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
+    // stock token, so the cashToken-only test blocked the exit for nearly half
+    // the venue during a drawdown -- the exact lock-in the comment above says
+    // it prevents, for the positions most likely to be causing the drawdown.
+    // ANY curve trade back into the QUOTE side is an exit, not just one into
+    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
+    // test blocked the exit for nearly half the venue during a drawdown --
+    // the exact lock-in the comment above says it prevents, for the positions
+    // most likely to be causing the drawdown.
+    //
+    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
+    // sealed list, so `assetOut is sellable` is true of every curve trade ever
+    // built, including buys -- testing it would mark the whole venue exempt and
+    // switch the breaker off exactly where the risk is highest. The real
+    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
+    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
+    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
+    // into a builtin is an exit and trading out into an extra is an entry.
+    (intent.kind === "curve-trade" &&
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

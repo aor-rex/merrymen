@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths } from "@/lib/home";
-import { llmProviderById, type MerrymenSettings } from "@merrymen/core";
+import { homePaths } from "@merrymen/home";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { isHostedMode, llmProviderById, type MerrymenSettings } from "@merrymen/core";
+import { tenantOf } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +13,26 @@ interface FetchModelsBody {
   baseUrl?: string;
 }
 
-async function readSavedSettings(): Promise<MerrymenSettings> {
+/**
+ * THE SAME SETTINGS THE REST OF THE PRODUCT READS.
+ *
+ * This read only ~/.merrymen/settings.json — a file that does not exist on the
+ * hosted deploy, where a tenant's settings live in the per-tenant encrypted
+ * store and the global file belongs to nobody. So `saved` came back empty for
+ * every hosted tenant, the saved Groq key was never attached, and the request
+ * went to the provider with no Authorization header at all. Groq answered 401,
+ * and the settings page printed "Could not load AI models. Check your provider
+ * and key" — beside a key field showing dots, which is to say beside the key it
+ * had just declined to use. Reported by two testers as showing "all the time,
+ * but everything is set". It was.
+ *
+ * Mirrors readStored in /api/settings exactly, including the refusal to fall
+ * back to the global file when hosted: those settings are not this tenant's,
+ * and reading somebody else's key here would be worse than not reading one.
+ */
+async function readSavedSettings(req: Request): Promise<MerrymenSettings> {
+  const tenant = isHostedMode() ? tenantOf(req) : null;
+  if (isHostedMode()) return tenant ? ((await getSettingsStore().get(tenant)) ?? {}) : {};
   try {
     return JSON.parse(
       (await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, ""),
@@ -38,7 +59,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const saved = await readSavedSettings();
+  const saved = await readSavedSettings(req);
   const providerId = body.provider || saved.llmProvider;
   if (!providerId) {
     return NextResponse.json({ error: "no provider specified and none saved" }, { status: 400 });
@@ -49,11 +70,81 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `unknown provider: ${providerId}` }, { status: 400 });
   }
 
+  /**
+   * THE TENANT'S KEY FIRST, THEN THE HOUSE'S — the same order as everything else.
+   *
+   * THE BUG THIS FIXES, reported as "Could not load AI models. Check your
+   * provider and key, or enter a model name" showing for somebody whose chat
+   * was working fine. It read ONLY the tenant's stored settings, while the rest
+   * of the product resolves a key as `str(file, env)` — the tenant's own key if
+   * they brought one, the house key otherwise (settings.ts:272). The house
+   * pays for inference and GROQ_API_KEY is set on this service, so a tenant who
+   * had never pasted a key of their own — which is nearly all of them, because
+   * the house key is what makes chat work — got no Authorization header at all,
+   * a 401 from the provider, and a message telling them to check the key that
+   * was working.
+   *
+   * `HOUSE_KEY_FIELDS` no longer strips these: settings.ts records that the
+   * house key became the DEFAULT and a tenant's own key OVERRIDES it, precisely
+   * so somebody can bring their own quota. This route was the one place that
+   * never learned the second half.
+   *
+   * AND THE HOUSE KEY NEVER GOES TO A CALLER-INFLUENCED URL. For a fixed-base
+   * provider the destination is a constant in this repo, so there is nothing to
+   * aim it at. `custom` is excluded outright: its base URL is configuration,
+   * and pairing OUR credential with an address somebody else chose is the
+   * exfiltration oracle the guard below already exists to prevent. A custom
+   * provider still uses the tenant's own stored key with the tenant's own
+   * stored URL, exactly as before.
+   */
+  /**
+   * AND THE HOUSE KEY IS FOR THE HOUSE'S TENANTS, not for anyone who can reach
+   * this endpoint.
+   *
+   * This route has no auth check of its own — hosted, `readSavedSettings`
+   * simply returns {} for a caller with no session. Falling back to the house
+   * key unconditionally therefore let an unauthenticated request spend our
+   * quota, which I confirmed against production before tightening it: a POST
+   * with no cookie came back with the full model list.
+   *
+   * Nothing was disclosed — Groq's model names are public and the key never
+   * leaves this process — but "the house pays for inference" means for the
+   * people it is hosting. Self-hosted there is no session and no other tenant,
+   * so the operator's own env key stays exactly as available as it was.
+   */
+  const houseKeyAllowed = !isHostedMode() || !!tenantOf(req);
+  const house = (v: string | undefined) => (houseKeyAllowed ? (v ?? "") : "");
+
   let apiKey = body.apiKey || "";
+  // Which key would be sent — never the key itself. Lets the UI name the
+  // failed credential ("your saved Groq key") instead of showing raw JSON.
+  // Resolved after the fallback chain by re-reading the saved field for this
+  // provider: non-empty means the key came from settings, else from house env.
+  // The one-liner shapes below are pinned by house-key-and-basket.test.ts —
+  // keep them literal.
+  let keySource: "typed" | "saved" | "house" | "none" = body.apiKey ? "typed" : "none";
   if (!apiKey) {
-    if (prov.id === "groq") apiKey = saved.groqApiKey ?? "";
-    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey ?? "";
-    else apiKey = saved.llmApiKey ?? "";
+    if (prov.id === "groq") apiKey = saved.groqApiKey || house(process.env.GROQ_API_KEY);
+    else if (prov.id === "anthropic") apiKey = saved.anthropicApiKey || house(process.env.ANTHROPIC_API_KEY);
+    else if (prov.id === "custom") apiKey = saved.llmApiKey ?? "";
+    else apiKey = saved.llmApiKey || house(process.env.MERRYMEN_LLM_API_KEY);
+    if (apiKey) {
+      const savedForProvider =
+        prov.id === "groq" ? saved.groqApiKey :
+        prov.id === "anthropic" ? saved.anthropicApiKey :
+        saved.llmApiKey;
+      keySource = savedForProvider ? "saved" : "house";
+    }
+  }
+  // No key to try from any source — not a failure, nothing was attempted.
+  // The client treats this as the neutral "enter a key" hint rather than
+  // an error, so a bare page load never shows a provider refusal for
+  // something the user never did.
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "no API key to try", code: "missing_key", keySource },
+      { status: 200 },
+    );
   }
 
   let baseUrl = prov.baseUrl;
@@ -107,12 +198,14 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      const detail = text ? ` (${text.slice(0, 200)})` : "";
-      return NextResponse.json(
-        { error: `provider returned ${res.status}${detail}` },
-        { status: 502 },
-      );
+      // Classified, not parroted: raw provider bodies read as gibberish and
+      // leak provider internals. The UI renders per-code guidance instead.
+      const code = res.status === 401 || res.status === 403 ? "key_rejected" : "provider_error";
+      const error =
+        code === "key_rejected"
+          ? "provider refused the API key"
+          : `provider returned ${res.status}`;
+      return NextResponse.json({ error, code, keySource }, { status: 502 });
     }
 
     const json = (await res.json()) as Record<string, unknown>;
@@ -145,8 +238,7 @@ export async function POST(req: Request) {
 
     models.sort((a, b) => a.localeCompare(b));
     return NextResponse.json({ models });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    return NextResponse.json({ error: message }, { status: 502 });
+  } catch {
+    return NextResponse.json({ error: "provider unreachable", code: "provider_error", keySource }, { status: 502 });
   }
 }

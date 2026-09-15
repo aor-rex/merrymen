@@ -13,6 +13,17 @@ const MARQUEE = [
 const GITHUB = "https://github.com/millw14/merrymen";
 
 /**
+ * The hosted product.
+ *
+ * This page described merrymen for months without ever linking to it. The
+ * primary button went to /docs and the quickstart was `npm install -g`, so the
+ * only people who reached app.merrymen.dev were the ones already told the
+ * subdomain — while the hero copy two lines below says "self-host it or run it
+ * hosted", offering exactly one of those.
+ */
+const HOSTED_APP = "https://app.merrymen.dev";
+
+/**
  * The beta testers' room — an open Telegram invite. Anyone with the link joins,
  * which is the point while the band is still being tuned.
  *
@@ -101,10 +112,20 @@ const CAPS: [IconName, string, string][] = [
   ["power", "Kill switch", "One command destroys the grant; the worker stands down next tick. On-chain expiry is the backstop."],
 ];
 
+/*
+  These described the SELF-HOSTED path exclusively — install a package, paste a
+  bundler key — while the button above them now opens the hosted app, where
+  neither step exists. Rewritten for the path the primary CTA actually takes.
+
+  Step 2 deliberately does NOT promise paper trading. It used to say the agent
+  "trades on paper instantly", and hosted cannot do that today: paperActive()
+  requires no executor, and hosted always injects the house bundler key. Put
+  that sentence back when the worker keys paper on capability instead.
+*/
 const STEPS: [string, string, string][] = [
-  ["1", "Install & open it", "One command installs merrymen and opens your dashboard. No accounts, nothing to connect."],
-  ["2", "Create your agent — it trades on paper instantly", "Pick a spending-limit preset and go. Your agent starts trading at real live prices with pretend money, so you watch it work before risking a cent."],
-  ["3", "Add a key to go live", "When you're ready, paste one free key and the same agent trades for real — inside the exact same limits. Steer it from Telegram if you like."],
+  ["1", "Open it and connect a wallet", "No install, nothing to run, no card. Your wallet signs to prove it is you — it never moves anything, and merrymen never sees a private key of yours."],
+  ["2", "Sign the wall", "Choose what your agent may spend and how long its key lives, then sign once. That signature IS the limit: your account contract checks it on every operation, so the agent cannot exceed it even if our software is compromised."],
+  ["3", "Fund it and it trades", "Send it some money and it starts working the market. Change the limits whenever you like — re-signing is free and instant. Steer it from Telegram if you prefer, or take everything back out with your own key."],
 ];
 
 export default function Home() {
@@ -120,17 +141,25 @@ export default function Home() {
             Trading agents you never have to trust.
           </h1>
           <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
-            merrymen is a trading bot you run yourself. It works the market for you on Robinhood Chain —
-            but your keys stay on your machine, and the size of every trade, how often it may trade,
-            how long its key lives and where value can land are enforced by the blockchain itself, not
-            by the bot behaving. Name it, chat with it, and steer it from Telegram.
+            merrymen is a trading bot you own — self-host it or run it hosted. It works the market for
+            you on Robinhood Chain, but your owner key never leaves you, and the size of every trade,
+            how often it may trade, how long its key lives and where value can land are enforced by the
+            blockchain itself, not by the bot behaving. Name it, chat with it, and steer it from Telegram.
           </p>
           <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
+            {/* Hosted is the primary path because it is the one with no
+                prerequisites: no install, no node, no machine left running.
+                Docs stay one button away for the people who want to self-host,
+                which the hero copy promises and which is genuinely the better
+                answer for anyone who would rather not trust our frontend. */}
             <span className="mag" data-magnetic>
-              <Link href="/docs" className="btn btn-primary btn-lg has-box">
-                Get started <span className="box"><Icon name="arrow" size={16} /></span>
-              </Link>
+              <a href={HOSTED_APP} className="btn btn-primary btn-lg has-box">
+                Start trading <span className="box"><Icon name="arrow" size={16} /></span>
+              </a>
             </span>
+            <Link href="/docs" className="btn btn-ghost btn-lg">
+              <Icon name="arrow" size={15} /> Self-host it instead
+            </Link>
             {/* Deep-links the CURRENT installer, not the releases page, so a
                 wrong or stale build is never one click away. See the note on
                 WINDOWS_DOWNLOAD above. */}
@@ -150,7 +179,7 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-meta" data-reveal="up" style={{ ["--d" as string]: "240ms" }}>
-            MIT-licensed · runs on your machine · no account, no cloud
+            MIT-licensed · self-host it or run it hosted · your owner key never leaves you
             <br />
             <span style={{ opacity: 0.75 }}>
               Windows {DESKTOP_VERSION} · {DESKTOP_SIZE} · macOS and Linux via{" "}
@@ -208,9 +237,9 @@ export default function Home() {
             <h2 data-reveal="mask">The wall is the product.</h2>
             <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               Anyone can ship a trading agent. The hard thing — the thing merrymen is — is an agent
-              you don&apos;t have to trust: it runs on your machine, holds keys that never leave it,
-              and trades inside caps the chain itself enforces. Everything else on this page is
-              built on top of that wall.
+              you don&apos;t have to trust: your owner key never leaves you, and it trades inside caps
+              the chain itself enforces — a leaked session key is value-churn, never theft. Everything
+              else on this page is built on top of that wall.
             </p>
           </div>
 
@@ -246,9 +275,10 @@ export default function Home() {
             <div className="cell" data-reveal="up" style={{ ["--d" as string]: "80ms" }}>
               <h4>merrymen inverts it</h4>
               <p>
-                The agent lives on your machine and holds a session key whose limits — how much per
-                trade, how often, how long it lives, and <em>where value may land</em> — are
-                enforced by your account contract on-chain, verifiable in the explorer. A
+                The agent holds only a session key whose limits — how much per trade, how often, how
+                long it lives, and <em>where value may land</em> — are enforced by your account
+                contract on-chain, verifiable in the explorer. The owner key that could lift those
+                limits never leaves you. A
                 compromised agent can trade inside that wall. It cannot send your funds to an
                 address you never registered, and it cannot sign anything. You verify; it trades.
               </p>
@@ -272,12 +302,13 @@ export default function Home() {
 
           <div className="feature-row">
             <div className="feature-copy" data-reveal="up">
-              <div className="feature-kicker">Self-hosted</div>
-              <h3>Runs on your machine. Full stop.</h3>
+              <div className="feature-kicker">Your machine, or ours</div>
+              <h3>Self-host it, or run it hosted.</h3>
               <p>
-                One <code className="inline">npm install</code>, a local dashboard, and a worker that
-                trades on a schedule. No servers, no sign-up — your data and your keys live in
-                <code className="inline">~/.merrymen</code> and never leave it.
+                One <code className="inline">npm install</code> for a local dashboard and a worker on
+                your own machine — or run it hosted from a URL, no install. Either way your{" "}
+                <strong>owner key</strong> is generated on your device and never leaves it; a hosted
+                server only ever holds a capped, revocable session key the chain keeps on a leash.
               </p>
               <ul className="feature-list">
                 {["Create a wallet in-browser — nothing to connect", "Caps enforced by the account contract on every op", "Testnet sandbox or real mainnet, you choose", "Kill switch destroys the grant, halts the band"].map((t) => (
@@ -502,7 +533,7 @@ npm install -g merrymen && merrymen start`}
             <span>MIT open source — read every line</span>
             <span>200+ tests on the policy wall &amp; pipeline</span>
             <span>caps enforced by the account contract, verifiable in the explorer</span>
-            <span>zero servers — it runs on your machine</span>
+            <span>your owner key never leaves your device — self-hosted or hosted</span>
           </div>
 
           <p className="words-invite" data-reveal="up" style={{ ["--d" as string]: "140ms" }}>
@@ -522,10 +553,13 @@ npm install -g merrymen && merrymen start`}
           <p data-reveal="up" style={{ ["--d" as string]: "80ms" }}>Free, open source, and yours. Install it, name your merryman, loose the first arrow.</p>
           <div className="hero-cta" data-reveal="up" style={{ marginTop: 30, ["--d" as string]: "150ms" }}>
             <span className="mag" data-magnetic>
-              <Link href="/docs" className="btn btn-primary btn-lg has-box">
-                Read the docs <span className="box"><Icon name="arrow" size={16} /></span>
-              </Link>
+              <a href={HOSTED_APP} className="btn btn-primary btn-lg has-box">
+                Start trading <span className="box"><Icon name="arrow" size={16} /></span>
+              </a>
             </span>
+            <Link href="/docs" className="btn btn-ghost btn-lg">
+              Read the docs
+            </Link>
             <a href={TELEGRAM_BETA} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
               <Icon name="chat" size={15} /> Join the beta
             </a>

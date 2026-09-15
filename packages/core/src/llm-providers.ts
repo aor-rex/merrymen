@@ -64,7 +64,24 @@ export const LLM_PROVIDERS: LlmProviderInfo[] = [
     label: "Groq",
     transport: "openai",
     baseUrl: "https://api.groq.com/openai/v1",
-    defaultModel: "llama-3.3-70b-versatile",
+    /**
+     * NOT the biggest model on the menu, deliberately — measured 2026-08-30.
+     *
+     * Groq retired the entire Llama 3.x chat line, so the old default answers
+     * 404 model_not_found. The flagship replacement, openai/gpt-oss-120b, is a
+     * REASONING model: it spends completion tokens on hidden reasoning before
+     * emitting anything, and this repo's smallest budget is 300 tokens (the
+     * Telegram interpreter's forced tool call). At 300 it burns the lot
+     * reasoning and the request fails outright — `tool_use_failed`, "model did
+     * not call a tool" — while the same model at 2048 works fine. A default
+     * that works for the strategist and breaks Telegram is the worst kind.
+     *
+     * qwen3.8-27b returned clean content and a clean tool call at every budget
+     * this codebase uses (300, 400, 500, 1536, 2048), with no reasoning tax.
+     * Owners who want the bigger model can pick it in settings, where the
+     * budgets are theirs to match.
+     */
+    defaultModel: "qwen/qwen3.8-27b",
     keyUrl: "https://console.groq.com/keys",
     vision: false,
     free: true,

@@ -1,0 +1,725 @@
+/**
+ * The frame: rail above 860, tab bar below. Scoped under .mm.
+ *
+ * 860 is THE collapse point and appears exactly once in the product. There used
+ * to be five breakpoint sets and a 40px band where the shell and the page
+ * disagreed about whether they were mobile.
+ */
+
+.mm-app {
+  display: grid;
+  grid-template-columns: 1fr;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.mm-main {
+  min-width: 0;
+  /* Clear of the tab bar AND the home indicator. feed.css had no safe-area
+     handling at all, so in a normal browser tab its last 34px sat under the
+     indicator. */
+  padding-bottom: calc(var(--mm-nav-h) + env(safe-area-inset-bottom, 0px) + var(--mm-6));
+}
+
+/* ── the rail ────────────────────────────────────────────────────────────── */
+
+.mm-rail {
+  display: none;
+  flex-direction: column;
+  gap: var(--mm-6);
+  padding: var(--mm-5) var(--mm-3);
+  border-right: 1px solid var(--mm-edge);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.mm-rail ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mm-rail-foot {
+  margin-top: auto;
+}
+
+.mm-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+  padding: 0 var(--mm-3);
+  font-size: var(--mm-t-lead);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mm-tx);
+}
+
+.mm-brand:hover {
+  color: var(--mm-tx);
+}
+
+.mm-navlink {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-3);
+  min-block-size: 40px;
+  padding: 0 var(--mm-3);
+  border-radius: var(--mm-r-chip);
+  font-size: var(--mm-t-lead);
+  font-weight: 550;
+  color: var(--mm-dim);
+  transition:
+    background-color var(--mm-fast) var(--mm-ease),
+    color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-navlink:hover {
+  background: var(--mm-surface-2);
+  color: var(--mm-tx);
+}
+
+.mm-navlink.on {
+  background: color-mix(in srgb, var(--mm-wire) 12%, transparent);
+  color: var(--mm-wire);
+}
+
+.mm-navlink.sub {
+  font-size: var(--mm-t-body);
+}
+
+/* ── the context column ──────────────────────────────────────────────────── */
+
+.mm-context {
+  display: none;
+  padding: var(--mm-5) var(--mm-4);
+  border-left: 1px solid var(--mm-edge);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+/* ── the tab bar ─────────────────────────────────────────────────────────── */
+
+.mm-tabbar {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 40;
+  display: flex;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: color-mix(in srgb, var(--mm-surface) 82%, transparent);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border-top: 1px solid var(--mm-edge);
+}
+
+/* SIZED ON THE CLASS, NOT THE ELEMENT. globals.css scopes its 44px minimum to
+   `button, input, select`, so the old tab bar's Settings item — an <a> — was
+   never caught and was the shortest target on the bar. Every item here is a
+   <Link>, so an element-scoped rule would have missed all four. */
+.mm-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-block-size: 48px;
+  padding: 6px 2px;
+  font-size: var(--mm-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--mm-dim);
+}
+
+.mm-tab.on {
+  color: var(--mm-wire);
+}
+
+/* ── 860: THE collapse point ─────────────────────────────────────────────── */
+
+@media (min-width: 860px) {
+  .mm-app {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+  .mm-rail {
+    display: flex;
+  }
+  /* Icon-only until there is room for words. */
+  .mm-rail .mm-navlink span,
+  .mm-brand span {
+    display: none;
+  }
+  .mm-navlink {
+    justify-content: center;
+    padding: 0;
+  }
+  .mm-brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .mm-tabbar {
+    display: none;
+  }
+  .mm-main {
+    padding-bottom: var(--mm-10);
+  }
+}
+
+/* ── 1180: labels, and the context column ────────────────────────────────── */
+
+@media (min-width: 1180px) {
+  .mm-app {
+    grid-template-columns: var(--mm-rail) minmax(0, 1fr) var(--mm-context);
+  }
+  .mm-app.no-context {
+    grid-template-columns: var(--mm-rail) minmax(0, 1fr);
+  }
+  .mm-rail .mm-navlink span,
+  .mm-brand span {
+    display: inline;
+  }
+  .mm-navlink {
+    justify-content: flex-start;
+    padding: 0 var(--mm-3);
+  }
+  .mm-brand {
+    justify-content: flex-start;
+    padding: 0 var(--mm-3);
+  }
+  .mm-context {
+    display: block;
+  }
+}
+
+/* ── the sticky header ───────────────────────────────────────────────────── */
+
+.mm-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  padding-top: env(safe-area-inset-top, 0px);
+  background: color-mix(in srgb, var(--mm-bg) 86%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 0;
+}
+
+/*
+ * THE KERF.
+ *
+ * The band's grammar — the 4px cell, the ember ramp — carried onto every route
+ * and every scroll position for four lines of CSS. No canvas, no JavaScript, no
+ * data, nothing to pause and nothing to observe. It is what stops the redesign
+ * having a lifespan of one flick: the band scrolls away, this does not.
+ */
+.mm-header::after {
+  content: "";
+  display: block;
+  height: 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--mm-ramp-2) 0 var(--mm-cell),
+    var(--mm-ramp-1) var(--mm-cell) calc(var(--mm-cell) * 2)
+  );
+}
+
+.mm-header-in {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-3);
+  min-height: var(--mm-header-h);
+}
+
+.mm-header-mark {
+  display: inline-flex;
+  color: var(--mm-tx);
+  flex: none;
+}
+
+.mm-header-txt {
+  min-width: 0;
+}
+
+.mm-header-txt h1 {
+  margin: 0;
+  font-size: var(--mm-t-head);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--mm-tx);
+}
+
+.mm-header-txt p {
+  margin: 0;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-dim);
+}
+
+.mm-header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+}
+
+/* The rail already says what this site is; do not say it twice. */
+@media (min-width: 860px) {
+  .mm-header-mark {
+    display: none;
+  }
+}
+
+/* ══ THE RAIL'S LIVE COLUMN ═══════════════════════════════════════════════
+ *
+ * Dense on purpose. The reference product's equivalent column is the loudest
+ * thing on its screen, and ours was four links and air. Every row here is an
+ * agent, an action, a token, a size — and the line no other tape has, which is
+ * the first clause of why.
+ */
+
+.mm-alerts {
+  display: none; /* only where the rail has room for words */
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: var(--mm-2);
+  padding-top: var(--mm-3);
+  border-top: 1px solid var(--mm-edge);
+}
+
+.mm-alerts > .mm-kicker {
+  margin: 0 0 var(--mm-2);
+  padding: 0 var(--mm-3);
+}
+
+.mm-alerts ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * SEPARATED BY SPACE, NOT BY A RULE.
+ *
+ * Each row drew a border AND carried a four-sided chip, which put about
+ * thirty edges into a 304px column — in green, rose, amber and blue at
+ * once. A row is one thing; it does not need an edge as well as a gap.
+ */
+.mm-alert {
+  padding-bottom: var(--mm-3);
+}
+
+.mm-alert > a,
+.mm-alert > span {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 4px var(--mm-2);
+  padding: 9px var(--mm-3);
+  transition: background-color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-alert > a:hover {
+  background: var(--mm-surface-2);
+  color: inherit;
+}
+
+.mm-alert .mm-av {
+  grid-row: 1;
+}
+
+.mm-alert .who {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mm-alert .who .nm {
+  font-size: var(--mm-t-body);
+  font-weight: 650;
+  color: var(--mm-tx);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The name gets the room before anything else competes for it: an agent
+     rendered as three characters and an ellipsis is not identifiable, which is
+     the entire job of this column. */
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.mm-alert .who time {
+  margin-left: auto;
+  font-size: var(--mm-t-micro);
+  color: var(--mm-faint);
+  white-space: nowrap;
+}
+
+/*
+ * A COLOURED WORD, NOT A PILL.
+ *
+ * At 8.5px inside a border this was a smudge that still cost four edges.
+ * The colour already carries the meaning; the box was carrying nothing.
+ */
+.mm-alert .mm-chip {
+  font-size: var(--mm-t-micro);
+  padding: 0;
+  border: 0;
+  background: none;
+  letter-spacing: 0.08em;
+  flex: none;
+}
+
+.mm-alert .did {
+  grid-column: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--mm-t-meta);
+  color: var(--mm-tx-2);
+}
+
+.mm-alert .did b {
+  color: var(--mm-tx);
+  font-weight: 600;
+}
+
+.mm-alert .did .amt {
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-alert .did .pp {
+  font-size: var(--mm-t-micro);
+  color: var(--mm-faint);
+  border: 1px dashed var(--mm-edge-2);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.mm-alert .say {
+  grid-column: 2;
+  font-size: var(--mm-t-meta);
+  line-height: 1.4;
+  color: var(--mm-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mm-alert.skel {
+  height: 54px;
+  margin: 0 var(--mm-3) 6px;
+  border-radius: var(--mm-r-chip);
+  border-bottom: 0;
+  background: var(--mm-surface-2);
+}
+
+/* ══ THE TAPE ═════════════════════════════════════════════════════════════ */
+
+.mm-ticker {
+  display: none;
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 45;
+  height: 30px;
+  border-top: 1px solid var(--mm-edge);
+  background: color-mix(in srgb, var(--mm-surface) 92%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.mm-ticker-scroll {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-5);
+  height: 100%;
+  padding: 0 var(--mm-4);
+  /* SCROLLS, NEVER MARQUEES. A strip of prices that slides past is unreadable,
+     and this one is meant to be read. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mm-ticker-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.mm-tick {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: var(--mm-t-meta);
+  flex: none;
+}
+
+.mm-tick .k {
+  font-family: var(--mm-mono);
+  font-size: var(--mm-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mm-dim);
+}
+
+.mm-tick b {
+  font-family: var(--mm-mono);
+  font-weight: 600;
+  color: var(--mm-tx);
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-tick .dim {
+  color: var(--mm-faint);
+}
+.mm-tick .warn {
+  color: var(--mm-warn);
+}
+.mm-tick .up {
+  color: var(--mm-up);
+}
+/*
+ * QUIET, BECAUSE IT IS THE COMMON CASE.
+ *
+ * Outside market hours every stock feed on this chain is stale, so a boxed
+ * amber badge on each of twelve tickers is a row of alarms about nothing. The
+ * fact still has to be said — a price nobody has updated in an hour is not a
+ * current price — so it is said with a dim word and a tooltip. The boxed
+ * treatment is kept for a halted feed, which is genuinely unusual.
+ */
+.mm-tick .stale {
+  color: var(--mm-faint);
+  font-size: var(--mm-t-micro);
+}
+
+.mm-tick .halted {
+  color: var(--mm-warn);
+  font-size: var(--mm-t-micro);
+  border: 1px dashed color-mix(in srgb, var(--mm-warn) 45%, transparent);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+/* The fleet's own number leads the tape, and is separated from the market. */
+.mm-tick.fleet {
+  padding-right: var(--mm-5);
+  border-right: 1px solid var(--mm-edge-2);
+}
+
+.mm-tick:hover {
+  color: inherit;
+}
+.mm-tick:hover .k {
+  color: var(--mm-wire);
+}
+
+@media (min-width: 860px) {
+  .mm-ticker {
+    display: block;
+  }
+  /* Clear the tape, which is fixed. */
+  .mm-main,
+  .mm-context {
+    padding-bottom: calc(30px + var(--mm-6));
+  }
+  .mm-rail {
+    height: calc(100dvh - 30px);
+  }
+}
+
+@media (min-width: 1180px) {
+  .mm-alerts {
+    display: block;
+  }
+}
+
+/* ══ THE TOP BAR ══════════════════════════════════════════════════════════ */
+
+.mm-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--mm-4);
+  padding: var(--mm-2) var(--mm-4);
+  border-bottom: 1px solid var(--mm-edge);
+}
+
+.mm-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--mm-2);
+  flex: 1;
+  max-width: 560px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--mm-3);
+  border: 1px solid var(--mm-edge-2);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface);
+  color: var(--mm-dim);
+  transition: border-color var(--mm-fast) var(--mm-ease);
+}
+
+.mm-search:focus-within {
+  border-color: var(--mm-wire);
+  color: var(--mm-tx-2);
+}
+
+.mm-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--mm-tx);
+  font: inherit;
+  font-size: var(--mm-t-body);
+}
+
+.mm-search input::placeholder {
+  color: var(--mm-faint);
+}
+
+.mm-search kbd {
+  flex: none;
+  font-size: var(--mm-t-micro);
+  color: var(--mm-faint);
+  border: 1px solid var(--mm-edge-2);
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 16px;
+}
+
+.mm-search-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  padding: 6px;
+  border: 1px solid var(--mm-edge-2);
+  border-radius: var(--mm-r-chip);
+  background: var(--mm-surface);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.6);
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.mm-search-pop .none {
+  margin: 0;
+  padding: 10px 8px;
+  font-size: var(--mm-t-body);
+  color: var(--mm-dim);
+}
+
+.mm-search-pop button {
+  display: flex;
+  align-items: baseline;
+  gap: var(--mm-2);
+  width: 100%;
+  padding: 8px;
+  border-radius: 5px;
+  text-align: left;
+  font-size: var(--mm-t-body);
+  color: var(--mm-tx);
+}
+
+.mm-search-pop button:hover {
+  background: var(--mm-surface-2);
+}
+
+.mm-search-pop .kind {
+  flex: none;
+  font-family: var(--mm-mono);
+  font-size: var(--mm-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--mm-edge-2);
+  color: var(--mm-dim);
+}
+
+/* An agent is a squircle and a token is a circle everywhere else in this
+   product; here the two are told apart by the same colours that separate the
+   wire from the market. */
+.mm-search-pop .kind.agent {
+  color: var(--mm-wire);
+  border-color: color-mix(in srgb, var(--mm-wire) 40%, transparent);
+}
+
+.mm-search-pop .t {
+  font-weight: 650;
+}
+
+.mm-search-pop .s {
+  font-size: var(--mm-t-meta);
+  color: var(--mm-dim);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ── your own position ───────────────────────────────────────────────────── */
+
+.mm-mine {
+  margin-left: auto;
+  flex: none;
+}
+
+.mm-mine-book {
+  display: flex;
+  gap: var(--mm-5);
+}
+
+.mm-mine-book span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+}
+
+.mm-mine-book b {
+  font-size: var(--mm-t-lead);
+  font-weight: 700;
+  color: var(--mm-tx);
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-mine-book i {
+  font-style: normal;
+  font-family: var(--mm-mono);
+  font-size: var(--mm-t-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mm-faint);
+}
+
+.mm-mine-book:hover b {
+  color: var(--mm-wire);
+}
+
+.mm-btn.sm {
+  min-block-size: 32px;
+  padding: 0 var(--mm-3);
+  font-size: var(--mm-t-body);
+}
+
+@media (max-width: 620px) {
+  .mm-search kbd {
+    display: none;
+  }
+  /* The book collapses to the one figure that matters on a phone. */
+  .mm-mine-book span:first-child {
+    display: none;
+  }
+}

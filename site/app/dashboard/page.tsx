@@ -45,16 +45,15 @@ export default function Dashboard() {
               live tape
             </Link>{" "}
             shows those. But the reasoning behind it, and every trade your caps <em>refused</em>,
-            live in the ledger on your own machine. We could only show you those by running a server
-            that holds your data, which is the thing merrymen exists not to do. Your local dashboard
-            has the full picture.
+            live in your own ledger — your self-hosted dashboard, or your hosted account. This public
+            page holds none of it; your own dashboard has the full picture.
           </p>
 
           <h3>Is this safe to open on someone else&apos;s computer?</h3>
           <p>
             Yes — an address is public information and reveals no ability to spend. Pasting one here
-            lets you look; it never lets anyone move anything. Your keys never leave your own
-            machine, and nothing on this page asks for them.
+            lets you look; it never lets anyone move anything. Your owner key never leaves you, and
+            nothing on this page asks for it.
           </p>
         </div>
       </div>

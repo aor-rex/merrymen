@@ -37,33 +37,33 @@ const KEY = { currency0: USDG, currency1: MEME, fee: 8388608, tickSpacing: 200, 
 const base = { address: MEME, symbol: "MEME", decimals: 18, liquidityUsd: 1000, fdvUsd: 50_000, firstSeen: 0 };
 
 describe("pool keys in the candidate store", () => {
-  it("a captured key is returned for the pair, in either argument order", () => {
-    recordCandidate({ ...base, key: KEY });
+  it("a captured key is returned for the pair, in either argument order", async () => {
+    await recordCandidate({ ...base, key: KEY });
     for (const [a, b] of [
       [USDG, MEME],
       [MEME, USDG],
     ] as const) {
-      const keys = poolKeysFor(a, b);
+      const keys = await poolKeysFor(a, b);
       assert.equal(keys.length, 1);
       assert.deepEqual(keys[0], KEY);
     }
   });
 
-  it("a KEYLESS re-sighting does not blank the key — learned once is kept", () => {
-    recordCandidate({ ...base, liquidityUsd: 2000 }); // gateway-shaped update, no key
-    const keys = poolKeysFor(USDG, MEME);
+  it("a KEYLESS re-sighting does not blank the key — learned once is kept", async () => {
+    await recordCandidate({ ...base, liquidityUsd: 2000 }); // gateway-shaped update, no key
+    const keys = await poolKeysFor(USDG, MEME);
     assert.equal(keys.length, 1, "the key survived");
     assert.deepEqual(keys[0], KEY);
   });
 
-  it("a pair nobody discovered returns empty, and a partial key row never qualifies", () => {
-    assert.deepEqual(poolKeysFor(USDG, "0x00000000000000000000000000000000000000cc"), []);
+  it("a pair nobody discovered returns empty, and a partial key row never qualifies", async () => {
+    assert.deepEqual(await poolKeysFor(USDG, "0x00000000000000000000000000000000000000cc"), []);
   });
 
-  it("a NEW full key replaces the old one — full keys are the only writers", () => {
+  it("a NEW full key replaces the old one — full keys are the only writers", async () => {
     const moved = { ...KEY, fee: 3000, tickSpacing: 60 };
-    recordCandidate({ ...base, key: moved });
-    const keys = poolKeysFor(USDG, MEME);
+    await recordCandidate({ ...base, key: moved });
+    const keys = await poolKeysFor(USDG, MEME);
     assert.equal(keys.length, 1);
     assert.equal(keys[0]!.fee, 3000);
   });

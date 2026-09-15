@@ -369,7 +369,12 @@ describe("createPoolPriceReader — the depth floor survives the WETH hop", () =
     });
     // If the route ever claims the $5,000,000 second leg for a token whose own
     // pool holds $300,000, the floor has quietly become decorative.
-    assert.match(r.quotes.get("CATE")!.detail!, /\$3\d\d,\d\d\d deep/, r.quotes.get("CATE")!.detail!);
+    // Asserted on the NUMBER, not on describeRoute's prose. The prose is built
+    // with toLocaleString, so the old regex here only held on a comma-grouping
+    // host and failed on de-DE, fr-FR, ru-RU and friends — for a reason with
+    // nothing to do with what this test is actually about.
+    const depth = Number(r.quotes.get("CATE")!.liquidityUsdg!) / 1e6;
+    assert.ok(depth > 300_000 && depth < 400_000, `expected the shallow leg, got ${depth}`);
   });
 
   it("prices the memecoin at its real value rather than a quantized step", async () => {
@@ -507,10 +512,67 @@ describe("describeRoute", () => {
     const s = describeRoute(route({ route: "weth", liquidityUsdg: usdgD(12_345), twapWindowSec: 900 }));
     assert.match(s, /15m TWAP/);
     assert.match(s, /via WETH/);
-    assert.match(s, /12,345/);
+    // Locale-independent: this asserts the FIGURE is there, not that the host
+    // groups it with commas. describeRoute is a human string and may be
+    // grouped any way the runtime likes.
+    assert.match(s.replace(/[^0-9]/g, ""), /12345/);
   });
 
   it("names a direct pool as such", () => {
     assert.match(describeRoute(route({ route: "direct" })), /USDG pool/);
+  });
+});
+
+/**
+ * Depth travels as a NUMBER, not inside a sentence.
+ *
+ * It used to be recovered by running /\$([\d,]+)\s+deep/ over describeRoute's
+ * output. describeRoute formats with toLocaleString, so on a host grouping with
+ * dots or using non-Latin digits the match failed for every pool over $1,000 —
+ * and it failed SILENTLY, returning null rather than erroring. Two live
+ * consequences: trencher's liquidity-drain exit never fired, and the trench
+ * entry baseline was stamped 0 through an upsert that never corrects itself, for
+ * the position's whole life.
+ */
+describe("PriceQuote.liquidityUsdg", () => {
+  const POOL = "0x00000000000000000000000000000000000000fe" as const;
+  const client = stubClient({
+    poolFor: (a, b, fee) => {
+      const usdg = (CASH.USDG as string).toLowerCase();
+      return fee === 500 && (a === usdg || b === usdg) ? POOL : null;
+    },
+    cashInPool: () => usdgD(50_000),
+    token0: () => CATE.address,
+    sqrtPriceX96: () => 2n ** 96n,
+    liquidity: () => usdgD(50_000),
+    tickCumulatives: () => [0n, 0n],
+  });
+
+  it("carries depth in the same 6dp USDG units as the guard", async () => {
+    const r = await createPoolPriceReader().read({ client, tokens: [CATE], guard: GUARD, nowSec: 1_000 });
+    const q = r.quotes.get("CATE")!;
+    assert.equal(typeof q.liquidityUsdg, "bigint");
+    // Comparable against PriceGuard.minLiquidityUsdg with no conversion, which
+    // is the point. An 8dp number under this name would let a $250 pool clear
+    // a $25,000 floor.
+    assert.ok(q.liquidityUsdg! >= GUARD.minLiquidityUsdg);
+    assert.equal(Math.round(Number(q.liquidityUsdg) / 1e6), 50_000);
+  });
+
+  it("would have been unreadable through the prose on a non-comma locale", () => {
+    // The exact live failure, demonstrated rather than described.
+    for (const loc of ["de-DE", "fr-FR", "ru-RU", "sv-SE"]) {
+      const prose = `$${(347_123).toLocaleString(loc, { maximumFractionDigits: 0 })} deep`;
+      const parsed = /\$([\d,]+)\s+deep/.exec(prose)?.[1]?.replace(/,/g, "");
+      assert.notEqual(parsed, "347123", `${loc} would have parsed, weakening this test`);
+    }
+  });
+
+  it("is ABSENT rather than zero when there is no depth concept", () => {
+    // Chainlink and broker quotes have no depth. Downstream treats null as
+    // "skip the drain check" and 0 as "the pool emptied" — collapsing the two
+    // turns a missing fact into a forced liquidation.
+    const chainlinkish = { price8: 1n, stale: false, source: "chainlink" as const };
+    assert.equal("liquidityUsdg" in chainlinkish, false);
   });
 });

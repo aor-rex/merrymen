@@ -29,7 +29,7 @@ export interface MerrymenSettings {
   /** The free/default brain: a Groq key (console.groq.com) powers chat, the
    * strategist, and narration on Groq's fast OpenAI-compatible models. */
   groqApiKey?: string;
-  /** Groq model id (default llama-3.3-70b-versatile). */
+  /** Groq model id (default qwen/qwen3.8-27b). */
   groqModel?: string;
   /** The upgrade: an Anthropic key routes everything through Claude instead
    * (and unlocks screen vision). Takes precedence over Groq when both are set. */
@@ -49,6 +49,32 @@ export interface MerrymenSettings {
   /** Model id for the selected provider. Blank = the provider's default. Accepts
    * vendor ids with slashes/case (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo). */
   llmProviderModel?: string;
+  /**
+   * The research browser service — private-network URL and shared token.
+   *
+   * HOUSE keys, not tenant settings: this is one shared Chromium reached over
+   * Railway private networking, the same shape as the bundler. A tenant must not
+   * be able to repoint it, because whatever it points at gets fetched by a real
+   * browser sitting inside our network.
+   */
+  browserUrl?: string;
+  browserToken?: string;
+  /**
+   * HOW A MERRYMAN THINKS — one shared Brain service, reached over Railway
+   * private networking, same shape as the browser and the bundler.
+   *
+   * HOUSE-OWNED on both counts: the URL is an address our egress connects to,
+   * and the token is a credential for a service whose inference bill the house
+   * pays. Unlike llmApiKey there is no version of this a tenant brings — a
+   * tenant who could set either would be repointing our egress or spending our
+   * model budget.
+   *
+   * ABSENT MEANS BRAIN DOES NOT RUN. Not "falls back to the local strategist":
+   * a missing Brain is a missing Brain, and quietly substituting a different
+   * reasoner would make the feed claim a thesis came from something it did not.
+   */
+  brainUrl?: string;
+  brainToken?: string;
   /** Rialto integrator key — enables the full quote→swap leg. */
   rialtoApiKey?: string;
   /** Header name the Rialto API expects the key in (their docs say). */
@@ -64,7 +90,63 @@ export interface MerrymenSettings {
    * is sealed into the grant at signing time, so it only takes effect after a
    * re-sign. The worker executes against the grant-sealed address, never this.
    */
+  /**
+   * What the owner calls their agent.
+   *
+   * Lives HERE rather than on the grant or the agents row for three reasons:
+   * settings are per-tenant and sealed in hosted mode, they survive a redeploy
+   * where a container filesystem does not, and they can be written before a
+   * grant or an agents row exists. The soul file stays the RUNTIME seat -- this
+   * is the durable seed the worker reconciles from at arm time, so every
+   * existing reader keeps working unchanged.
+   *
+   * Deliberately NOT a house key: a tenant must be able to name their own agent.
+   */
+  agentName?: string;
+  /**
+   * The owner's X handle, for a public page to credit them.
+   *
+   * DISPLAY METADATA, NEVER AN AUTHORIZATION KEY. Nothing looks up an agent,
+   * tenant or permission by this.
+   *
+   * UNVERIFIED, IT RENDERS DISCLAIMED AND NEVER AS A LINK — we store what the
+   * owner typed and nothing checks that they own it, so linking it would make
+   * merrymen vouch for an association it never checked and would let an agent
+   * impersonate anyone by typing their name.
+   *
+   * That rule now has one exception, and it is the exception that proves it:
+   * when `xProof` below records that this exact handle was proven, the check
+   * HAS been made and the handle may be linked. Absent a proof, nothing
+   * changes — plain text, as before.
+   */
+  xHandle?: string;
   v4AdapterAddress?: string;
+  /**
+   * The deployed PonsSelfTrade adapter for this chain, or absent.
+   *
+   * A HINT, never the authority. The worker calls whatever address the grant
+   * was SEALED against (grantPonsAdapter); this field only lets the dashboard
+   * offer it at signing time and lets the worker warn when the two have
+   * drifted. Reading it at tick time would let a setting redirect trades at a
+   * contract the signature never covered.
+   */
+  ponsAdapterAddress?: string;
+  /**
+   * The deployed PonsClassVaultFactory for this chain, or absent.
+   *
+   * A HINT AT SIGNING TIME, on exactly the terms `ponsAdapterAddress` is one:
+   * the worker calls whatever the grant was sealed against
+   * (grantPonsClassVaultFactory), and this only lets the dashboard offer it when
+   * a grant is minted.
+   *
+   * THE FACTORY, NOT THE VAULT, and that is not interchangeable. A vault is
+   * CREATE2-salted with one smart account, so there is no vault address that is
+   * correct for every agent — the signer derives each account's own from this.
+   *
+   * Setting it alone changes nothing. It has to be sealed by re-signing at
+   * /grant, and the wall REFUSES to seal a vault without it.
+   */
+  ponsClassVaultFactory?: string;
 
   // ── paper trading (the full loop with zero funds) ──────────────────────
   /** When the account can't sign (no bundler key), fill approved intents as
@@ -73,6 +155,40 @@ export interface MerrymenSettings {
   paperTradingEnabled?: boolean;
   /** Starting paper cash, USDG. */
   paperStartUsdg?: number;
+  /**
+   * WHICH KINDS OF THING THE AGENT MAY BUY — "all" | "stocks" | "crypto".
+   *
+   * A FILTER OVER TRADE LEGS, NOT OVER THE WATCH SET, and the distinction is
+   * the whole safety of the feature. See `assetModeAllows` in tokens.ts: the
+   * watch set is what `snap.holdings` is built from, and every stop-loss and
+   * take-profit iterates that. A class switched off stays watched, priced,
+   * valued and sellable — only new buys of it stop.
+   *
+   * SETTINGS-ONLY, NO RE-SIGNATURE. Narrowing off-chain is always safe —
+   * policy.ts: "a mirror STRICTER than the chain, which is the one direction
+   * that is always safe." The shipped precedent is `officialCoinsEnabled`,
+   * which filters a token set that is sealed into every grant. Note the
+   * corollary: "crypto" cannot make the wall stop covering the stock tokens
+   * without a re-sign, and does not need to — nothing on-chain initiates a
+   * trade, so refusing off-chain is sufficient.
+   */
+  assetMode?: "all" | "stocks" | "crypto";
+  /**
+   * THE OWNER'S CONSENT TO SPEND REAL MONEY. Off until they say otherwise.
+   *
+   * Separate from `paperTradingEnabled` because they answer different
+   * questions: this one is "may real orders reach the chain", that one is
+   * "when they may not, should I simulate instead". For a while there was only
+   * the second, and it could not do this job — it is consulted only after the
+   * live rail has already failed, so an agent whose rail was healthy traded for
+   * real no matter what its owner had chosen. Funding an account was enough to
+   * cross that line, which is not a thing funding should be able to do.
+   *
+   * A REQUIRED TERM of `canTradeForReal` (worker/src/exec-mode.ts), not a
+   * fallback — see the long note on `ExecInputs.liveTradingEnabled` for why the
+   * distinction is the whole fix.
+   */
+  liveTradingEnabled?: boolean;
 
   // ── trading ────────────────────────────────────────────────────────────
   /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
@@ -95,6 +211,29 @@ export interface MerrymenSettings {
   maxImpactBps?: number;
   /** Performance fee on profit above HWM, bps (accrual-only). */
   perfFeeBps?: number;
+  /**
+   * Per-trade fee on TURNOVER, bps. Accrual-only, like `perfFeeBps`.
+   *
+   * A DIFFERENT ANIMAL from the performance fee, and kept apart everywhere:
+   * that one is charged on profit above a peak and costs nothing when an agent
+   * loses money; this one is owed on every trade either way. Both are
+   * disclosed, but adding them into one total would hide which is which.
+   *
+   * HOUSE-OWNED — it is the platform charging the tenant, so a tenant who could
+   * set it would be setting their own bill to zero.
+   */
+  tradeFeeBps?: number;
+  /**
+   * Where a collected trade fee would go.
+   *
+   * NOTHING COLLECTS YET. Sealing this into a grant as a withdrawal address is
+   * what would let a session key transfer to it, and no existing grant carries
+   * one at all — `withdrawalAddresses` has always been empty — so until an
+   * owner re-signs this is a destination on paper. HOUSE-OWNED for the obvious
+   * reason: a tenant who could set it would point the platform's fee at their
+   * own wallet.
+   */
+  tradeFeeAddress?: string;
   /** Worker tick cadence, seconds. */
   tickSeconds?: number;
   /** Basket universe — symbols from the official token registry, equal-weighted. */
@@ -112,11 +251,51 @@ export interface MerrymenSettings {
   /** Refuse to value a token whose deepest route is shallower than this (USD).
    * A thin pool can be pushed for pocket change, and that price would feed
    * equity, P&L and the drawdown breaker. */
+  /**
+   * Smallest fully diluted value a memecoin must carry to be considered, USD.
+   * 0 = no floor, and 0 is the default.
+   *
+   * THE SIZE DIAL. Depth, volume and buyers all say how BUSY a pool is; none of
+   * them says how BIG the thing is. Two coins can match on all three and be a
+   * $40k novelty and a $4M one, and an owner who wants the larger end of the
+   * chain had no way to say so.
+   */
+  memecoinMinFdvUsd?: number;
   minPoolLiquidityUsdg?: number;
   /** Refuse when spot has run this far from the TWAP (bps) — the signature of a
    * pool being manipulated right now. */
   maxPriceDivergenceBps?: number;
   /** Steady-basket: USDG bought per tick across the basket. */
+  /**
+   * Sell a basket leg once it is this far ahead of what it cost, in bps.
+   * 0 = never, and 0 is the default.
+   *
+   * THE DEFAULT STRATEGY HAD NO SELL AT ALL until this existed: every intent it
+   * could emit had cash on the sell side, so an agent on it accumulated forever
+   * and never realised anything. Take-profit only — a stop-loss on a DCA sleeve
+   * would sell exactly the dip the sleeve exists to buy.
+   *
+   * OFF BY DEFAULT because turning it on changes what a live agent does with
+   * somebody money, and the right threshold for one book is wrong for another.
+   */
+  /**
+   * Sell a holding outright once it is this far below what it cost, in bps.
+   * 0 = off, and 0 is the default.
+   *
+   * THE ONLY MECHANICAL EXIT llm-strategist has. Every other stop in this repo
+   * belongs to trencher, so reaching one meant abandoning the strategist
+   * entirely. This runs every tick, needs no model call, and can only ever ADD
+   * a sell.
+   *
+   * A STOP FROM ENTRY, NOT A TRAILING ONE: it measures against cost basis, so
+   * it does not catch a position that ran up and gave it back to break-even.
+   *
+   * Set it with the round trip in mind. Gas is roughly 0.44-0.78 USDG a leg on
+   * this chain, so on a 10 USDG position a stop-and-reenter costs 9-16% of
+   * notional — a tight floor turns into a machine that pays the chain to churn.
+   */
+  strategistStopLossBps?: number;
+  takeProfitBps?: number;
   buyPerTickUsdg?: number;
   /** Steady-basket: cash floor kept liquid; the excess sweeps to the vault. */
   idleFloorUsdg?: number;
@@ -132,6 +311,42 @@ export interface MerrymenSettings {
    * to set your Circle tier — which lowers your platform fee and unlocks perks.
    * Optional; blank = no tier. Purely a discount/perk lookup, never a spend key. */
   holderAddress?: string;
+  /**
+   * A DIFFERENT WALLET, PROVEN BY ITS OWN SIGNATURE.
+   *
+   * `holderAddress` above is self-declared: shape-validated and nothing more,
+   * which is why /api/alpha refuses to use it as an authorisation input and why
+   * the orchestrator overwrites it with the session-verified tenant. That made
+   * the tier earnable and shut out anyone holding $MERRYMEN somewhere other
+   * than the wallet they log in with — a real case, raised by a tester.
+   *
+   * This is that case, answered the only way a claim can become an
+   * authorisation: the wallet signs a message naming itself and this account,
+   * and /api/holder verifies the recovery. WRITTEN ONLY BY THAT ROUTE. The
+   * settings PUT handler has no branch for it, so a tenant cannot set it by
+   * hand; holder-proof.test.ts pins that, because the day it gains one is the
+   * day the tier goes back to being a claim.
+   */
+  holderProof?: { address: string; at: number };
+
+  /**
+   * PROOF THAT `xHandle` IS ACTUALLY THEIRS — written only by /api/x-proof.
+   *
+   * This is what changes the rule above the `xHandle` field. Unverified, a
+   * handle still renders as plain text and never as a link, for exactly the
+   * reason stated there: nothing checked they own it, and a link would make
+   * merrymen vouch for an association it never made. With a proof, we DID
+   * check — the owner posted a nonce we issued, from that account — so it may
+   * be linked, and only then.
+   *
+   * The settings PUT handler has no branch for this field, deliberately: like
+   * `holderProof`, a tenant must not be able to mint their own proof through
+   * the API they do have.
+   *
+   * POINT-IN-TIME, like the holder proof beside it. `at` records when we
+   * looked; deleting the post later does not un-verify, and nothing re-checks.
+   */
+  xProof?: { handle: string; at: number };
 
   // ── Virtuals Terminal (stream your agent's activity to its Virtuals page) ─
   /** Virtuals API key (secret). Get it from your agent's page on app.virtuals.io.
@@ -188,11 +403,164 @@ export interface MerrymenSettings {
    * `scoutBudgetUsdg` IS the risk control for scout capital. Treat it as money
    * you have decided you can lose.
    */
+  /**
+   * Let trencher trade LIVE, not only on paper.
+   *
+   * The rail it replaces was `if (!paperActive()) return []` — and paperActive
+   * is defined as the ABSENCE of an executor, so arming one turned the candidate
+   * feed off entirely. That is a safe default and an odd one to discover: the
+   * strategy silently stopped seeing anything the moment it could act.
+   *
+   * Off by default. Turning it on is the owner saying the memecoin strategy may
+   * spend real money, and it composes with — never replaces — the scout budget,
+   * the per-trade cap and the wall.
+   */
+  trencherLiveEnabled?: boolean;
+  /**
+   * Pay this agent's gas from a sponsor, so the owner funds USDG only.
+   *
+   * HOUSE-OWNED (see HOUSE_KEY_FIELDS) because hosted it spends OUR money, not
+   * the tenant's — a third category from the key/URL split that file draws.
+   * A tenant who could set this would be writing a cheque on the house.
+   */
+  sponsorGasEnabled?: boolean;
+  /**
+   * Let the strategist RESEARCH before it decides, instead of answering in one
+   * shot from a fixed blob of numbers.
+   *
+   * On, a decision window becomes a short tool loop: the model can pull depth,
+   * check what a position cost, read back its own last decisions, and read the
+   * project's own page where a browser is configured — then it submits a view
+   * in its own words, which is what the public feed publishes.
+   *
+   * OFF BY DEFAULT because it costs up to deskMaxSteps model calls per window
+   * instead of one. The scout consumed an entire day's shared token allowance
+   * on 2026-08-31 and took user chat down with it; this is the same class of
+   * spend and deserves the same caution.
+   */
+  deskEnabled?: boolean;
+  /** Model calls one research session may make before it must decide. */
+  deskMaxSteps?: number;
+  /** Pimlico sponsorship policy id (`sp_…`), which is where the real spend limits live. */
+  sponsorshipPolicyId?: string;
+  /**
+   * Read deposits and withdrawals from USDG Transfer logs instead of inferring
+   * them from balance changes.
+   *
+   * Inference can only see two cases — the first funded observation, and a cash
+   * change with no ledger row in between — so a top-up that lands in the same
+   * tick as a fill is folded into performance. Reading the logs makes every
+   * flow exact and gives it a transaction hash.
+   *
+   * OFF by default despite being strictly more accurate, because it changes how
+   * CONTRIBUTIONS are counted and contributions are what P&L is measured
+   * against. It earns its way on one agent against the live chain before the
+   * fleet, exactly like sponsorship.
+   */
+  depositScanEnabled?: boolean;
   scoutEnabled?: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. 0 = off. */
   scoutBudgetUsdg?: number;
   /** Max USDG into any single unpriceable token. */
   scoutPerTokenUsdg?: number;
+
+  // ── the class route (buying tokens the grant never named) ──────────────
+  /**
+   * MAY THIS AGENT BUY A TOKEN NOBODY ENUMERATED? OFF by default.
+   *
+   * READ THIS BEFORE TURNING IT ON. Every other venue can only trade assets the
+   * owner named in `customTokens` and sealed by re-signing at /grant. The class
+   * route is the one exception: it buys tokens that did not exist when the grant
+   * was signed, holds them in a per-account vault (because a token the ACCOUNT
+   * holds cannot be sold — the wall has no approve permission for an address
+   * nobody enumerated), and sells them back through the same vault.
+   *
+   * What still bounds it: the per-trade cap, the daily cap, the ops cap, the
+   * scout budget, `classPerEntryUsdg` below, and the fact that the vault can pay
+   * nobody but this account. What does NOT bound it, stated rather than implied:
+   * NOTHING ON CHAIN VOUCHES FOR THE TOKEN. The wall cannot pin a curve — a new
+   * address per launch — so provenance lives entirely in the worker's
+   * factory-filtered launch feed. For this permission the chain is LOOSER than
+   * the off-chain mirror, which is the reverse of this system's usual posture,
+   * and it is the price of the capability.
+   *
+   * A SEPARATE DECISION FROM THE SIGNATURE, deliberately. Sealing a class vault
+   * at /grant says "this key COULD reach class tokens". This says "go and do
+   * it". The distinction is the one curveLegsNow was fixed to respect: an
+   * owner's "know about this" must never be read as "trade this", and the same
+   * rule applies one level up.
+   */
+  classSnipeEnabled?: boolean;
+  /**
+   * Trade the platform's OFFICIAL COINS — the curated non-equity listings in
+   * packages/core/src/official-coins.ts. Default ON.
+   *
+   * DEFAULT ON, which is the opposite of `classSnipeEnabled` two fields up, and
+   * the difference is what is being trusted. The class route buys a token nobody
+   * enumerated, on provenance that lives entirely off-chain; an official coin is
+   * an address the platform published, verified and stands behind, reaching the
+   * owner the same way the default equity basket does. Requiring an opt-in for a
+   * curated listing would reproduce the exact failure this was built to end: an
+   * owner holding the default basket, shown the sentence "Memecoins trade around
+   * the clock and are unaffected", with nothing on the platform able to reach
+   * one.
+   *
+   * Turning it off removes the listings from the watch set entirely, so they are
+   * not watched, not priced, not legs, and not sealed at the next re-sign —
+   * rather than watched-but-untradable, which is the state that made an agent
+   * look broken while behaving correctly.
+   *
+   * IT IS NOT PERMISSION AND CANNOT BECOME PERMISSION. A grant signed before a
+   * listing does not cover it, whatever this says; the owner re-signs or the
+   * coin stays unreachable.
+   */
+  officialCoinsEnabled?: boolean;
+  /**
+   * Max USDG into a single class entry. 0 = nothing, which is the default.
+   *
+   * Two switches rather than one because they fail differently: forgetting to
+   * set a size is a no-op, and forgetting to turn the route off is not.
+   */
+  classPerEntryUsdg?: number;
+  /** Max simultaneous class positions. 0 = no limit beyond the scout budget. */
+  classMaxPositions?: number;
+  /**
+   * How long a class position may be held before it is sold back, seconds.
+   *
+   * THE EXIT THAT CANNOT BE BLOCKED BY A MISSING PRICE, which is why it is a
+   * clock and not a stop-loss. A class token has no oracle and may have no
+   * depth; a rugged one has no price at all. Every price-based exit is
+   * unreachable in exactly the case an exit matters most, so the one exit that
+   * always works has to be time.
+   *
+   * A position that cannot be closed is not a position. Until this existed, the
+   * route could open one and nothing in the codebase could ever close it.
+   */
+  classMaxHoldSec?: number;
+  /**
+   * Sell once the curve is this far toward graduation, percent.
+   *
+   * NOT A PROFIT TARGET — a trap door. `PonsClassVault` refuses a trade on a
+   * graduated curve by name (`CurveGraduated`), because a graduated curve
+   * resets its reserves and reports a live market that has actually moved to a
+   * pool. So a position still in the vault when its curve graduates can never
+   * be sold through that curve again, and the only way out becomes the owner's
+   * own key via `sweep`.
+   *
+   * Leaving early costs whatever the last stretch would have paid. Leaving late
+   * costs the whole position, and costs it in a way the agent cannot fix.
+   */
+  classExitAtGraduationPct?: number;
+  /**
+   * Minimum REAL curve depth, USDG, before a class entry is considered.
+   *
+   * Real, not reported: a Pons curve's quote reserve includes a virtual seed
+   * worth 40% of the graduation threshold, which is not money anyone can sell
+   * into. `CURVE_GUARD_DEFAULTS.minRealDepthUsdg` is the venue's own
+   * correctly-scaled floor; trencher's $25,000 is a POOL figure and sits 2.4x
+   * above the maximum a curve can ever hold.
+   */
+  classMinDepthUsdg?: number;
   /** Master switch — OFF by default. When on (and a key is set), landed/rejected
    * trades and the daily report are PUBLISHED to your agent's Virtuals page.
    * Outbound + public: nothing streams until you turn this on. */
@@ -268,6 +636,96 @@ export const SECRET_SETTING_KEYS = [
 ] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
 
+/**
+ * Connection / credential / endpoint fields the HOSTED server owns — "house
+ * keys". A tenant must never set them: `bundler*` spends our bundler budget or
+ * points us at their key; `rpc*` / `llmBaseUrl` are SSRF from our egress; the
+ * LLM keys are ours to pay for. Self-hosted, these are the owner's own and the
+ * settings file wins as always. Shared by the worker (strips them from the
+ * tenant file before merge, so env wins) and the settings API (refuses to write
+ * them hosted).
+ */
+export const HOUSE_KEY_FIELDS = [
+  "bundlerApiKey",
+  "bundlerUrl",
+  "rpcMainnet",
+  "rpcTestnet",
+  // THE LLM KEYS ARE NOT HERE ANY MORE — a tenant may bring their own.
+  //
+  // They were house-owned because the house pays for inference. That reasoning
+  // held right up until the house budget ran out: on 2026-08-31 the shared Groq
+  // key hit its daily limit and a user's CHAT stopped working, on a plan he had
+  // no way to top up, because the field was stripped before it reached the store.
+  //
+  // Now the house key is the DEFAULT and a tenant's own key OVERRIDES it — which
+  // falls out of `str(file, env)` for free: the settings file wins, env is the
+  // fallback. Bring a key and you get your own quota and your own choice of model;
+  // bring nothing and you get ours.
+  //
+  // Storing it is safe by the same mechanism that already holds a tenant's
+  // Telegram bot token: the settings blob is sealed at rest under a DEK held by
+  // the web and the orchestrator and never by a child (settings-store.ts).
+  //
+  // `llmBaseUrl` DOES stay house-owned, and the distinction is the whole point:
+  // a key is a credential the tenant pays with, a base URL is an address OUR
+  // egress would connect to. One is their money, the other is our SSRF.
+  "llmBaseUrl",
+  // SPONSORSHIP IS THE HOUSE'S MONEY — a third category.
+  //
+  // The distinction above is a tenant's credential versus our egress. This is
+  // neither: it decides whether WE pay for a tenant's gas. Leaving it out would
+  // let a hosted tenant enable it in their own settings, which is a cheque
+  // written on the house account, stored and honoured.
+  "sponsorGasEnabled",
+  "sponsorshipPolicyId",
+  // THE PLATFORM CHARGING THE TENANT — a fourth case, and the same reasoning.
+  // A tenant who could set these would be setting their own bill to zero, or
+  // pointing the platform fee at their own wallet.
+  "tradeFeeBps",
+  "tradeFeeAddress",
+  "rialtoApiKey",
+  "rialtoApiKeyHeader",
+  "bitqueryApiKey",
+  "merrymenToken",
+  "virtualsApiKey",
+  "telegramTranscribeKey",
+  "telegramTranscribeBase",
+  "browserUrl",
+  "browserToken",
+  // BRAIN IS THE HOUSE'S, on both counts the split above draws.
+  //
+  // The URL is an address OUR egress connects to on the private network, so it
+  // is the SSRF half. The token is a credential the HOUSE issued for a service
+  // the house pays the inference bill for — a tenant who could set either would
+  // be pointing our egress somewhere of their choosing, or spending our model
+  // budget. Unlike llmApiKey, there is no version of this a tenant brings.
+  "brainUrl",
+  "brainToken",
+] as const;
+
+/**
+ * The remote-execution settings — turning these on means "run a shell / drive a
+ * PC". Self-hosted that is the owner's own machine; hosted it would be a shell on
+ * OUR server with an allowlist the attacker chose, so a tenant must never set
+ * them. The worker also refuses to act on them hosted (defence in depth), but a
+ * value the tenant cannot even write is one fewer thing to get wrong.
+ */
+export const RCE_SETTING_FIELDS = [
+  "telegramPcControlEnabled",
+  "telegramAgentEnabled",
+  "telegramAgentAutoShell",
+  "telegramShellAllowlist",
+  "telegramAppAllowlist",
+  "telegramFilesRoot",
+  "telegramCapabilities",
+] as const;
+
+/** Every settings field a HOSTED tenant is forbidden from writing. */
+export const HOSTED_FORBIDDEN_SETTING_FIELDS = [
+  ...HOUSE_KEY_FIELDS,
+  ...RCE_SETTING_FIELDS,
+] as const;
+
 /** The PC-control capability groups a user can enable, in dashboard order. */
 export const PC_CAPABILITIES = [
   "screen",
@@ -283,9 +741,50 @@ export const PC_CAPABILITIES = [
 ] as const;
 export type PcCapability = (typeof PC_CAPABILITIES)[number];
 
+/**
+ * The highest slippage a grant may ever be configured with, in bps.
+ *
+ * This was 5,000 — a minOut of HALF the quote — and it lived in a web
+ * route's validation table rather than anywhere a policy belongs, duplicated
+ * in the worker where an out-of-range value silently fell back to the default
+ * instead of being refused. The worker-side sanity check in
+ * `minOutWithSlippage` is looser still (`>= 10_000`), because its job is only
+ * to stop a negative minOut, not to express a bound.
+ *
+ * 1,000 bps, and it is a PRODUCT POLICY rather than a preference: there is no
+ * env var and no settings field that raises it, because a ceiling a running
+ * agent can lift for itself is not a ceiling. Vex pins the same number for
+ * the same reason, and names 5,000 as the range where a provider will accept
+ * a fill that is a total loss.
+ *
+ * Above ~1,000 bps on this chain the number stops describing slippage. The v4
+ * fee survey found a median LP fee of 86.33%, so a fill 10% below quote is
+ * not a market moving — it is a pool set up to keep the difference.
+ */
+export const SLIPPAGE_BPS_MAX = 1_000;
+
 export const SETTINGS_DEFAULTS = {
+  /**
+   * EVERYTHING THE GRANT COVERS. The only default that changes nothing for
+   * anybody who never touches it — which is the bar a filter added to a live
+   * fleet has to clear.
+   */
+  assetMode: "all" as const,
   paperTradingEnabled: true,
   paperStartUsdg: 1000,
+  /**
+   * OFF. The only safe default for a term that means "spend my money", and the
+   * one place in this file where the default is a promise rather than a
+   * preference: no agent trades for real until a person says so.
+   *
+   * MIGRATION — this default is why the rollout is two deploys, not one.
+   * `worker/src/settings.ts` resolves an absent field to the default, so
+   * shipping enforcement and this default together would move every existing
+   * tenant to paper at once, including agents whose owners are watching them
+   * trade real money right now. The backfill in `scripts/backfill-live-intent`
+   * writes the flag explicitly for anyone already live BEFORE enforcement lands.
+   */
+  liveTradingEnabled: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,
@@ -296,6 +795,8 @@ export const SETTINGS_DEFAULTS = {
   // that would quietly cost more than the strategy could ever make back.
   maxImpactBps: 300,
   perfFeeBps: 1000,
+  // 0.5% of turnover, accrual-only — see fees.ts tradeFeeUsdg.
+  tradeFeeBps: 50,
   tickSeconds: 60,
   // A handful of the deepest names, NOT the whole tradable set — spreading a
   // first deposit across fourteen legs is worse, not more diversified. See
@@ -305,6 +806,7 @@ export const SETTINGS_DEFAULTS = {
   // $25k of depth and a 5% spot/TWAP band. Deliberately strict: live pools on
   // this chain run from ~$3k (trivially pushed) to ~$1.2M, so this admits the
   // deep end and refuses the rest until the owner explicitly loosens it.
+  memecoinMinFdvUsd: 0,
   minPoolLiquidityUsdg: 25_000,
   maxPriceDivergenceBps: 500,
   // Scout mode is OFF and ZERO by default. Buying what you cannot price is a
@@ -312,13 +814,54 @@ export const SETTINGS_DEFAULTS = {
   // inherits the main budget — the owner has to name a number themselves.
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
+  trencherLiveEnabled: false,
+  // Off by default like every other switch that spends money.
+  sponsorGasEnabled: false,
+  // Off by default because it changes how contributions are counted, and a
+  // change to contributions is a change to every P&L figure derived from them.
+  depositScanEnabled: false,
+  // Off by default like every other switch that spends money — this one spends
+  // it on inference rather than gas.
+  deskEnabled: false,
+  deskMaxSteps: 4,
   scoutEnabled: false,
   scoutBudgetUsdg: 0,
   scoutPerTokenUsdg: 25,
+  // THE CLASS ROUTE IS OFF, AND SIZED AT ZERO. Two closed doors rather than
+  // one, because they fail differently: an owner who enables the route and
+  // forgets the size gets a no-op, and one who sets a size and forgets to
+  // disable the route does not. See MerrymenSettings.classSnipeEnabled for what
+  // is actually being opted into.
+  classSnipeEnabled: false,
+  classPerEntryUsdg: 0,
+  classMaxPositions: 0,
+  // SIX HOURS, and unlike the two above this one is NOT a closed door — it is
+  // the door out, so it defaults to a real value rather than to zero. A
+  // launchpad coin's depth has a measured half-life of hours (of the 14 deepest
+  // USDG curves, 7 fell under the tradable floor in 3.5), so a hold window
+  // longer than that is holding through the part where the exit stops working.
+  classMaxHoldSec: 6 * 3600,
+  // Well clear of the cliff. Graduation is not gradual — the curve resets — and
+  // the vault refuses a graduated curve outright, so the margin is the whole
+  // protection. 85% leaves room for a tick to be missed and for the last read
+  // to be stale.
+  classExitAtGraduationPct: 85,
+  // ON, unlike everything above it. See MerrymenSettings.officialCoinsEnabled
+  // for why a curated listing defaults differently from a discovered one.
+  officialCoinsEnabled: true,
+  // The venue's own floor (CURVE_GUARD_DEFAULTS.minRealDepthUsdg), not
+  // trencher's $25,000 — that is a POOL figure and sits 2.4x above the most a
+  // Pons curve can ever hold.
+  classMinDepthUsdg: 250,
+  strategistStopLossBps: 0,
+  takeProfitBps: 0,
   buyPerTickUsdg: 25,
   idleFloorUsdg: 50,
   gapEnterBudgetUsdg: 75,
-  groqModel: "llama-3.3-70b-versatile",
+  // Groq retired the whole Llama 3.x chat line; llama-3.3-70b-versatile now
+  // answers 404 model_not_found, which is why the chat could not think.
+  // See llm-providers.ts for why this model and not the bigger one.
+  groqModel: "qwen/qwen3.8-27b",
   llmModel: "claude-opus-4-8",
   llmIntervalMin: 30,
   llmMaxActionUsdg: 50,

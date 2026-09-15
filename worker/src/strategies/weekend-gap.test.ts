@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { weekendGapTick, type WeekendGapConfig } from "./weekend-gap";
-import type { Holding, Snapshot } from "./types";
+import { takeTick, type Holding, type Snapshot } from "./types";
+
+/**
+ * weekendGapTick now returns its reasons alongside its intents. These tests
+ * predate that and are about the intents, so they keep asserting on those.
+ */
+const wgTick = (...a: Parameters<typeof weekendGapTick>) => takeTick(weekendGapTick(...a)).intents;
 
 const ROUTER = "0x1111111111111111111111111111111111111111" as const;
 const USDG = "0x3333333333333333333333333333333333333333" as const;
@@ -47,17 +53,17 @@ const CLOSED = new Set(["AAPL", "MSFT"]); // both feeds stale = markets closed
 describe("weekendGapTick", () => {
   it("emits nothing when the sequencer is down", () => {
     assert.deepEqual(
-      weekendGapTick(cfg(), snap({ staleFeeds: CLOSED, sequencerUp: false })),
+      wgTick(cfg(), snap({ staleFeeds: CLOSED, sequencerUp: false })),
       [],
     );
   });
 
   it("market open + no holdings → flat, nothing to do", () => {
-    assert.deepEqual(weekendGapTick(cfg(), snap()), []);
+    assert.deepEqual(wgTick(cfg(), snap()), []);
   });
 
   it("ENTERs when the market closes: buys each leg's slice of the budget", () => {
-    const intents = weekendGapTick(cfg(), snap({ staleFeeds: CLOSED }));
+    const intents = wgTick(cfg(), snap({ staleFeeds: CLOSED }));
     assert.equal(intents.length, 2);
     for (const i of intents) {
       assert.equal(i.kind, "swap");
@@ -68,7 +74,7 @@ describe("weekendGapTick", () => {
   });
 
   it("holds through the closed market — does not re-enter what it already holds", () => {
-    const intents = weekendGapTick(
+    const intents = wgTick(
       cfg(),
       snap({
         staleFeeds: CLOSED,
@@ -81,7 +87,7 @@ describe("weekendGapTick", () => {
   });
 
   it("EXITs the full position when the market reopens", () => {
-    const intents = weekendGapTick(
+    const intents = wgTick(
       cfg(),
       snap({
         staleFeeds: new Set(), // feeds fresh = open
@@ -97,7 +103,7 @@ describe("weekendGapTick", () => {
   });
 
   it("mixed state: exits the reopened leg while entering the still-closed one", () => {
-    const intents = weekendGapTick(
+    const intents = wgTick(
       cfg(),
       snap({
         staleFeeds: new Set(["MSFT"]), // AAPL open, MSFT closed
@@ -111,7 +117,7 @@ describe("weekendGapTick", () => {
   });
 
   it("skips entry when cash cannot cover the slice", () => {
-    const intents = weekendGapTick(
+    const intents = wgTick(
       cfg(),
       snap({ staleFeeds: CLOSED, cashUsdg: 49_000_000n }),
     );
@@ -119,14 +125,14 @@ describe("weekendGapTick", () => {
   });
 
   it("never touches a paused token in either direction", () => {
-    const closed = weekendGapTick(
+    const closed = wgTick(
       cfg(),
       snap({ staleFeeds: CLOSED, pausedTokens: new Set([AAPL.toLowerCase()]) }),
     );
     assert.equal(closed.length, 1);
     assert.equal(closed[0]!.kind === "swap" && closed[0]!.buyToken, MSFT);
 
-    const open = weekendGapTick(
+    const open = wgTick(
       cfg(),
       snap({
         pausedTokens: new Set([AAPL.toLowerCase()]),

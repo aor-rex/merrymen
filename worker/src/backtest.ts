@@ -10,7 +10,7 @@
  */
 
 import { checkPolicy, type AgentLimits, type AgentState, type TradeIntent } from "./policy";
-import type { Holding, Snapshot, Strategy } from "./strategies/types";
+import { takeTick, type Holding, type Snapshot, type Strategy } from "./strategies/types";
 
 /** One bar of the input series. Prices in USD (8dp bigint), per symbol. */
 export interface Bar {
@@ -149,7 +149,9 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       perTradeCapUsdg: cfg.limits.perTradeUsdg,
     };
 
-    const intents = await cfg.strategy.tick(snap);
+    // The reasons a strategy now returns are for the ledger, and the backtest
+    // has no ledger — it replays intents against bars.
+    const { intents } = takeTick(await cfg.strategy.tick(snap));
     for (const intent of intents) {
       const state: AgentState = {
         spentTodayUsdg: spentToday,
@@ -171,7 +173,9 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       executed += 1;
       if (intent.kind !== "vault-withdraw") {
         spentToday +=
-          intent.kind === "swap" || intent.kind === "equity-order" ? intent.notionalUsdg : intent.amountUsdg;
+          intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+            ? intent.notionalUsdg
+            : intent.amountUsdg;
       }
     }
 
@@ -188,11 +192,15 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
           const amt = intent.amountUsdg > cash ? cash : intent.amountUsdg;
           cash -= amt;
           vault += amt;
-        } else {
+        } else if (intent.kind === "vault-withdraw") {
           const amt = intent.amountUsdg > vault ? vault : intent.amountUsdg;
           vault -= amt;
           cash += amt;
         }
+        // A curve trade falls through deliberately: the backtest replays
+        // Chainlink history, and a bonding curve has none — no feed, no
+        // reserves at a past block (this chain keeps no archive state beyond a
+        // few hundred blocks). Simulating one would be inventing a fill.
         return;
       }
       const buySymbol = tokenToSymbol.get(intent.buyToken.toLowerCase());

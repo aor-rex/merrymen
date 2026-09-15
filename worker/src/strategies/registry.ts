@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, type StockToken } from "../../../packages/core/src/index";
+import { CASH, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist, type StrategistDecision } from "../strategist/strategy";
@@ -31,6 +31,25 @@ export function isCircleStrategy(name: string): boolean {
 }
 
 export interface StrategyBuildOpts {
+  /**
+   * Which kinds of thing the owner wants traded. Absent = "all", so a host that
+   * does not set it is unchanged.
+   */
+  assetMode?: AssetMode;
+  /**
+   * The bonding-curve legs available right now, re-read per decision.
+   *
+   * Supplied by the host (the worker tick), because a curve leg carries THIS
+   * TICK’S reserves — the input a slippage floor is derived from. Optional, so
+   * a host that does not trade curves is unchanged.
+   */
+  curveLegsNow?: () => {
+    legs: ReadonlyMap<string, import("../strategist/proposals").CurveLeg>;
+    tokens: ReadonlyMap<string, `0x${string}`>;
+    slippageBps: number;
+    /** How far one buy may move the curve, bps. Travels with the legs. */
+    maxImpactBps: number;
+  } | null;
   swapRouter: `0x${string}`;
   usdg6: (v: number) => bigint;
   basketSymbols: string[];
@@ -41,6 +60,14 @@ export interface StrategyBuildOpts {
    * (tests, fixtures) falls back to the shipped registry, i.e. old behaviour.
    */
   universe?: readonly StockToken[];
+  /**
+   * Symbols that are legs whether or not the owner listed them — the platform's
+   * official coins. See `legsForUniverse` for why this is a different question
+   * from the basket, and why it is not permission.
+   */
+  alwaysSymbols?: readonly string[];
+  strategistStopLossBps?: number;
+  takeProfitBps?: number;
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
   gapEnterBudgetUsdg: number;
@@ -50,6 +77,20 @@ export interface StrategyBuildOpts {
     maxActionUsdg: number;
     /** Persist each strategist decision (survivor + drop) — see makeLlmStrategist. */
     onDecision?: (d: StrategistDecision) => void | Promise<void>;
+    /**
+     * Research instead of one-shot. Present only when the owner turned it on
+     * AND there is a model to run it — see makeLlmStrategist's `desk`.
+     */
+    desk?: {
+      recall: () => Promise<string>;
+      basisFor?: (symbol: string) => Promise<string | null>;
+      links?: () => { label: string; url: string }[];
+      readLink?: (index: number) => Promise<string>;
+      /** Desks this owner wired in. Absent or empty hides the tool entirely. */
+      peers?: () => { label: string }[];
+      readPeer?: (index: number) => Promise<string>;
+      maxSteps?: number;
+    };
   };
   onNote?: (level: "ok" | "warn", message: string) => void;
   /**
@@ -60,9 +101,10 @@ export interface StrategyBuildOpts {
    */
   trench?: {
     usdgToken: `0x${string}`;
-    candidates: () => readonly Candidate[];
-    open: () => readonly OpenPosition[];
+    candidates: () => readonly Candidate[] | Promise<readonly Candidate[]>;
+    open: () => readonly OpenPosition[] | Promise<readonly OpenPosition[]>;
     liquidityOf: (token: `0x${string}`) => number | null;
+    unpriceable?: () => ReadonlySet<string>;
   };
 }
 
@@ -72,8 +114,8 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
 }
 
 /**
- * The full set the worker watches: the curated basket, plus whatever the owner
- * added themselves.
+ * The full set the worker watches: the curated basket, the platform's official
+ * coins, plus whatever the owner added themselves.
  *
  * Owner-added entries become `kind: "memecoin"` with `chainlinkFeed: null`, which
  * is what routes them to pool pricing and keeps them out of every code path that
@@ -85,14 +127,40 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
  * feed; letting a settings entry shadow it would let a typo'd or hostile address
  * take over a real symbol — and the basket would keep naming it as if nothing
  * had changed.
+ *
+ * OFFICIAL COINS TAKE THE MEMECOIN DOOR, NOT THE REGISTRY DOOR, and they come in
+ * ahead of the owner's own extras so the same collision rule protects them: a
+ * settings entry cannot shadow an official listing's symbol or address. They are
+ * deliberately NOT `STOCK_TOKENS` entries — see official-coins.ts for the three
+ * things that would break if they were, one of which is a hole in the wall.
+ *
+ * The caller passes the list rather than this function reading it, so that "which
+ * chain" and "did the owner opt out" are decided once, by code that knows the
+ * answer, instead of being guessed here.
  */
 export function watchTokensFor(
   basketSymbols: readonly string[],
   customTokens: readonly { symbol: string; address: `0x${string}`; decimals: number }[],
+  officialCoins: readonly { symbol: string; name: string; address: `0x${string}`; decimals: number }[] = [],
 ): StockToken[] {
   const basket = tokensForSymbols(basketSymbols);
   const takenSymbols = new Set(STOCK_TOKENS.map((t) => t.symbol.toUpperCase()));
   const takenAddresses = new Set(basket.map((t) => t.address.toLowerCase()));
+  const official: StockToken[] = [];
+  for (const c of officialCoins) {
+    if (takenSymbols.has(c.symbol.toUpperCase())) continue;
+    if (takenAddresses.has(c.address.toLowerCase())) continue;
+    takenSymbols.add(c.symbol.toUpperCase());
+    takenAddresses.add(c.address.toLowerCase());
+    official.push({
+      symbol: c.symbol,
+      name: c.name,
+      address: c.address,
+      chainlinkFeed: null,
+      kind: "memecoin",
+      decimals: c.decimals,
+    });
+  }
   const extras: StockToken[] = [];
   for (const c of customTokens) {
     if (takenSymbols.has(c.symbol.toUpperCase())) continue;
@@ -108,7 +176,7 @@ export function watchTokensFor(
       decimals: c.decimals,
     });
   }
-  return [...basket, ...extras];
+  return [...basket, ...official, ...extras];
 }
 
 /**
@@ -123,10 +191,45 @@ export function watchTokensFor(
  * means "know about this", putting its symbol in the basket means "trade it".
  * Exactly how stock tokens already work, and deliberately NOT automatic — a
  * token added to be tracked must not start being bought on its own.
+ *
+ * `alwaysSymbols` IS THE ONE EXCEPTION, and it is a different question from the
+ * one the rule above answers. That rule protects the owner from the PLATFORM
+ * reading their "watch this" as "trade this" — from discovery, a feed, or a
+ * model quietly widening what gets bought. An official coin is not discovered:
+ * it is a listing the platform publishes and stands behind, in the same breath
+ * as AAPL, and an owner who never edits their basket still gets AAPL. Listing is
+ * the platform saying "this is reachable", exactly as the default basket already
+ * does, and it is declinable in one setting.
+ *
+ * What it still is NOT: permission. The signature, the caps, the scout budget,
+ * the depth floor and the impact ceiling all bind afterwards, and a listing
+ * cannot widen a grant that is already signed.
  */
-export function legsForUniverse(symbols: readonly string[], universe?: readonly StockToken[]) {
-  const pool = universe ?? STOCK_TOKENS;
-  const chosen = pool.filter((t) => symbols.includes(t.symbol));
+export function legsForUniverse(
+  symbols: readonly string[],
+  universe?: readonly StockToken[],
+  alwaysSymbols: readonly string[] = [],
+  /**
+   * WHICH KINDS OF THING MAY BE TRADED — the owner's asset mode.
+   *
+   * Applied to the POOL, before the basket intersection, so it narrows what can
+   * be proposed without touching what is watched. This is the highest-leverage
+   * line of the feature: every builtin resolves its legs through here, and the
+   * strategist derives `tradableSymbols` from the result — so an excluded class
+   * stops being named in the model's prompt at all, rather than being proposed
+   * and then refused. That is the direct fix for "it continue to answer me about
+   * the stock basket".
+   *
+   * Defaulted to "all" so every existing caller and test is unchanged.
+   */
+  mode: AssetMode = "all",
+) {
+  const pool = (universe ?? STOCK_TOKENS).filter((t) => assetModeAllows(mode, t.address));
+  // Deduplicated, because an owner who ALSO put the official symbol in their
+  // basket must not get the leg twice — that would halve every other leg's
+  // weight and silently double the coin's target allocation.
+  const wanted = new Set([...symbols, ...alwaysSymbols]);
+  const chosen = pool.filter((t) => wanted.has(t.symbol));
   return chosen.map((t) => ({
     symbol: t.symbol,
     token: t.address,
@@ -135,13 +238,28 @@ export function legsForUniverse(symbols: readonly string[], universe?: readonly 
 }
 
 export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
+  // ONE PLACE THE MODE IS APPLIED for every builtin. They all resolve legs
+  // through this closure, so the filter cannot be forgotten by one of them.
   const legsFor = (symbols: readonly string[]) =>
-    legsForUniverse(symbols, opts.universe);
+    legsForUniverse(symbols, opts.universe, opts.alwaysSymbols, opts.assetMode);
   // Not a builtin → a user-written strategy file in strategies/ (lazy-loaded,
   // hot-reloading, crash-isolated; every intent is shape-validated and then
   // policy-checked like any other).
   if (!(BUILTIN_STRATEGIES as readonly string[]).includes(name)) {
-    return makeCustomStrategy(name, { onNote: opts.onNote });
+    if (isHostedMode()) {
+      // FAIL CLOSED on hosted. A non-builtin name makes makeCustomStrategy
+      // dynamic-import() and EXECUTE a file from the tenant's home, in the
+      // process that holds every tenant's session key — arbitrary code
+      // execution. The intent validator constrains the return VALUE, never the
+      // module body, which runs at import. So we refuse to load it and fall
+      // through to the safe builtin (steady-basket) below rather than run tenant
+      // code — never throw, which would crash the child at boot. The settings
+      // route rejects the name at write time too; this is the loader half of the
+      // gate, the boundary that actually executes.
+      opts.onNote?.("warn", `custom strategy "${name}" is disabled on hosted merrymen — running steady-basket instead`);
+    } else {
+      return makeCustomStrategy(name, { onNote: opts.onNote });
+    }
   }
   if (name === "llm-strategist") {
     // LLM proposes; deterministic code disposes. Without a key, the null
@@ -159,9 +277,24 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
         maxPerActionUsdg: opts.usdg6(opts.llm.maxActionUsdg),
         maxActionsPerTick: 4,
       },
+      // The curve venue, re-read per decision. Undefined when the host does
+      // not supply one, which keeps every existing strategy identical.
+      curveLegsNow: opts.curveLegsNow,
+      // The mechanical floor. 0 = off, which is the shipped default.
+      stopLossBps: opts.strategistStopLossBps ?? 0,
+      // AND THE CEILING, which this branch never forwarded. `takeProfitBps`
+      // reached steady-basket only, so an owner on the strategist had the
+      // setting saved, shown in the UI, and read by nothing — while their agent
+      // described it to them as armed.
+      takeProfitBps: opts.takeProfitBps ?? 0,
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
+      // The desk needs a real model: with the null driver there is nothing to
+      // research WITH, and a loop around no provider is just a slower no-op.
+      ...(opts.llm.desk && opts.llm.creds
+        ? { desk: { creds: opts.llm.creds, ...opts.llm.desk } }
+        : {}),
       provider: opts.llm.creds?.provider,
       model: opts.llm.creds?.model,
     });
@@ -177,6 +310,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       candidates: t?.candidates ?? (() => []),
       open: t?.open ?? (() => []),
       liquidityOf: t?.liquidityOf ?? (() => null),
+      unpriceable: t?.unpriceable ?? (() => new Set<string>()),
       onNote: opts.onNote,
     });
   }
@@ -217,6 +351,19 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     swapRouter: opts.swapRouter,
     vault: MORPHO.steakhouseUsdgVault as `0x${string}`,
     usdg: CASH.USDG as `0x${string}`,
+    takeProfitBps: opts.takeProfitBps ?? 0,
   };
-  return { name: "steady-basket", tick: (snap) => steadyBasketTick(cfg, snap) };
+  // RE-READ PER TICK, NOT CAPTURED IN cfg. A curve leg carries that tick's
+  // reserves, and curve-prices.ts refuses to cache them for a measured reason:
+  // p99 movement is 1,546 bps over 240 seconds, so last tick's reserves are a
+  // slippage floor for a market that no longer exists.
+  //
+  // AND SUPPLIED HERE OR THE FALLBACK IS INERT. curve-wiring.test.ts exists
+  // because exactly this line was missing for the strategist: every layer
+  // looked wired, the production call site never passed it, and every memecoin
+  // came back "not in the tradable universe".
+  return {
+    name: "steady-basket",
+    tick: (snap) => steadyBasketTick({ ...cfg, curve: opts.curveLegsNow?.() ?? null }, snap),
+  };
 }

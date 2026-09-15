@@ -1,0 +1,1767 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { CircleHelp } from "lucide-react";
+import { HolderLink } from "../HolderLink";
+import { basketAfterAdd, basketNow } from "../basket";
+import { isCircleStrategyId } from "../strategy";
+import type { TierView } from "@/app/api/tier/route";
+import { loadTier } from "../tier";
+import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
+import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import type { SettingsView } from "@/app/api/settings/route";
+import type { TelegramStatus } from "@/app/api/telegram/route";
+import SetupChecklist from "../SetupChecklist";
+// QUARANTINED alongside /grant. A settings form is not a surface anybody shares
+// from a phone, and its ~30 fields are styled against the old sheet — so it
+// keeps it, and the sheet no longer reaches anything else.
+
+type Draft = Record<string, string>;
+
+function Field(props: {
+  label: string;
+  hint?: React.ReactNode;
+  /** Optional "get a key ↗" link shown beside the label (opens the provider). */
+  action?: { href: string; label: string };
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mm-field setting-field">
+    <label>
+      <span className="mm-labelrow">
+        <span className="mm-label">{props.label}</span>
+        {props.action && (
+          <a className="mm-getkey" href={props.action.href} target="_blank" rel="noreferrer">
+            {props.action.label} ↗
+          </a>
+        )}
+      </span>
+      <span className="mm-input">{props.children}</span>
+    </label>
+    {props.hint && <details className="setting-help"><summary aria-label={`About ${props.label}`}><CircleHelp size={15}/></summary><div className="mm-hint">{props.hint}</div></details>}
+    </div>
+  );
+}
+
+export default function SettingsPage({onFund}:{onFund:()=>void}) {
+  const [view, setView] = useState<SettingsView | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [draft, setDraft] = useState<Draft>({});
+  const [symbols, setSymbols] = useState<string[] | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [errors, setErrors] = useState<string[]>([]);
+  // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
+  /**
+   * Is this the hosted service?
+   *
+   * Load-bearing, not cosmetic. In hosted mode the settings API DELETES 26
+   * fields from every PUT and still answers ok -- the whole AI provider block,
+   * every key, the bundler, the RPC overrides. Showing those controls invites
+   * the owner to fill in things that cannot take effect and then tells them it
+   * saved. The house runs them; the page should say so instead of pretending
+   * they are yours to set.
+   */
+  const [hosted, setHosted] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch("/api/auth/session")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setHosted(!!d?.hosted))
+      .catch(() => setHosted(false));
+  }, []);
+  const [tg, setTg] = useState<TelegramStatus | null>(null);
+  const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
+  const [tgControl, setTgControl] = useState<boolean | null>(null);
+  const [tgTransfer, setTgTransfer] = useState<boolean | null>(null);
+  const [tgNotify, setTgNotify] = useState<boolean | null>(null);
+  const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
+  // Scout mode is a boolean, so it can't ride the string `draft`.
+  const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
+  const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
+  const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
+  /** The owner's consent to spend real money. Null = untouched this session. */
+  const [liveTrading, setLiveTrading] = useState<boolean | null>(null);
+  /** Which kinds of thing the agent may BUY. Null = untouched this session. */
+  const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
+  const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
+  const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
+  const [allowlist, setAllowlist] = useState<number[] | null>(null);
+  const [tgTest, setTgTest] = useState<string | null>(null);
+  // PC control: master + capability set + string allowlists (also can't ride `draft`).
+  const [pcEnabled, setPcEnabled] = useState<boolean | null>(null);
+  const [caps, setCaps] = useState<string[] | null>(null);
+  const [shellList, setShellList] = useState<string[] | null>(null);
+  const [appList, setAppList] = useState<string[] | null>(null);
+  // Agent mode (/agent): master + free-form shell toggle (also booleans).
+  const [agentEnabled, setAgentEnabled] = useState<boolean | null>(null);
+  const [agentAutoShell, setAgentAutoShell] = useState<boolean | null>(null);
+  // Owner-added tokens (memecoins). A list of objects, so it can't ride `draft`
+  // either. null = untouched this session; the server value stands.
+  const [tokens, setTokens] = useState<CustomToken[] | null>(null);
+  const [newToken, setNewToken] = useState({ symbol: "", address: "", decimals: "18" });
+  /**
+   * SHOULD THE AGENT TRADE THIS ONE, as well as know about it?
+   *
+   * Defaulted ON, and shown right beside the address box rather than assumed.
+   * Adding a token and trading it are two different writes — `customTokens` says
+   * "know about this", `basketSymbols` says "trade it" — and the second was
+   * offered nowhere an owner would find it: the chip renders unselected at the
+   * end of twenty-five identical stock chips, and the rule itself lived only in
+   * a JSX comment. An owner pasted an address, saved, re-signed, and asked the
+   * group why his agent still traded only stocks. He had done nothing wrong.
+   *
+   * NOT made automatic, because `strategies/registry.ts` is deliberate about it:
+   * "a token added to be tracked must not start being bought on its own." That
+   * rule protects an owner from the PLATFORM widening what gets bought. A person
+   * typing forty-two hex characters and pressing a button is not the platform —
+   * so the choice is theirs, made visible, made here, and reversible.
+   */
+  const [tradeNewToken, setTradeNewToken] = useState(true);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  // The grant the browser holds, so the basket can say which symbols this
+  // signature can actually get back out of. null = none stored yet.
+  const [storedGrant, setStoredGrant] = useState<StoredGrant | null>(null);
+  // AI provider model listing — fetched from the provider's models API.
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  // Model-list failure, in words a non-developer can act on. Built here (not
+  // in the render) so the render below stays one literal line — see the pin
+  // in house-key-and-basket.test.ts. `missing_key` never reaches this: it
+  // renders as the neutral hint, not an error.
+  const modelsErrorMessage = (
+    code: string,
+    source: string | null,
+    provider: { label: string; keyUrl: string },
+  ): string => {
+    if (code === "key_rejected") {
+      const whose =
+        source === "typed" ? "the one just typed" : source === "house" ? "the shared key" : "the saved key";
+      const where = provider.keyUrl ? ` — check it at ${provider.keyUrl.replace(/^https?:\/\//, "")}` : "";
+      return `the ${provider.label} key was refused (${whose}${where})`;
+    }
+    return `couldn't reach ${provider.label} — check connection`;
+  };
+  /**
+   * This account standing against the Circle rule.
+   *
+   * The CREATE flow warns; this one never did — and this is the flow a beta
+   * tester with an existing agent actually uses. A bare dropdown of raw ids let
+   * somebody switch to a strategy their tier will not run and answered ok.
+   */
+  const [tier, setTier] = useState<TierView | null>(null);
+  useEffect(() => {
+    void loadTier().then(setTier);
+  }, []);
+
+  const loadTelegram = () =>
+    fetch("/api/telegram")
+      .then((r) => (r.ok ? (r.json() as Promise<TelegramStatus>) : null))
+      .then((s) => s && setTg(s))
+      .catch(() => {});
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("merrymen.grant.v1");
+      if (raw) setStoredGrant(JSON.parse(raw) as StoredGrant);
+    } catch {
+      /* no grant, or unreadable — the basket just won't annotate */
+    }
+    void (async () => {
+      setLoadError(false);
+      try {
+        const res = await fetch("/api/settings");
+        if (!res.ok) throw new Error("Settings unavailable");
+        setView((await res.json()) as SettingsView);
+      } catch {
+        setLoadError(true);
+      }
+      void loadTelegram();
+    })();
+  }, [loadAttempt]);
+
+  // Debounced model fetch — triggers when provider, key, or custom URL changes.
+  // No client-side gate on key presence: the server may still serve the list
+  // from the shared house key, which the client cannot see. A response with no
+  // key behind it comes back as missing_key and renders as the neutral hint
+  // below — never as an error for something the user never did.
+  useEffect(() => {
+    if (!view) return;
+    const providerId = draft.llmProvider ?? view.values.llmProvider ?? "groq";
+    const prov = view.llmProviders.find((p) => p.id === providerId);
+    if (!prov) { setAvailableModels([]); setModelsError(null); return; }
+
+    setAvailableModels([]);
+    setModelsLoading(true);
+    setModelsError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const body: Record<string, string> = { provider: prov.id };
+        const kf = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
+        const keyInDraft = draft[kf]?.trim();
+        if (keyInDraft) body.apiKey = keyInDraft;
+        if (prov.id === "custom") {
+          const bu = draft.llmBaseUrl?.trim() || (view.values.llmBaseUrl as string | undefined) || "";
+          if (bu) body.baseUrl = bu;
+        }
+        const res = await fetch("/api/models", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const j = (await res.json()) as { models?: string[]; error?: string; code?: string; keySource?: string };
+        if (res.ok && j.models) {
+          setAvailableModels(j.models);
+          setModelsError(null);
+        } else {
+          setAvailableModels([]);
+          const code = j.code ?? "provider_error";
+          setModelsError(code === "missing_key" ? code : modelsErrorMessage(code, j.keySource ?? null, prov));
+        }
+      } catch {
+        setAvailableModels([]);
+        setModelsError(modelsErrorMessage("provider_error", null, prov));
+      } finally {
+        setModelsLoading(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [view, draft.llmProvider, draft.groqApiKey, draft.anthropicApiKey, draft.llmApiKey, draft.llmBaseUrl]);
+
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setDraft((d) => ({ ...d, [k]: e.target.value }));
+
+  const v = (k: keyof SettingsView["values"]): string => {
+    if (k in draft) return draft[k as string]!;
+    const stored = view?.values[k];
+    return stored === undefined || stored === null ? "" : String(stored);
+  };
+
+  // URL fields (bundler/RPC) come back REDACTED from GET because they can embed
+  // an API key. Render them empty (type-to-replace) with the redacted saved value
+  // as the placeholder, so the masked value is never in an editable input.
+  const urlPlaceholder = (k: keyof SettingsView["values"], fallback: string): string => {
+    const stored = view?.values[k];
+    return typeof stored === "string" && stored ? `saved: ${stored}` : fallback;
+  };
+
+  function toggleSymbol(sym: string) {
+    const current = symbols ?? view?.values.basketSymbols ?? view?.defaults.basketSymbols ?? [];
+    setSymbols(current.includes(sym) ? current.filter((s) => s !== sym) : [...current, sym]);
+  }
+
+  /** Add a token to the draft list. The server validates again — this is just
+   *  so a typo is caught here rather than after a round-trip. */
+  function addToken() {
+    setTokenError(null);
+    const candidate = {
+      symbol: newToken.symbol.trim(),
+      address: newToken.address.trim(),
+      decimals: Number(newToken.decimals),
+    };
+    if (!isValidCustomToken(candidate)) {
+      setTokenError("needs a short symbol, a full 0x… address (42 chars) and whole-number decimals");
+      return;
+    }
+    const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];
+    if (current.some((t) => t.address.toLowerCase() === candidate.address.toLowerCase())) {
+      setTokenError(`${candidate.address.slice(0, 10)}… is already in the list`);
+      return;
+    }
+    setTokens([...current, candidate]);
+    // THE SECOND WRITE, which never happened here. `Proposals.tsx` has always
+    // done both in one click; this screen wrote only `customTokens`, so a token
+    // was added and never selected, and the basket stayed on its stocks-only
+    // default. `basketNow` rather than `values.basketSymbols ?? []` because an
+    // unset basket is the DEFAULT basket, not an empty one — reading it as
+    // empty would narrow the agent's whole universe to the coin just added.
+    // `symbols` first: an edit made in this session has not been saved yet, and
+    // rebuilding from `view` would silently throw it away.
+    setSymbols(
+      basketAfterAdd({
+        saved: symbols ?? basketNow({ values: view?.values, defaults: view?.defaults }),
+        symbol: candidate.symbol,
+        trade: tradeNewToken,
+      }),
+    );
+    setNewToken({ symbol: "", address: "", decimals: "18" });
+  }
+
+  function removeToken(address: string) {
+    const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];
+    setTokens(current.filter((t) => t.address.toLowerCase() !== address.toLowerCase()));
+  }
+
+  async function save() {
+    setStatus("saving…");
+    setErrors([]);
+    const body: Record<string, unknown> = { ...draft };
+    if (symbols !== null) body.basketSymbols = symbols;
+    if (tokens !== null) body.customTokens = tokens;
+    if (tgEnabled !== null) body.telegramEnabled = tgEnabled;
+    if (tgControl !== null) body.telegramControlEnabled = tgControl;
+    if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
+    if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
+    if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
+    if (deskEnabled !== null) body.deskEnabled = deskEnabled;
+    if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
+    if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
+    if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
+    if (assetMode !== null) body.assetMode = assetMode;
+    if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
+    if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
+    if (allowlist !== null) body.telegramAllowlist = allowlist;
+    if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
+    if (caps !== null) body.telegramCapabilities = caps;
+    if (shellList !== null) body.telegramShellAllowlist = shellList;
+    if (appList !== null) body.telegramAppAllowlist = appList;
+    if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
+    if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
+    // Secrets: only send when the user typed something or hit clear ("").
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json()) as { ok?: boolean; errors?: string[] };
+      if (!res.ok) {
+        setErrors(json.errors ?? ["save failed"]);
+        setStatus(null);
+        return;
+      }
+      setStatus("Changes saved");
+      setDraft({});
+      setSymbols(null);
+      setTgEnabled(null);
+      setTgControl(null);
+      setTgTransfer(null);
+      setTgNotify(null);
+      setVirtualsEnabled(null);
+      setScoutEnabled(null);
+      setDiscoveryEnabled(null);
+      setAllowlist(null);
+      setPcEnabled(null);
+      setCaps(null);
+      setShellList(null);
+      setAppList(null);
+      setAgentEnabled(null);
+      setAgentAutoShell(null);
+      setTokens(null);
+      const fresh = await fetch("/api/settings");
+      if (fresh.ok) setView((await fresh.json()) as SettingsView);
+      void loadTelegram();
+      setTimeout(() => setStatus(null), 4000);
+    } catch {
+      setErrors(["could not reach the settings API"]);
+      setStatus(null);
+    }
+  }
+
+  if (view === null) {
+    return (
+      <AppShell>
+        <PageHeader title="Settings" />
+        <div className="mm-wrap">
+          {loadError ? <><p role="alert" className="mm-note">Could not load your settings.</p><button className="mm-btn" onClick={()=>setLoadAttempt(x=>x+1)}>Try again</button></> : <p role="status" className="mm-note">Loading settings…</p>}
+        </div>
+      </AppShell>
+    );
+  }
+
+  const d = view.defaults;
+  const activeSymbols = symbols ?? view.values.basketSymbols ?? d.basketSymbols;
+  /** What is actually listed on this chain — not whether the setting is on. */
+  const listedCoins = view.officialCoins ?? [];
+  const activeTokens =
+    tokens ?? ((view.values.customTokens as CustomToken[] | undefined) ?? []);
+  // Read the grant straight from localStorage — this page has no other handle on
+  // it, and what matters is the signature the browser actually holds.
+  // WITH THE OWNER'S OWN TOKENS, so the banner can fire for a memecoin — the
+  // token most likely to have been added after the grant was signed, and the one
+  // this warning could never reach. Unlike Wallet.tsx and the worker's coverage
+  // note, this screen has no `tokenCoverage` union of its own to double-report.
+  const unsellable = uncoveredBasketSymbols(activeSymbols, storedGrant, activeTokens);
+  const secretPlaceholder = (s: { set: boolean; hint: string | null }) =>
+    s.set ? `saved ····${s.hint ?? ""} — type to replace` : "not set";
+
+  // ── AI provider (bring any key) ──────────────────────────────────────────
+  // One picker drives which key/model fields show. Groq & Anthropic reuse their
+  // classic secret fields (old setups keep working); every other provider stores
+  // its key in the generic llmApiKey.
+  /**
+   * HOSTED, NOT EVERY PROVIDER IS OFFERABLE.
+   *
+   * `llmBaseUrl` stays in HOUSE_KEY_FIELDS, so a hosted tenant cannot point our
+   * egress anywhere -- which makes a custom endpoint a control that saves nothing,
+   * and a local model one our servers cannot reach at all. Listing either would be
+   * the same mistake as rendering thirty inert fields: an option that looks like it
+   * works. A KEY is offerable hosted because it is a credential the tenant pays
+   * with; an ADDRESS is not, because it is our SSRF.
+   */
+  const providers = view.llmProviders.filter(
+    (p) => hosted !== true || (p.id !== "custom" && p.needsKey !== false),
+  );
+  const llmProviderVal = draft.llmProvider ?? view.values.llmProvider ?? "groq";
+  const prov = providers.find((p) => p.id === llmProviderVal) ?? providers[0]!;
+  const providerKeyField = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
+  const providerKeyView = prov.id === "groq" ? view.groqApiKey : prov.id === "anthropic" ? view.anthropicApiKey : view.llmApiKey;
+  const providerModelField = prov.id === "groq" ? "groqModel" : prov.id === "anthropic" ? "llmModel" : "llmProviderModel";
+  const providerNeedsKey = prov.needsKey !== false;
+
+  const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
+  const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
+  const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
+  const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
+  const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
+  const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
+  const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
+  const classSnipeVal = classSnipe ?? view.values.classSnipeEnabled ?? d.classSnipeEnabled;
+  const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
+  const assetModeVal = assetMode ?? view.values.assetMode ?? d.assetMode;
+  const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
+  const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
+  // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
+  // this is the one setting whose default is ON, so an owner who has never saved
+  // it has NO stored value, and falling through to `false` would render the
+  // checkbox unticked while the worker traded the list. The control would then be
+  // lying about the system's actual behaviour.
+  const officialCoinsVal = officialCoins ?? view.values.officialCoinsEnabled ?? d.officialCoinsEnabled;
+  const allowlistVal = allowlist ?? view.values.telegramAllowlist ?? [];
+  const pcEnabledVal = pcEnabled ?? view.values.telegramPcControlEnabled ?? d.telegramPcControlEnabled;
+  const agentEnabledVal = agentEnabled ?? view.values.telegramAgentEnabled ?? d.telegramAgentEnabled;
+  const agentAutoShellVal = agentAutoShell ?? view.values.telegramAgentAutoShell ?? d.telegramAgentAutoShell;
+  const capsVal = caps ?? view.values.telegramCapabilities ?? [];
+  const shellListVal = shellList ?? view.values.telegramShellAllowlist ?? [];
+  const appListVal = appList ?? view.values.telegramAppAllowlist ?? [];
+  const toggleCap = (c: string) =>
+    setCaps(capsVal.includes(c) ? capsVal.filter((x) => x !== c) : [...capsVal, c]);
+  const PC_CAPS: { id: string; label: string }[] = [
+    { id: "screen", label: "📸 screen" },
+    { id: "vision", label: "👁️ vision" },
+    { id: "apps", label: "🚀 apps & web" },
+    { id: "system", label: "⚙️ system" },
+    { id: "files", label: "📂 files" },
+    { id: "clipboard", label: "📋 clipboard" },
+    { id: "shell", label: "🖥️ shell" },
+    { id: "keyboard", label: "⌨️ keyboard" },
+    { id: "voice", label: "🎙️ voice" },
+    { id: "watchers", label: "👀 watchers" },
+  ];
+
+  async function testTelegram() {
+    setTgTest("testing…");
+    try {
+      const res = await fetch("/api/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "test", token: draft.telegramBotToken || undefined }),
+      });
+      const j = (await res.json()) as { ok?: boolean; username?: string; reason?: string };
+      setTgTest(j.ok ? `✓ connected as @${j.username}` : `✗ ${j.reason ?? "failed"}`);
+      void loadTelegram();
+    } catch {
+      setTgTest("✗ could not reach the API");
+    }
+  }
+
+  return (
+    <AppShell>
+      {/* The rail, the tape, the tab bar and the search — none of which this
+          page has ever had. Clicking Settings in the rail used to drop the
+          reader onto a screen with no navigation at all and a brand mark as
+          the only way back. */}
+      <PageHeader title="Settings" />
+
+      <div className="mm-wrap">
+        <p className="mm-note">
+            Leave an API key blank to keep the saved key.
+        </p>
+
+        {/* Setup steps live here after the /app muster is done — a quiet, honest
+            status strip read from real state, and a fast way back to fund or re-key. */}
+        <SetupChecklist onFund={onFund} paper={view.values.paperTradingEnabled ?? view.defaults.paperTradingEnabled}/>
+
+          {/* ── PAPER OR LIVE ───────────────────────────────────────────────
+              THE SWITCH THAT DID NOT EXIST.
+
+              Two other screens have been telling owners to "turn paper trading
+              on in Settings" for months. There was no control here — not for
+              paper, not for live — so the only way to change how an agent
+              treated real money was a chat command most owners never found.
+              Worse, it would not have helped: until `liveTradingEnabled` was
+              added, nothing anywhere withheld permission to trade for real, and
+              a funded agent on mainnet traded real money whatever its owner had
+              chosen in the create wizard.
+
+              FIRST ON THE PAGE because it outranks everything below it. A
+              strategy, a cap or a venue only matters once you know whether the
+              money is real. */}
+          <div className="mm-section">Trading mode</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">live trading</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={liveTradingVal}
+                  onChange={(e) => setLiveTrading(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {liveTradingVal
+                    ? "ON — real orders, real money, within your signed caps"
+                    : "OFF — Paper mode: practising with simulated money at live prices"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                {liveTradingVal
+                  ? "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way."
+                  : "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does."}
+              </span>
+            </label>
+          </div>
+          {!liveTradingVal && (view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* TURNING IT OFF IS NOT A NEUTRAL ACT IF REAL MONEY IS ALREADY OUT.
+               On the paper rail the tick values the PAPER BOOK — positions come
+               from `paperPositionsOf(bookRow.shares)` and nothing reads the
+               chain — so tokens bought with real funds become invisible to the
+               agent: no stop-loss, no take-profit, no exit of any kind, and a
+               screen showing a tidy simulated book over the top of them.
+               Nothing warns about it anywhere else, and switching back is the
+               only thing that restores it. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>If your agent holds positions bought with real funds, read this first.</b> In Paper
+              mode it stops managing them — no stop-loss, no take-profit, no exits — and the screen
+              shows its simulated book instead. The tokens stay in the account and nothing is sold;
+              they are simply left alone until you turn Live trading back on. If you want out of a
+              real position, close it first and switch afterwards.
+            </p>
+          )}
+          {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
+            /* SAID BEFORE IT IS TRUE, not after. The owner has ticked the box
+               but not yet pressed save, which is the last moment this sentence
+               can still be useful to them. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              <b>This spends real money.</b> Once you save, your agent can open positions with the
+              funds in its account, up to the per-trade and daily caps in the permission you signed.
+              It will not exceed those caps, and you can switch back to Paper at any time.
+            </p>
+          )}
+
+          {/* ── WHAT IT TRADES ──────────────────────────────────────────────
+              Asked for by several owners at once: "there should be an option
+              mode for stocks only, crypto only, combo, or meme coin only", and
+              "it's great to toggle between stocks and crypto mode — sometimes
+              trading stocks is better when crypto bear is here".
+
+              FOUR CARDS, THREE MODES. `instrumentClassOf` can only tell an
+              equity from everything else, so shipping "crypto" and "meme coins"
+              as separate modes would be two names for one filter. The fourth
+              card writes `crypto` plus the switches that already govern buying
+              things nobody can price, and says so on the card rather than
+              implying a classification that does not exist.
+
+              A FILTER OVER WHAT MAY BE BOUGHT, never over what is watched. A
+              class you switch off stays priced, valued and sellable — see
+              assetModeAllows in core for why the other way round would brick a
+              live account. */}
+          <div className="mm-section">What it trades</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">asset mode</span>
+              <span className="mm-input">
+                <select
+                  value={assetModeVal}
+                  onChange={(e) => setAssetMode(e.target.value as "all" | "stocks" | "crypto")}
+                >
+                  <option value="all">All assets</option>
+                  <option value="stocks">Stocks only</option>
+                  <option value="crypto">Crypto only</option>
+                </select>
+              </span>
+              <span className="mm-hint">
+                {assetModeVal === "stocks"
+                  ? "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket."
+                  : assetModeVal === "crypto"
+                    ? "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought."
+                    : "Everything your basket and your signed permission allow."}
+              </span>
+            </label>
+          </div>
+          {assetModeVal !== "all" && (
+            /* SAID BEFORE IT BITES. Narrowing the pool re-splits every surviving
+               leg's weight, and even-keel acts on a 500bps band — so this is a
+               dropdown that moves real money for some owners. */
+            <p className="mm-hint" style={{ marginTop: 8 }}>
+              Anything you already hold stays priced, valued and sellable — including its
+              stop-loss and take-profit. This only changes what your agent may <b>buy</b>.
+              {activeSymbols.length > 0 && " If it leaves you with nothing to buy, your agent will say so rather than going quiet."}
+            </p>
+          )}
+
+          {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
+          <div className="mm-section">Agent settings</div>
+          <div className="mm-grid">
+            {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
+                This block used to be self-hosted only, on the reasoning that the
+                house pays for inference. That held until the house budget ran out:
+                the shared key hit its daily cap and a tenant's chat died on a plan
+                he had no way to top up, because the field was stripped before it
+                reached the store. The house key is now the DEFAULT and a tenant's
+                own key OVERRIDES it. Still gated on a RESOLVED `hosted` -- rendering
+                before we know would flash the wrong set of controls. */}
+            {hosted !== null && (
+              <>
+            {/* ── AI provider · bring any key ──────────────────────────── */}
+              <Field
+                label="AI provider"
+                action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
+                hint={hosted ? "Optional. Add your own provider for chat and the Strategist." : "Required for chat and the Strategist."}
+              >
+                <select value={llmProviderVal} onChange={set("llmProvider")}>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                      {p.holder ? " · 🏹 holders" : ""}
+                      {p.free ? " · free" : ""}
+                      {p.vision ? " · vision" : ""}
+                      {p.needsKey === false ? " · local" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {providerNeedsKey && (
+                <Field
+                  label={`${prov.label} API key`}
+                  action={prov.keyUrl ? { href: prov.keyUrl, label: "get a key" } : undefined}
+                >
+                  <input
+                    type="password"
+                    placeholder={secretPlaceholder(providerKeyView)}
+                    value={draft[providerKeyField] ?? ""}
+                    onChange={set(providerKeyField)}
+                  />
+                  {providerKeyView.set && (
+                    <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
+                      clear
+                    </button>
+                  )}
+                </Field>
+              )}
+              {/* SELF-HOSTED ONLY, and deliberately. See the providers filter above:
+                  the key is the tenant's money, the URL is our egress. */}
+              {hosted === false && prov.id === "custom" && (
+                <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
+                  <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
+                </Field>
+              )}
+              <Field
+                label="model"
+                hint={`Leave blank to use the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.`}
+              >
+                {modelsLoading ? (
+                  <span className="mm-loading">listing models…</span>
+                ) : availableModels.length > 0 ? (
+                  <select
+                    value={v(providerModelField as keyof SettingsView["values"])}
+                    onChange={set(providerModelField)}
+                  >
+                    <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder={prov.defaultModel || "model id"}
+                    value={v(providerModelField as keyof SettingsView["values"])}
+                    onChange={set(providerModelField)}
+                  />
+                )}
+              </Field>
+  
+              </>
+            )}
+            {hosted === false && (
+              <>
+            <Field
+                label="Pimlico API key"
+                action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
+                hint="Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet."
+              >
+                <input
+                  type="password"
+                  placeholder={secretPlaceholder(view.bundlerApiKey)}
+                  value={draft.bundlerApiKey ?? ""}
+                  onChange={set("bundlerApiKey")}
+                />
+                {view.bundlerApiKey.set && (
+                  <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bundlerApiKey: "" }))}>
+                    clear
+                  </button>
+                )}
+              </Field>
+                </>
+            )}
+            {/* The first thing an owner should be able to change, and until now
+                the only way was a Telegram command -- which is why every hosted
+                agent is called Robin. */}
+            <Field
+              label="Agent name"
+              hint="Up to 24 letters, numbers, or spaces."
+            >
+              <input
+                type="text"
+                maxLength={24}
+                placeholder={view.values.agentName || "Robin"}
+                value={draft.agentName ?? ""}
+                onChange={set("agentName")}
+              />
+            </Field>
+            <Field
+              label="Strategy"
+            >
+              <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
+                {view.strategies.builtin.map((s) => (
+                  <option key={s} value={s}>
+                    {/* MARKED IN THE LIST ITSELF. A dropdown has nowhere to put
+                        a badge, so the requirement goes in the option label —
+                        the only thing somebody reads before choosing.
+                        (Written without the tag name on purpose: the control
+                        census in app/settings/honesty.test.ts counts the literal
+                        string, and it is more useful dumb than clever.) */}
+                    {s}
+                    {isCircleStrategyId(s) ? " · holders only" : ""}
+                  </option>
+                ))}
+                {view.strategies.custom.length > 0 && <option disabled>── your strategies ──</option>}
+                {view.strategies.custom.map((s) => (
+                  <option key={s} value={s}>
+                    {s} (custom)
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {/* AND THE READER'S STANDING, at the moment of choosing.
+                The create flow warns and this one never did — which is the flow
+                a tester with an existing agent actually uses. Selecting a
+                holder-only strategy here answered {ok:true} and left them to
+                discover days later that nothing had happened. */}
+            {isCircleStrategyId(v("strategy") || d.strategy || "") &&
+              tier &&
+              tier.why !== "sign-in" &&
+              !tier.bonusStrategies && (
+                <div className="create-locked" role="status">
+                  <strong>That one won&apos;t run yet.</strong>
+                  {tier.why === "unreadable" ? (
+                    <p>
+                      We couldn&apos;t read your $MERRYMEN balance just now, so we can&apos;t tell
+                      whether it will run. That&apos;s our read failing, not your wallet.
+                    </p>
+                  ) : (
+                    <p>
+                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and it needs{" "}
+                      {tier.needTokens.toLocaleString("en-US")}. Your agent will keep running and
+                      stay idle until you hold enough — saving this won&apos;t change that.
+                    </p>
+                  )}
+                </div>
+              )}
+          </div>
+
+          {/* Model-list status: missing_key renders as the neutral hint (nothing
+              was attempted); anything else renders the single literal line the
+              pin in house-key-and-basket.test.ts requires, with the composed
+              sentence — never raw provider text. */}
+          {modelsError === "missing_key" && (
+            <p role="status" className="mm-hint">
+              Enter a {prov.label} API key above to load the model list — or just type a model id below.
+            </p>
+          )}
+          {modelsError && modelsError !== "missing_key" && (
+            <p role="status" className="mm-danger">
+              Could not load the model list — {modelsError}.{" "}
+              You can still type a model name below and save; the list is a convenience, not a requirement.
+            </p>
+          )}
+          <div className="mm-section">Trading basket</div>
+          {/* GROUPED, because one undifferentiated run of chips is what an owner
+              meant by "trading basket in settings is full of all stocks". It was
+              twenty-five registry symbols with his own coin unselected at the
+              end, and nothing said the two kinds were different or that the last
+              one was his. Two headed groups cost nothing and answer that. */}
+          {(
+            [
+              ["Stocks & ETFs", view.knownSymbols],
+              ["Coins", activeTokens.map((t) => t.symbol)],
+            ] as const
+          ).map(([heading, syms]) => (
+            <div key={heading}>
+              <div className="mm-subtle mono" style={{ marginTop: 10 }}>
+                {heading.toLowerCase()}
+              </div>
+              {syms.length === 0 ? (
+                /* An empty group rendered as nothing is how an owner concludes
+                   the feature does not exist. Say it is empty and where to
+                   start. */
+                <div className="mm-hint">
+                  None yet — add one below, or take a suggestion from your agent.
+                </div>
+              ) : (
+                <div className="mm-chips">
+                  {syms.map((sym) => (
+                    <button
+                      key={sym}
+                      type="button"
+                      className={`mm-toggle${activeSymbols.includes(sym) ? " on" : ""}`}
+                      /* In the basket or not, said rather than only shaded. */
+                      aria-pressed={activeSymbols.includes(sym)}
+                      onClick={() => toggleSymbol(sym)}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="mm-hint">
+            {activeSymbols.length === 0
+              ? "select at least one symbol (empty falls back to the default basket)"
+              : `trading ${activeSymbols.join(" · ")}`}
+          </div>
+          {/* Selecting a symbol the signed key can't sell used to mean buying a
+              position with no exit. The buy is refused now, but say why here —
+              at the moment of choosing — rather than in the event feed later. */}
+          {unsellable.length > 0 && (
+            <div className="mm-danger">
+              Update your <Link href="/grant">trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
+            </div>
+          )}
+
+          {/* ── OWNER-ADDED TOKENS (memecoins) ─────────────────────────────
+              Deliberately separate from the basket: those are issuer-backed
+              stocks with Chainlink feeds, these are whatever the owner pastes.
+              Adding one here does NOT make it tradable — the tradable list is
+              sealed into the signed key — so the /grant re-sign is spelled out
+              rather than left to be discovered as a reverted trade. */}
+          <details className="settings-group"><summary>Custom tokens & discovery</summary>
+          {activeTokens.length > 0 && (
+            <div className="mm-rows">
+              {activeTokens.map((t) => (
+                <div key={t.address.toLowerCase()} className="mm-row mono">
+                  <b>{t.symbol}</b>
+                  <span className="addr">{t.address}</span>
+                  <span className="dim">{t.decimals}dp</span>
+                  <button type="button" className="copy-btn" onClick={() => removeToken(t.address)}>
+                    remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mm-grid">
+            <Field label="symbol">
+              <input
+                value={newToken.symbol}
+                placeholder="CATE"
+                onChange={(e) => setNewToken((n) => ({ ...n, symbol: e.target.value }))}
+              />
+            </Field>
+            <Field label="contract address">
+              <input
+                value={newToken.address}
+                placeholder="0x…"
+                onChange={(e) => setNewToken((n) => ({ ...n, address: e.target.value }))}
+              />
+            </Field>
+            <Field label="decimals" hint="18 for most tokens — check the contract if unsure">
+              <input
+                value={newToken.decimals}
+                inputMode="numeric"
+                onChange={(e) => setNewToken((n) => ({ ...n, decimals: e.target.value }))}
+              />
+            </Field>
+          </div>
+          {/* THE SECOND GATE, MADE VISIBLE. Adding a token means "know about
+              this"; trading it is a separate decision that lived only in a code
+              comment and in an unselected chip at the end of twenty-five stock
+              chips. Offered here, defaulted on, one click to decline. */}
+          <label className="ack-row" style={{ marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={tradeNewToken}
+              onChange={(e) => setTradeNewToken(e.target.checked)}
+            />
+            <span>
+              Trade this one too — add it to the trading basket, not just the watch list.
+            </span>
+          </label>
+          <button type="button" className="copy-btn" onClick={addToken}>
+            add token
+          </button>
+          {tokenError && <div className="mm-danger">{tokenError}</div>}
+
+          {/* The two knobs that decide whether a token gets a price at all. They
+              live here, next to the tokens they govern, because the refusal
+              message names them by value ("below your $25,000 floor") and an
+              owner who can't find the dial can't act on that. */}
+          <div className="mm-grid" style={{ marginTop: 12 }}>
+            <Field
+              label="minimum pool depth (USD)"
+              hint="Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk."
+            >
+              <input
+                value={v("minPoolLiquidityUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.minPoolLiquidityUsdg)}
+                onChange={set("minPoolLiquidityUsdg")}
+              />
+            </Field>
+            <Field
+              label="max spot-vs-average gap (bps)"
+              hint="Maximum difference between the current and average pool price. 100 bps = 1%."
+            >
+              <input
+                value={v("maxPriceDivergenceBps")}
+                inputMode="numeric"
+                placeholder={String(d.maxPriceDivergenceBps)}
+                onChange={set("maxPriceDivergenceBps")}
+              />
+            </Field>
+          </div>
+          {/* ALL THREE STEPS, because naming two of them is how an owner ends
+              up doing everything he was told and getting nowhere. This said
+              "save your tokens, then update trading permissions" and omitted
+              the basket entirely — the one gate that was invisible. */}
+          <div className="mm-hint">
+            Three things have to be true before your agent buys a token you added:
+            it&apos;s <b>in your trading basket</b> above (the checkbox does that when you
+            add it), you&apos;ve <b>saved</b>, and your{" "}
+            <Link href="/grant">trading permission</Link> covers it — re-sign after
+            saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
+          </div>
+
+          {/* ── DISCOVERY ──────────────────────────────────────────────────
+              Read-only and message-only. Worth surfacing next to the token
+              editor because the action it prompts is "add a token here". */}
+          <div className="mm-subtle mono">discovery · new pairs as they launch</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">watch for new pairs</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={discoveryEnabledVal}
+                  onChange={(e) => setDiscoveryEnabled(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {discoveryEnabledVal ? "tells you when something launches" : "off"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Requires a Bitquery key or Merry Circle token in Connections.
+              </span>
+            </label>
+            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN.
+                It has had an API branch and no control, so an owner who picked
+                trencher and went live got a candidate feed that returned nothing,
+                forever, with nothing said. index.ts says the surprise out loud
+                -- “the strategy stopped seeing anything at the exact moment it
+                became able to act” -- and then left the only remedy unreachable. */}
+            <label className="mm-field">
+              <span className="mm-label">let trencher trade for real</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={trencherLiveVal}
+                  onChange={(e) => setTrencherLive(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Allows live Trencher trades in tokens covered by your trading permissions.
+              </span>
+            </label>
+            {/* THE ONE TOGGLE ON THIS SCREEN THAT STARTS ON.
+                Everything around it opts INTO something discovered; this opts OUT
+                of a list the platform curates and stands behind, which is why it
+                defaults the other way. Its job here is to be findable: without a
+                control, "off" is unreachable and the checkbox is the only place
+                an owner learns the list exists at all. */}
+            <label className="mm-field">
+              <span className="mm-label">trade the platform coin list</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={officialCoinsVal}
+                  onChange={(e) => setOfficialCoins(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {/* THREE STATES, NOT TWO. This read off the SETTING and said
+                      "coins are in your basket" whenever it was on — which is the
+                      default — while OFFICIAL_COINS[4663] is empty, so there are
+                      none. official-coins.ts already names the distinction the UI
+                      was collapsing: "An empty list is the honest state for a chain
+                      with no verified listing, and is a different fact from
+                      'official coins are turned off' — which is a setting." */}
+                  {!officialCoinsVal
+                    ? "stocks only"
+                    : listedCoins.length > 0
+                      ? `${listedCoins.length} in your basket: ${listedCoins.join(", ")}`
+                      : "on — but none are listed on this chain yet"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                {listedCoins.length > 0
+                  ? "Verified coins we publish, watched and traded without you adding them. Coins trade"
+                  : "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"}{" "}
+                around the clock, so your agent keeps working when the stock market is shut. Your
+                caps, budgets and trading permissions still apply — and a coin listed after you
+                signed needs a free re-sign at /grant before your key can touch it.
+              </span>
+            </label>
+            <Field
+              label="check every (minutes)"
+            >
+              <input
+                value={v("discoveryIntervalMin")}
+                inputMode="numeric"
+                placeholder={String(d.discoveryIntervalMin)}
+                onChange={set("discoveryIntervalMin")}
+              />
+            </Field>
+          </div>
+          <div className="mm-hint">
+            Discovery sends alerts. To trade a discovered token, add it above and update your <Link href="/grant">trading permissions</Link>.
+          </div>
+
+          {/* ── SCOUT MODE ─────────────────────────────────────────────────
+              The one place merrymen will knowingly hold something it cannot
+              value. The copy has to be blunt about what that costs, because
+              the usual safety net genuinely does not apply here. */}
+          <div className="mm-subtle mono">scout mode · buying what can&apos;t be priced yet</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">research before deciding</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={deskEnabledVal}
+                  onChange={(e) => setDeskEnabled(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {deskEnabledVal
+                    ? "the strategist looks things up before it commits"
+                    : "off — one shot from a fixed set of numbers"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                llm-strategist only. On, a decision becomes a short research loop: it can pull
+                depth, check what a position cost, and read back its own past decisions before it
+                acts — and it writes what it concluded, in its own words, to your feed. Off by
+                default because it costs up to a few model calls per window instead of one.
+              </span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">scout mode</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={scoutEnabledVal}
+                  onChange={(e) => setScoutEnabled(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {scoutEnabledVal ? "may buy unpriceable tokens, up to the budget" : "off — unpriceable tokens are never bought"}
+                </span>
+              </span>
+            </label>
+            <Field
+              label="scout budget (USDG)"
+              hint="Maximum purchase cost of all open scout positions. Selling restores the available budget."
+            >
+              <input
+                value={v("scoutBudgetUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.scoutBudgetUsdg)}
+                onChange={set("scoutBudgetUsdg")}
+              />
+            </Field>
+            <Field
+              label="max per token (USDG)"
+              hint="Maximum total purchase cost per scout token, including additional buys."
+            >
+              <input
+                value={v("scoutPerTokenUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.scoutPerTokenUsdg)}
+                onChange={set("scoutPerTokenUsdg")}
+              />
+            </Field>
+          </div>
+          <div className="mm-danger">
+            <b>The drawdown breaker cannot protect this money.</b> These positions stay valued at
+            purchase cost even if they lose value, so if one goes to zero your equity will not show
+            it and the breaker will not fire. <b>The budget is the risk control here</b>, not the
+            breaker — set it to what you have decided you can lose.
+            {scoutEnabledVal && Number(v("scoutBudgetUsdg") || d.scoutBudgetUsdg) === 0 && (
+              <>
+                <br />
+                <br />
+                Scout mode is on but the budget is <b>0</b>, so nothing will be bought. Set a budget
+                or turn it back off.
+              </>
+            )}
+          </div>
+
+          {/* ── THE CLASS ROUTE ────────────────────────────────────────────
+              Four settings that had a type, a PUT-allowlist entry and a worker
+              read, and NO control — so the only way to configure the route was
+              to call the API by hand, and `classSnipeEnabled` could not be
+              turned on at all. The factory field alone sat in Connections,
+              which made the page look like the feature was reachable when
+              nothing downstream of it could be set.
+
+              Deliberately BELOW the scout block and after its warning: a class
+              buy is gated by the scout budget, so an owner who has not read
+              that paragraph is not ready to read this one. */}
+          <div className="mm-subtle mono">class route · buying a coin nobody listed</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold
+            again. Needs a class vault factory in Connections and a re-signed key — and the scout
+            budget above still bounds it.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">class route</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={classSnipeVal}
+                  onChange={(e) => setClassSnipe(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {classSnipeVal ? "may buy newly launched coins" : "off — no coin is bought unless you listed it"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Separate from sealing a vault at /grant. That says this key COULD reach one; this
+                says go and do it.
+              </span>
+            </label>
+            <Field
+              label="per entry (USDG)"
+              hint="Spent on a single class entry. 0 means nothing is bought, whatever the switch says."
+            >
+              <input
+                value={v("classPerEntryUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classPerEntryUsdg)}
+                onChange={set("classPerEntryUsdg")}
+              />
+            </Field>
+            <Field
+              label="max open positions"
+              hint="How many class positions may be held at once. 0 = no limit beyond the scout budget."
+            >
+              <input
+                value={v("classMaxPositions")}
+                inputMode="numeric"
+                placeholder={String(d.classMaxPositions)}
+                onChange={set("classMaxPositions")}
+              />
+            </Field>
+            <Field
+              label="minimum curve depth (USDG)"
+              hint="Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused."
+            >
+              <input
+                value={v("classMinDepthUsdg")}
+                inputMode="numeric"
+                placeholder={String(d.classMinDepthUsdg)}
+                onChange={set("classMinDepthUsdg")}
+              />
+            </Field>
+          </div>
+          {classSnipeVal && Number(v("classPerEntryUsdg") || d.classPerEntryUsdg) === 0 && (
+            <div className="mm-danger">
+              The class route is on but the size is <b>0</b>, so nothing will be bought. Two
+              switches rather than one, because they fail differently — set a size or turn the
+              route back off.
+            </div>
+          )}
+
+          </details>
+          <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Create a bot with @BotFather, add its token, then send <code>/link {tg?.linkCode ?? "……"}</code> to connect it.
+          </p>
+          <div className="mm-grid">
+            <Field
+              label="bot token"
+              hint="Get your bot token from @BotFather."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.telegramBotToken)}
+                value={draft.telegramBotToken ?? ""}
+                onChange={set("telegramBotToken")}
+              />
+              {view.telegramBotToken.set && (
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field label="connection">
+              <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
+                test connection
+              </button>
+              <span className="mm-unit">
+                {tgTest ?? (tg?.connected ? `✓ @${tg.botUsername}` : tg?.hasToken ? "not verified" : "no token")}
+              </span>
+            </Field>
+            <label className="mm-field">
+              <span className="mm-label">enable telegram</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+              </span>
+            </label>
+          </div>
+
+          </details>
+
+          {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
+          <details className="mm-advanced">
+            <summary>Advanced settings</summary>
+
+            <div className="mm-section">Telegram controls</div>
+            <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">allow control commands</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgControlVal} onChange={(e) => setTgControl(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
+              </span>
+              <span className="mm-hint">Off = the bot can answer questions but not change state.</span>
+            </label>
+            <Field label="chat trade ceiling" hint="Max USDG per chat-triggered trade — beneath your grant caps.">
+              <input
+                type="number"
+                min={1}
+                placeholder={String(d.telegramMaxActionUsdg)}
+                value={v("telegramMaxActionUsdg")}
+                onChange={set("telegramMaxActionUsdg")}
+              />
+              <span className="mm-unit">USDG</span>
+            </Field>
+            <label className="mm-field">
+              <span className="mm-label">allow transfers</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgTransferVal} onChange={(e) => setTgTransfer(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
+              </span>
+              <span className="mm-hint">
+                Requires existing transfer permission. Otherwise, use Withdraw in Profile.
+              </span>
+            </label>
+            <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">
+              <input
+                type="number"
+                min={1}
+                placeholder={String(d.telegramTransferDailyUsdg)}
+                value={v("telegramTransferDailyUsdg")}
+                onChange={set("telegramTransferDailyUsdg")}
+              />
+              <span className="mm-unit">USDG</span>
+            </Field>
+            <label className="mm-field">
+              <span className="mm-label">proactive pings</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgNotifyVal} onChange={(e) => setTgNotify(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
+              </span>
+              <span className="mm-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
+            </label>
+            {tgNotifyVal && (
+              <Field
+                label="trade pings — how often"
+                hint="Batch the routine trade notifications so you're not pinged every fill. Warnings, price alerts, reminders and the daily report always come through right away."
+              >
+                <select value={v("telegramNotifyEveryMin") || "0"} onChange={set("telegramNotifyEveryMin")}>
+                  <option value="0">Every trade</option>
+                  <option value="5">A summary every 5 minutes</option>
+                  <option value="15">A summary every 15 minutes</option>
+                  <option value="30">A summary every 30 minutes</option>
+                  <option value="60">A summary every hour</option>
+                </select>
+              </Field>
+            )}
+            <Field label="daily report hour" hint="Local hour (0–23) after which the campfire report is sent.">
+              <input
+                type="number"
+                min={0}
+                max={23}
+                placeholder={String(d.telegramDigestHour)}
+                value={v("telegramDigestHour")}
+                onChange={set("telegramDigestHour")}
+              />
+              <span className="mm-unit">h</span>
+            </Field>
+          </div>
+          <div className="mm-hint" style={{ marginTop: 4 }}>
+            {tg?.linkCode ? (
+              <>
+                link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
+              </>
+            ) : (
+              "save a token to generate your link code"
+            )}
+          </div>
+          <div className="mm-chips" style={{ marginTop: 6 }}>
+            {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
+            {allowlistVal.map((id) => (
+              <span key={id} className="mm-toggle on">
+                {id}
+                <button
+                  type="button"
+                  onClick={() => setAllowlist(allowlistVal.filter((x) => x !== id))}
+                  style={{ marginLeft: 6, background: "none", border: "none", color: "inherit", cursor: "pointer" }}
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="add chat id…"
+              className="mono"
+              style={{ width: 120, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const n = Number((e.target as HTMLInputElement).value.trim());
+                if (Number.isInteger(n) && !allowlistVal.includes(n)) {
+                  setAllowlist([...allowlistVal, n]);
+                  (e.target as HTMLInputElement).value = "";
+                }
+              }}
+            />
+          </div>
+
+          {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
+          <div className="mm-section">Computer access</div>
+          <div className="mm-danger" style={{ marginBottom: 12 }}>
+            <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
+            screenshots, open apps, browse a folder you pick, and — if you enable them — run
+            allowlisted shell commands and type keystrokes. Everything is <b>off by default</b>,
+            enabled one capability at a time, and the sharp ones (shell, keyboard, files, power)
+            always ask you to <code>/confirm</code> first. Only turn on what you want.
+          </div>
+          <label className="mm-field">
+            <span className="mm-label">enable remote control</span>
+            <span className="mm-input">
+              <input type="checkbox" checked={pcEnabledVal} onChange={(e) => setPcEnabled(e.target.checked)} style={{ width: "auto" }} />
+              <span className="mm-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
+            </span>
+            <span className="mm-hint">The master switch. Off = every PC command is refused, regardless of the toggles below.</span>
+          </label>
+
+          <div className="mm-field">
+            <span className="mm-label">capabilities</span>
+            <div className="caps" style={{ marginTop: 4 }}>
+              {PC_CAPS.map((c) => (
+                /*
+                 * A BUTTON, AND IT SAYS WHETHER IT IS ON.
+                 *
+                 * This was a <span> with an onClick: not reachable by keyboard,
+                 * not announced as a control, and carrying no pressed state — so
+                 * whether SHELL AND KEYBOARD ACCESS TO THE OWNER'S MACHINE were
+                 * armed was communicated by colour and opacity alone. Nothing in
+                 * this file used aria-pressed or aria-checked anywhere.
+                 *
+                 * It keeps its classes, so it looks exactly as it did; the
+                 * neighbouring basket chips are already buttons with the same
+                 * ones.
+                 */
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`mm-toggle ${capsVal.includes(c.id) ? "on" : ""}`}
+                  aria-pressed={capsVal.includes(c.id)}
+                  onClick={() => toggleCap(c.id)}
+                  style={{ cursor: "pointer", opacity: pcEnabledVal ? 1 : 0.5 }}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+            <span className="mm-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
+          </div>
+
+          {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
+            <div className="mm-danger">
+              ⚠️ <b>This is remote control of your computer.</b> <b>Keyboard</b> types keystrokes into
+              whatever window is focused, and <b>shell</b> runs your allowlisted commands — together
+              they can do essentially anything you can. Allowlisting an <b>interpreter</b> (python,
+              node, bash, powershell, git…) hands over <b>everything that program can do</b>, not just
+              one command. Only enable these on a machine you trust, keep the shell allowlist as
+              narrow as possible, and note each one still asks for <code>/confirm</code> first.
+            </div>
+          )}
+
+          {/* ── agent mode · /agent <task> ─────────────────────────────── */}
+          <label className="mm-field">
+            <span className="mm-label">🤖 agent mode · /agent</span>
+            <span className="mm-input">
+              <input
+                type="checkbox"
+                checked={agentEnabledVal}
+                onChange={(e) => setAgentEnabled(e.target.checked)}
+                style={{ width: "auto" }}
+                disabled={!pcEnabledVal}
+              />
+              <span className="mm-unit">
+                {!pcEnabledVal ? "needs remote control ON" : agentEnabledVal ? "ON — /agent works multi-step tasks" : "off"}
+              </span>
+            </span>
+            <span className="mm-hint">
+              Send a task with <code>/agent</code>. It uses your enabled capabilities. Send <b>stop</b> to halt it.
+            </span>
+          </label>
+          {agentEnabledVal && pcEnabledVal && (
+            <>
+              <label className="mm-field">
+                <span className="mm-label">free-form shell for /agent</span>
+                <span className="mm-input">
+                  <input
+                    type="checkbox"
+                    checked={agentAutoShellVal}
+                    onChange={(e) => setAgentAutoShell(e.target.checked)}
+                    style={{ width: "auto" }}
+                  />
+                  <span className="mm-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
+                </span>
+                <span className="mm-hint">
+                  Off: /agent may only run your allowlisted commands. On: it may compose its own
+                  commands (installs, builds, git) — destructive commands and secrets paths are
+                  refused always.
+                </span>
+              </label>
+              {agentAutoShellVal && (
+                <div className="mm-danger">
+                  <b>Free-form shell is remote code execution by an AI.</b> Your agent can control
+                  this computer without asking for each action — running commands, typing, and
+                  opening links. It may damage files or expose private information. The destructive
+                  blocklist and the secret redaction are a <b>seatbelt, not a cage</b>: they narrow
+                  the damage, they do not prevent it. Send <code>/agent stop</code> to halt it.
+                </div>
+              )}
+              <div className="mm-grid">
+                <Field label="step budget" hint="Maximum steps per task.">
+                  <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
+                  <span className="mm-unit">steps</span>
+                </Field>
+              </div>
+            </>
+          )}
+
+          <div className="mm-grid">
+            <Field
+              label="files root"
+              hint="Folder available to /ls and /get. Use an absolute path. Leave blank to disable file access."
+            >
+              <input type="text" placeholder="C:\\Users\\you\\Documents\\shared" value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
+            </Field>
+            <Field
+              label="transcription key (voice)"
+              hint="Transcription API key for voice notes. Leave blank to disable voice."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.telegramTranscribeKey)}
+                value={draft.telegramTranscribeKey ?? ""}
+                onChange={set("telegramTranscribeKey")}
+              />
+            </Field>
+          </div>
+
+          <div className="mm-field">
+            <span className="mm-label">shell allowlist</span>
+            <div className="mm-chips">
+              {shellListVal.map((cmd) => (
+                <span key={cmd} className="mm-toggle on">
+                  <code>{cmd}</code>
+                  <button type="button" onClick={() => setShellList(shellListVal.filter((x) => x !== cmd))} className="mm-chip-x">✕</button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder="exact command, e.g. git status ↵"
+                style={{ width: 220, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const s = (e.target as HTMLInputElement).value.trim();
+                  if (s && !shellListVal.includes(s)) {
+                    setShellList([...shellListVal, s]);
+                    (e.target as HTMLInputElement).value = "";
+                  }
+                }}
+              />
+            </div>
+            <span className="mm-hint">Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.</span>
+          </div>
+
+          <div className="mm-field">
+            <span className="mm-label">app allowlist</span>
+            <div className="mm-chips">
+              {appListVal.map((app) => (
+                <span key={app} className="mm-toggle on">
+                  {app}
+                  <button type="button" onClick={() => setAppList(appListVal.filter((x) => x !== app))} className="mm-chip-x">✕</button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder="app name, e.g. spotify ↵"
+                style={{ width: 180, background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 12, padding: "2px 6px" }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const s = (e.target as HTMLInputElement).value.trim();
+                  if (s && !appListVal.includes(s)) {
+                    setAppList([...appListVal, s]);
+                    (e.target as HTMLInputElement).value = "";
+                  }
+                }}
+              />
+            </div>
+            <span className="mm-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
+          </div>
+
+          <div className="mm-section">Merry Circle</div>
+          {/* The tier reads a $MERRYMEN balance. By default that is the wallet you
+              sign in with, which is the only address the server can verify without
+              being told. Holding the token elsewhere is a real case and needs a
+              proof, not a text box — see /api/holder. */}
+          <HolderLink />
+          <div className="mm-section">Connections</div>
+          <div className="mm-grid">
+            <Field
+              label="mainnet RPC override"
+              hint="Optional custom connection to Robinhood Chain mainnet."
+            >
+              <input type="url" placeholder={urlPlaceholder("rpcMainnet", "default: rpc.mainnet.chain.robinhood.com")} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
+            </Field>
+            <Field label="testnet RPC override" hint="Optional.">
+              <input type="url" placeholder={urlPlaceholder("rpcTestnet", "default: rpc.testnet.chain.robinhood.com")} value={draft.rpcTestnet ?? ""} onChange={set("rpcTestnet")} />
+            </Field>
+            <Field
+              label="bundler URL override"
+              hint="Overrides the Pimlico connection. Must support your wallet’s network."
+            >
+              <input type="url" placeholder={urlPlaceholder("bundlerUrl", "https://…/rpc?apikey=…")} value={draft.bundlerUrl ?? ""} onChange={set("bundlerUrl")} />
+            </Field>
+            <Field
+              label="breaker contract"
+              hint="BreakerRegistry contract on your wallet’s network."
+            >
+              <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
+            </Field>
+            <Field
+              label="v4 adapter contract"
+              hint="V4SelfSwap contract on your wallet’s network. Update trading permissions after saving."
+            >
+              <input type="text" placeholder="0x…" value={v("v4AdapterAddress")} onChange={set("v4AdapterAddress")} />
+            </Field>
+            <Field
+              label="Pons curve adapter contract"
+              hint="PonsSelfTrade contract on your wallet’s network. Updating trading permissions authorizes this contract to spend your permitted tokens."
+            >
+              <input type="text" placeholder="0x…" value={v("ponsAdapterAddress")} onChange={set("ponsAdapterAddress")} />
+            </Field>
+            <Field
+              label="Class vault factory contract"
+              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here."
+            >
+              <input
+                type="text"
+                placeholder="0x…"
+                value={v("ponsClassVaultFactory")}
+                onChange={set("ponsClassVaultFactory")}
+              />
+            </Field>
+            <Field
+              label="Rialto integrator key"
+              hint="Required to trade through Rialto."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.rialtoApiKey)}
+                value={draft.rialtoApiKey ?? ""}
+                onChange={set("rialtoApiKey")}
+              />
+              {view.rialtoApiKey.set && (
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, rialtoApiKey: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
+              <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
+            </Field>
+          </div>
+
+          <div className="mm-section">Virtuals</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">stream to Virtuals</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={virtualsEnabledVal} onChange={(e) => setVirtualsEnabled(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
+              </span>
+              <span className="mm-hint">
+                Publishes landed trades and the daily report to your agent&apos;s public page on
+                app.virtuals.io. <b>Outbound &amp; public</b> — off by default; nothing streams until
+                you turn this on and add a key.
+              </span>
+            </label>
+            <Field
+              label="Virtuals API key"
+              hint="Get this from your agent’s page on app.virtuals.io."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.virtualsApiKey)}
+                value={draft.virtualsApiKey ?? ""}
+                onChange={set("virtualsApiKey")}
+              />
+              {view.virtualsApiKey.set && (
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, virtualsApiKey: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field
+              label="bitquery api key"
+              action={{ href: "https://account.bitquery.io/", label: "get a key" }}
+              hint="Required for token discovery unless you use a Merry Circle token."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.bitqueryApiKey)}
+                value={draft.bitqueryApiKey ?? ""}
+                onChange={set("bitqueryApiKey")}
+              />
+              {view.bitqueryApiKey.set && (
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, bitqueryApiKey: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+            <Field
+              label="merry circle token"
+              action={{ href: `${MERRYMEN_GATEWAY_ORIGIN}/claim`, label: "claim one" }}
+              hint="Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery."
+            >
+              <input
+                type="password"
+                placeholder={secretPlaceholder(view.merrymenToken)}
+                value={draft.merrymenToken ?? ""}
+                onChange={set("merrymenToken")}
+              />
+              {view.merrymenToken.set && (
+                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, merrymenToken: "" }))}>
+                  clear
+                </button>
+              )}
+            </Field>
+          </div>
+
+          <div className="mm-section">Trading preferences</div>
+          <div className="mm-grid">
+            <Field label="swap venue" hint="Rialto requires an integrator key.">
+              <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
+                <option value="uniswap">uniswap</option>
+                <option value="rialto">rialto</option>
+              </select>
+            </Field>
+            <Field label="max slippage" hint="vs the pre-trade quote.">
+              <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
+              <span className="mm-unit">bps</span>
+            </Field>
+            <Field label="performance fee" hint="Calculated on new peak profits. Fees are recorded but not collected.">
+              <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
+              <span className="mm-unit">bps</span>
+            </Field>
+            <Field label="Market check interval">
+              <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
+              <span className="mm-unit">sec</span>
+            </Field>
+            <Field label="Buy amount per check" hint="Amount spread across the Steady Basket.">
+              <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
+              <span className="mm-unit">USDG</span>
+            </Field>
+            <Field
+              label="take profit"
+              hint="steady-basket: sell a leg once it is this far ahead of what it cost. 0 never sells — and this is the only exit this strategy has, so at 0 it only ever buys."
+            >
+              <input type="number" min={0} placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={set("takeProfitBps")} />
+              <span className="mm-unit">bps</span>
+            </Field>
+            <Field label="idle cash floor" hint="steady-basket: cash kept liquid; the excess sweeps to the Morpho vault.">
+              <input type="number" min={0} placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={set("idleFloorUsdg")} />
+              <span className="mm-unit">USDG</span>
+            </Field>
+            <Field label="gap budget" hint="weekend-gap: total USDG deployed per gap window.">
+              <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
+              <span className="mm-unit">USDG</span>
+            </Field>
+            <Field label="Claude / vision model" hint="Model for Anthropic and screen analysis.">
+              <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
+            </Field>
+            <Field label="Strategist decision interval">
+              <input type="number" min={1} max={1440} placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={set("llmIntervalMin")} />
+              <span className="mm-unit">min</span>
+            </Field>
+            <Field label="LLM max per action" hint="Hard strategist ceiling per proposed trade — beneath the grant caps.">
+              <input type="number" min={1} placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={set("llmMaxActionUsdg")} />
+              <span className="mm-unit">USDG</span>
+            </Field>
+          </div>
+
+          </details>
+
+          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
+            {status ?? "Save changes"}
+          </button>
+          {errors.length > 0 && (
+            <div className="mm-danger mono">
+              {errors.map((e, i) => (
+                <div key={i}>{e}</div>
+              ))}
+            </div>
+          )}
+
+      </div>
+    </AppShell>
+  );
+}

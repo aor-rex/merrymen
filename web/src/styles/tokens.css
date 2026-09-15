@@ -1,0 +1,205 @@
+/**
+ * THE ONE TOKEN SET.
+ *
+ * Every name is prefixed --mm-, and that prefix is the whole migration
+ * strategy: globals.css defines --bg, --border, --green, --radius on :root and
+ * console.css defines a DIFFERENT palette (--line, --panel, --lime, --mint) on
+ * .sc-root. Zero of those collide with --mm-*, so this file can be live on the
+ * same page as either of them while /grant and /settings are still being served
+ * by the old sheets. Nothing has to be retired before anything else can ship.
+ *
+ * WHY THE GREEN GROUND GOES. The product ran on #0d1512 with mint as the gain
+ * colour, so green was doing two jobs at once — the background family AND the
+ * semantic for "up". A green "bought" chip on a green-black card has almost no
+ * separation, which is most of why the old UI reads muddy rather than sleek.
+ * The ground is now a cool graphite that keeps a whisper of the original teal
+ * cast, and green is freed to mean exactly one thing.
+ *
+ * And --lime (#b6e226, decorative) sat next to --mint (#3ad884, semantic). At
+ * chip size those are both just "green", so the palette had two greens and one
+ * meaning. Lime is retired.
+ *
+ * WHY THE GRAPHITE WENT. The same fault one level up. #0b0f10 was the ground
+ * AND the darkest step of every ramp drawn on it, so nothing on this page could
+ * burn. On #000000 the amber has somewhere to go. And --mm-warn gave up three
+ * of its four jobs — paper, pending, stale — to the dashed convention in
+ * base.css, because a colour that means four things means none of them. It now
+ * means one: THE WALL SAID NO.
+ *
+ * THE RULE: colour means something, or it is not on screen. The page is
+ * achromatic; the only saturated pixels are semantics — up, down, warn — and
+ * the wire.
+ *
+ * SINGLE THEME, DELIBERATELY. This is a dark trading surface and it commits to
+ * that, so there is no prefers-color-scheme block. Everything is painted
+ * explicitly, including the body background, so nothing borrows a ground from
+ * the host.
+ */
+
+/*
+ * THE GROUND, PAINTED HERE AND NOWHERE ELSE.
+ *
+ * The comment above claimed the body background was painted explicitly and
+ * it was not: the only `body` rule in any live sheet belonged to the legacy
+ * one, so a route that stopped importing it would fall through to whatever
+ * the browser or the old sheet last set — and, mid-migration, render new
+ * black chrome on the old sherwood photograph at 13.5px.
+ *
+ * On :root rather than under .mm, because .mm is a div inside the body and a
+ * div cannot paint the ground behind itself.
+ */
+html,
+body {
+  background: #000000;
+  color-scheme: dark;
+}
+
+:root {
+  /* ── ground: TOTAL BLACK ──────────────────────────────────────────────
+     #0b0f10 was a good graphite and it is also the reason this page has
+     never had anywhere for a hot colour to burn. A dithered ramp on
+     graphite has nowhere to go; on absolute black it has everywhere.     */
+  --mm-bg: #000000;          /* the page */
+  --mm-surface: #0b0d0e;     /* cards, sticky header — a card is its edge, not its fill */
+  --mm-surface-2: #121517;   /* hover, raised, segmented track, the trade strip */
+  --mm-surface-3: #1a1e20;   /* inputs, avatar wells */
+  --mm-edge: #232729;        /* hairline — internal rules */
+  --mm-edge-2: #333a3d;      /* hairline, emphasised — the card seam */
+
+  /* ── text: WARM off-white, never #FFF ─────────────────────────────────
+     On true black a pure white is a razor, and this is a reading product.
+     Warm also keeps the text from going blue against the amber ramp.     */
+  --mm-tx: #e9e6e1;          /* 16.9:1 */
+  --mm-tx-2: #b3afa9;        /* body secondary, 9.6:1 */
+  --mm-dim: #918d86;         /* labels, 6.4:1 */
+  --mm-faint: #757068;       /* timestamps ONLY — never load-bearing, 4.3:1 */
+
+  /* ── semantics: unchanged values, one narrowed meaning ─────────────────
+     --mm-up and --mm-down are the feed's primary scan cue — buy vs sell is
+     a sub-200ms judgement down a column of near-identical cards — and they
+     do not move.
+
+     --mm-warn is PROMOTED to the hot accent and NARROWED to one meaning:
+     THE WALL SAID NO. It no longer carries paper, pending or stale; those
+     moved to the dashed convention in base.css, which costs no colour. That
+     is what makes it safe to spend a masthead on it — a colour that means
+     four things means none of them.                                       */
+  --mm-up: #34d399;          /* bought · gain */
+  --mm-down: #fb7185;        /* sold · loss */
+  --mm-warn: #fbbf24;        /* THE ONE HOT ACCENT · refused · turned back */
+
+  /* ── the wire ─────────────────────────────────────────────────────────
+     Unchanged, and it gains by subtraction: now the only cool colour on a
+     page that is otherwise black, white and amber.                        */
+  --mm-wire: #5cc8ff;
+  --mm-wire-dim: #2e7fa8;
+
+  /* ── the band ramp: six stops, quantised, CANVAS ONLY ──────────────────
+     Never a UI colour. --mm-thru is the ramp's top stop and the absence of
+     the wall: a white pixel on this site means exactly one thing — an
+     intent got through — so it may not appear anywhere in the interface.  */
+  --mm-ramp-0: #000000;
+  --mm-ramp-1: #3a1600;
+  --mm-ramp-2: #7a2e00;
+  --mm-ramp-3: #c77a0b;
+  --mm-ramp-4: #fbbf24;
+  --mm-thru: #ffffff;
+
+  /* ── shape ────────────────────────────────────────────────────────────
+     AGENT = SQUIRCLE, TOKEN = CIRCLE is the only thing telling the two
+     apart at 24px with no label. The band has no radius at all — a pixel
+     grid does not round.                                                  */
+  --mm-r-card: 16px;
+  --mm-r-chip: 6px;
+  --mm-r-agent: 10px;
+  --mm-r-token: 999px;
+
+  /* ── space: a 4px scale ──────────────────────────────────────────────── */
+  --mm-1: 4px;
+  --mm-2: 8px;
+  --mm-3: 12px;
+  --mm-4: 16px;
+  --mm-5: 20px;
+  --mm-6: 24px;
+  --mm-8: 32px;
+  --mm-10: 40px;
+
+  /* THE CELL. The canvas's cell, the kerf's rhythm and the space scale's
+     unit are the same 4px. Changing this changes the picture. */
+  --mm-cell: 4px;
+
+  /* ── type ─────────────────────────────────────────────────────────────
+     --mm-display is GEIST PIXEL and it is display ONLY: below roughly 24px
+     the square grid stops being legible and the face turns to mush. It
+     appears in exactly two places in the product, and both are
+     system-generated integers.                                            */
+  --mm-display: var(--font-geist-pixel), var(--font-geist), ui-monospace, monospace;
+  --mm-sans: var(--font-geist), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mm-mono: var(--font-geist-mono), ui-monospace, "Geist Mono", Menlo, monospace;
+
+  /* ── chrome ──────────────────────────────────────────────────────────── */
+  --mm-nav-h: 56px;
+  --mm-header-h: 52px;
+  --mm-col: 640px;
+  --mm-rail: 304px;
+  --mm-context: 320px;
+  --mm-band-h: 168px;        /* the band on /, >=860 */
+  --mm-band-h-sm: 132px;     /* the band on /, <860 */
+  --mm-band-h-agent: 96px;   /* the still band on /a/<slug> */
+
+  /* ── vertical rhythm ───────────────────────────────────────────────────
+   *
+   * ONE SECTION SPACING, DEFINED ONCE.
+   *
+   * Eleven section rules across six sheets used six different paddings —
+   * 24/20, 20/20, 16/20, 16/16, 20/16, 12/16 — each chosen against whatever
+   * happened to sit above it. Read down a page they make the gaps look
+   * arbitrary, which is precisely what a rhythm is not.
+   *
+   * A shorthand in a custom property, so the sheets keep their own selectors
+   * and there is still exactly one place to change the spacing.
+   */
+  --mm-sec-y: var(--mm-6) 0 var(--mm-5);
+
+  /* ── motion ──────────────────────────────────────────────────────────── */
+  --mm-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --mm-fast: 140ms;
+
+  /* ── type: one scale, seven steps ──────────────────────────────────────
+   *
+   * The .mm sheets had 27 distinct font sizes, nine of them fractional —
+   * 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5 — each chosen once, in isolation,
+   * to look right next to whatever was beside it that day. The result reads
+   * as noise: a page where nothing is quite the same size as anything else
+   * has no hierarchy, only variety.
+   *
+   * Seven steps, and a rule for each. Anything at or above 24px is a DISPLAY
+   * size and keeps its own value: those are set against a pixel typeface and
+   * a canvas rather than against body copy.
+   */
+  --mm-t-micro: 10px; /* kickers, chips, axis labels — said, not read */
+  --mm-t-meta: 11.5px; /* captions, notes, the qualifying sentence */
+  --mm-t-body: 13px; /* rows, lists, holdings, the reasoning */
+  --mm-t-lead: 15px; /* emphasis, a figure that is not the figure */
+  --mm-t-head: 18px; /* a section's name, a card's title */
+  --mm-t-fig: 23px; /* a figure worth reading across the page */
+  --mm-t-hero: 30px; /* the one number a page exists to publish */
+}
+
+
+/*
+ * THREE BREAKPOINTS. NAMED. THAT IS ALL.
+ *
+ * There were five unrelated sets — globals at 980/760/640/420, console at
+ * 940/860/720/540/520, grant at 720, feed at 480 — and the 720/760 disagreement
+ * produced a 40px band where the shell collapsed but the page around it did
+ * not. These are declared here as documentation; CSS custom properties cannot
+ * be used in media queries, so the literals below are repeated in each sheet
+ * and MUST match:
+ *
+ *    520px   phone -> large phone   (card metrics loosen)
+ *    860px   THE collapse point     (bottom tab bar <-> left rail)
+ *   1180px   desktop                (the context column appears)
+ *
+ * Do not add a fourth without deleting one.
+ */

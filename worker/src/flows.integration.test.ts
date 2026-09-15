@@ -177,7 +177,7 @@ describe("a top-up made while the worker was STOPPED", () => {
   it("is recoverable from the ledger — the worker is not the only memory", async () => {
     await ensureAgent(grant(R));
     // A tick before the restart recorded cash of 500.
-    await addEquity(R, { ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
+    await addEquity(R, { mode: "live", ethWei: 0n, cashUsdg: 500, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 500 });
     assert.equal(await lastKnownCashUsdg(R), 500);
   });
 
@@ -223,9 +223,9 @@ describe("readPnl reports the agent's own money", () => {
     // retired explicitly, or "which agent is current" answers with the newest.
     retireAllAgents();
     await setAgentStatus(A, "armed");
-    await addEquity(A, { ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
+    await addEquity(A, { mode: "live", ethWei: 0n, cashUsdg: 700, vaultUsdg: 0, positionsUsdg: 299.480778, equityUsdg: 999.480778 });
     // B is funded and marked to a very different number in the same tables.
-    await addEquity(B, { ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
+    await addEquity(B, { mode: "live", ethWei: 0n, cashUsdg: 50_000, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 50_000 });
 
     const out = readPnl();
     // The headline is equity MINUS capital: 999.48 − 750 = 249.48. It used to be
@@ -247,11 +247,87 @@ describe("readPnl reports the agent's own money", () => {
     await ensureAgent(grant(C));
     await setAgentStatus(A, "expired");
     await setAgentStatus(C, "armed");
-    await addEquity(C, { ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 999.48 });
+    await addEquity(C, { mode: "live", ethWei: 0n, cashUsdg: 999.48, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 999.48 });
 
     assert.equal(await getNetContributionsUsdg(C), null);
     const out = readPnl();
     assert.match(out, /not measurable/);
     assert.doesNotMatch(out, /change: \$999\.48/);
+  });
+});
+
+/**
+ * A FLOW'S IDENTITY, written the same way by every writer.
+ *
+ * Two processes write chain-derived flows into the same shared table: the
+ * deposit scanner via this function, and the accounting repair directly. The
+ * unique index that stops them booking one deposit twice is over
+ * `(chain_id, agent_id, tx_hash, log_index)` — so if the two disagree about the
+ * chain (NULL vs 4663) or the case of the hash (0xAB… vs 0xab…), the constraint
+ * never fires and the owner's deposit is counted twice, both rows stamped with
+ * the schema's highest-trust source.
+ */
+describe("the identity of a chain-derived flow", () => {
+  const D = "0x000000000000000000000000000000000000000d";
+
+  it("carries the chain from the agent's own grant, without being told", async () => {
+    initStore();
+    await ensureAgent(grant(D));
+    await addFlow({
+      agentId: D,
+      direction: "in",
+      amountUsdg: 10,
+      source: "chain-log",
+      txHash: "0xAbCdEf0123",
+      blockNumber: 100,
+      logIndex: 0,
+    });
+    const db = new DatabaseSync(homePaths.db());
+    const row = db
+      .prepare("SELECT chain_id, tx_hash FROM flows WHERE agent_id = ? ORDER BY id DESC LIMIT 1")
+      .get(D) as { chain_id: number; tx_hash: string };
+    db.close();
+    assert.equal(Number(row.chain_id), 46630, "read from agents.chain_id, which ensureAgent wrote from the grant");
+    assert.equal(row.tx_hash, "0xabcdef0123", "normalised, so two writers cannot disagree about the same hash");
+  });
+
+  it("writes an identity a unique index can be built over", async () => {
+    // WHAT THIS CHANGE IS FOR, and the reason it ships one deploy ahead of the
+    // constraint. The index that stops a double-booked deposit is over
+    // (chain_id, agent_id, tx_hash, log_index) — and it cannot be created safely
+    // over rows that are half-NULL and mixed-case, because NULLs are distinct in
+    // a unique index on both engines and 0xAB… is not 0xab…. Every row written
+    // from here on carries the full identity in one canonical form, so by the
+    // time the constraint arrives there is nothing left for it to trip over.
+    //
+    // The dedup PROOF belongs with the index, not here: without a constraint
+    // there is nothing for `ON CONFLICT DO NOTHING` to catch.
+    const db = new DatabaseSync(homePaths.db());
+    const rows = db
+      .prepare("SELECT chain_id, tx_hash, log_index FROM flows WHERE agent_id = ? AND tx_hash IS NOT NULL")
+      .all(D) as { chain_id: number | null; tx_hash: string; log_index: number | null }[];
+    db.close();
+    assert.ok(rows.length > 0);
+    for (const r of rows) {
+      assert.ok(r.chain_id !== null, "a chain-derived row names its chain");
+      assert.ok(r.log_index !== null, "…and its position in the block");
+      assert.equal(r.tx_hash, r.tx_hash.toLowerCase(), "…in one canonical case");
+    }
+  });
+
+  it("reports whether the row landed, so the caller can refuse to move the peak", async () => {
+    // addFlow used to return void and swallow its own failures while the caller
+    // went straight on to adjustAgentHwm — so a failed insert shifted the peak
+    // by the full deposit with no row to explain it and no way to retry.
+    assert.equal(
+      await addFlow({ agentId: D, direction: "in", amountUsdg: 1, source: "inferred" }),
+      true,
+      "a live agent's inferred flow lands, and says so",
+    );
+    assert.equal(
+      await addFlow({ agentId: D, direction: "in", amountUsdg: 1, source: "inferred", mode: "paper" }),
+      false,
+      "a refusal is reported, not swallowed",
+    );
   });
 });

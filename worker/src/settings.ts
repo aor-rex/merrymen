@@ -8,13 +8,27 @@
 
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  HOUSE_KEY_FIELDS,
   SETTINGS_DEFAULTS,
+  SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  isHostedMode,
   isValidCustomToken,
   type CustomToken,
   type MerrymenSettings,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
+
+/**
+ * A tenant settings file with every house-key field removed (hosted mode). The
+ * field list is HOUSE_KEY_FIELDS in core, shared with the settings API so the
+ * worker's "strip before merge" and the API's "refuse to write" can't drift.
+ */
+export function stripHouseKeys(file: MerrymenSettings): MerrymenSettings {
+  const copy = { ...file } as Record<string, unknown>;
+  for (const k of HOUSE_KEY_FIELDS) delete copy[k];
+  return copy as MerrymenSettings;
+}
 
 export interface ResolvedConfig {
   bundlerApiKey: string | undefined;
@@ -35,8 +49,33 @@ export interface ResolvedConfig {
   rialtoApiKey: string | undefined;
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
+  agentName: string | undefined;
+  xHandle: string | undefined;
+  /**
+   * Proof that xHandle is theirs, written only by /api/x-proof.
+   *
+   * Carried through so the worker can stamp `agents.x_verified` — the flag a
+   * public surface needs before it may turn a handle into a link. Read from
+   * the file only: unlike the handle beside it there is no env override,
+   * because a proof somebody can set from a shell is not a proof.
+   */
+  xProof: { handle: string; at: number } | undefined;
   v4AdapterAddress: `0x${string}` | undefined;
+  ponsAdapterAddress: `0x${string}` | undefined;
+  /** The PonsClassVaultFactory. A HINT for signing; the grant is the authority. */
+  ponsClassVaultFactory: `0x${string}` | undefined;
+  /** Which kinds of thing may be BOUGHT. Never filters the watch set. */
+  assetMode: "all" | "stocks" | "crypto";
   paperTradingEnabled: boolean;
+  /** The owner's explicit consent to put real orders on chain. Default false. */
+  liveTradingEnabled: boolean;
+  /**
+   * Is the consent gate in force yet? False ONLY while the one-time migration
+   * that populates `liveTradingEnabled` is still in report mode — see
+   * `ExecInputs.enforceLiveIntent` for why a gate with a safe default is an
+   * outage until somebody has written the field for the people mid-trade.
+   */
+  enforceLiveIntent: boolean;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -44,11 +83,16 @@ export interface ResolvedConfig {
   slippageBps: number;
   maxImpactBps: number;
   perfFeeBps: number;
+  /** Per-trade fee on turnover, bps. Accrual-only — see fees.ts. */
+  tradeFeeBps: number;
+  /** Where a collected trade fee would go. Nothing collects yet. */
+  tradeFeeAddress?: string;
   tickSeconds: number;
   basketSymbols: string[];
   /** Owner-added ERC-20s (memecoins). Shape-checked; still gated by the grant. */
   customTokens: CustomToken[];
   /** USD depth below which a token is refused a price (manipulation guard). */
+  memecoinMinFdvUsd: number;
   minPoolLiquidityUsdg: number;
   /** Spot-vs-TWAP band, bps, above which a price is refused. */
   maxPriceDivergenceBps: number;
@@ -56,11 +100,39 @@ export interface ResolvedConfig {
   discoveryEnabled: boolean;
   discoveryIntervalMin: number;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
+  trencherLiveEnabled: boolean;
+  sponsorGasEnabled: boolean;
+  sponsorshipPolicyId?: string;
+  /** Read flows from USDG Transfer logs rather than inferring them. */
+  depositScanEnabled: boolean;
+  /** Let the strategist research before deciding. */
+  deskEnabled: boolean;
+  deskMaxSteps: number;
+  browserUrl: string | undefined;
+  browserToken: string | undefined;
+  /** The shared Brain service. Absent = shadow Brain does not run, ever. */
+  brainUrl: string | undefined;
+  brainToken: string | undefined;
   scoutEnabled: boolean;
   /** Max USDG of COST that may sit in unpriceable positions at once. */
   scoutBudgetUsdg: number;
   /** Max USDG into any single unpriceable token. */
   scoutPerTokenUsdg: number;
+  /** The class route. See MerrymenSettings.classSnipeEnabled — OFF by default. */
+  classSnipeEnabled: boolean;
+  classPerEntryUsdg: number;
+  classMaxPositions: number;
+  classMinDepthUsdg: number;
+  /** The class EXIT. See MerrymenSettings.classMaxHoldSec — a clock, not a price. */
+  classMaxHoldSec: number;
+  classExitAtGraduationPct: number;
+  /**
+   * The platform's official coins. See MerrymenSettings.officialCoinsEnabled —
+   * ON by default, and the only member of this block that is.
+   */
+  officialCoinsEnabled: boolean;
+  strategistStopLossBps: number;
+  takeProfitBps: number;
   buyPerTickUsdg: number;
   idleFloorUsdg: number;
   gapEnterBudgetUsdg: number;
@@ -171,14 +243,46 @@ export function mergeSettings(
   env: Record<string, string | undefined>,
 ): ResolvedConfig {
   const d = SETTINGS_DEFAULTS;
+  const hosted = isHostedMode();
+
+  // HOSTED: the house owns the connection/credential/endpoint fields. Drop them
+  // from the tenant file so every `str(file.X, env.X)` below falls through to the
+  // server env. Self-hosted (the default) is untouched — the file still wins.
+  // The remote-execution flags are forced off further down (they are not house
+  // keys, but a shell on our server is never a tenant's to enable).
+  if (hosted) file = stripHouseKeys(file);
 
   const rawBreaker = str(file.breakerAddress, env.MERRYMEN_BREAKER_ADDRESS);
   const breakerAddress =
     rawBreaker && /^0x[0-9a-fA-F]{40}$/.test(rawBreaker) ? (rawBreaker as `0x${string}`) : undefined;
 
+  const agentName = str(file.agentName, env.MERRYMEN_AGENT_NAME);
+  const xHandle = str(file.xHandle, env.MERRYMEN_X_HANDLE);
+  // Shape-checked before use, because a settings blob is data: a malformed
+  // proof falls back to "unproven" rather than reaching the column as whatever
+  // it happens to be. Same treatment holderProof gets in the orchestrator.
+  const rawProof = file.xProof;
+  const xProof =
+    rawProof &&
+    typeof rawProof === "object" &&
+    typeof rawProof.handle === "string" &&
+    /^[A-Za-z0-9_]{1,15}$/.test(rawProof.handle) &&
+    typeof rawProof.at === "number"
+      ? { handle: rawProof.handle, at: rawProof.at }
+      : undefined;
+
   const rawAdapter = str(file.v4AdapterAddress, env.MERRYMEN_V4_ADAPTER_ADDRESS);
   const v4AdapterAddress =
     rawAdapter && /^0x[0-9a-fA-F]{40}$/.test(rawAdapter) ? (rawAdapter as `0x${string}`) : undefined;
+
+  const rawPons = str(file.ponsAdapterAddress, env.MERRYMEN_PONS_ADAPTER_ADDRESS);
+  const rawClassFactory = str(file.ponsClassVaultFactory, env.MERRYMEN_CLASS_VAULT_FACTORY);
+  const ponsClassVaultFactory =
+    rawClassFactory && /^0x[0-9a-fA-F]{40}$/.test(rawClassFactory)
+      ? (rawClassFactory as `0x${string}`)
+      : undefined;
+  const ponsAdapterAddress =
+    rawPons && /^0x[0-9a-fA-F]{40}$/.test(rawPons) ? (rawPons as `0x${string}`) : undefined;
 
   const rawHolder = str(file.holderAddress, env.MERRYMEN_HOLDER_ADDRESS);
   const holderAddress =
@@ -227,8 +331,47 @@ export function mergeSettings(
     rialtoApiKey: str(file.rialtoApiKey, env.MERRYMEN_RIALTO_API_KEY),
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
+    agentName,
+    xHandle,
+    xProof,
     v4AdapterAddress,
+    ponsAdapterAddress,
+    ponsClassVaultFactory,
+    assetMode: oneOf(file.assetMode, env.MERRYMEN_ASSET_MODE, ["all", "stocks", "crypto"] as const, d.assetMode),
     paperTradingEnabled: bool(file.paperTradingEnabled, env.MERRYMEN_PAPER_TRADING, d.paperTradingEnabled),
+    // NO ENVIRONMENT OVERRIDE, and the omission is the point.
+    //
+    // Every sibling here takes `env.MERRYMEN_*` as a middle term, which is right
+    // for operational knobs: the house may set a bundler, a tick rate, a fee. It
+    // is wrong for this one. `MERRYMEN_LIVE_TRADING=true` on the orchestrator
+    // would be the house granting consent to spend real money on behalf of every
+    // owner in the fleet simultaneously — the exact implicit promotion this
+    // field was added to prevent, available as a single deploy variable.
+    //
+    // So consent is read from the tenant's OWN settings or not at all. `bool`
+    // is still the reader, with `undefined` for the env slot, so an absent
+    // field falls to the default (false) rather than to anything ambient.
+    liveTradingEnabled: bool(file.liveTradingEnabled, undefined, d.liveTradingEnabled),
+    // NOT a tenant setting and not in the file: this is an operator-controlled
+    // migration state.
+    //
+    // IT USED TO READ `MERRYMEN_BACKFILL_LIVE_INTENT !== "report"`, so that
+    // asking the migration to REPORT also switched the gate off. That was right
+    // exactly once — before the migration had run, when the field was absent
+    // fleet-wide and enforcing it would have moved every live agent to paper.
+    //
+    // After the migration it inverts into a hazard: the fleet now has 46 grant
+    // tenants whose consent IS recorded, and re-running the report to check a
+    // detail would quietly un-gate every one of them for the length of the run
+    // — reopening the original bug (funding implying consent) as a side effect
+    // of asking a read-only question. A dry run must not change behaviour; that
+    // is the entire meaning of the word.
+    //
+    // So standing down is now its own deliberate act, on its own variable, and
+    // `=report` is inert. Set this ONLY on a deployment whose owners have no
+    // `liveTradingEnabled` recorded yet — a fresh self-hosted upgrade — and
+    // remove it in the same session, as docs/live-trading-consent.md sets out.
+    enforceLiveIntent: (env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
@@ -238,21 +381,51 @@ export function mergeSettings(
       return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : d.strategy;
     })(),
     swapVenue: oneOf(file.swapVenue, env.MERRYMEN_SWAP_VENUE, ["uniswap", "rialto"], d.swapVenue),
-    slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, 5_000),
+    slippageBps: num(file.slippageBps, env.MERRYMEN_SLIPPAGE_BPS, d.slippageBps, 1, SLIPPAGE_BPS_MAX),
     // Floor of 0 is meaningful here: it turns the guard off. Ceiling of 10_000
     // is 100% impact, past which the number stops meaning anything.
     maxImpactBps: num(file.maxImpactBps, env.MERRYMEN_MAX_IMPACT_BPS, d.maxImpactBps, 0, 10_000),
     perfFeeBps: num(file.perfFeeBps, env.MERRYMEN_PERF_FEE_BPS, d.perfFeeBps, 0, 5_000),
+    // Bounded well below the performance fee ceiling: this is charged on every
+    // trade regardless of outcome, so the same number means something much
+    // larger here. 500 bps of turnover would eat an account in a fortnight.
+    tradeFeeBps: num(file.tradeFeeBps, env.MERRYMEN_TRADE_FEE_BPS, d.tradeFeeBps ?? 50, 0, 500),
+    tradeFeeAddress: str(file.tradeFeeAddress, env.MERRYMEN_TRADE_FEE_ADDRESS),
     tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, 3_600),
     basketSymbols,
     customTokens,
+    memecoinMinFdvUsd: num(file.memecoinMinFdvUsd, env.MERRYMEN_MEMECOIN_MIN_FDV_USD, d.memecoinMinFdvUsd ?? 0, 0, 1_000_000_000_000),
     minPoolLiquidityUsdg: num(file.minPoolLiquidityUsdg, env.MERRYMEN_MIN_POOL_LIQUIDITY_USDG, d.minPoolLiquidityUsdg, 0, 100_000_000),
     maxPriceDivergenceBps: num(file.maxPriceDivergenceBps, env.MERRYMEN_MAX_PRICE_DIVERGENCE_BPS, d.maxPriceDivergenceBps, 10, 10_000),
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
+    trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
+    sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
+    sponsorshipPolicyId: str(file.sponsorshipPolicyId, env.MERRYMEN_SPONSORSHIP_POLICY_ID),
+    depositScanEnabled: bool(file.depositScanEnabled, env.MERRYMEN_DEPOSIT_SCAN, d.depositScanEnabled),
+    deskEnabled: bool(file.deskEnabled, env.MERRYMEN_DESK, d.deskEnabled),
+    deskMaxSteps: num(file.deskMaxSteps, env.MERRYMEN_DESK_MAX_STEPS, d.deskMaxSteps, 1, 12),
+    browserUrl: str(file.browserUrl, env.MERRYMEN_BROWSER_URL),
+    browserToken: str(file.browserToken, env.MERRYMEN_BROWSER_TOKEN),
+    brainUrl: str(file.brainUrl, env.MERRYMEN_BRAIN_URL),
+    brainToken: str(file.brainToken, env.MERRYMEN_BRAIN_TOKEN),
     scoutEnabled: bool(file.scoutEnabled, env.MERRYMEN_SCOUT_ENABLED, d.scoutEnabled),
     scoutBudgetUsdg: num(file.scoutBudgetUsdg, env.MERRYMEN_SCOUT_BUDGET_USDG, d.scoutBudgetUsdg, 0, 1_000_000),
     scoutPerTokenUsdg: num(file.scoutPerTokenUsdg, env.MERRYMEN_SCOUT_PER_TOKEN_USDG, d.scoutPerTokenUsdg, 0, 1_000_000),
+    classSnipeEnabled: bool(file.classSnipeEnabled, env.MERRYMEN_CLASS_SNIPE, d.classSnipeEnabled),
+    classPerEntryUsdg: num(file.classPerEntryUsdg, env.MERRYMEN_CLASS_PER_ENTRY_USDG, d.classPerEntryUsdg, 0, 1_000_000),
+    classMaxPositions: num(file.classMaxPositions, env.MERRYMEN_CLASS_MAX_POSITIONS, d.classMaxPositions, 0, 1_000),
+    classMinDepthUsdg: num(file.classMinDepthUsdg, env.MERRYMEN_CLASS_MIN_DEPTH_USDG, d.classMinDepthUsdg, 0, 10_000_000),
+    // FLOOR OF 60s, not 0. A zero hold window would sell every position on the
+    // tick after it opened, turning the route into a fee pump; the exit exists
+    // to bound a hold, not to forbid one.
+    classMaxHoldSec: num(file.classMaxHoldSec, env.MERRYMEN_CLASS_MAX_HOLD_SEC, d.classMaxHoldSec, 60, 30 * 86_400),
+    classExitAtGraduationPct: num(file.classExitAtGraduationPct, env.MERRYMEN_CLASS_EXIT_GRAD_PCT, d.classExitAtGraduationPct, 1, 100),
+    officialCoinsEnabled: bool(file.officialCoinsEnabled, env.MERRYMEN_OFFICIAL_COINS, d.officialCoinsEnabled),
+    // 0 disables it; the ceiling is 100x, past which it is not a take-profit
+    // rule, it is a number nobody will ever hit.
+    strategistStopLossBps: num(file.strategistStopLossBps, env.MERRYMEN_STRATEGIST_STOP_LOSS_BPS, d.strategistStopLossBps ?? 0, 0, 10_000),
+    takeProfitBps: num(file.takeProfitBps, env.MERRYMEN_TAKE_PROFIT_BPS, d.takeProfitBps ?? 0, 0, 1_000_000),
     buyPerTickUsdg: num(file.buyPerTickUsdg, env.MERRYMEN_BUY_PER_TICK_USDG, d.buyPerTickUsdg, 1, 100_000),
     idleFloorUsdg: num(file.idleFloorUsdg, env.MERRYMEN_IDLE_FLOOR_USDG, d.idleFloorUsdg, 0, 1_000_000),
     gapEnterBudgetUsdg: num(file.gapEnterBudgetUsdg, env.MERRYMEN_GAP_BUDGET_USDG, d.gapEnterBudgetUsdg, 1, 1_000_000),
@@ -274,15 +447,21 @@ export function mergeSettings(
     telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
     telegramNotifyEveryMin: num(file.telegramNotifyEveryMin, env.MERRYMEN_TELEGRAM_NOTIFY_EVERY_MIN, d.telegramNotifyEveryMin, 0, 1440),
     telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
-    telegramPcControlEnabled: bool(file.telegramPcControlEnabled, env.MERRYMEN_TELEGRAM_PC_CONTROL, d.telegramPcControlEnabled),
-    telegramCapabilities: strArray(file.telegramCapabilities, env.MERRYMEN_TELEGRAM_CAPABILITIES, d.telegramCapabilities),
-    telegramFilesRoot: str(file.telegramFilesRoot, env.MERRYMEN_TELEGRAM_FILES_ROOT),
-    telegramShellAllowlist: strArray(file.telegramShellAllowlist, env.MERRYMEN_TELEGRAM_SHELL_ALLOWLIST, d.telegramShellAllowlist),
-    telegramAppAllowlist: strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
+    // Remote-execution surface — FORCED OFF hosted, regardless of file or env.
+    // Self-hosted these mean "a shell / PC control on the owner's own machine";
+    // hosted they would mean "a shell on OUR server", with an allowlist the
+    // attacker picked. The settings route also refuses to write them, and the
+    // agent gate refuses to run them — this is the config-resolution boundary of
+    // the same defence, the one that wins even for a value already on disk.
+    telegramPcControlEnabled: hosted ? false : bool(file.telegramPcControlEnabled, env.MERRYMEN_TELEGRAM_PC_CONTROL, d.telegramPcControlEnabled),
+    telegramCapabilities: hosted ? [] : strArray(file.telegramCapabilities, env.MERRYMEN_TELEGRAM_CAPABILITIES, d.telegramCapabilities),
+    telegramFilesRoot: hosted ? undefined : str(file.telegramFilesRoot, env.MERRYMEN_TELEGRAM_FILES_ROOT),
+    telegramShellAllowlist: hosted ? [] : strArray(file.telegramShellAllowlist, env.MERRYMEN_TELEGRAM_SHELL_ALLOWLIST, d.telegramShellAllowlist),
+    telegramAppAllowlist: hosted ? [] : strArray(file.telegramAppAllowlist, env.MERRYMEN_TELEGRAM_APP_ALLOWLIST, d.telegramAppAllowlist),
     telegramTranscribeKey: str(file.telegramTranscribeKey, env.MERRYMEN_TELEGRAM_TRANSCRIBE_KEY),
     telegramTranscribeBase: str(file.telegramTranscribeBase, env.MERRYMEN_TELEGRAM_TRANSCRIBE_BASE, d.telegramTranscribeBase)!,
-    telegramAgentEnabled: bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
-    telegramAgentAutoShell: bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
+    telegramAgentEnabled: hosted ? false : bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
+    telegramAgentAutoShell: hosted ? false : bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
     telegramAgentMaxSteps: num(file.telegramAgentMaxSteps, env.MERRYMEN_TELEGRAM_AGENT_MAX_STEPS, d.telegramAgentMaxSteps, 1, 60),
   };
 }
@@ -332,7 +511,17 @@ export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSet
 
 /** Fingerprint of fields that require re-arming the executor when changed. */
 export function connectionKey(cfg: ResolvedConfig): string {
-  return [cfg.bundlerApiKey, cfg.bundlerUrl, cfg.rpcMainnet, cfg.rpcTestnet].join("|");
+  // SPONSORSHIP BELONGS IN THE FINGERPRINT. The paymaster attaches inside
+  // createAgentExecutor, which is rebuilt only when this changes — so without
+  // these two the toggle saves, reports ok, and does nothing until a restart.
+  return [
+    cfg.bundlerApiKey,
+    cfg.bundlerUrl,
+    cfg.rpcMainnet,
+    cfg.rpcTestnet,
+    String(cfg.sponsorGasEnabled),
+    cfg.sponsorshipPolicyId ?? "",
+  ].join("|");
 }
 
 /**
@@ -380,6 +569,16 @@ export function strategyKey(cfg: ResolvedConfig): string {
     // rebuild it — otherwise a token added mid-run is never read or priced until
     // the next restart, and the owner sees nothing happen.
     cfg.customTokens.map((t) => `${t.symbol}:${t.address.toLowerCase()}:${t.decimals}`).join(","),
+    // WITHOUT THIS THE SETTING IS INERT. `watchTokens` and the strategy are only
+    // rebuilt when this key changes, so a mode the owner flips would do nothing
+    // until some other strategy field happened to move.
+    cfg.assetMode,
+    // AND `officialCoinsEnabled` WAS ALREADY IN THAT STATE — a pre-existing bug
+    // found while adding the line above. Its own doc promises that turning it
+    // off "removes the listings from the watch set entirely", and the rebuild
+    // that would do so sits behind this key. Masked only because
+    // OFFICIAL_COINS[4663] is empty, so there has been nothing to remove.
+    cfg.officialCoinsEnabled,
     cfg.buyPerTickUsdg,
     cfg.idleFloorUsdg,
     cfg.gapEnterBudgetUsdg,

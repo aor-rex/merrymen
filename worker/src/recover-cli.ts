@@ -15,7 +15,7 @@
 
 import { chainForId, pimlicoBundlerUrl, robinhoodChain } from "../../packages/core/src/index";
 import { resolveConfig } from "./settings";
-import { planRecovery, recoverFunds } from "./recover";
+import { ownerFromPrivateKey, planRecovery, recoverFunds } from "./recover";
 
 const say = (s: string) => process.stderr.write(`${s}\n`);
 const emit = (obj: unknown) => process.stdout.write(`__RESULT__${JSON.stringify(obj)}\n`);
@@ -52,7 +52,7 @@ async function main() {
     if (mode === "plan") {
       const plan = await planRecovery({
         chain,
-        ownerPrivateKey: ownerKey,
+        owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expect,
         extraTokens: cfg.customTokens,
@@ -64,15 +64,41 @@ async function main() {
         // Only claim empty when we actually READ everything. Otherwise say what
         // we could not see — "this account is empty" is how someone concludes
         // their money is gone because an RPC blinked.
+        //
+        // AND NOT WHEN THE CLASS VAULT HOLDS SOMETHING. The vault is a separate
+        // contract holding tokens the ACCOUNT does not, so an owner whose whole
+        // book was class positions used to be told they had nothing by the one
+        // command that exists to get money out.
         say(
-          plan.unreadable.length
-            ? `  holdings      : none found, but ${plan.unreadable.join(", ")} could not be read — that is NOT a zero balance. Check the RPC and rerun.`
-            : "  holdings      : none — this account is empty",
+          plan.classHoldings.length
+            ? `  holdings      : none in the account itself — but your class vault holds ${plan.classHoldings.length} token(s), listed below. They are recoverable.`
+            : plan.unreadable.length
+              ? `  holdings      : none found, but ${plan.unreadable.join(", ")} could not be read — that is NOT a zero balance. Check the RPC and rerun.`
+              : "  holdings      : none — this account is empty",
         );
       } else {
         say("  holdings:");
         for (const b of plan.balances) say(`    • ${b.amount} ${b.symbol}${b.note ? `  (${b.note})` : ""}`);
         if (plan.unreadable.length) say(`  NOT READ      : ${plan.unreadable.join(", ")} — there may be more here than this list shows.`);
+      }
+      // THE CLASS VAULT, SHOWN SEPARATELY because recovering it is a separate
+      // operation: `sweep` moves a token to the account, and only then can the
+      // ordinary transfer reach it. An owner reading this should be able to see
+      // that their coins exist, where they are, and that they can get them out
+      // without anything of ours running.
+      if (plan.classVault) {
+        say(`  class vault   : ${plan.classVault}`);
+        if (plan.classHoldings.length === 0) {
+          say(
+            plan.classNote
+              ? `    (nothing found, but ${plan.classNote})`
+              : "    (empty — no class positions)",
+          );
+        } else {
+          for (const h of plan.classHoldings) say(`    • ${h.amount} ${h.symbol}`);
+          say("    these sweep to your account first, then out with everything else — two operations, one command");
+          if (plan.classNote) say(`    NOTE: ${plan.classNote}`);
+        }
       }
       emit({
         ok: true,
@@ -81,6 +107,13 @@ async function main() {
         gasWei: plan.gasWei.toString(),
         unreadable: plan.unreadable,
         balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
+        classVault: plan.classVault,
+        classNote: plan.classNote,
+        classHoldings: plan.classHoldings.map((h) => ({
+          token: h.token,
+          symbol: h.symbol,
+          amount: h.amount,
+        })),
       });
       process.exit(0);
     }
@@ -96,7 +129,7 @@ async function main() {
     say(`  sweeping to ${to} …`);
     const res = await recoverFunds({
       chain,
-      ownerPrivateKey: ownerKey,
+      owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
       rpcUrl,
       to,
@@ -120,6 +153,10 @@ async function main() {
       say("  left behind (they refused to transfer):");
       for (const sk of res.skipped) say(`    • ${sk.symbol}: ${sk.reason}`);
     }
+    if (res.nativeSweptWei > 0n) {
+      say(`  ✓ also swept ${(Number(res.nativeSweptWei) / 1e18).toFixed(6)} ETH ` +
+          `(${(Number(res.nativeReservedWei) / 1e18).toFixed(6)} left to pay for this op)`);
+    }
     say(`  ✓ swept — tx ${res.txHash}`);
     emit({
       ok: true,
@@ -127,6 +164,8 @@ async function main() {
       to: res.to,
       smartAccount: res.smartAccount,
       balances: res.balances.map((b) => ({ symbol: b.symbol, amount: b.amount })),
+      nativeSweptWei: res.nativeSweptWei.toString(),
+      nativeReservedWei: res.nativeReservedWei.toString(),
     });
     process.exit(0);
   } catch (e) {

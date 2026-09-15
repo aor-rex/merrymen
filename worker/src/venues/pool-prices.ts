@@ -66,7 +66,12 @@ export interface PoolQuoteRefusal {
    * live pool balance and a divergence percentage, so it changes every time
    * anyone trades, and a change-detector built on it fires forever.
    */
-  kind: RefusalKind | "no-pool" | "stale-read";
+  /**
+   * Curve refusals arrive here too, prefixed `curve-`, when a token has no
+   * pool but does have a bonding curve. Same contract: stable identifier, never
+   * the prose.
+   */
+  kind: RefusalKind | "no-pool" | "stale-read" | `curve-${string}`;
   reason: string;
 }
 
@@ -196,6 +201,9 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
           stale: false,
           source: "pool",
           detail: describeRoute(r),
+          // The number itself, not the sentence. describeRoute stays the human
+          // string; this is what any guard or exit actually reads.
+          liquidityUsdg: r.liquidityUsdg,
         });
       }
 

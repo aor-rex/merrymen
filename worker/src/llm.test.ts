@@ -19,7 +19,7 @@ test("legacy auto: groq key alone → groq (openai transport)", () => {
   assert.equal(creds?.provider, "groq");
   assert.equal(creds?.transport, "openai");
   assert.equal(creds?.baseUrl, "https://api.groq.com/openai/v1");
-  assert.equal(creds?.model, "llama-3.3-70b-versatile");
+  assert.equal(creds?.model, "qwen/qwen3.8-27b");
 });
 
 test("no keys, no selection → null (deterministic degrade)", () => {

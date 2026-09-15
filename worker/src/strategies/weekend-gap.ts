@@ -17,7 +17,8 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot } from "./types";
+import type { Snapshot, Tick } from "./types";
+import type { Why } from "./reasons";
 
 export interface GapLeg {
   symbol: string;
@@ -33,10 +34,11 @@ export interface WeekendGapConfig {
   usdg: `0x${string}`;
 }
 
-export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): TradeIntent[] {
-  if (!snap.sequencerUp) return [];
+export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
+  if (!snap.sequencerUp) return { intents: [], why: [] };
 
   const intents: TradeIntent[] = [];
+  const why: (Why | null)[] = [];
 
   for (const leg of cfg.legs) {
     if (snap.pausedTokens.has(leg.token.toLowerCase())) continue;
@@ -56,6 +58,7 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): TradeInte
         sellAmountRaw: slice,
         notionalUsdg: slice,
       });
+      why.push({ code: "gap-enter", symbol: leg.symbol, usdgRaw: slice });
     } else if (!marketClosed && held && held.rawBalance > 0n) {
       // EXIT at the open — full position, back to cash.
       intents.push({
@@ -66,8 +69,9 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): TradeInte
         sellAmountRaw: held.rawBalance,
         notionalUsdg: held.valueUsdg,
       });
+      why.push({ code: "gap-exit", symbol: leg.symbol });
     }
   }
 
-  return intents;
+  return { intents, why };
 }

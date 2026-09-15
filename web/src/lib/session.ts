@@ -3,9 +3,11 @@
 /**
  * The permission wall — creating an agent account and granting it a scoped key.
  *
- * NO EXTERNAL WALLET. The account's owner key is generated in the browser, so
- * there's nothing to connect — you create the wallet, back up its owner key,
- * and fund the account address. The flow (all counterfactual — nothing is
+ * NO EXTERNAL WALLET OWNS THE FUNDS. The account's owner key is generated in
+ * the browser — you create the wallet, back up its owner key, and fund the
+ * account address. Hosted adds ONE wallet popup on top of that, and only to
+ * link the account to your login (see step 5); the wallet never owns the
+ * account and never signs a trade. The flow (all counterfactual — nothing is
  * deployed until the agent's first trade):
  *  1. A fresh OWNER keypair is generated → it's the Kernel account's sudo
  *     validator (ECDSA). The smart-account address derives from it.
@@ -18,15 +20,30 @@
  *       - timestamp: hard expiry
  *  4. The owner key signs the grant locally (no popup); the serialized grant is
  *     what the worker uses to act. Revocation = expiry (or nonce invalidation).
+ *  5. HOSTED ONLY — the account is bound to the signed-in tenant by two
+ *     signatures over one server-issued nonce: the wallet authorizes the pair
+ *     (intent) and the owner key co-signs it (possession). Both personal_sign,
+ *     so no chain switch is ever required. Without step 5 the server has no way
+ *     to tell whose account this is, because `owner` is a key minted here and
+ *     can never equal the signed-in wallet.
  *
- * TESTNET DEMO CAVEATS (labeled in the UI): both private keys are kept in
- * localStorage so you can inspect and back them up; production owner keys live
- * in a Turnkey TEE and never touch a browser. Whoever holds the owner key
- * controls the funds — the UI forces a backup before funding. Drawdown breaker
+ * WHERE THE KEYS ACTUALLY LIVE, on every deployment including hosted mainnet.
+ *
+ * Both private keys are kept in this browser's localStorage. That is not a
+ * testnet demo caveat — it is the shipped arrangement, and :308 below makes
+ * this key load-bearing for hosted custody and for client-side recovery.
+ * Whoever holds the owner key controls the funds; the UI forces a backup
+ * before funding for exactly that reason.
+ *
+ * This block used to say production owner keys live in a Turnkey TEE and
+ * never touch a browser. No such thing is shipped — no dependency, no code
+ * path, no vendor. README.md is accurate that TEE custody is on the roadmap.
+ * The comment mattered because a TEE is precisely what someone would cite to
+ * argue that server-side custody is already fine here. It is not. Drawdown breaker
  * is worker-enforced until the breaker contract ships (Phase 2).
  */
 
-import { createPublicClient, erc20Abi, http, parseAbi, type Address } from "viem";
+import { createPublicClient, erc20Abi, http, parseAbi, type Address, type LocalAccount } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
@@ -56,17 +73,29 @@ import {
   buildWallPolicies,
   WALL_POLICY_FLAG,
   usableExtraTokens,
+  buildCallPermissions,
+  wallShape,
+  wallSignable,
   chainForId,
-  robinhoodTestnet,
-  GRANT_MULTIHOP,
+  officialCoinTokens,
+  ponsAdapterForSigning,
+  PONS_CLASS_VAULT_FACTORY,
+  robinhoodChain,
+  
   GRANT_V4,
   GRANT_V4_ADAPTER,
+  GRANT_PONS_ADAPTER,
+  GRANT_PONS_CLASS,
+  resolveClassVault,
+  bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
+  assertDerivedAccount,
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
 } from "@merrymen/core";
+import { findInjectedProvider, requestAccount } from "./wallet";
 
 export type { GrantCaps, StoredGrant };
 
@@ -80,6 +109,27 @@ const VAULT_ABI = parseAbi([
 
 export type Grant = StoredGrant;
 
+/**
+ * IS THIS ACCOUNT OWNED BY A PRIVY EMBEDDED WALLET?
+ *
+ * The distinction the backup screens need, and it is not "is the key missing".
+ * A missing key has two completely different meanings:
+ *
+ *   legacy grant, no key    something went wrong. The key WAS generated in this
+ *                           browser and should be here. Do not fund this
+ *                           account; tell somebody.
+ *   privy grant, no key     nothing went wrong. There is no key for merrymen to
+ *                           hold, which is the point of the design.
+ *
+ * Reading absence alone conflates them, and the screens then told a Privy user
+ * their key was unreadable and warned them off funding an account that was
+ * working perfectly. The binding version is the durable signal, sealed into the
+ * grant at signing time, so it cannot drift from what the account actually is.
+ */
+export function isPrivyOwned(grant: Pick<Grant, "binding"> | null | undefined): boolean {
+  return grant?.binding?.version === "privy-did-owner-v1";
+}
+
 const STORAGE_KEY = "merrymen.grant.v1";
 
 export function loadGrant(): Grant | null {
@@ -91,11 +141,36 @@ export function loadGrant(): Grant | null {
   }
 }
 
+/**
+ * Stop using this grant — WITHOUT destroying the only key that can recover it.
+ *
+ * This was a bare `removeItem`, and hosted that is irreversible fund loss.
+ * `mintGrant` omits `demoOwnerPrivateKey` from the copy it sends the server
+ * (see the hostedAs branch below), precisely so the server is never custodian
+ * of an owner key — which means this browser's localStorage holds the ONLY
+ * copy in existence. Three call sites removed it: the grant page's discard,
+ * BandSection, and the kill switch, whose own comment reads “server
+ * unreachable — still destroy the local key below”.
+ *
+ * So pressing KILL on the hosted service permanently destroyed the ability to
+ * ever withdraw, for anyone, and the UI said only “grant destroyed”. The
+ * funds stay on-chain and become unreachable by construction.
+ *
+ * ARCHIVE FIRST, exactly as minting already does. The helper existed and this
+ * path simply never called it. Killing an agent is about stopping it from
+ * TRADING; it was never meant to be about forfeiting the balance, and
+ * listSavedWallets already surfaces archived wallets so the key stays
+ * reachable from /grant and from the dashboard's recovery panel.
+ */
 export function clearGrant(): void {
+  archivePreviousGrant();
   localStorage.removeItem(STORAGE_KEY);
 }
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
+
+/** An address, abbreviated for a sentence a person has to read. */
+const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 /**
  * Mint a grant for a given OWNER key: derive the Kernel account, generate a
@@ -107,8 +182,47 @@ const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
  * the same owner key always reproduces the same smart account, so an existing
  * funded wallet can be re-armed with a brand-new session key.
  */
+/**
+ * WHO OWNS A MERRYMAN'S KERNEL ACCOUNT.
+ *
+ * This used to be a private key, because there was only one kind of owner: a
+ * keypair generated in this browser and kept in localStorage. Privy adds a
+ * second — an embedded wallet whose key merrymen never sees and cannot export
+ * — so the parameter had to become the thing both actually are, which is a
+ * SIGNER. The Kernel derivation, the wall and the session key are untouched by
+ * the change; only where the signature comes from differs.
+ *
+ * `binding` is carried alongside because the two owners prove themselves
+ * differently, and which model applies is never inferred: a browser key
+ * co-signs beside the login wallet, an embedded wallet signs once and its
+ * authentication is a verified access token.
+ */
+export type OwnerSigner =
+  | {
+      /**
+       * A viem LocalAccount. `privateKeyToAccount` for a browser-held key,
+       * `toViemAccount({ wallet })` for a Privy embedded wallet — Privy returns
+       * a LocalAccount precisely so it drops into code like this one.
+       *
+       * NOT an EIP-1193 provider. ZeroDev's `toSigner` resolves a provider's
+       * address with `Promise.any([eth_requestAccounts, eth_accounts])` and
+       * takes [0] — whichever RPC answers first. The owner address decides the
+       * ACCOUNT address, so that race would decide which Merryman you get.
+       */
+      account: LocalAccount;
+      binding: "legacy-wallet-owner-v1";
+      /** The key that controls the funds. Present ONLY for a browser-generated owner. */
+      privateKey: `0x${string}`;
+    }
+  | {
+      account: LocalAccount;
+      binding: "privy-did-owner-v1";
+      /** The verified DID this owner signs under. Appears in the signed text. */
+      did: string;
+    };
+
 async function mintGrant(
-  ownerPrivateKey: `0x${string}`,
+  ownerSigner: OwnerSigner,
   caps: GrantCaps,
   onStatus: (status: string) => void,
   chainId: number,
@@ -125,7 +239,54 @@ async function mintGrant(
    * together below, or not at all.
    */
   v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
+  /**
+   * The deployed PonsSelfTrade adapter to seal into the wall, or absent for no
+   * bonding-curve route. A SECOND, SEPARATE opt-in from the v4 adapter: two
+   * venues, two risks, two decisions. Marker and permission are minted
+   * together below, or not at all.
+   */
+  ponsAdapterAddress?: `0x${string}`,
+  /**
+   * Whether this deployment is the hosted service, from GET /api/auth/session.
+   *
+   * PASSED IN, NOT DETECTED. `isHostedMode()` reads process.env, and this module
+   * is `"use client"` — Next inlines only NEXT_PUBLIC_* into the browser bundle
+   * and next.config.mjs declares no `env` block, so it evaluated to `false` in
+   * every browser no matter how the server was configured. That silently
+   * attached the owner key to every hosted POST, which the server then refused
+   * with a 422 nobody could see. The runtime endpoint is the only signal the
+   * client can trust.
+   */
+  hostedAs?: Address,
+  /**
+   * The account this call claims to be RE-SIGNING, when it is one.
+   *
+   * Absent for a fresh mint and for a restore of a wallet this browser has
+   * never seen — neither of those knows an address to expect. Present for a
+   * renewal, where landing on a different account is the failure that quietly
+   * costs somebody their funds. Enforced against the sudo-only derivation
+   * below, before the wall is pinned to anything.
+   */
+  expectAccount?: Address,
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * A FACTORY, NOT A VAULT, and the distinction is not a detail. The vault is
+   * per-account and derived from a smart account that, on a fresh mint, does not
+   * exist until several steps into this function — so no caller could hand us
+   * the address even in principle. The factory is the deployment constant; the
+   * vault comes out of it below, once the account is known.
+   *
+   * A THIRD, SEPARATE opt-in: v4, Pons and class are three venues, three risks,
+   * three decisions. Marker, sealed address and permission are minted together
+   * or not at all — and if the factory cannot be read, nothing is signed, see
+   * resolveClassVault.
+   *
+   * APPENDED AT THE END on purpose. The comment on MintOptions records what
+   * inserting an optional address in the middle of this list cost last time.
+   */
+  ponsClassVaultFactory?: `0x${string}`,
+): Promise<MintedGrant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -134,10 +295,49 @@ async function mintGrant(
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
 
+  /**
+   * EVERY token this signature will cover: the platform's official listings
+   * first, then whatever the owner added.
+   *
+   * Sealed here rather than at the four call sites, because the failure mode of
+   * missing one is invisible. A caller that forgot would mint a grant whose wall
+   * does not cover a coin the worker is watching, pricing and treating as a
+   * tradable leg — and the owner would see refusals naming a token they never
+   * chose and cannot remove.
+   *
+   * Listings go FIRST so `usableExtraTokens`' own de-duplication keeps the
+   * verified address when an owner has separately typed the same coin in by
+   * hand, possibly with a typo.
+   *
+   * THIS IS WHERE A LISTING BECOMES REACHABLE, and it is the only place it can
+   * be: the token list is baked into the call policy at SIGNING time, so
+   * publishing a coin cannot widen a grant that is already signed. An owner
+   * whose grant predates a listing must re-sign before their key can touch it.
+   * That is the wall working, not a gap in it.
+   */
+  const sealedTokens: readonly CustomToken[] = [...officialCoinTokens(chainId), ...extraTokens];
+
+  /**
+   * The Pons adapter this signature seals: the owner's own if they named one,
+   * else the chain's deployed adapter.
+   *
+   * RESOLVED HERE for the same reason as the tokens above — the address reached
+   * a grant only if an owner had pasted it into /settings, and essentially none
+   * had, so the weekend curve fallback could not fire for anybody. Defaulting at
+   * the call sites would leave the phone signer out, which has no /settings
+   * fetch wired at all.
+   *
+   * A SIGNING-TIME DEFAULT ONLY. The worker still calls whatever address the
+   * signature sealed (`grantPonsAdapter`) and never this constant, so a later
+   * redeploy cannot redirect an existing grant's trades, and an owner who names
+   * their own address still wins over the platform's.
+   */
+  const sealedPonsAdapter = ponsAdapterForSigning(chainId, ponsAdapterAddress);
+
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
-  const ownerAccount = privateKeyToAccount(ownerPrivateKey);
+  const ownerAccount = ownerSigner.account;
   const owner = ownerAccount.address;
 
   onStatus("deriving your smart account…");
@@ -163,6 +363,47 @@ async function mintGrant(
     plugins: { sudo: ecdsaValidator },
   });
 
+  // BEFORE THE WALL IS PINNED TO IT. createKernelAccount resolves this address
+  // with a live getSenderAddress eth_call and, when the Kernel factory does not
+  // answer on this chain, returns 0x0000...0000 and throws nothing. Everything
+  // below would then be built around the zero address: the wall's swap
+  // recipient, the vault receiver, the assertion further down (which two zeros
+  // satisfy), and the smartAccount the server is asked to verify — which, if it
+  // derived the same zero, would MATCH. Refuse here, where it is still just a
+  // failed derivation rather than a sealed grant.
+  assertDerivedAccount(sudoOnlyAccount.address, "the smart account could not be derived");
+
+  /**
+   * RE-SIGNING MUST LAND ON THE ACCOUNT IT CLAIMS TO BE RE-SIGNING.
+   *
+   * A re-sign and a brand-new agent are the SAME CALL with a different owner.
+   * The Kernel address derives from the sudo validator alone, so an owner that
+   * is not the one this grant was minted under produces a different address —
+   * quietly, successfully, with no error anywhere. The caller would then hand
+   * the server a valid grant for an account holding nothing, while the funded
+   * account it meant to re-sign keeps its old wall and its money.
+   *
+   * That was survivable while the only re-sign path was `restoreAgentWallet`
+   * with a key read out of THIS grant: same key, same account, by construction.
+   * It stops being survivable with a Privy owner, because `usePrivyOwner`
+   * returns whichever embedded wallet is connected RIGHT NOW — a different
+   * Privy login in the same browser is a different owner and a different agent.
+   *
+   * Checked HERE rather than at the call site, and checked against the
+   * sudo-only address before the wall is pinned to anything: this is the one
+   * signing funnel, so a caller that knows which account it is re-signing
+   * cannot forget to say so, and one that legitimately does not know (minting a
+   * new agent, restoring a wallet the browser has never seen) passes nothing
+   * and is unaffected.
+   */
+  if (expectAccount && sudoOnlyAccount.address.toLowerCase() !== expectAccount.toLowerCase()) {
+    throw new Error(
+      `refusing to sign: this owner derives ${sudoOnlyAccount.address}, not ${expectAccount}. ` +
+        `Re-signing needs the same owner the agent was created with — signing in as somebody ` +
+        `else would mint a second agent and leave this one's funds where they are.`,
+    );
+  }
+
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this
   // one with nothing failing when it did. worker/src/wall.test.ts pins its shape.
@@ -172,12 +413,130 @@ async function mintGrant(
   // capability the wall granted regardless of it. Deriving both from one
   // constant is what stops them drifting apart again.
   const allowUniswapV4: boolean = false;
+
+  // THE CLASS VAULT, RESOLVED FROM THE ACCOUNT THAT WAS JUST DERIVED. It has to
+  // happen here and not earlier: `sudoOnlyAccount.address` is the vault's owner
+  // and the CREATE2 salt, and it is only known now. Throws rather than falling
+  // back if the factory cannot be read — see resolveClassVault.
+  /**
+   * THE FACTORY IS A PLATFORM ANSWER, NOT A THING EACH OWNER MUST TYPE.
+   *
+   * This read the address from the tenant's own settings and skipped the whole
+   * vault block when it was absent — which it is for everyone, because nothing
+   * ever asked them for it. So the class route, whose entire purpose is trading
+   * a launch that did not exist at signing, could only be reached by an owner
+   * who had somehow learned a deploy address and pasted it in. Measured: every
+   * tenant on the platform except one has no vault sealed, and a re-sign would
+   * have sealed nothing and told them it succeeded.
+   *
+   * `PONS_CLASS_VAULT_FACTORY` makes the same argument its own docstring makes
+   * for the adapter constant: a deploy fact, decided once per chain by whoever
+   * ran the deploy, identical for every tenant, and about which no tenant has
+   * information the platform lacks.
+   *
+   * THIS IS NOT THE ADAPTER, and the distinction is the whole safety case.
+   * `ponsAdapterForSigning` deliberately refuses to default, because
+   * `tradeExactIn` takes the curve as a CALLER-SUPPLIED argument the wall cannot
+   * pin and hands it a live allowance. A class vault is the opposite shape: the
+   * wall pins the vault itself as a literal target, the vault validates the
+   * curve internally, and `sweep` has no recipient — it pays `owner`, fixed at
+   * construction. Sealing it widens nothing the owner does not already control.
+   *
+   * AND IT STARTS NOTHING. A sealed vault is a capability, not an instruction:
+   * `proposeClassEntries` still requires `classSnipeEnabled`, a non-zero entry
+   * size and room for a position, all of which default off. Re-signing gives an
+   * owner the ABILITY to trade launches autonomously; turning it on stays a
+   * separate, deliberate act.
+   *
+   * A tenant who has set their own factory keeps it — grant-first precedence,
+   * exactly as the adapter path does.
+   */
+  const sealedClassFactory =
+    ponsClassVaultFactory ??
+    ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined);
+
+  let ponsClassVaultAddress: `0x${string}` | undefined;
+  if (sealedClassFactory) {
+    onStatus("locating your class vault…");
+    ponsClassVaultAddress = await resolveClassVault(
+      publicClient,
+      sealedClassFactory,
+      sudoOnlyAccount.address,
+    );
+  }
+
+  const wallOpts = {
+    extraTokens: sealedTokens,
+    allowUniswapV4,
+    v4AdapterAddress,
+    ponsAdapterAddress: sealedPonsAdapter,
+    ponsClassVaultAddress,
+    // The factory rides with the vault. buildWallPolicies THROWS on a vault
+    // without one — two of three class permissions is a key that can reach a
+    // vault it can never create.
+    ponsClassVaultFactoryAddress: sealedClassFactory,
+  };
+
+  // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
+  //
+  // A session key installs its validator lazily: the enable data rides in the
+  // signature of the first operation the key signs, so that one operation
+  // carries the whole wall. It therefore has its own gas ceiling — and until
+  // now signing had no idea that ceiling existed. The product minted grants
+  // whose first UserOp the executor was already designed to refuse, and two
+  // funded agents sat retrying one every ~97 seconds, forever, for a reason
+  // that was knowable before anyone contacted a bundler.
+  //
+  // THE SAME FUNCTION THE EXECUTOR CALLS, over the SAME permission objects the
+  // signature is about to be made over — not the same arithmetic reproduced
+  // here. Two implementations of one policy is exactly how the two sides came
+  // to disagree, and `wall-policy-lockstep.test.ts` fails if either grows its
+  // own.
+  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
+  //
+  // A fact about the account, read from the chain, not a constant. It used to be
+  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
+  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
+  // this ceiling that is the difference between signable and refused. A beta
+  // owner was told to delete a fifth token when four was the true answer.
+  //
+  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
+  // that would have fitted, which the owner can retry; under-charging mints one
+  // whose first operation the executor then refuses forever, which they cannot.
+  // Only one of those is recoverable, so the RPC failing picks that one.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
+  const signable = wallSignable(
+    wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)),
+    {
+      deploying: !alreadyDeployed,
+      // THE OWNER'S OWN ARITHMETIC. Re-shaped through the SAME builder, so the
+      // maximum it reports is true for this owner's venues and adapters rather
+      // than a constant measured on somebody else's feature set.
+      basket: {
+        count: sealedTokens.length,
+        shapeWith: (n) =>
+          wallShape(
+            buildCallPermissions(caps, sudoOnlyAccount.address, {
+              ...wallOpts,
+              extraTokens: sealedTokens.slice(0, n),
+            }),
+          ),
+      },
+    },
+  );
+  if (!signable.ok) throw new Error(signable.why);
+
   const { policies, now, expiresAt } = buildWallPolicies({
     caps,
     smartAccount: sudoOnlyAccount.address,
-    extraTokens,
-    allowUniswapV4,
-    v4AdapterAddress,
+    ...wallOpts,
   });
 
   const permissionValidator = await toPermissionValidator(publicClient, {
@@ -207,6 +566,7 @@ async function mintGrant(
   // being true, every pin would point at an account that doesn't exist and the
   // agent would be unable to trade — or worse, at someone else's. Fail here,
   // loudly, before a grant is sealed, rather than discovering it on-chain.
+  assertDerivedAccount(account.address, "the permissioned account could not be derived");
   if (account.address.toLowerCase() !== sudoOnlyAccount.address.toLowerCase()) {
     throw new Error(
       `refusing to seal this grant: the permission plugin changed the account address ` +
@@ -230,9 +590,13 @@ async function mintGrant(
     // it the worker assumes the legacy three — because a grant signed before the
     // list grew genuinely only has those three in its call policy, and crediting
     // it with more is how a position gets bought and never sold.
-    // GRANT_MULTIHOP is unconditional because buildCallPermissions grants
-    // `exactInput` unconditionally — the two must move together, or the worker
-    // either declines a route it could take or takes one that reverts.
+    // GRANT_MULTIHOP IS NO LONGER MINTED. buildCallPermissions stopped
+    // granting `exactInput` — its packed `path` hides the output token and
+    // cannot be constrained at the pinned policy version, which made it the
+    // loosest door in the wall once exactInputSingle pinned both legs. Marker
+    // and permission move together, so it goes too: the worker reads
+    // grantHasMultihop to decide whether to route via WETH, and a marker
+    // without the permission would send it building calls the chain refuses.
     // NO "transfer" HERE, and that is not an omission. This list carried it
     // unconditionally while buildWallPolicies was called without
     // withdrawalAddresses — so the wall emitted no transfer permission at all
@@ -248,35 +612,370 @@ async function mintGrant(
     // address rides with it because the marker alone is a claim, not evidence.
     grantFeatures: [
       TRADEABLE_V2,
-      GRANT_MULTIHOP,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
+      ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
+      // GRANT_PONS_CLASS is minted from `ponsClassVaultAddress`, NOT from
+      // `ponsClassVaultFactory`. The factory is what the owner asked for; the
+      // vault address is what the wall actually pinned, and only the second one
+      // is evidence. They differ in exactly the case that matters — a factory
+      // that could not be read — and that case never gets here, because
+      // resolveClassVault throws instead of returning undefined.
+      ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
+    ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
+    ...(ponsClassVaultAddress
+      ? {
+          ponsClassVaultAddress: ponsClassVaultAddress.toLowerCase(),
+          ponsClassVaultFactoryAddress: sealedClassFactory!.toLowerCase(),
+        }
+      : {}),
     // What this signature ACTUALLY covers — the worker compares it against the
     // owner's configured tokens and says so when they've drifted apart.
     // Same filter the wall itself applied, so what we RECORD as covered and what
     // the policy actually covers cannot disagree — the worker compares this
     // against the owner's configured tokens and warns when they've drifted.
-    grantTokens: usableExtraTokens(extraTokens).map((t) => t.address.toLowerCase()),
+    grantTokens: usableExtraTokens(sealedTokens).map((t) => t.address.toLowerCase()),
     demoSessionPrivateKey: sessionPrivateKey,
-    demoOwnerPrivateKey: ownerPrivateKey,
+    // THE CUSTODY LINE. Self-hosted keeps the owner key on the grant object: it
+    // is a localhost round-trip to a 0600 file on the user's own machine, which
+    // is not a leak, and it is what the local `merrymen recover` reads. HOSTED
+    // omits it entirely — the grant that goes to the server is session-key-only
+    // (the shape the mobile signer has always used), so the server is never
+    // custodian of a single owner key. The owner key still lives in this
+    // browser's localStorage below, which is what makes client-side recovery
+    // work with no server involvement.
+    // ONLY A BROWSER-GENERATED OWNER HAS A KEY TO OMIT. A Privy owner has none
+    // to carry in the first place, which is the point: there is no copy of it
+    // anywhere in merrymen to leak, back up, or forget to strip.
+    ...(hostedAs || ownerSigner.binding !== "legacy-wallet-owner-v1"
+      ? {}
+      : { demoOwnerPrivateKey: ownerSigner.privateKey }),
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(grant));
 
-  // Hand the grant to the worker (dev-mode file handoff; Supabase later).
-  onStatus("handing the grant to the worker…");
-  try {
-    await fetch("/api/grants", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(grant),
+  // HOSTED: prove this account belongs to the signed-in wallet before offering
+  // it. The owner key was generated right here, so `owner` can never equal the
+  // tenant and the server cannot authorize on it — two signatures over one
+  // server-issued nonce stand in for that. See bindingMessage in packages/core.
+  if (hostedAs) {
+    onStatus("linking this wallet to your account…");
+    const binding = await signBinding({
+      owner,
+      smartAccount: account.address,
+      chainId,
+      ownerSigner,
+      tenant: hostedAs,
     });
-  } catch {
-    // Worker handoff failing must not lose the signed grant — it's in localStorage.
+    grant.binding = binding;
   }
 
-  return grant;
+  // localStorage ALWAYS gets the full grant WITH the owner key — hosted or not.
+  // This is the browser's own copy, the root of client-side recovery, and it
+  // never crosses the network. Losing it is the same as losing the key, which
+  // is why the UI forces a backup before funding.
+  //
+  // ARCHIVE FIRST. This is a single key, so writing it destroys whatever grant
+  // was here — and for a hosted grant that blob is the ONLY copy of its owner
+  // key, never shown to the user and never sent anywhere. Overwriting it
+  // silently strands any funds in the old account, so the outgoing grant is
+  // copied aside under its own address, the same safety net archiveCurrentGrant
+  // gives the self-hosted file (web/src/app/api/grants/route.ts).
+  archivePreviousGrant();
+  // The browser copy, which ALWAYS carries the owner key, hosted or not. Kept in
+  // a named local so it can be returned as well as stored -- the UI needs the
+  // copy with the key, and reading it back off localStorage to find that out
+  // was the bug.
+  const localGrant: Grant =
+    ownerSigner.binding === "legacy-wallet-owner-v1"
+      ? { ...grant, demoOwnerPrivateKey: ownerSigner.privateKey }
+      : { ...grant };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(localGrant));
+
+  // Hand the grant to the worker. Self-hosted: a localhost file handoff.
+  // Hosted: an authenticated POST of the session-key-only grant to the tenant's
+  // own store. In hosted mode the browser sends its session cookie so the
+  // server can bind the grant to the authenticated wallet.
+  onStatus("handing the grant to the worker…");
+  return { grant, local: localGrant, handoff: await postGrant(grant) };
+}
+
+/**
+ * Produce the two signatures that bind this account to the signed-in wallet.
+ *
+ * The nonce comes from /api/auth/challenge — the same server-issued,
+ * origin-bound, expiring, single-use nonce the login uses. Reused deliberately
+ * rather than adding a second nonce system: the two messages are textually
+ * distinct (see bindingMessage), so a nonce spent on one can never be replayed
+ * as the other, and there is one piece of nonce machinery to get right.
+ *
+ * The wallet signature is the only popup in the whole flow. The owner
+ * co-signature is local and silent — it exists to prove the browser actually
+ * holds the key it is vouching for, without which the server's remaining checks
+ * are just arithmetic over public addresses.
+ *
+ * `personal_sign` for both, which is why this works at all: it carries no
+ * domain and no chainId, so no wallet is asked to switch to (or even know
+ * about) Robinhood Chain. Phantom cannot connect to dApps on 4663 at all, and
+ * still signs this fine.
+ */
+async function signBinding(args: {
+  owner: Address;
+  smartAccount: Address;
+  chainId: number;
+  ownerSigner: OwnerSigner;
+  /** The wallet the session belongs to — what the server will check against. */
+  tenant: Address;
+}): Promise<NonNullable<Grant["binding"]>> {
+  const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
+    if (!r.ok) throw new Error("couldn't start the account link — please sign in again.");
+    return r.json();
+  })) as { origin: string; nonce: string };
+
+  // ── privy-did-owner-v1: ONE SIGNATURE, AND THE DID IS IN THE TEXT ────────
+  //
+  // No injected provider is consulted, and that is the fix for the error this
+  // path used to throw: it compared the browser wallet's ACTIVE account against
+  // the session, which under Privy is an embedded wallet MetaMask has never
+  // heard of. The comparison was right for a model where the login is an
+  // injected wallet, and simply does not apply to this one.
+  //
+  // Authentication here is the access token the server verifies at intake; this
+  // signature is the owner half. The DID is inside the signed bytes, so a
+  // signature captured under one identity cannot be replayed under another.
+  if (args.ownerSigner.binding === "privy-did-owner-v1") {
+    const did = args.ownerSigner.did;
+    const privyMessage = bindingMessage({
+      version: "privy-did-owner-v1",
+      origin: ch.origin,
+      nonce: ch.nonce,
+      owner: args.owner,
+      smartAccount: args.smartAccount,
+      chainId: args.chainId,
+      did,
+    });
+    return {
+      version: "privy-did-owner-v1",
+      nonce: ch.nonce,
+      ownerSignature: await args.ownerSigner.account.signMessage({ message: privyMessage }),
+      did,
+    };
+  }
+
+  const message = bindingMessage({
+    origin: ch.origin,
+    nonce: ch.nonce,
+    owner: args.owner,
+    smartAccount: args.smartAccount,
+    chainId: args.chainId,
+  });
+
+  const provider = findInjectedProvider();
+  if (!provider) {
+    throw new Error("No wallet found in this browser to authorize the agent — sign in again from a browser with your wallet.");
+  }
+  const account = await requestAccount(provider);
+  // CHECK BEFORE PROMPTING. The wallet's ACTIVE account is whatever the user
+  // last selected, which is not necessarily the one they signed in with — and
+  // the server checks the signature against the session. Without this they
+  // approve a signature and only then get a 403 naming a wallet mismatch they
+  // cannot act on. Catch it while it is still a sentence about switching
+  // accounts, not a failed grant.
+  if (account.toLowerCase() !== args.tenant.toLowerCase()) {
+    throw new Error(
+      `Your wallet is on ${short(account)} but you signed in as ${short(args.tenant)}. ` +
+        `Switch back to that account in your wallet, or sign out and in again.`,
+    );
+  }
+  const walletSignature = (await provider.request({
+    method: "personal_sign",
+    // [message, address] — the order Onboarding.tsx's sign-in already uses.
+    params: [message, account],
+  })) as `0x${string}`;
+
+  // Local, no popup: the generated owner key vouches for itself.
+  const ownerSignature = await args.ownerSigner.account.signMessage({ message });
+
+  return { version: "legacy-wallet-owner-v1", nonce: ch.nonce, walletSignature, ownerSignature };
+}
+
+/** Where a superseded grant is parked, keyed by the account it controls. */
+const ARCHIVE_PREFIX = "merrymen.grant.archive.";
+
+/** An agent account this browser holds the owner key for. */
+export interface SavedWallet {
+  smartAccount: Address;
+  owner: Address;
+  chainId: number;
+  /** The key that controls the funds. Absent only on a grant that never had one. */
+  ownerKey?: `0x${string}`;
+  /** Whether this is the wallet currently armed, or one it superseded. */
+  current: boolean;
+}
+
+/**
+ * Every agent account this browser can still reach, newest first.
+ *
+ * THE POINT: an account's funds live at an address derived from an owner key,
+ * and that key exists in exactly one place — this browser's localStorage. If a
+ * grant is superseded, or the server refuses it, the money does not move and
+ * the key does not vanish; only the UI stops mentioning either. That is
+ * indistinguishable from "my funds are gone" to the person it happened to.
+ *
+ * So enumerate what is actually here — the live grant plus every archived one —
+ * and let the page show balances and hand back the key. Reads only localStorage;
+ * no server, no session, works while signed out.
+ */
+export function listSavedWallets(): SavedWallet[] {
+  const out: SavedWallet[] = [];
+  const take = (raw: string | null, current: boolean) => {
+    if (!raw) return;
+    try {
+      const g = JSON.parse(raw) as Partial<Grant>;
+      if (typeof g?.smartAccount !== "string" || typeof g?.owner !== "string") return;
+      // A wallet already listed as current must not appear twice as an archive.
+      if (out.some((w) => w.smartAccount.toLowerCase() === g.smartAccount!.toLowerCase())) return;
+      out.push({
+        smartAccount: g.smartAccount as Address,
+        owner: g.owner as Address,
+        // A grant with no readable chainId is a corrupt record, not a testnet
+        // one. Defaulting it to the sandbox meant a mainnet wallet with a
+        // damaged field silently became "practice" — funds on one chain, a UI
+        // describing another. Mainnet is both the product default and the
+        // conservative guess: it makes the page say REAL MONEY about a wallet
+        // that may hold some, rather than the reverse.
+        chainId: typeof g.chainId === "number" ? g.chainId : robinhoodChain.id,
+        ownerKey: g.demoOwnerPrivateKey,
+        current,
+      });
+    } catch {
+      /* a corrupt blob must not hide the others */
+    }
+  };
+  try {
+    take(localStorage.getItem(STORAGE_KEY), true);
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(ARCHIVE_PREFIX)) take(localStorage.getItem(k), false);
+    }
+  } catch {
+    /* storage unavailable — return whatever was readable */
+  }
+  return out;
+}
+
+/**
+ * Copy the grant currently in localStorage aside before it is overwritten.
+ *
+ * Best-effort and deliberately silent: this must never be able to stop someone
+ * creating a wallet. Keyed by smart account, so re-creating over the same
+ * account just refreshes its copy while a different account gets its own slot.
+ */
+function archivePreviousGrant(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const prev = JSON.parse(raw) as Partial<Grant>;
+    if (typeof prev?.smartAccount !== "string") return;
+    localStorage.setItem(`${ARCHIVE_PREFIX}${prev.smartAccount.toLowerCase()}`, raw);
+  } catch {
+    /* unreadable or storage full — never block the create */
+  }
+}
+
+/**
+ * Hand a signed grant to the server, and REPORT WHAT IT SAID.
+ *
+ * This used to be a bare `await fetch(...)` inside a `try {} catch {}`, and the
+ * comment explained only why a failure must not lose the grant — which is true,
+ * and is handled by the localStorage write above. What it missed is that a
+ * rejected POST does not throw: `fetch` resolves normally for 401/403/422/500,
+ * so the catch never ran and nothing ever read `res.ok`. Every server refusal
+ * looked identical to success, and the caller happily reported a wallet the
+ * server had thrown away. That is why hosted onboarding could be broken for
+ * every tester with nobody able to say more than "it doesn't work".
+ *
+ * So: never throw (the grant is safe in localStorage either way), but always
+ * return what happened, and prefer the server's OWN message — it is the only
+ * text that can say which of the six hosted checks refused this grant.
+ */
+/**
+ * Turn a refusal into something the reader can ACT on.
+ *
+ * The server's own strings are accurate but written for whoever is reading the
+ * route — "not signed in" is true and tells a user nothing about what to do
+ * next. Each hosted check gets a sentence naming the fix; anything unmapped
+ * falls through to the server's text, which is still better than the silence
+ * this replaced. The raw message is kept on the end where it adds detail, so a
+ * bug report can still quote the exact check that refused.
+ */
+export function refusalMessage(status: number, serverError?: string): string {
+  switch (status) {
+    case 401:
+      return "Sign in with your wallet first — a hosted agent is bound to the wallet you sign in with.";
+    case 422:
+      // carriesOwnerKey. Today this is reachable from this very client, which is
+      // a bug on our side, not something the reader did wrong — say so.
+      return "This wallet can't be armed on the hosted service yet: the grant still carries its owner key. That's a bug on our side, not yours.";
+    case 403:
+      // TWO DIFFERENT REFUSALS ARRIVE AS 403 and they need different actions:
+      // the grant carries no binding at all ("create it again from a signed-in
+      // browser"), or it carries one that does not verify against this login.
+      // A single hardcoded sentence for both said "isn't owned by the wallet
+      // you signed in with" about a wallet created seconds earlier by that very
+      // wallet — which sent the reader looking for a wallet-mixup that did not
+      // exist, and hid a real bug for the length of a debugging session.
+      //
+      // This function's own docstring says to prefer the server's message
+      // because it is the only text that can name which check refused. This arm
+      // was the one place that ignored it.
+      return serverError
+        ? `${serverError} (the server refused to arm this wallet)`
+        : "The server won't arm this wallet: it isn't linked to the wallet you signed in with.";
+    case 503:
+      return "Couldn't verify the account on-chain just now — try again in a moment.";
+    default:
+      return serverError ?? `the server refused the grant (${status})`;
+  }
+}
+
+/**
+ * How the browser proves a Privy identity when handing over a grant.
+ *
+ * Set by the Privy sign-in once, read here. The access token is NOT stored —
+ * this is a getter, so the token is fetched fresh at the moment it is needed
+ * and Privy refreshes it near expiry. Holding one would mean holding a
+ * credential past the moment it was useful.
+ */
+let privyTokenSource: (() => Promise<string | null>) | null = null;
+export function setPrivyTokenSource(fn: (() => Promise<string | null>) | null): void {
+  privyTokenSource = fn;
+}
+
+async function postGrant(grant: Grant): Promise<GrantHandoff> {
+  try {
+    // A PRIVY BINDING CARRIES ITS TOKEN. The server cannot verify the identity
+    // half of that binding without one, and it refuses rather than falling back
+    // to the legacy check — so a missing header is a 401, not a downgrade.
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (grant.binding?.version === "privy-did-owner-v1" && privyTokenSource) {
+      const token = await privyTokenSource();
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch("/api/grants", {
+      method: "POST",
+      headers,
+      credentials: "same-origin",
+      body: JSON.stringify(grant),
+    });
+    if (res.ok) return { ok: true };
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: refusalMessage(res.status, body.error) };
+  } catch {
+    // A genuine network failure, as opposed to a refusal. Still not fatal — the
+    // grant is in localStorage and `re-arm` can push it again later.
+    return { ok: false, error: "couldn't reach the server to hand over the grant — it's saved in this browser, try re-arming." };
+  }
 }
 
 /**
@@ -284,15 +983,103 @@ async function mintGrant(
  * (this is the account's sudo signer and the root of fund custody — no external
  * wallet, nothing to connect), then a grant is sealed on it.
  */
-export async function createAgentWallet(
-  caps: GrantCaps,
-  onStatus: (status: string) => void,
-  chainId: number = robinhoodTestnet.id,
-  extraTokens: readonly CustomToken[] = [],
-  v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
-  onStatus("minting your agent's owner key…");
-  return mintGrant(generatePrivateKey(), caps, onStatus, chainId, extraTokens, v4AdapterAddress);
+/**
+ * Everything a mint needs, NAMED.
+ *
+ * An options object rather than positional arguments, because of a bug that
+ * actually shipped. These entry points took seven positional parameters, four
+ * optional and three of them the same type — so inserting a new one
+ * (`ponsAdapterAddress`) before `hostedAs` silently shifted every existing call
+ * site: the signed-in WALLET address landed in the adapter slot and `hostedAs`
+ * became undefined. TypeScript cannot catch that, because an optional address
+ * is an optional address whatever it is supposed to mean.
+ *
+ * The consequences were not cosmetic. No `hostedAs` meant no binding, so the
+ * server refused every newly created hosted wallet with "this grant isn't
+ * linked to your login" — and the owner's own wallet address was being sealed
+ * into the wall as a Pons adapter, i.e. as a call target and an approve spender
+ * it should never have been.
+ *
+ * With names, adding a field can only ever be additive.
+ */
+export interface MintOptions {
+  caps: GrantCaps;
+  onStatus: (status: string) => void;
+  chainId?: number;
+  extraTokens?: readonly CustomToken[];
+  v4AdapterAddress?: `0x${string}`;
+  ponsAdapterAddress?: `0x${string}`;
+  /** The signed-in wallet, on the hosted service. Absent when self-hosted. */
+  hostedAs?: Address;
+  /**
+   * The account being RE-SIGNED, when this is a renewal rather than a mint.
+   *
+   * A re-sign and a new agent are the same call with a different owner, and the
+   * difference is invisible without this: see the refusal in mintGrant.
+   */
+  expectAccount?: Address;
+  /**
+   * The deployed PonsClassVaultFactory, or absent for no class route.
+   *
+   * The FACTORY, because the vault is per-account and derives from a smart
+   * account this call is about to create — see the parameter of the same name
+   * on mintGrant.
+   */
+  ponsClassVaultFactory?: `0x${string}`;
+}
+
+export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
+  o.onStatus("minting your agent's owner key…");
+  const key = generatePrivateKey();
+  return mintGrant(
+    { account: privateKeyToAccount(key), binding: "legacy-wallet-owner-v1", privateKey: key },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+    o.expectAccount,
+    o.ponsClassVaultFactory,
+  );
+}
+
+/**
+ * CREATE A MERRYMAN OWNED BY A PRIVY EMBEDDED WALLET.
+ *
+ * Everything downstream is the SAME code the browser-key path runs: the same
+ * Kernel v3.3 derivation, the same permission wall, the same session key, the
+ * same serialization. Only the owner differs, and only in where its signature
+ * comes from. There is no second smart-account implementation, no alternative
+ * executor, and no Privy account abstraction anywhere in the path.
+ *
+ * WHAT IS GONE, DELIBERATELY: `demoOwnerPrivateKey`. A Privy owner has no key
+ * for merrymen to hold, back up, strip at the boundary, or lose — which
+ * removes the localStorage custody this file's header has always flagged as
+ * the weak point, and replaces it with Privy's own recovery. The consequence
+ * to be honest about is the mirror image: merrymen cannot sweep this account
+ * from a backed-up key, because there is no such key. Recovery for a
+ * Privy-owned Merryman is signer-based and is NOT yet built.
+ */
+export async function createPrivyOwnedWallet(
+  owner: LocalAccount,
+  did: string,
+  o: MintOptions,
+): Promise<MintedGrant> {
+  o.onStatus("deriving your smart account…");
+  return mintGrant(
+    { account: owner, binding: "privy-did-owner-v1", did },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+    o.expectAccount,
+    o.ponsClassVaultFactory,
+  );
 }
 
 /**
@@ -308,14 +1095,65 @@ export async function createAgentWallet(
  */
 export async function restoreAgentWallet(
   ownerPrivateKey: `0x${string}`,
-  caps: GrantCaps,
-  onStatus: (status: string) => void,
-  chainId: number = robinhoodTestnet.id,
-  extraTokens: readonly CustomToken[] = [],
-  v4AdapterAddress?: `0x${string}`,
-): Promise<Grant> {
-  onStatus("re-deriving your smart account from the owner key…");
-  return mintGrant(ownerPrivateKey, caps, onStatus, chainId, extraTokens, v4AdapterAddress);
+  o: MintOptions,
+): Promise<MintedGrant> {
+  o.onStatus("re-deriving your smart account from the owner key…");
+  return mintGrant(
+    {
+      account: privateKeyToAccount(ownerPrivateKey),
+      binding: "legacy-wallet-owner-v1",
+      privateKey: ownerPrivateKey,
+    },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    o.hostedAs,
+    o.expectAccount,
+    o.ponsClassVaultFactory,
+  );
+}
+
+/**
+ * What the server said when the signed grant was handed over.
+ *
+ * Separate from the grant itself because the two succeed independently: the
+ * grant is signed and in localStorage regardless, while the handoff can be
+ * refused (not signed in, carries an owner key, owner isn't the tenant…). The
+ * UI must be able to show a wallet AND say the server rejected it, which is
+ * exactly the state a desynced browser is in.
+ */
+export interface GrantHandoff {
+  ok: boolean;
+  /** The server's own message, shown verbatim — it names which check refused. */
+  error?: string;
+}
+
+/** A freshly signed grant plus the outcome of handing it to the server. */
+export interface MintedGrant {
+  /**
+   * The grant AS HANDED TO THE SERVER. Hosted grants omit the owner key from
+   * this object on purpose — the server is never custodian of one.
+   */
+  grant: Grant;
+  /**
+   * The browser's OWN copy, which always carries the owner key.
+   *
+   * Separate from `grant` because the two are deliberately different, and
+   * conflating them broke the one screen that exists to show a user their key:
+   * the backup gate read `grant.demoOwnerPrivateKey`, which is undefined for a
+   * hosted grant by design, and rendered "(external wallet — no key stored)"
+   * while asking the reader to confirm they had saved it. The key was in
+   * localStorage the whole time, so a page reload displayed it correctly — but
+   * nobody reloads a page that is telling them to write something down.
+   *
+   * Anything user-facing wants THIS one. Anything that talks to the server
+   * wants `grant`.
+   */
+  local: Grant;
+  handoff: GrantHandoff;
 }
 
 export interface OwnerPreview {
@@ -332,7 +1170,7 @@ export interface OwnerPreview {
  */
 export async function previewOwnerAccount(
   ownerPrivateKey: `0x${string}`,
-  chainId: number = robinhoodTestnet.id,
+  chainId: number = robinhoodChain.id,
 ): Promise<OwnerPreview> {
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
@@ -348,6 +1186,12 @@ export async function previewOwnerAccount(
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },
   });
+  // The restore flow shows this address and then funds it. A zero here would
+  // invite a deposit to an account nobody controls.
+  // Assert, then return the ORIGINAL casing. assertDerivedAccount normalises
+  // to lowercase, and this value is rendered next to addresses everywhere else
+  // in the app, which show EIP-55.
+  assertDerivedAccount(account.address, "that owner key does not derive an account");
   return { smartAccount: account.address, owner: ownerAccount.address };
 }
 
@@ -358,7 +1202,7 @@ export interface Funding {
   usdg: number;
 }
 
-export async function readFunding(smartAccount: Address, chainId: number = robinhoodTestnet.id): Promise<Funding> {
+export async function readFunding(smartAccount: Address, chainId: number = robinhoodChain.id): Promise<Funding> {
   const publicClient = createPublicClient({ chain: chainForId(chainId), transport: http() });
   const [gasWei, usdgUnits] = await Promise.all([
     publicClient.getBalance({ address: smartAccount }).catch(() => 0n),

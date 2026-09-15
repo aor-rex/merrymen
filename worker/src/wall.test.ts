@@ -11,7 +11,7 @@ import {
   TRADEABLE_SYMBOLS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
-  V4SELFSWAP_ABI,
+  PONS_SELFTRADE_ABI, V4SELFSWAP_ABI,
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
@@ -206,31 +206,18 @@ test("the vault deposit is capped, the withdrawal is not — but BOTH land in ou
   assert.equal(wdArgs[2], null, "owner is unconstrained — it can only be us anyway");
 });
 
-test("a MULTI-HOP swap IS permitted, and its recipient is pinned at the RIGHT word", () => {
-  // `exactInput` (the via-WETH route) is a different selector from
-  // `exactInputSingle`, and the wall used to grant only the latter while the
-  // worker quoted multi-hop routes anyway: they logged "simulated ✓ v3 via
-  // WETH", were submitted, and reverted on-chain — burning gas every tick,
-  // invisible in paper mode because paper never builds calldata.
-  //
-  // Granting it costs nothing beyond what single-hop already grants: the input
-  // is bounded by the USDG approve cap (≤ perTradeUsdg) and the output is
-  // pinned to this account, exactly as asserted below.
-  const [hop] = find(UNISWAP.swapRouter02, "exactInput");
-  assert.ok(hop, "the multi-hop permission exists");
-  const args = hop.args as (null | { condition: number; value: string })[];
+test("MULTI-HOP IS GONE, and the packed path is why it cannot come back", () => {
+  // It used to be granted with `args: [null, null, self]` — recipient pinned at
+  // word 2, both tokens open. That was defensible only while its single-hop
+  // sibling was equally open. Once `exactInputSingle` pinned both token legs,
+  // this became the loosest door in the wall: the output token lives inside a
+  // packed `path`, so the drain the single-hop pin closes was one selector away.
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0, "no multi-hop permission");
 
-  // THREE entries, not seven, and the pin sits at index 2 rather than 3 — THAT
-  // is the trap. ExactInputParams leads with `bytes path`, so the tuple is
-  // DYNAMIC: word 0 is the pointer to the tuple, word 1 the pointer to the
-  // path, and `recipient` lands at word 2. Copying the single-hop mapping would
-  // have constrained `amountIn` and left the recipient free to be anyone.
-  assert.equal(args.length, 3);
-  assert.deepEqual(args[2], { condition: ParamCondition.EQUAL, value: SELF });
-  assert.equal(args[0], null, "word 0 is the tuple pointer");
-  assert.equal(args[1], null, "word 1 is the path pointer");
-
-  // AND PROVE IT against viem's encoder, not against the reasoning above.
+  // AND THE PATH IS UNCONSTRAINABLE — which is why the answer is removal rather
+  // than a tighter rule. Proven against viem's encoder: the output token is not
+  // right-aligned in any word, and its word index MOVES with the hop count, so
+  // no fixed-offset ONE_OF can ever name it.
   const OTHER = "0x00000000000000000000000000000000000000ff" as const;
   const path = `0x${CASH.USDG.slice(2)}000bb8${CASH.WETH.slice(2)}000bb8${OTHER.slice(2)}` as `0x${string}`;
   const calldata = encodeFunctionData({
@@ -240,33 +227,26 @@ test("a MULTI-HOP swap IS permitted, and its recipient is pinned at the RIGHT wo
   });
   const body = `0x${calldata.slice(10)}`;
   const wordAt = (i: number) => `0x${body.slice(2 + i * 64, 2 + (i + 1) * 64)}`;
-  assert.equal(
-    wordAt(2).toLowerCase(),
-    pad(SELF, { size: 32 }).toLowerCase(),
-    "offset 2*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
+  assert.equal(BigInt(wordAt(5)), 66n, "3 hops = 20+3+20+3+20 bytes of path");
+  const tail = OTHER.slice(2).toLowerCase();
+  assert.ok(
+    ![6, 7, 8].some((i) => wordAt(i).toLowerCase().endsWith(tail)),
+    "the output token is not right-aligned in any word — a ONE_OF rule cannot match it",
   );
-  // The neighbours too, so a shift in EITHER direction fails rather than aliases.
-  assert.equal(BigInt(wordAt(3)), 1_000_000n, "word 3 is amountIn");
-  assert.equal(BigInt(wordAt(1)), 128n, "word 1 is the path OFFSET, not a value");
 
-  // The permission and the grant marker must move together, exactly like
-  // allowUniswapV4 and GRANT_V4. Both signers mint this unconditionally now.
-  assert.equal(
-    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2", "multihop"] }),
-    true,
-    "a grant signed today claims it",
-  );
-  assert.equal(
-    grantHasMultihop({ grantFeatures: ["transfer", "tradeable-v2"] }),
-    false,
-    "one signed before this does not — the worker keeps routing it single-hop",
-  );
+  // Marker and permission move together. A wall that no longer grants the route
+  // must not hand out a marker that tells the worker to build it.
+  assert.equal(grantHasMultihop({ grantFeatures: ["tradeable-v2"] }), false);
 });
 
-test("the routers are narrowed to the two swap entrypoints, and Rialto is absent by default", () => {
+
+test("the router is narrowed to ONE entrypoint, and Rialto is absent by default", () => {
+  // ONE, not two. `exactInput` (multi-hop) was dropped: its packed `path` hides
+  // the output token and cannot be constrained at the pinned policy version,
+  // which made it the loosest door once exactInputSingle pinned both legs.
   assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 1);
-  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 1);
-  assert.equal(find(UNISWAP.swapRouter02).length, 2, "and nothing else on that router");
+  assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0);
+  assert.equal(find(UNISWAP.swapRouter02).length, 1, "and nothing else on that router");
   // The UniversalRouter is absent entirely by default — see the v4 test above.
   // When opted in it is narrowed to `execute` and no further, because there is
   // no further: its arguments are opaque bytes.
@@ -304,13 +284,15 @@ test("owner-added tokens are validated and de-duplicated before becoming policy"
 test("the wall carries exactly the expected permission set — no more, no less", () => {
   const list = perms();
   const stockCount = STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).length;
-  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×2
-  // (exactInputSingle and exactInput) + vault deposit + vault withdraw. No USDG
-  // transfer, no Rialto and no v4 — all three are opt-in. This count dropped
-  // from stockCount + 6 when Permit2 and the UniversalRouter stopped being
-  // granted unconditionally, and rose by one when the multi-hop route was
-  // granted rather than quoted-and-reverted.
-  assert.equal(list.length, stockCount + 5, "an unexpected permission count means something was added or lost");
+  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×1
+  // (exactInputSingle only) + vault deposit + vault withdraw. No USDG transfer,
+  // no Rialto and no v4 — all three are opt-in. The count dropped from
+  // stockCount + 6 when Permit2 and the UniversalRouter stopped being granted
+  // unconditionally, rose to +6 when multi-hop was granted rather than
+  // quoted-and-reverted, and fell to +4 when multi-hop was dropped again —
+  // its packed path could not be constrained, which made it the widest door
+  // left once exactInputSingle pinned both token legs.
+  assert.equal(list.length, stockCount + 4, "an unexpected permission count means something was added or lost");
   // ...and each opt-in adds exactly the entries it should, never more.
   const withXfer = buildCallPermissions(CAPS, SELF, { withdrawalAddresses: [SELF] });
   const withRialto = buildCallPermissions(CAPS, SELF, { allowRialto: true });
@@ -322,13 +304,23 @@ test("the wall carries exactly the expected permission set — no more, no less"
   for (const p of list) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
 });
 
-test("policies carry a hard expiry and a daily op limit", () => {
+test("the wall carries a hard expiry and a call policy — and NO rate limit", () => {
   const now = 1_800_000_000;
   const { policies, expiresAt } = buildWallPolicies({ caps: CAPS, smartAccount: SELF, now });
   assert.equal(expiresAt, now + CAPS.expiryDays * 86_400);
-  // Expiry, rate limit, call policy — the key dies on schedule even if every
-  // other control fails.
-  assert.equal(policies.length, 3);
+
+  // TWO, not three. This asserted three while the middle one was a pointer into
+  // empty space, and the count passing was part of why nobody looked: a test
+  // can only check that a policy was CONSTRUCTED, never that the contract it
+  // names exists. eth_getCode on 2026-08-30 returned 0 bytes for
+  // RATE_LIMIT_POLICY_CONTRACT on mainnet 4663 AND testnet 46630, while the
+  // timestamp and call policies both carry real bytecode.
+  //
+  // So maxOpsPerDay is enforced by the WORKER only, alongside the daily total
+  // and the drawdown breaker, and the on-chain ceiling is per-trade until
+  // expiry. WALL_POLICY_CONTRACTS + the arm-time probe are what make a future
+  // undeployed singleton a refusal instead of a mystery.
+  assert.equal(policies.length, 2, "expiry + call policy; the rate limit is gone because it was never there");
 });
 
 test("the session key may EXECUTE but may not SIGN (the ERC-1271 hole)", () => {
@@ -363,7 +355,29 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
   // consecutive words. Index 3 is `recipient`.
   assert.equal(args.length, 7);
   assert.deepEqual(args[3], { condition: ParamCondition.EQUAL, value: SELF });
-  for (const i of [0, 1, 2, 4, 5, 6]) assert.equal(args[i], null, `arg ${i} must stay unconstrained`);
+
+  // BOTH TOKEN LEGS ARE PINNED, and this is the assertion that used to say the
+  // opposite. It read `for (const i of [0, 1, 2, 4, 5, 6]) assert.equal(args[i],
+  // null)` — enshrining the hole: with tokenOut open, a stolen key could
+  // approve a stock (the amount is deliberately uncapped) and swap the entire
+  // balance into a token it had just minted, in ONE UserOp. The recipient pin
+  // was satisfied throughout: the account duly received the worthless token.
+  const legs = [args[0], args[1]] as unknown as { condition: number; value: string[] }[];
+  for (const [i, leg] of legs.entries()) {
+    assert.equal(leg?.condition, ParamCondition.ONE_OF, `token leg ${i} must be an allowlist`);
+    assert.ok(
+      leg.value.map((a) => a.toLowerCase()).includes(CASH.USDG.toLowerCase()),
+      `token leg ${i} must admit USDG`,
+    );
+    assert.ok(
+      !leg.value.map((a) => a.toLowerCase()).includes("0x00000000000000000000000000000000000000ff"),
+      `token leg ${i} must not admit a token nobody named`,
+    );
+  }
+  // The two legs are built from the SAME list the approve permissions use, so
+  // what a key may approve and what it may swap into cannot drift apart.
+  assert.deepEqual(legs[0]!.value, legs[1]!.value, "both legs share one allowlist");
+  for (const i of [2, 4, 5, 6]) assert.equal(args[i], null, `arg ${i} must stay unconstrained`);
 
   // AND PROVE THE OFFSET, against viem's encoder rather than against the
   // reasoning above. If SwapRouter02's struct ever gains a dynamic member or
@@ -388,12 +402,28 @@ test("the swap recipient is pinned to our own account, at the RIGHT calldata off
   });
   // Skip the 4-byte selector, then read word 3 (the policy's offset 3*32).
   const body = `0x${calldata.slice(10)}`;
-  const word3 = `0x${body.slice(2 + 3 * 64, 2 + 4 * 64)}`;
+  const wordAt = (i: number) => `0x${body.slice(2 + i * 64, 2 + (i + 1) * 64)}`;
   assert.equal(
-    word3.toLowerCase(),
+    wordAt(3).toLowerCase(),
     pad(SELF, { size: 32 }).toLowerCase(),
     "offset 3*32 must be `recipient` — if this fails the tuple layout moved and the pin is aimed at the wrong field",
   );
+
+  // AND THE TOKEN LEGS, for the same reason and with more at stake: a ONE_OF
+  // aimed at the wrong word is an allowlist that permits everything while
+  // reading as strict. Words 0 and 1 must be tokenIn and tokenOut.
+  assert.equal(
+    wordAt(0).toLowerCase(),
+    pad(CASH.USDG as `0x${string}`, { size: 32 }).toLowerCase(),
+    "offset 0 must be `tokenIn`",
+  );
+  assert.equal(
+    wordAt(1).toLowerCase(),
+    pad(OTHER, { size: 32 }).toLowerCase(),
+    "offset 1 must be `tokenOut`",
+  );
+  // The neighbour too, so a shift in either direction fails rather than aliases.
+  assert.equal(BigInt(wordAt(2)), 3000n, "word 2 is the fee tier");
 });
 
 test("the V4 ADAPTER opt-in: one permission, both legs pinned to the owner's asset list, at proven offsets", () => {
@@ -506,5 +536,314 @@ test("the adapter opt-in is INDEPENDENT of the legacy v4 route, and a junk addre
       /not an address/,
       `"${bad}" must be refused before it becomes policy`,
     );
+  }
+});
+
+test("the PONS ADAPTER opt-in: one permission, both asset legs pinned, curve deliberately not, at proven offsets", () => {
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+  const CUSTOM = { symbol: "WIF", address: "0x00000000000000000000000000000000000000e7", decimals: 9 } as const;
+
+  // Absent by default — the closed position, like every opt-in here.
+  assert.equal(find(PONS).length, 0, "no Pons permission without the opt-in");
+
+  const withPons = buildCallPermissions(CAPS, SELF, {
+    ponsAdapterAddress: PONS,
+    extraTokens: [CUSTOM],
+  }) as unknown as Perm[];
+  const mine = withPons.filter((p) => p.target.toLowerCase() === PONS);
+  assert.equal(mine.length, 1, "exactly one call permission on the adapter");
+  const [trade] = mine;
+  assert.equal(trade!.functionName, "tradeExactIn");
+  // NOT covered by the default-wall loop above, which only walks perms() — an
+  // opt-in permission needs its own assertion or the invariant has a hole.
+  // Load-bearing here specifically: the adapter is non-payable, which is the
+  // whole reason native-quoted curves are out of reach.
+  assert.equal(trade!.valueLimit, 0n, "granting Pons must not become the first permission that moves native ETH");
+
+  // The adapter joined the SPENDER set, so the existing approves can name it —
+  // zero new approve entries, exactly as the v4 adapter did.
+  const usdgApprove = withPons.find(
+    (p) => p.target.toLowerCase() === CASH.USDG.toLowerCase() && p.functionName === "approve",
+  )!;
+  const spenderCond = (usdgApprove.args as { value: string[] }[])[0]!;
+  assert.ok(
+    spenderCond.value.map((a) => a.toLowerCase()).includes(PONS),
+    "the adapter must be an allowed spender, or it can never pull assetIn",
+  );
+
+  const args = trade!.args as (null | { condition: number; value: string | string[] })[];
+  assert.equal(args.length, 6, "six declared args, six policy slots — all static, no pointer words");
+
+  // THE CURVE IS UNPINNED, AND THAT IS THE DESIGN. A buy goes to a per-token
+  // address (~475 new ones an hour), so any ONE_OF over word 0 is stale
+  // tomorrow or unbounded today. Asserted rather than left to a reader's
+  // assumption: if someone later "tightens" this, the test says why not to.
+  assert.equal(args[0], null, "the curve cannot be pinned — see wall.ts");
+
+  // BOTH ASSET LEGS PINNED, from the same list the approves cover, so the
+  // trade set and the approve set cannot drift inside one grant.
+  for (const i of [1, 2] as const) {
+    const cond = args[i] as { condition: number; value: string[] };
+    assert.equal(cond.condition, ParamCondition.ONE_OF, `arg ${i} must be pinned`);
+    const set = cond.value.map((a) => a.toLowerCase());
+    assert.ok(set.includes(CASH.USDG.toLowerCase()), "cash is an asset");
+    assert.ok(set.includes(CUSTOM.address.toLowerCase()), "the owner's own token is an asset");
+    assert.ok(!set.includes("0x00000000000000000000000000000000000000ff"), "an unnamed token is not");
+  }
+  for (const i of [3, 4, 5]) assert.equal(args[i], null, `arg ${i} stays unconstrained — see wall.ts for why each`);
+
+  // AND PROVE THE OFFSETS against viem's encoder, not against the reasoning.
+  // There is no ABI arity check in the policy layer: a wrong-length args array
+  // builds rules over garbage silently, and this is the only thing that catches
+  // it. All six params are static, so the flat args[i] -> word i mapping is
+  // exact — which is the claim that must fail loudly if the contract's
+  // signature ever grows a struct or a `bytes`.
+  const calldata = encodeFunctionData({
+    abi: PONS_SELFTRADE_ABI,
+    functionName: "tradeExactIn",
+    args: [
+      "0x00000000000000000000000000000000000000cc",
+      CASH.USDG as `0x${string}`,
+      CUSTOM.address as `0x${string}`,
+      1_000_000n,
+      999n,
+      1_800_000_000n,
+    ],
+  });
+  const body = calldata.slice(10);
+  const word = (i: number) => `0x${body.slice(i * 64, (i + 1) * 64)}`;
+  assert.equal(
+    word(0).toLowerCase(),
+    pad("0x00000000000000000000000000000000000000cc", { size: 32 }).toLowerCase(),
+    "word 0 = curve",
+  );
+  assert.equal(word(1).toLowerCase(), pad(CASH.USDG as `0x${string}`, { size: 32 }).toLowerCase(), "word 1 = assetIn");
+  assert.equal(word(2).toLowerCase(), pad(CUSTOM.address as `0x${string}`, { size: 32 }).toLowerCase(), "word 2 = assetOut");
+  assert.equal(BigInt(word(3)), 1_000_000n, "word 3 = amountIn");
+  assert.equal(BigInt(word(4)), 999n, "word 4 = minAmountOut");
+  assert.equal(BigInt(word(5)), 1_800_000_000n, "word 5 = deadline");
+});
+
+test("the Pons opt-in is INDEPENDENT of the v4 adapter, and a junk address throws", () => {
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+  const V4 = "0x00000000000000000000000000000000000000d4" as const;
+  const base = perms().length;
+
+  // Each alone adds exactly its own call permission, and neither implies the
+  // other. Two venues, two risks, two decisions — one flag granting both would
+  // make the owner's only choice all-or-nothing.
+  assert.equal(buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: PONS }).length, base + 1);
+  assert.equal(buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4 }).length, base + 1);
+  assert.equal(
+    buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: PONS, v4AdapterAddress: V4 }).length,
+    base + 2,
+    "both opt-ins are additive, not overlapping",
+  );
+
+  // A malformed address must throw rather than be sealed into a signature: a
+  // policy that can never match is a bricked route that looks granted.
+  assert.throws(
+    () => buildCallPermissions(CAPS, SELF, { ponsAdapterAddress: "0xnope" as never }),
+    /ponsAdapterAddress is not an address/,
+  );
+});
+
+/**
+ * EVERY ADAPTER REACHES THE CHAIN — the assertion that was missing.
+ *
+ * `buildWallPolicies` forwarded `v4AdapterAddress` to `buildCallPermissions` and
+ * silently dropped `ponsAdapterAddress`. It type-checked, because the function's
+ * argument is an intersection with `WallOptions`: the field was accepted at the
+ * call site and discarded one line later.
+ *
+ * That is the precise failure this whole file exists to prevent, and every other
+ * Pons assertion here missed it by calling `buildCallPermissions` DIRECTLY —
+ * bypassing the wrapper that both signers actually use. The one existing
+ * `buildWallPolicies` test passes no adapters at all and counts policies.
+ *
+ * A grant signed through that path would carry the `pons-adapter` marker and a
+ * sealed address over a call policy containing no `tradeExactIn` permission and
+ * no adapter in the approve spender set. `grantPonsAdapter` would return the
+ * address, `limitsFromGrant` would allow the target, `checkPolicy` would pass,
+ * the arm-time liveness check would pass — and both calls would revert at the
+ * wall. A mirror looser than the chain.
+ *
+ * So this asserts the WRAPPER, for both adapters, forever.
+ */
+test("buildWallPolicies forwards EVERY adapter into the call policy", () => {
+  const V4 = "0x00000000000000000000000000000000000000d4" as const;
+  const PONS = "0x00000000000000000000000000000000000000d5" as const;
+
+  const call = (opts: Parameters<typeof buildWallPolicies>[0]) => {
+    const { policies } = buildWallPolicies(opts);
+    // The call policy is the LAST, and its permissions live under policyParams
+    // — the zerodev policy object exposes only getPolicyData/getPolicyInfoInBytes
+    // /policyParams, so reading `.permissions` off the top level silently yields
+    // an empty list and this test would pass for the wrong reason.
+    //
+    // Indexed from the end deliberately. This read `policies[2]` until the
+    // rate-limit policy was removed, and a positional index into a list whose
+    // length is itself under test is a second thing to remember to change.
+    const p = policies[policies.length - 1] as unknown as { policyParams?: { permissions?: { target: string }[] } };
+    const perms = p.policyParams?.permissions ?? [];
+    assert.ok(perms.length > 0, "the call policy must expose its permissions, or this test proves nothing");
+    return perms.map((x) => x.target.toLowerCase());
+  };
+
+  const bare = call({ caps: CAPS, smartAccount: SELF });
+  assert.ok(!bare.includes(V4), "no adapter asked for, none granted");
+  assert.ok(!bare.includes(PONS), "no adapter asked for, none granted");
+
+  // Each one alone must reach the permission list.
+  assert.ok(
+    call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4 }).includes(V4),
+    "v4AdapterAddress must survive buildWallPolicies",
+  );
+  assert.ok(
+    call({ caps: CAPS, smartAccount: SELF, ponsAdapterAddress: PONS }).includes(PONS),
+    "ponsAdapterAddress must survive buildWallPolicies — it did not, and the grant still carried the marker",
+  );
+
+  // And together, because forwarding one is what made the other's absence invisible.
+  const both = call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4, ponsAdapterAddress: PONS });
+  assert.ok(both.includes(V4) && both.includes(PONS), "both adapters must reach the chain");
+
+  // The wrapper must agree with the function it wraps — no path may be looser.
+  const direct = buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4, ponsAdapterAddress: PONS }).map((p) =>
+    p.target.toLowerCase(),
+  );
+  assert.deepEqual(both, direct, "buildWallPolicies must mirror buildCallPermissions exactly");
+});
+
+test("the swap's pinned asset set IS the approve set — they cannot drift", () => {
+  // THE INVARIANT BEHIND 1.1. Pinning `tokenIn`/`tokenOut` is only worth
+  // anything if the pinned list is the same list the approves cover. Pin a
+  // narrower set and legitimate sells die on-chain with an opaque revert; pin a
+  // wider one and the pin stops meaning what its comment says.
+  //
+  // wall.ts builds both from the single `adapterAssets` const, in one call, so
+  // they cannot drift by construction — but "by construction" is a claim about
+  // code that a later refactor can quietly break. This asserts the OUTPUT,
+  // which is the only thing the chain sees.
+  const CUSTOM = {
+    address: "0x00000000000000000000000000000000000000dd" as const,
+    symbol: "MEME",
+    decimals: 18,
+  };
+  for (const opts of [{}, { extraTokens: [CUSTOM] }]) {
+    const list = buildCallPermissions(CAPS, SELF, opts) as unknown as Perm[];
+    const approved = new Set(
+      list.filter((p) => p.functionName === "approve").map((p) => p.target.toLowerCase()),
+    );
+    const swap = list.find(
+      (p) => p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase() && p.functionName === "exactInputSingle",
+    )!;
+    const legs = swap.args as unknown as { condition: number; value: string[] }[];
+    for (const i of [0, 1] as const) {
+      const pinned = new Set(legs[i]!.value.map((a) => a.toLowerCase()));
+      assert.deepEqual(
+        [...pinned].sort(),
+        [...approved].sort(),
+        `leg ${i} must be exactly the set of tokens this grant can approve`,
+      );
+    }
+  }
+});
+
+/**
+ * THE CLASS ROUTE — the only door in this wall to a token nobody enumerated.
+ *
+ * Three permissions, granted together or not at all. The reason they cannot be
+ * split is EVM semantics rather than tidiness: a vault address is a CREATE2
+ * prediction and the contract does not exist until the factory is called, and a
+ * CALL to a codeless address SUCCEEDS with empty returndata. So a wall carrying
+ * `buy`/`sell` without `deploy` would approve USDG, no-op the buy, and report a
+ * landed trade that bought nothing — every tick, forever.
+ */
+const CLASS_VAULT = "0x00000000000000000000000000000000000000c0" as const;
+const CLASS_FACTORY = "0x00000000000000000000000000000000000000fa" as const;
+const classOpts = {
+  ponsClassVaultAddress: CLASS_VAULT,
+  ponsClassVaultFactoryAddress: CLASS_FACTORY,
+};
+
+test("a class grant carries buy, sell AND deploy — three, not two", () => {
+  const list = buildCallPermissions(CAPS, SELF, classOpts);
+  const base = buildCallPermissions(CAPS, SELF, {});
+  assert.equal(list.length, base.length + 3, "the class route is exactly three permissions");
+
+  const onVault = list.filter((p) => p.target.toLowerCase() === CLASS_VAULT);
+  assert.deepEqual(
+    onVault.map((p) => p.functionName).sort(),
+    ["buy", "sell"],
+    "the vault gets buy and sell, and nothing else — sweep is an OWNER action",
+  );
+  const onFactory = list.filter((p) => p.target.toLowerCase() === CLASS_FACTORY);
+  assert.equal(onFactory.length, 1);
+  assert.equal(onFactory[0]!.functionName, "deploy");
+});
+
+test("a vault with no factory is REFUSED, not silently granted", () => {
+  // Two of three is a key that can reach a vault it can never create.
+  assert.throws(
+    () => buildCallPermissions(CAPS, SELF, { ponsClassVaultAddress: CLASS_VAULT }),
+    /factory/i,
+  );
+});
+
+test("deploy is pinned to THIS account, so it can create exactly one contract", () => {
+  // Deployment is permissionless, so this pin is not about privilege. Left
+  // unpinned, a compromised key could burn the account's gas creating vaults
+  // for strangers, repeatedly, inside the ops cap. Pinned, the only contract
+  // this permission can produce is the vault the wall already names as a target.
+  const deploy = buildCallPermissions(CAPS, SELF, classOpts).find(
+    (p) => p.functionName === "deploy",
+  )!;
+  assert.deepEqual(deploy.args, [{ condition: ParamCondition.EQUAL, value: SELF }]);
+  assert.equal(deploy.valueLimit, 0n);
+});
+
+test("the class BUY pins its funding leg and nothing else", () => {
+  // The class token is not an argument to either call — that is what makes this
+  // expressible at all. `buy` names the FUNDING asset, which stays enumerated;
+  // the token is derived from the curve inside the contract.
+  const buy = buildCallPermissions(CAPS, SELF, classOpts).find((p) => p.functionName === "buy")!;
+  const args = buy.args!;
+  assert.equal(args.length, 5, "curve, quoteAsset, quoteIn, minTokensOut, deadline");
+  assert.equal(args[0], null, "the curve is unpinnable — a new address per launch");
+  assert.equal(
+    (args[1] as { condition: number }).condition,
+    ParamCondition.ONE_OF,
+    "the funding leg must stay inside the sealed asset set",
+  );
+  for (const i of [2, 3, 4]) assert.equal(args[i], null);
+  assert.equal(buy.valueLimit, 0n, "keeps native value out of the class route");
+});
+
+test("the class SELL constrains nothing, because the vault already does", () => {
+  // It can only sell what it holds and can only pay its own owner, so there is
+  // nothing here a policy could usefully bound. Stated by assertion rather than
+  // left to be inferred from an empty-looking args list.
+  const sell = buildCallPermissions(CAPS, SELF, classOpts).find((p) => p.functionName === "sell")!;
+  assert.deepEqual(sell.args, [null, null, null, null]);
+  assert.equal(sell.valueLimit, 0n);
+});
+
+test("the vault is an approve SPENDER; the factory is not", () => {
+  // The vault must be nameable so the account's capped USDG approve can fund a
+  // buy. The factory pulls nothing and must never appear — an approve spender is
+  // a standing licence, and this one would be granted for no reason at all.
+  const spenders = allowedSpenders(false, false, undefined, undefined, CLASS_VAULT).map((a) =>
+    a.toLowerCase(),
+  );
+  assert.ok(spenders.includes(CLASS_VAULT));
+  assert.ok(!spenders.includes(CLASS_FACTORY));
+});
+
+test("no class option means no class permission, which is every grant today", () => {
+  const list = buildCallPermissions(CAPS, SELF, {});
+  for (const p of list) {
+    assert.notEqual(p.target.toLowerCase(), CLASS_VAULT);
+    assert.notEqual(p.target.toLowerCase(), CLASS_FACTORY);
   }
 });
