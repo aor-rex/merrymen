@@ -81,6 +81,22 @@ describe("release tag scheme (updater-visible)", () => {
     assert.equal(prereleaseChannel("v0.1.9"), null);
   });
 
+  it("channel detection matches the workflow: -beta.N and one-off -dev.N are prereleases", () => {
+    // Mirrors the `if [[ $REF == ... ]]` in desktop-release.yml — if the
+    // workflow gains a suffix, this list must gain it too (v0.1.9-dev.2
+    // shipped as STABLE because -dev.* was missing; fixed the same day).
+    const isBetaTag = (tag) => {
+      const v = semverValid(tag);
+      if (!v) return false;
+      const pre = v.split("-")[1] ?? "";
+      return pre.startsWith("beta.") || pre.startsWith("dev.");
+    };
+    assert.equal(isBetaTag("v0.1.9-beta.1"), true);
+    assert.equal(isBetaTag("v0.1.9-dev.2"), true);
+    assert.equal(isBetaTag("v0.1.9"), false);
+    assert.equal(isBetaTag("desktop-beta-v0.1.8-dev.5"), false);
+  });
+
   it("our historical tags would all have been skipped (documents the incident)", () => {
     for (const t of ["desktop-v0.1.7", "desktop-beta-v0.1.8-dev.5", "mobile-v0.1.2"]) {
       assert.equal(semverValid(t), null, `${t} must stay invisible — that was the bug`);
