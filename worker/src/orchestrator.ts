@@ -2498,7 +2498,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
             txHash: x.tx_hash === null ? null : String(x.tx_hash),
           }));
           const cr = await client.query(
-            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, entry_tx, exit_tx
+            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, opened_at_block, entry_tx, exit_tx
                FROM class_positions WHERE lower(agent_id) = lower($1)`,
             [acctAddr],
           );
@@ -2509,7 +2509,15 @@ async function runTenantInspectIfAsked(): Promise<void> {
             costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
             proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
             qtyRaw: x.qty_raw === null ? null : String(x.qty_raw),
-            openedAtBlock: x.opened_at_block === null ? null : String(x.opened_at_block),
+            // `?? null` as well as the null check: a column absent from the
+            // result set arrives as UNDEFINED, and String(undefined) prints the
+            // word "undefined" as though it were a value. That is exactly the
+            // unknown-rendered-as-something this module exists to prevent, and it
+            // is what this line printed on its first run.
+            openedAtBlock:
+              x.opened_at_block === null || x.opened_at_block === undefined
+                ? null
+                : String(x.opened_at_block),
             entryTx: x.entry_tx === null ? null : String(x.entry_tx),
             exitTx: x.exit_tx === null ? null : String(x.exit_tx),
           }));
