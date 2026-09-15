@@ -24,7 +24,10 @@
       "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
       "@merrymen/identity-store": ["worker/src/identity-store.ts"],
       "@merrymen/home": ["worker/src/home.ts"],
-      "@merrymen/settings-store": ["worker/src/settings-store.ts"]
+      "@merrymen/settings-store": ["worker/src/settings-store.ts"],
+      // The P&L card, reached from web/src/app/api/pnl/route.ts. Registered in
+      // BOTH tsconfigs: this one governs `tsx --test`, web/ governs the build.
+      "@merrymen/pnl-card": ["worker/src/pnl-card.ts"]
     }
   },
   "include": ["worker/src", "packages/core/src"]

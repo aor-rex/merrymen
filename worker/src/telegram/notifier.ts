@@ -25,6 +25,8 @@ import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
 import { cpuPercent, procRunning } from "../pc/platform";
 import { esc, sendMessage } from "./api";
+import { pnlCardFromFill } from "../pnl-card";
+import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
 import { narrateJournal, narrateTrade } from "./interpreter";
 import { readReport, type StatusContext } from "./reads";
@@ -150,6 +152,51 @@ interface TradeRowLite {
   tx_hash: string | null;
   /** The decision this trade came from, when one was linked. */
   decision_id?: string | null;
+  /** The token, for the P&L card's headline. */
+  target?: string | null;
+  /** The three fields a closed round trip is drawn from. See pnl-card.ts. */
+  fill_side?: string | null;
+  fill_cash_usdg?: number | null;
+  realized_pnl_usdg?: number | null;
+}
+
+/**
+ * The columns a trade ping reads. Kept in one place because the immediate and
+ * the quiet path must select the SAME shape — the card was added to one of them
+ * first, and a digest that silently lacked the P&L columns is exactly the kind
+ * of drift that makes a feature look broken for half the fleet.
+ */
+const TRADE_PING_COLUMNS =
+  "id, kind, amount_usdg, status, reject_rule, tx_hash, decision_id, " +
+  "target, fill_side, fill_cash_usdg, realized_pnl_usdg";
+
+/**
+ * The P&L card for a row that closed something, or nothing at all.
+ *
+ * SWALLOWS EVERYTHING. `pnlCardFromFill` returns null for a buy, a refusal or
+ * an unbacked sell, and `sendPnlPhoto` already reports rather than throws — but
+ * this is called from inside the ping loop, and an image is never a reason for
+ * an owner to stop being told what their agent did.
+ */
+async function sendCardFor(
+  row: TradeRowLite,
+  token: string,
+  chatId: number,
+  /**
+   * Immediate mode puts a full receipt directly above the card, so the picture
+   * is captioned by what it follows. A digest does NOT — it sends counts — so
+   * there the card must carry its own line or it arrives as an image of some
+   * numbers with nothing saying which position closed.
+   */
+  withCaption: boolean,
+): Promise<void> {
+  try {
+    const card = pnlCardFromFill(row);
+    if (!card) return;
+    await sendPnlPhoto({ token }, chatId, card, withCaption ? undefined : "");
+  } catch {
+    /* the receipt is the record; the picture is decoration */
+  }
 }
 
 /** Just enough of a decision row to explain the trade it produced. */
@@ -354,7 +401,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           // Immediate: one message per trade row.
           const rows = db
             .prepare(
-              "SELECT id, kind, amount_usdg, status, reject_rule, tx_hash, decision_id FROM trades WHERE id > ? AND agent_id = ? ORDER BY id ASC LIMIT 10",
+              `SELECT ${TRADE_PING_COLUMNS} FROM trades WHERE id > ? AND agent_id = ? ORDER BY id ASC LIMIT 10`,
             )
             .all(state.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
           for (const t of rows) {
@@ -390,6 +437,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
               }
             }
             await sendMessage({ token }, chatId, said ? `${receipt}\n\n${esc(said)}` : receipt);
+            // AND THE PICTURE, when this row closed something at a knowable
+            // P&L. After the receipt on purpose: the text is the record and
+            // goes out whatever happens to the image.
+            await sendCardFor(t, token, chatId, false);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: t.id,
@@ -406,6 +457,21 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             const maxRow = db.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM trades").get() as { m: number } | undefined;
             const total = agg.reduce((n, r) => n + r.c, 0);
             if (total > 0) await sendMessage({ token }, chatId, tradeDigestLine(agg, periodMin));
+            // A CLOSE STILL GETS ITS CARD ON A DIGEST. Quiet mode exists to
+            // stop a strategist that re-proposes the same refused leg from
+            // pinging every tick; a realised sale is rate-limited by the thing
+            // itself — you can only close what you opened — and it is the one
+            // event the digest's counts cannot convey. Sending the summary and
+            // silently dropping the P&L would give half the fleet a feature
+            // that never fires.
+            const closes = db
+              .prepare(
+                `SELECT ${TRADE_PING_COLUMNS} FROM trades ` +
+                  "WHERE id > ? AND agent_id = ? AND fill_side = 'sell' AND realized_pnl_usdg IS NOT NULL " +
+                  "ORDER BY id ASC LIMIT 10",
+              )
+              .all(st.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
+            for (const t of closes) await sendCardFor(t, token, chatId, true);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: Math.max(st.lastNotifiedTradeId, maxRow?.m ?? st.lastNotifiedTradeId),
