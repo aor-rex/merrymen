@@ -149,3 +149,21 @@ export const HALT_MUST_PRESERVE = [
   "slippageBps",
   "assetMode",
 ] as const;
+
+/**
+ * TURN NEW ENTRIES BACK ON. THE EXACT INVERSE OF `HALT_ENTRIES`, AND NOTHING MORE.
+ *
+ * Deliberately not `CANARY`. That writes eight fields, and re-running it to flip
+ * one would restate the owner's hold window and graduation cliff as a side
+ * effect — values somebody may have tuned since. Resuming is one field because
+ * halting was one field, and the pair has to be symmetric or the round trip
+ * through them is not a round trip.
+ */
+export const RESUME_ENTRIES = Object.freeze({ classSnipeEnabled: true });
+
+/** The owner's settings with entries switched back on and nothing else changed. */
+export function mergeResumeEntries(
+  current: Record<string, unknown> | null,
+): Record<string, unknown> {
+  return { ...(current ?? {}), ...RESUME_ENTRIES };
+}

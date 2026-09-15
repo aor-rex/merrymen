@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries } from "./enable-class";
+import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries, RESUME_ENTRIES, mergeResumeEntries } from "./enable-class";
 
 describe("enabling the class route preserves everything else", () => {
   it("KEEPS EVERY FIELD IT DOES NOT SET", () => {
@@ -160,5 +160,44 @@ describe("halting class entries leaves every exit intact", () => {
 
   it("an owner with no settings row at all still gets a well-formed one", () => {
     assert.deepEqual(mergeHaltEntries(null), { classSnipeEnabled: false });
+  });
+});
+
+/**
+ * HALT AND RESUME MUST BE A ROUND TRIP.
+ *
+ * If resuming touched anything halting did not, the pair would not be inverse
+ * and an owner's tuned hold window or graduation cliff would drift a little on
+ * every cycle through them.
+ */
+describe("resuming entries is the exact inverse of halting them", () => {
+  const owner = {
+    classSnipeEnabled: true,
+    classMaxHoldSec: 21_600,
+    classExitAtGraduationPct: 85,
+    liveTradingEnabled: true,
+    classPerEntryUsdg: 5,
+    classMaxPositions: 3,
+    maxImpactBps: 500,
+    slippageBps: 200,
+    telegramBotToken: "secret-and-must-survive",
+  };
+
+  it("halt then resume returns the settings byte-for-byte", () => {
+    assert.deepEqual(mergeResumeEntries(mergeHaltEntries(owner)), owner);
+  });
+
+  it("each touches exactly the one field, and it is the same field", () => {
+    assert.deepEqual(Object.keys(RESUME_ENTRIES), ["classSnipeEnabled"]);
+    assert.deepEqual(Object.keys(HALT_ENTRIES), Object.keys(RESUME_ENTRIES));
+    assert.equal(RESUME_ENTRIES.classSnipeEnabled, true);
+    assert.equal(HALT_ENTRIES.classSnipeEnabled, false);
+  });
+
+  it("and resuming leaves the exit triggers exactly where they were", () => {
+    const after = mergeResumeEntries(mergeHaltEntries(owner));
+    for (const k of HALT_MUST_PRESERVE) {
+      assert.deepEqual(after[k], (owner as Record<string, unknown>)[k], `${k} must not move`);
+    }
   });
 });

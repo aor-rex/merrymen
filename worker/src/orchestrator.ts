@@ -2144,6 +2144,47 @@ async function runHwmRepairIfAsked(): Promise<void> {
 }
 let enableClassRan = false;
 let haltClassEntriesRan = false;
+let resumeClassEntriesRan = false;
+
+/**
+ * TURN NEW CLASS ENTRIES BACK ON FOR ONE TENANT. One field, the inverse of the
+ * halt, and the same read-back on both halves — that entries actually resumed,
+ * and that nothing an exit depends on moved while they did.
+ */
+async function runResumeClassEntriesIfAsked(): Promise<void> {
+  const want = (process.env.MERRYMEN_RESUME_CLASS_ENTRIES_FOR ?? "").trim().toLowerCase();
+  if (!want) return;
+  if (resumeClassEntriesRan) return;
+  resumeClassEntriesRan = true;
+  if (!/^0x[0-9a-f]{40}$/.test(want)) {
+    log("resume-entries: MERRYMEN_RESUME_CLASS_ENTRIES_FOR is not an address — refusing to guess");
+    return;
+  }
+  try {
+    const { HALT_MUST_PRESERVE, mergeResumeEntries } = await import("./enable-class");
+    const { getSettingsStore } = await import("./settings-store");
+    const store = getSettingsStore();
+    const current = (await store.get(want as `0x${string}`)) as unknown as Record<string, unknown> | null;
+    const before = Object.fromEntries(HALT_MUST_PRESERVE.map((k) => [k, current?.[k]]));
+    log(`resume-entries: classSnipeEnabled ${JSON.stringify(current?.classSnipeEnabled)} -> true for ${want}`);
+    await store.put(want as `0x${string}`, mergeResumeEntries(current) as never);
+    const after = (await store.get(want as `0x${string}`)) as unknown as Record<string, unknown> | null;
+    const moved = HALT_MUST_PRESERVE.filter((k) => JSON.stringify(after?.[k]) !== JSON.stringify(before[k]));
+    log(
+      after?.classSnipeEnabled === true
+        ? "resume-entries: WROTE and verified classSnipeEnabled=true"
+        : "resume-entries: *** VERIFY FAILED — classSnipeEnabled did not stick ***",
+    );
+    log(
+      moved.length === 0
+        ? `resume-entries: every exit setting preserved (${HALT_MUST_PRESERVE.join(", ")})`
+        : `resume-entries: *** ${moved.join(", ")} CHANGED ***`,
+    );
+    log("resume-entries: remove MERRYMEN_RESUME_CLASS_ENTRIES_FOR now.");
+  } catch (e) {
+    log(`resume-entries: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 let classPnlRepairRan = false;
 
@@ -3890,6 +3931,7 @@ export async function runOrchestrator(): Promise<void> {
       await runHwmRepairIfAsked();
       await runEnableClassIfAsked();
       await runHaltClassEntriesIfAsked();
+      await runResumeClassEntriesIfAsked();
       await runClassPnlRepairIfAsked();
       await reconcile();
       watchdog();
