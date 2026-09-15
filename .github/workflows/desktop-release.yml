@@ -149,7 +149,10 @@ jobs:
         shell: bash
         run: |
           REF="${{ github.ref }}"
-          if [[ "$REF" == refs/tags/v*-beta.* ]]; then
+          # Beta = -beta.N, plus one-off -dev.N bridge tags (a dev-channel
+          # install can only see same-channel tags, so the channel migration
+          # rode a -dev tag carrying a -beta version — see the v0.1.9-dev.2 notes).
+          if [[ "$REF" == refs/tags/v*-beta.* || "$REF" == refs/tags/v*-dev.* ]]; then
             echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
             echo "CHANNEL_LINE=**Channel:** beta — offered only to apps with the beta toggle on." >> "$GITHUB_ENV"
             echo "DISPLAY_NAME=Desktop ${REF#refs/tags/v}" >> "$GITHUB_ENV"
