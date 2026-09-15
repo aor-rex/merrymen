@@ -391,6 +391,16 @@ export interface MovementFacts {
         proceedsUsdg: string | null;
         qtyRaw: string | null;
         openedAtBlock: string | null;
+        /**
+         * The clock the EXIT is measured against — `first_seen`, unix seconds.
+         *
+         * Not `opened_at_block`. `proposeClassExits` computes
+         * `heldSec = now - firstSeen`, and `first_seen` DEFAULTS TO NOW on a
+         * rebuilt row, so a container restart stamps a position as brand new and
+         * would restart its six-hour hold. `rehydrateClassRow` corrects it back
+         * from the entry block; this is how you check that it did.
+         */
+        firstSeen: number | null;
         /** The two fields the SELL leg is built from. Without them there is no exit. */
         curve: string | null;
         quoteToken: string | null;
@@ -426,6 +436,12 @@ export function describeMovements(f: MovementFacts): string[] {
       // no curve cannot be sold at all, which is the failure worth seeing before
       // it is needed rather than at the moment it is.
       lines.push(`    curve ${c.curve ?? "MISSING — NO EXIT CAN BE BUILT"} · quote ${c.quoteToken ?? "MISSING"}`);
+      lines.push(
+        `    hold clock first_seen ${c.firstSeen ?? "UNKNOWN"}` +
+          (c.firstSeen === null
+            ? ""
+            : ` (${new Date(c.firstSeen * 1000).toISOString()}) — held ${Math.round((Date.now() / 1000 - c.firstSeen) / 60)}m`),
+      );
       lines.push(
         `    cost ${c.costUsdg ?? "UNKNOWN"} · proceeds ${c.proceedsUsdg ?? "UNKNOWN"} · qty ${c.qtyRaw ?? "UNKNOWN"}`,
       );

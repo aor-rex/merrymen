@@ -2498,7 +2498,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
             txHash: x.tx_hash === null ? null : String(x.tx_hash),
           }));
           const cr = await client.query(
-            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, opened_at_block, curve, quote_token, entry_tx, exit_tx
+            `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, opened_at_block, first_seen, curve, quote_token, entry_tx, exit_tx
                FROM class_positions WHERE lower(agent_id) = lower($1)`,
             [acctAddr],
           );
@@ -2518,6 +2518,8 @@ async function runTenantInspectIfAsked(): Promise<void> {
               x.opened_at_block === null || x.opened_at_block === undefined
                 ? null
                 : String(x.opened_at_block),
+            firstSeen:
+              x.first_seen === null || x.first_seen === undefined ? null : Number(x.first_seen),
             curve: x.curve === null || x.curve === undefined ? null : String(x.curve),
             quoteToken:
               x.quote_token === null || x.quote_token === undefined ? null : String(x.quote_token),
