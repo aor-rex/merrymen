@@ -567,6 +567,58 @@ function openBrowser(url) {
 async function start() {
   ensureHome();
   warnIfOldNode();
+  // Single-worker lock, shared with the desktop app (same file, same rules):
+  // the desktop is canonical, but a terminal `merrymen start` against the same
+  // HOME would spawn a second worker — two workers, one account, double
+  // trades. Exclusive-create wins; a dead PID is stolen, a live one refuses
+  // loudly with the holder named.
+  const lockFile = path.join(HOME, ".lock");
+  const lockAlive = (pid) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let lockHolder = 0;
+  try {
+    writeFileSync(lockFile, String(process.pid), { flag: "wx" });
+  } catch {
+    try {
+      lockHolder = Number(readFileSync(lockFile, "utf8").trim());
+    } catch {
+      lockHolder = 0;
+    }
+    if (lockAlive(lockHolder)) {
+      bad(`another merrymen worker is already running (PID ${lockHolder}) — quit it first, then start.`);
+      process.exit(1);
+    }
+    try {
+      writeFileSync(lockFile, String(process.pid));
+      console.log(dim(`  stole a stale worker lock (PID ${lockHolder} is gone)`));
+    } catch {
+      bad("could not take the worker lock — quit the other merrymen first, then start.");
+      process.exit(1);
+    }
+  }
+  const releaseLock = () => {
+    try {
+      if (readFileSync(lockFile, "utf8").trim() === String(process.pid)) rmSync(lockFile, { force: true });
+    } catch {
+      /* best effort */
+    }
+  };
+  process.on("exit", releaseLock);
+  process.on("SIGINT", () => {
+    releaseLock();
+    process.exit(130);
+  });
+  process.on("SIGTERM", () => {
+    releaseLock();
+    process.exit(143);
+  });
   const noOpen = process.argv.includes("--no-open");
   // Headless mode: run the supervised worker without the dashboard. The tavern
   // is never booted (no port bound, no first-run build), so this fits a VPS or
