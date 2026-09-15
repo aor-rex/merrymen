@@ -2187,6 +2187,8 @@ async function runResumeClassEntriesIfAsked(): Promise<void> {
 }
 
 let classPnlRepairRan = false;
+/** Once per process, like every other repair pass here. */
+let cashRowRepairRan = false;
 
 /**
  * BOOK THE RESULT OF CLASS ROUND TRIPS THAT COMPLETED WITHOUT ONE.
@@ -2657,6 +2659,114 @@ async function runHaltClassEntriesIfAsked(): Promise<void> {
  * fields asked for, never the settings object, so nothing else is in scope where
  * the strings are built.
  */
+
+/**
+ * DELETE A `class_positions` ROW THAT WAS NEVER A POSITION.
+ *
+ * The producer is fixed and the child's copy went with its sqlite, but the
+ * ledger mirror skips `DELETE FROM class_positions` while the child reads
+ * `rebuilt` — which it does after every redeploy — so the SHARED copy of a
+ * phantom cash row would stand indefinitely. This removes it.
+ *
+ * Report first, apply only when a tenant is named. See class-cash-row-repair.ts
+ * for the four clauses and why each one is required.
+ */
+async function runCashRowRepairIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_REPAIR_CLASS_CASH_ROW ?? "").trim().toLowerCase();
+  if (!mode) return;
+  if (cashRowRepairRan) return;
+  cashRowRepairRan = true;
+
+  if (mode !== "report" && mode !== "apply") {
+    log(`class-cash-row: MERRYMEN_REPAIR_CLASS_CASH_ROW=${mode} is not a mode. Use "report" or "apply".`);
+    return;
+  }
+  const applying = mode === "apply";
+  const only = new Set(
+    (process.env.MERRYMEN_REPAIR_CLASS_CASH_ROW_ONLY ?? "")
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.startsWith("0x")),
+  );
+  // NO FLEET APPLY. A tool that can delete rows for every owner at once is a
+  // different and much larger thing to leave armed by accident.
+  if (applying && only.size === 0) {
+    log("class-cash-row: REFUSING to apply without MERRYMEN_REPAIR_CLASS_CASH_ROW_ONLY — name the tenant");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("class-cash-row: asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { planCashRowRepair, cashRowRepairLines } = await import("./class-cash-row-repair");
+    const { CASH } = await import("../../packages/core/src/index");
+    const shared = await makePgDb(url);
+    // TENANT -> SMART ACCOUNT. `class_positions.agent_id` IS the smart account
+    // and knows nothing about tenants; `grants` is the only bridge.
+    const grants = (await shared
+      .prepare("SELECT tenant, smart_account FROM grants")
+      .all()) as unknown as Record<string, unknown>[];
+    for (const g of grants) {
+      const tenant = String(g.tenant ?? "").toLowerCase();
+      const acct = g.smart_account === null || g.smart_account === undefined ? null : String(g.smart_account);
+      if (!tenant || !acct) continue;
+      if (only.size > 0 && !only.has(tenant)) continue;
+
+      const rows = (await shared
+        .prepare(
+          "SELECT agent_id, token, symbol, quote_token, state, curve, entry_tx, cost_usdg " +
+            "FROM class_positions WHERE lower(agent_id) = lower(?)",
+        )
+        .all(acct)) as unknown as Record<string, unknown>[];
+      const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+      const plan = planCashRowRepair(
+        tenant,
+        rows.map((r) => ({
+          agentId: String(r.agent_id ?? ""),
+          token: String(r.token ?? ""),
+          symbol: str(r.symbol),
+          quoteToken: str(r.quote_token),
+          state: str(r.state),
+          curve: str(r.curve),
+          entryTx: str(r.entry_tx),
+          costUsdg: str(r.cost_usdg),
+        })),
+        CASH.USDG,
+      );
+      if (plan.deletable.length === 0 && plan.refused.length === 0) continue;
+      for (const line of cashRowRepairLines(plan, applying ? "apply" : "report")) log(line);
+
+      if (!applying) continue;
+      for (const v of plan.deletable) {
+        // Keyed on the exact row, and re-stating every clause in the WHERE so
+        // the delete cannot widen even if the plan were wrong about a row.
+        await shared
+          .prepare(
+            "DELETE FROM class_positions WHERE lower(agent_id) = lower(?) AND lower(token) = lower(?) " +
+              "AND curve IS NULL AND entry_tx IS NULL AND cost_usdg IS NULL",
+          )
+          .run(v.row.agentId, v.row.token);
+      }
+      const left = (await shared
+        .prepare(
+          "SELECT COUNT(*) AS n FROM class_positions WHERE lower(agent_id) = lower(?) AND lower(token) = lower(?)",
+        )
+        .all(acct, plan.deletable[0]!.row.token)) as unknown as Record<string, unknown>[];
+      const n = Number(left[0]?.n ?? -1);
+      log(
+        n === 0
+          ? `class-cash-row: VERIFIED — the row is gone for ${tenant}`
+          : `class-cash-row: *** VERIFY FAILED — ${n} row(s) still present for ${tenant} ***`,
+      );
+    }
+  } catch (e) {
+    log(`class-cash-row: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runTenantInspectIfAsked(): Promise<void> {
   const want = (process.env.MERRYMEN_INSPECT_TENANT ?? "").trim().toLowerCase();
   if (!want) return;
@@ -4065,6 +4175,7 @@ export async function runOrchestrator(): Promise<void> {
       await runHaltClassEntriesIfAsked();
       await runResumeClassEntriesIfAsked();
       await runClassPnlRepairIfAsked();
+      await runCashRowRepairIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
