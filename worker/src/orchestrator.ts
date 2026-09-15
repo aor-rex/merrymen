@@ -2353,6 +2353,21 @@ async function runClassPnlRepairIfAsked(): Promise<void> {
       const got = after[0]?.realized_pnl_usdg;
       const ok = after.length === 1 && got !== null && got !== undefined && Math.abs(Number(got) - realized) < 1e-9;
 
+      // AND CONSUME THE BASIS, which is what `applyFill` would have done had it
+      // run. The child already deleted its own row — `setBasis` deletes at zero
+      // rather than zeroing — but the mirror skips its `DELETE FROM cost_basis`
+      // whenever the child is flagged `rebuilt`, so the deletion had nothing to
+      // upsert over and the SHARED row sits there indefinitely. It reads as a
+      // position still carrying 5.000000 of cost that closed hours ago.
+      //
+      // Safe to delete outright here and it stays deleted: the child holds no
+      // row to re-push, and the upsert only writes rows the child has.
+      await shared
+        .prepare(
+          `DELETE FROM cost_basis WHERE lower(agent_id) = lower($1) AND mode = live AND symbol = $2`,
+        )
+        .run(account, x.symbol);
+
       await shared
         .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
         .run(

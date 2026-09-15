@@ -93,6 +93,11 @@ describe("the report shows what it is deciding from", () => {
     assert.match(lines, /exit  0xa8ed38d8aa/);
     assert.match(lines, /cost 5\.000000 · proceeds 3\.226758/);
     assert.match(lines, /realised NOT RECORDED/);
+    // Named for WHICH ledger, because the two disagree by design: `setBasis`
+    // deletes a row at zero rather than zeroing it, and the mirror skips its
+    // own DELETE whenever the child is flagged `rebuilt` — so a deletion has
+    // nothing to upsert over the shared row and it sits there indefinitely.
+    assert.match(lines, /basis remaining \(shared\)/, "named for which ledger it is");
     assert.match(lines, /WOULD BOOK realised -1\.773242 USDG onto the exit row/);
   });
 

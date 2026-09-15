@@ -59,7 +59,21 @@ export interface ClassRoundTripFacts {
    * booked and this must not touch it.
    */
   recordedRealizedUsdg: number | null;
-  /** Cost basis still sitting against this symbol, in USDG base units. */
+  /**
+   * Cost basis still sitting against this symbol IN THE SHARED LEDGER.
+   *
+   * Not necessarily what the child holds. `setBasis` DELETES a row when the
+   * quantity reaches zero rather than zeroing it, and the mirror skips its own
+   * `DELETE FROM cost_basis` whenever the child is flagged `rebuilt` — which a
+   * hosted child is on nearly every pass. A deletion therefore has nothing to
+   * upsert over the shared row, and a basis for a position that closed hours
+   * ago sits there indefinitely.
+   *
+   * The mirror calls such a row inert, and for the dashboard it is: the feed
+   * joins basis to POSITIONS, so a basis for a symbol nobody holds never
+   * renders. It is not inert for a repair that reads this ledger to say what a
+   * position has left against it, which is why the apply clears it.
+   */
   basisRemainingRaw: bigint | null;
   /** False when the vault's log could not be read end to end. */
   scanComplete: boolean;
@@ -160,7 +174,7 @@ export function classPnlRepairLines(plans: readonly ClassPnlRepairPlan[]): strin
     );
     L.push(
       `   ledger: realised ${x.recordedRealizedUsdg === null ? "NOT RECORDED" : x.recordedRealizedUsdg.toFixed(6)} · ` +
-        `basis remaining ${x.basisRemainingRaw === null ? "UNKNOWN" : f6(x.basisRemainingRaw)} · ` +
+        `basis remaining (shared) ${x.basisRemainingRaw === null ? "UNKNOWN" : f6(x.basisRemainingRaw)} · ` +
         `curve-trade rows on the exit tx ${x.exitIntentRows}`,
     );
     L.push(
