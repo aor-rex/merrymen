@@ -391,6 +391,9 @@ export interface MovementFacts {
         proceedsUsdg: string | null;
         qtyRaw: string | null;
         openedAtBlock: string | null;
+        /** The two fields the SELL leg is built from. Without them there is no exit. */
+        curve: string | null;
+        quoteToken: string | null;
         entryTx: string | null;
         exitTx: string | null;
       }[]
@@ -419,6 +422,10 @@ export function describeMovements(f: MovementFacts): string[] {
   else
     for (const c of f.classRows) {
       lines.push(`  ${c.token}  ${c.symbol ?? "(no symbol)"}  state=${c.state}`);
+      // THE EXIT IS BUILT FROM THESE TWO. A position with a cost and a clock but
+      // no curve cannot be sold at all, which is the failure worth seeing before
+      // it is needed rather than at the moment it is.
+      lines.push(`    curve ${c.curve ?? "MISSING — NO EXIT CAN BE BUILT"} · quote ${c.quoteToken ?? "MISSING"}`);
       lines.push(
         `    cost ${c.costUsdg ?? "UNKNOWN"} · proceeds ${c.proceedsUsdg ?? "UNKNOWN"} · qty ${c.qtyRaw ?? "UNKNOWN"}`,
       );
