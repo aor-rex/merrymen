@@ -421,11 +421,34 @@ export function DesktopPortfolio({
         {/* THE ONE THING THAT WOULD END IT, where the money is — not in a feed
             event nobody reads. Only ever rendered when the worker itself
             resolved a blocker the owner alone can clear. */}
-        {mine.autonomy.needsOwnerAction && mine.autonomy.action && (
+        {mine.autonomy.needsOwnerAction && mine.autonomy.action && mine.autonomy.headline && (
           <div className="desktop-blocked" role="status">
-            <strong>Your Merryman needs a free permission renewal to trade autonomously.</strong>
+            {/* THE HEADLINE COMES FROM THE RULE, not from this file.
+                It was one hardcoded sentence — "needs a free permission
+                renewal" — for every blocker an owner can clear, and it is
+                false for two of them: renewing changes nothing for a key
+                signed on another network, or for a wall that is too wide.
+                A tester re-signed repeatedly and watched the banner come
+                back, because the only remedy offered could not work. */}
+            <strong>{mine.autonomy.headline}</strong>
             <p>{mine.autonomy.reason}</p>
-            <button onClick={() => onScreen({ kind: "grant" })}>{mine.autonomy.action.label}</button>
+            {/* THE LABEL AND THE DESTINATION MUST AGREE.
+                `onScreen({kind:"grant"})` is flattened to the string "/grant" by
+                pathForScreen and re-hydrated from usePathname(), so any field
+                added to the descriptor is silently dropped — which is why the
+                intent travels as a query instead. Without it this button said
+                "Re-sign on Robinhood Chain" and opened a screen whose selector
+                syncs to the testnet grant being replaced, so the obvious control
+                there re-minted the same testnet grant and the banner returned. */}
+            <button
+              onClick={() => {
+                window.location.href = mine.autonomy.action?.chain
+                  ? `/grant?chain=${mine.autonomy.action.chain}#resign`
+                  : "/grant#resign";
+              }}
+            >
+              {mine.autonomy.action.label}
+            </button>
           </div>
         )}
       </section>

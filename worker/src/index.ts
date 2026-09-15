@@ -36,6 +36,7 @@ import {
 import {
   isHostedMode,
   instrumentClassOf,
+  assetModeAllows,
   CASH,
   CIRCLE_TIERS,
   MORPHO,
@@ -79,7 +80,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, publicationSourceFor, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -150,7 +151,7 @@ import {
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
-import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, watchTokensFor } from "./strategies/registry";
+import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
 import { TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
@@ -246,6 +247,69 @@ const CLASS_MAX_READS = 8;
  * plus real slippage and refuses what is much worse than both.
  */
 const CLASS_MAX_ROUND_TRIP_BPS = 600;
+
+/**
+ * How far BELOW the graduation exit this route will still open a position.
+ *
+ * Ten percentage points of curve. The exit sells at
+ * `classExitAtGraduationPct` because the vault refuses a graduated curve by
+ * name, so a position bought just under that threshold has almost nowhere to
+ * live: it is either sold again within a tick or two, paying two lots of 99bps
+ * curve fees for nothing, or it graduates before the sell lands and becomes
+ * unsellable through the vault entirely.
+ *
+ * A margin rather than a second setting, so the entry ceiling tracks whatever
+ * the owner sets the exit to and the two can never be configured into
+ * contradiction.
+ */
+const CLASS_ENTRY_GRADUATION_MARGIN_BPS = 1_000;
+
+/**
+ * How far a stored hold clock may sit ahead of the chain before it is corrected.
+ *
+ * The estimate it is compared against comes from a block count at 0.101 s/block,
+ * which drifts; ten minutes is comfortably wider than that error and far
+ * narrower than the six-hour hold the clock governs. A row inside the tolerance
+ * costs no RPC.
+ */
+const CLASS_CLOCK_DRIFT_SEC = 600;
+
+/**
+ * How far back the class route looks for a candidate to enter.
+ *
+ * HOISTED so discovery can reach it. The candidate table is a cache of factory
+ * logs, and a child rebuilds its sqlite on redeploy — so the first scan after a
+ * restart must reach back far enough to refill THIS window, or the route is
+ * blind to everything that launched before it booted. One number, two readers:
+ * the producer that consumes the window and the scan that fills it.
+ */
+const CLASS_WINDOW_SEC = 6 * 3600;
+
+/** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
+let lastClassFunnelKey = "";
+let lastClassIdleKey = "";
+
+/**
+ * THE LAUNCHPAD'S TAPE, CACHED, because the entry pass runs far more often than
+ * the tape changes meaningfully.
+ *
+ * `readCurveActivity` is ONE chunked query for every curve at once rather than
+ * one per candidate — bounded to MAX_ACTIVITY_BLOCKS (9,000) in 3,000-block
+ * chunks, and it returns null rather than a short tally when a chunk hits the
+ * node's 10,000-log cap. So the cost is a handful of eth_getLogs per refresh,
+ * not per token.
+ *
+ * Null is kept DISTINCT from an empty map, and the distinction is the whole
+ * point of this cache existing rather than a bare call: an empty map means the
+ * launchpad was quiet and a curve genuinely has no trades, while null means the
+ * query was refused and NOTHING is known about any curve. Gating a buy on the
+ * second would refuse every candidate on a transient RPC error and call it
+ * prudence.
+ */
+let classActivity: Map<string, { buys: number; sells: number; traders: number }> | null = null;
+let classActivityAt = 0;
+/** Refreshed on the discovery cadence — the tape is not more informative sooner. */
+const CLASS_ACTIVITY_TTL_SEC = 300;
 import {
   CURVE_GUARD_DEFAULTS,
   curveFloorDrawdownBps,
@@ -254,8 +318,12 @@ import {
   curveBuyOut,
   curveSellOut,
   curveMinOut,
+  curveDepthFraction,
+  realQuoteRaw,
   type CurveReserves,
 } from "./venues/pons-price";
+import { chooseEntry } from "./venues/candidate-score";
+import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
@@ -268,6 +336,8 @@ import {
   basisSymbols,
   classPositionCurves,
   classPositions,
+  writeClassLedger,
+  setClassFirstSeen,
   upsertClassPosition,
   getBasis,
   setBasis,
@@ -285,6 +355,7 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  hasChainFlow,
   accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
@@ -307,6 +378,7 @@ import {
   getGasPaidUsdg,
   getNetContributionsUsdg,
   setAgentEpoch,
+  restoreAgentHwmParts,
   setAgentHwm,
   setAgentQuality,
   setAgentMode,
@@ -314,6 +386,7 @@ import {
   clearTrenchEntry,
   getTrenchEntry,
   markPoolSeen,
+  classCandidateCensus,
   recentCandidates,
   pruneDiscovered,
   curveFor,
@@ -325,7 +398,9 @@ import {
   setPositions,
   type TradeRow,  knownCurves,
 } from "./store";
-import { quoteDecimalsOf, readCurveReserves } from "./venues/pons";
+import { quoteDecimalsOf, readCurveReserves, readCurveThreshold } from "./venues/pons";
+import { decodeClassLog, foldClassEvents, readClassLog } from "./venues/class-log";
+import { reconcileClassBook, scoutCostOf } from "./class-reconcile";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
 /** The one read the onchain reconstruction checks itself against. */
@@ -542,6 +617,11 @@ async function main() {
       // another first-enable, so its historical wall cannot block it.
       wallTooWide: (active?.wallOverMax ?? false) && active?.accountDeployed === false,
       paperTradingEnabled: cfg.paperTradingEnabled,
+      // THE OWNER'S OWN ANSWER, carried in from their settings and nowhere else.
+      // Every other field on this object is measured; this one is given.
+      liveTradingEnabled: cfg.liveTradingEnabled,
+      // False only during the migration that populates the field above.
+      enforceLiveIntent: cfg.enforceLiveIntent,
     });
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */
@@ -753,6 +833,101 @@ async function main() {
    * Returns [] rather than throwing on every refusal, because "no class entry
    * this tick" is the overwhelmingly common answer and the ordinary one.
    */
+  /**
+   * WHAT THE SCAN SAW, IN TWO REGISTERS.
+   *
+   * The operator gets the funnel — every stage, so a quiet agent can be
+   * diagnosed in seconds instead of by reading a tick by hand. The owner gets
+   * one sentence in plain English, because `depth 7 · impact 3` is not an
+   * answer to "what is my agent doing".
+   *
+   * Both are change-keyed. The producer runs every fifteen seconds and the
+   * answer is usually the same one; a line per tick is a line nobody reads, and
+   * this repo already carries the incident where 1,242 identical rows told
+   * nobody anything.
+   *
+   * The stage counts are CUMULATIVE and that is sound, because `scoreLeg`
+   * short-circuits in this order — depth, then impact, then graduation. So
+   * "passed depth" is everything the depth check did not turn back, and each
+   * later stage narrows what survived the one before it.
+   */
+  function reportClassScan(a: {
+    discovered: number;
+    pairs: number;
+    verified: number;
+    refusedByVenue: number;
+    choice: { pick: { symbol: string } | null; refused: { reason: string; kind: string }[] };
+    holding: number;
+    buying: boolean;
+    /** The launchpad tape could not be read this pass, so no entry may qualify. */
+    activityUnknown?: boolean;
+  }): void {
+    const by = (k: string) => a.choice.refused.filter((r) => r.kind === k).length;
+    const depthOut = by("depth");
+    const impactOut = by("impact") + by("unpriceable");
+    const gradOut = by("graduation");
+    const passedDepth = a.verified - depthOut;
+    const passedImpact = passedDepth - impactOut;
+    const passedGrad = passedImpact - gradOut;
+    const qualified = a.choice.pick ? 1 : 0;
+
+    const key =
+      `${a.discovered}/${a.pairs}/${a.verified}/${passedDepth}/${passedImpact}/${passedGrad}/${qualified}/${a.buying ? 1 : 0}`;
+    if (key !== lastClassFunnelKey) {
+      lastClassFunnelKey = key;
+      console.log(
+        `[class funnel] scanned ${a.discovered} → ${a.pairs} usdg pairs → ${a.verified} tradable → ` +
+          `${passedDepth} passed depth → ${passedImpact} passed impact → ${passedGrad} passed graduation safety → ` +
+          `${qualified} qualified${a.buying ? "" : " · BUYING OFF (scan only)"}`,
+      );
+    }
+
+    /**
+     * THE OWNER'S SENTENCE. One line, no codes, and it never claims progress it
+     * did not make. When the route is switched off it says so plainly rather
+     * than implying the market was the obstacle — that distinction is the
+     * difference between "nothing qualified" and "you have not turned this on".
+     */
+    const held = a.holding > 0 ? `Holding ${a.holding} position${a.holding === 1 ? "" : "s"}. ` : "";
+    let scanning: string;
+    if (a.discovered === 0) {
+      scanning = `Scanning the launchpad — no new tokens have appeared yet.`;
+    } else if (a.choice.pick) {
+      scanning = `Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`;
+    } else if (a.activityUnknown) {
+      // BEFORE the depth and impact arms. When the tape is unreadable every
+      // candidate is refused on activity regardless of how deep or cheap it
+      // was, so reporting "nothing has enough liquidity" would name a reason
+      // that is not the one that stopped it.
+      scanning = `Still scanning — recent market activity could not be verified yet.`;
+    } else if (passedDepth <= 0) {
+      scanning = `Still scanning — nothing currently has enough real liquidity.`;
+    } else if (passedImpact <= 0) {
+      scanning = `Found ${passedDepth} deep enough, but getting in and out would cost too much.`;
+    } else if (passedGrad <= 0) {
+      scanning = `Found ${passedImpact} worth pricing, but they are too close to graduating to sell safely afterwards.`;
+    } else {
+      scanning = `Scanning ${a.discovered} tokens on the launchpad…`;
+    }
+
+    /**
+     * SCANNING AND PAUSED ARE TWO FACTS, AND BOTH ARE TRUE.
+     *
+     * An agent with autonomous buying switched off is not idle and it is not
+     * broken — it is looking and not acting, which is a state the product had no
+     * way to express. Saying only "scanning" hides that nothing will be bought;
+     * saying only "paused" hides that it is still working. The owner gets both,
+     * in that order, because the first answers "is it alive" and the second
+     * answers "why has it not bought anything".
+     */
+    const sentence = a.buying ? `${held}${scanning}` : `${held}${scanning} Trading is paused.`;
+
+    if (sentence !== lastClassIdleKey) {
+      lastClassIdleKey = sentence;
+      if (active) void addEvent(active.agentId, "ok", sentence);
+    }
+  }
+
   async function proposeClassEntries(): Promise<TradeIntent[]> {
     // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, and a
     // simulated class fill would need a price for a token with no oracle, no
@@ -763,18 +938,39 @@ async function main() {
     // what a simulator cannot model, on the one venue where the tape is written
     // by the adversary.
     if (paperActive()) return [];
-    if (!cfg.classSnipeEnabled) return [];
-    if (cfg.classPerEntryUsdg <= 0) return [];
+    // A class entry is a launchpad coin by construction, so stocks-only excludes
+    // the whole route. No symbol set to sift, and therefore no drift surface —
+    // this is a gate, not a filter.
+    if (cfg.assetMode === "stocks") return [];
     if (!active) return [];
     const vault = grantPonsClassVault(active.grant);
     if (!vault) return [];
+
+    /**
+     * THE EXECUTION GATES MOVED DOWN, AND THAT IS THE POINT.
+     *
+     * `classSnipeEnabled`, `classPerEntryUsdg` and `classMaxPositions` used to
+     * sit here, above every read — so an agent with the route switched off did
+     * not look at the market at all, and had nothing whatsoever to say about it.
+     * From outside that is indistinguishable from an agent that is broken, which
+     * is the complaint this whole milestone exists to answer: "my bot doesn't
+     * want to trade alone" from an owner whose bot was never permitted to look.
+     *
+     * Those three settings say DO NOT BUY. They do not say do not look. They are
+     * now applied after the scan, so the funnel and the owner's sentence are
+     * produced either way and an idle agent can prove it is alive.
+     *
+     * The gates that remain above are the ones where looking is impossible or
+     * meaningless rather than merely forbidden: no rail (paper), the wrong asset
+     * class entirely, no armed grant, or no vault sealed into the signature —
+     * without which there is no route to report on.
+     */
 
     // ALREADY-HELD POSITIONS BOUND THE COUNT. Null means the record could not
     // be read, and an unreadable position count must not read as zero — that
     // would let the ceiling free itself exactly when the book is unknown.
     const held = await classPositions(active.agentId);
     if (held === null) return [];
-    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
     const alreadyHeld = new Set(held.map((h) => h.token));
 
     // THE ONLY ADMISSIBLE SOURCE. recentCandidates without `poolsOnly`, whose
@@ -784,7 +980,8 @@ async function main() {
     // feed, a chat message) breaks the property checkPolicy's curve-provenance
     // rule rests on, and for a class trade that rule is the ONLY thing vouching
     // for the output token.
-    const rows = await recentCandidates(6 * 3600, 40);
+    const CLASS_LIMIT = 40;
+    const rows = await recentCandidates(CLASS_WINDOW_SEC, CLASS_LIMIT);
     const candidates = rows
       .filter((r) => !alreadyHeld.has(r.address.toLowerCase()))
       .flatMap((r) => {
@@ -805,35 +1002,334 @@ async function main() {
           },
         ];
       });
-    if (candidates.length === 0) return [];
+    // THE READ SIDE OF THE FUNNEL.
+    //
+    // Emitted BEFORE the early return below, because `candidates.length === 0`
+    // is the branch that has been taken and the only silent one on this path:
+    // an empty slice, a slice of rows that carry no curve, and a route that is
+    // switched off all return here identically.
+    //
+    // Keyed on the COUNTS only. The ages move every tick, so keying on the
+    // whole census would print a line each tick and the change-on-change
+    // discipline would buy nothing.
+    const cc = await classCandidateCensus(CLASS_WINDOW_SEC, CLASS_LIMIT);
+    if (cc) {
+      const key =
+        `${cc.allWithCurve}/${cc.inWindow}/${cc.returned}·` +
+        `${cc.usdgAll}/${cc.usdgInWindow}/${cc.usdgReturned}·${candidates.length}`;
+      if (key !== lastClassCensusKey) {
+        lastClassCensusKey = key;
+        const age = (s: number | null) => (s === null ? "—" : `${(s / 3600).toFixed(1)}h`);
+        console.log(
+          `[class census] curve rows ${cc.allWithCurve} all → ${cc.inWindow} in 6h → ${cc.returned} after LIMIT ${CLASS_LIMIT} · ` +
+            `usdg ${cc.usdgAll} → ${cc.usdgInWindow} → ${cc.usdgReturned} · ` +
+            `returned mix usdg ${cc.usdgReturned}/native ${cc.nativeReturned}/other ${cc.otherReturned} · ` +
+            `oldest returned ${age(cc.cutoffAgeSec)} · newest usdg anywhere ${age(cc.newestUsdgAgeSec)} · ` +
+            `producer got ${candidates.length} (${rows.length} rows, ${rows.length - candidates.length} without a curve or held)`,
+        );
+      }
+    } else {
+      // Null is the census failing, not a table of zeroes. Saying so costs one
+      // line and stops a read error from being read as "there is nothing there".
+      if (lastClassCensusKey !== "unreadable") {
+        lastClassCensusKey = "unreadable";
+        console.log(`[class census] the candidate census could not be read — counts below are unavailable, not zero`);
+      }
+    }
+    if (candidates.length === 0) {
+      // REPORTED, NOT SILENTLY RETURNED. This is the commonest outcome of the
+      // whole route — a quiet launchpad, or a child whose candidate table was
+      // rebuilt by a redeploy — and it was the one branch that said nothing at
+      // all. An owner watching an agent that has discovered nothing yet is
+      // exactly the owner most likely to conclude it is broken.
+      reportClassScan({
+        discovered: rows.length,
+        pairs: 0,
+        verified: 0,
+        refusedByVenue: 0,
+        choice: { pick: null, refused: [] },
+        holding: held.length,
+        buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+        activityUnknown: classActivity === null,
+      });
+      return [];
+    }
 
-    const { legs } = await readClassLegs({
+    const { legs, refused } = await readClassLegs({
       client: active.client,
       candidates,
       usdg: CASH.USDG as `0x${string}`,
       minRealDepthUsdg: usdg(cfg.classMinDepthUsdg),
       maxReads: CLASS_MAX_READS,
     });
+    // WHY NOTHING QUALIFIED, WHICH WAS THROWN AWAY.
+    //
+    // `readClassLegs` builds six distinct owner-vocabulary reasons — native
+    // quote, wrong quote, no threshold, unreadable reserves, graduated, too
+    // thin — and the caller destructured only `legs`. So the overwhelmingly
+    // common outcome of this whole route, "considered some and took none", was
+    // indistinguishable from "the launchpad was quiet", and both looked exactly
+    // like the route being switched off.
+    //
+    // Logged on CHANGE rather than per tick: the producer runs every tick and
+    // the answer is usually the same one, so a line each time is a line nobody
+    // reads. Same discipline as the token-coverage notice.
+    if (refused.length > 0) {
+      const tally = new Map<string, number>();
+      for (const r of refused) tally.set(r.reason, (tally.get(r.reason) ?? 0) + 1);
+      const key = [...tally].sort().map(([r, n]) => `${n}×${r}`).join(" · ");
+      if (key !== lastClassRefusalKey) {
+        lastClassRefusalKey = key;
+        // "none taken" ONLY when none were, which is not the same as "some were
+        // refused". The first version said it unconditionally and printed on
+        // any refusal, so a pass that refused 13 and found a perfectly good
+        // 14th read as a total washout — and the missing candidate then looks
+        // like a candidate that vanished, which is the one shape this route's
+        // logging must never invent. It cost me a search for a leak that was a
+        // sentence.
+        const outcome = legs.length === 0 ? "none taken" : `${legs.length} still in play`;
+        console.log(`[class] ${refused.length} of ${candidates.length} candidate(s) turned back, ${outcome} — ${key}`);
+      }
+    }
+    /**
+     * WHAT SIZE THE SCORING IS DONE AT.
+     *
+     * Impact and round-trip cost are functions of SIZE, so scoring needs one
+     * even when the route is switched off and nothing will be bought. Using the
+     * owner's real entry size keeps the report truthful about the trade they
+     * would actually make; when that size is zero — the scanning-only case —
+     * a small probe is used purely so the funnel can still say something about
+     * impact, and no intent is ever built from it because the execution gates
+     * below refuse first.
+     */
+    const configured = usdg(cfg.classPerEntryUsdg);
+    const probe = usdg(5) < active.limits.perTradeUsdg ? usdg(5) : active.limits.perTradeUsdg;
+    const spend =
+      configured > 0n
+        ? configured < active.limits.perTradeUsdg
+          ? configured
+          : active.limits.perTradeUsdg
+        : probe;
+
+    /**
+     * SCORED, NOT FIRST-PAST-THE-POST.
+     *
+     * This took `legs[0]` — whichever candidate the launch scan happened to
+     * return first, which is an ordering by discovery time and by nothing else.
+     * A route that buys the first thing it can reach is not selecting.
+     *
+     * The scorer applies the owner's OWN limits: `classMinDepthUsdg` for depth,
+     * `maxImpactBps` for the round trip, and the graduation ceiling derived from
+     * their exit setting. No new knob, and nothing here can loosen a signed
+     * limit — it chooses among candidates the wall would already permit.
+     *
+     * FAIL CLOSED ON EVERY SIGNAL. A depth, impact or graduation figure that
+     * could not be MEASURED is a refusal, never a zero and never a pass: the
+     * scorer's own tests pin that, and it is the difference between declining a
+     * token and buying the one token nobody could read.
+     *
+     * Age and recent-activity floors are left at zero because this pass does not
+     * measure them yet — gating on a signal nobody produced would refuse
+     * everything and call it prudence.
+     */
+    /**
+     * THE TAPE, REFRESHED AT MOST EVERY FIVE MINUTES.
+     *
+     * Read here rather than in the venue because the cost is per PASS, not per
+     * token, and this is the one place that knows whether a pass is happening.
+     */
+    const nowSecForActivity = Math.floor(Date.now() / 1000);
+    if (nowSecForActivity - classActivityAt >= CLASS_ACTIVITY_TTL_SEC) {
+      const tape = await readCurveActivity(active.client, MAX_ACTIVITY_BLOCKS);
+      /**
+       * A REFUSED READ MAKES THE SIGNAL UNKNOWN. IT DOES NOT MAKE IT OPTIONAL.
+       *
+       * The first version of this kept the previous tally and stood the floor
+       * down when there was none, reasoning that refusing every candidate on a
+       * transient RPC error was "broken in effect". That was wrong, and the
+       * asymmetry is the reason: NOT buying is always a safe action. An agent
+       * that declines for five minutes has lost nothing; an agent that buys
+       * because a required check temporarily disappeared has bought something
+       * nobody verified.
+       *
+       * So a failed refresh clears the tape. The signal reads unknown, the
+       * scorer refuses every candidate on it, and the owner is told the reason
+       * in those words. Scanning continues and the next pass retries.
+       */
+      classActivity = tape;
+      classActivityAt = nowSecForActivity;
+    }
+
+    const exitBpsForScore = cfg.classExitAtGraduationPct * 100;
+    const thresholds = {
+      minRealDepthRaw: usdg(cfg.classMinDepthUsdg),
+      maxCostBps: cfg.maxImpactBps,
+      minAgeSec: 0,
+      maxGraduationBps: Math.max(0, exitBpsForScore - CLASS_ENTRY_GRADUATION_MARGIN_BPS),
+      /**
+       * ALWAYS ENFORCED. A signal that stands down when it cannot be read is
+       * not a requirement, it is a suggestion — and the one moment it would
+       * stand down is the moment nothing is known about any curve.
+       *
+       * Three states, and only one of them buys:
+       *   tape read, curve present with enough trades   pass
+       *   tape read, curve absent                        a measured 0 — refuse
+       *   tape unreadable                                unknown — refuse
+       *
+       * ACTIVITY_GATE.minTrades is the measured bar rather than an invented
+       * one: 12.6% of launches clear it, and 96% of the ones that graduate.
+       */
+      minRecentTrades: ACTIVITY_GATE.minTrades,
+    };
+
+    const scored = legs.map((l) => {
+      const out = curveBuyOut(l.reserves, spend);
+      const back = out === null || out <= 0n ? null : curveSellOut(l.reserves, out);
+      const costBps =
+        back === null || spend <= 0n
+          ? null
+          : Math.max(0, Number(((spend - back) * 10_000n) / spend));
+      const progressNow = curveDepthFraction(l.reserves);
+      return {
+        raw: l,
+        leg: {
+          venue: "pons" as const,
+          token: l.token,
+          symbol: l.symbol,
+          decimals: l.decimals,
+          route: l.curve,
+          quoteToken: l.quoteToken,
+          realDepthRaw: realQuoteRaw(l.reserves),
+          graduationBps: progressNow === null ? null : Math.round(progressNow * 10_000),
+          ageSec: null,
+          // Absent from a tape we DID read is a measured zero. Absent because
+          // there is no tape is null, and the floor above stands down for it.
+          recentTrades:
+            classActivity === null
+              ? null
+              : (() => {
+                  const a = classActivity.get(l.curve.toLowerCase());
+                  return a ? a.buys + a.sells : 0;
+                })(),
+        },
+        entry: out === null || out <= 0n ? null : { amountOutRaw: out, costBps },
+      };
+    });
+
+    const choice = chooseEntry(
+      scored.map((s) => ({ leg: s.leg, entry: s.entry })),
+      thresholds,
+    );
+
+    // THE FUNNEL, EVERY TICK, WHETHER OR NOT ANYTHING IS BOUGHT. An agent that
+    // looked at the market and declined is doing its job; one that cannot say
+    // so is indistinguishable from one that is broken.
+    reportClassScan({
+      discovered: rows.length,
+      pairs: candidates.length,
+      verified: legs.length,
+      refusedByVenue: refused.length,
+      choice,
+      holding: held.length,
+      buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
+      activityUnknown: classActivity === null,
+    });
+
     if (legs.length === 0) return [];
+
+    /**
+     * NOW THE EXECUTION GATES. Everything above this line is looking; nothing
+     * above it can spend. These three say DO NOT BUY, and they are applied here
+     * so that the scan and its report happen first.
+     */
+    if (!cfg.classSnipeEnabled) return [];
+    if (cfg.classPerEntryUsdg <= 0) return [];
+    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
     // proposal keeps the decision legible: an owner reading the feed sees one
     // considered entry rather than a wall of refusals from a batch that could
     // only ever have filled its first member.
-    const leg = legs[0]!;
-    const size = usdg(cfg.classPerEntryUsdg);
-    const spend = size < active.limits.perTradeUsdg ? size : active.limits.perTradeUsdg;
-    if (spend <= 0n) return [];
+    if (!choice.pick) return [];
+    const leg = scored.find((s) => s.leg.token === choice.pick!.token)!.raw;
+
+    // THE LAST FIVE SILENT REFUSALS ON THIS PATH.
+    //
+    // Everything upstream of here now says why it turned a candidate back — the
+    // census, the quote filter, the depth floor. These five were bare
+    // `return []`, so a tick that found eight qualifying legs and then rejected
+    // the best one was indistinguishable, from outside, from a tick that found
+    // nothing. That gap cost an evening: the producer reported "8 still in
+    // play" and the executor was never reached, with nothing in between.
+    //
+    // Logged on CHANGE, like the refusal tally above: the answer is usually the
+    // same one and a line per tick is a line nobody reads.
+    const refuse = (why: string): TradeIntent[] => {
+      if (why !== lastClassSizingKey) {
+        lastClassSizingKey = why;
+        console.log(`[class] ${leg.symbol}: ${why}`);
+      }
+      return [];
+    };
+    if (spend <= 0n) return refuse(`nothing to spend — entry size ${cfg.classPerEntryUsdg} against a per-trade cap of ${Number(active.limits.perTradeUsdg) / 1e6}`);
 
     // Quoted, impact-checked and floored HERE, because this is where the
     // reserves are — the executor holds only an intent. Every existing curve
     // producer makes the same three checks in the same order.
     const quoted = curveBuyOut(leg.reserves, spend);
-    if (quoted === null || quoted <= 0n) return [];
+    if (quoted === null || quoted <= 0n) return refuse("its curve would not quote a buy at this size");
     const impact = curveBuyImpactBps(leg.reserves, spend);
-    if (impact === null || impact > cfg.maxImpactBps) return [];
+    if (impact === null) return refuse("its price impact could not be computed");
+    if (impact > cfg.maxImpactBps) return refuse(`a ${Number(spend) / 1e6} USDG buy would move it ${impact}bps, over the ${cfg.maxImpactBps}bps ceiling`);
     const floor = curveMinOut(quoted, cfg.slippageBps);
-    if (floor === null || floor <= 0n) return [];
+    if (floor === null || floor <= 0n) return refuse("no minimum-output floor could be set, so the buy would be unprotected");
+
+    /**
+     * ROOM TO LIVE IN, BEFORE THE EXIT'S OWN DEADLINE.
+     *
+     * The gap this closes: every check on this path asked whether the trade is
+     * good, and none asked whether it can be got OUT of. `PonsClassVault.sell`
+     * reverts `CurveGraduated()` by name, so a position whose curve graduates
+     * stops being sellable through the vault and needs the owner's own sweep —
+     * and graduation is the SUCCESS case, so the better the token does the
+     * sooner its exit closes.
+     *
+     * `proposeClassExits` already sells at `classExitAtGraduationPct` for
+     * exactly this reason. But entry had no ceiling at all, so the route would
+     * happily buy at 84% against an 85% exit: a position with one percent of a
+     * curve to live in, whose most likely outcomes are an immediate forced sale
+     * or a graduation that traps it.
+     *
+     * Derived from the exit rather than configured separately, so the two
+     * cannot drift and no new setting has to be plumbed. An owner who lowers
+     * the exit automatically lowers the entry ceiling with it, which is the
+     * direction that stays safe.
+     *
+     * Measured with `curveDepthFraction` — the same function the exit uses, so
+     * "how far along is this curve" has one answer on this route rather than
+     * two that disagree at the boundary.
+     */
+    const exitAtBps = cfg.classExitAtGraduationPct * 100;
+    const entryCeilingBps = exitAtBps - CLASS_ENTRY_GRADUATION_MARGIN_BPS;
+    const progress = curveDepthFraction(leg.reserves);
+    if (progress === null) {
+      // Unknown is not "early". A curve whose progress cannot be read is one
+      // whose deadline cannot be read either.
+      return refuse("how close it is to graduating could not be read, and a position that graduates cannot be sold from the vault");
+    }
+    const progressBps = Math.round(progress * 10_000);
+    if (entryCeilingBps <= 0) {
+      return refuse(
+        `the graduation exit is set to ${cfg.classExitAtGraduationPct}%, which leaves no room to enter below it`,
+      );
+    }
+    if (progressBps > entryCeilingBps) {
+      return refuse(
+        `it is ${(progressBps / 100).toFixed(1)}% of the way to graduating, past the ` +
+          `${(entryCeilingBps / 100).toFixed(1)}% this route will enter at — the vault cannot sell a graduated curve, ` +
+          `and the exit fires at ${cfg.classExitAtGraduationPct}%`,
+      );
+    }
 
     // THE ON-RAMP CHECK THE WALL CANNOT PROVIDE. Everywhere else `no-exit`
     // refuses a buy the key could not sell; here the key CAN sell, so the
@@ -841,8 +1337,12 @@ async function main() {
     // a side, so a round trip cannot beat ~200 bps and a curve where it is much
     // worse than that is one nobody should be entering.
     const roundTrip = curveSellOut(leg.reserves, quoted);
-    if (roundTrip === null || roundTrip * 10_000n < spend * BigInt(10_000 - CLASS_MAX_ROUND_TRIP_BPS)) {
-      return [];
+    if (roundTrip === null) return refuse("its curve would not quote the sell back, so the round trip is unknown");
+    if (roundTrip * 10_000n < spend * BigInt(10_000 - CLASS_MAX_ROUND_TRIP_BPS)) {
+      return refuse(
+        `buying and immediately selling would return ${(Number(roundTrip) / 1e6).toFixed(2)} of ` +
+          `${Number(spend) / 1e6} USDG — worse than the ${CLASS_MAX_ROUND_TRIP_BPS}bps round trip this route accepts`,
+      );
     }
 
     return [
@@ -857,6 +1357,570 @@ async function main() {
         notionalUsdg: spend,
       },
     ];
+  }
+
+  /**
+   * WHAT THE VAULT ACTUALLY HOLDS, from the tick's own custody read.
+   *
+   * Kept rather than discarded for the same reason `lastCurveLegs` is: the exit
+   * below needs the balance at the VAULT, the tick already paid for it, and a
+   * second read would be a different moment's answer.
+   */
+  let lastClassBalances: ReadonlyMap<string, bigint> = new Map<string, bigint>();
+  /** What the OPEN class positions actually cost, from the chain. Scout budget. */
+  let lastClassCostUsdg = 0n;
+  /**
+   * What the chain says each HELD class position cost, keyed by the symbol the
+   * quarantine looks costs up under.
+   *
+   * Replaced wholesale on every class read, never merged, for the same reason
+   * `lastClassBalances` is: a position that stopped answering must not leave a
+   * stale cost behind for equity to be built on.
+   */
+  let classCostBySymbol = new Map<string, bigint>();
+  /** USDG the class vault holds. Cash at an address the balance read misses. */
+  let classCashUsdg = 0n;
+  /** Last class-refusal tally, so the reason is logged on change and not per tick. */
+  let lastClassRefusalKey: string | null = null;
+  /** Diagnostic dedupe for the candidate census — counts only, never ages. */
+  let lastClassCensusKey: string | null = null;
+  /** Last sizing refusal, so the reason is logged on change and not per tick. */
+  let lastClassSizingKey: string | null = null;
+  /** Quote-token decimals, learned once and kept for the life of the process. */
+  const classQuoteDecimals = new Map<string, number>();
+
+  /**
+   * How far back an arm looks for a vault's history.
+   *
+   * ~7 days at the measured 0.101 s/block. Bounded because this runs on every
+   * arm and an unbounded scan of a busy chain is a startup that never finishes.
+   *
+   * A position older than the window is NOT lost: its balance still shows up,
+   * and it is classified `recovered` — held, with an honestly unknown basis —
+   * rather than dropped. The window decides how much history we can explain,
+   * never how much money we can see.
+   */
+  const CLASS_LOG_LOOKBACK_BLOCKS = 6_000_000n;
+
+  /**
+   * Rebuild this agent's class book from the chain and write it to the cache.
+   *
+   * Everything it writes is a fold over `(txHash, logIndex)`-identified events,
+   * so running it twice writes the same rows. There is no `+=` in the path,
+   * which is what lets a restart loop, a re-arm and a replayed block range all
+   * converge instead of compounding.
+   */
+  /**
+   * RESTORE THE COLUMNS A REBUILT CHILD LOSES, FROM THE CHAIN.
+   *
+   * `class_positions` is written by two producers. `upsertClassPosition` writes
+   * the CANDIDATE columns — symbol, decimals, quote_token, first_seen — at buy
+   * time, from the intent. `writeClassLedger` writes the MONEY columns from the
+   * vault's own events. A child rebuilds its sqlite on redeploy, and only the
+   * second one runs on the way back up.
+   *
+   * So a restarted agent came back holding a position it could not sell:
+   *
+   *   quote_token NULL   `proposeClassExits` refuses the row outright — both
+   *                      legs are needed to route a sell, and it says so.
+   *   first_seen  "now"   the store stamps it on insert, so the six-hour hold
+   *                      clock restarted on every redeploy. A position could
+   *                      never age out as long as deploys kept happening.
+   *
+   * Both are recoverable because the chain still knows. The curve names its own
+   * pair token; the ERC-20 names its symbol and decimals; and the ClassBuy that
+   * opened the position is in a block with a timestamp, which is the true start
+   * of the hold clock and does not move when a container does.
+   *
+   * WRITES ONLY WHAT IS MISSING. A row that already carries these keeps them —
+   * this repairs a gap, it does not restate what the buy path recorded. And
+   * every read is individually tolerant: a curve that will not answer leaves
+   * quote_token null for the next tick to retry, rather than failing the whole
+   * reconciliation and losing the money columns too.
+   *
+   * Bounded by the position count, which `classMaxPositions` caps at 3.
+   */
+  async function rehydrateClassRow(
+    agentId: string,
+    p: { token: string; curve: string | null; openedAtBlock: bigint | null },
+    client: PublicClient,
+  ): Promise<void> {
+    try {
+      const existing = (await classPositions(agentId))?.find(
+        (r) => r.token.toLowerCase() === p.token.toLowerCase(),
+      );
+      const needsLegs = !existing?.quoteToken || existing.symbol === null;
+
+      /**
+       * IS THE STORED CLOCK LATER THAN THE CHAIN SAYS IT SHOULD BE?
+       *
+       * `first_seen` defaults to `unixepoch()`, so a rebuilt row stamps NOW —
+       * not zero — and a naive "is it missing" test would never fire. The
+       * question is not whether it is absent but whether it is WRONG, and the
+       * chain is the authority: the position opened when its ClassBuy landed.
+       *
+       * Estimated first from the block number at the measured 0.101 s/block, so
+       * a row whose clock is already right costs no RPC. Only a row that looks
+       * materially younger than its own entry block is worth an exact read —
+       * `CLASS_CLOCK_DRIFT_SEC` of tolerance absorbs the estimate's own error.
+       */
+      const headNow = p.openedAtBlock === null ? null : await client.getBlockNumber();
+      const estimatedOpenedAt =
+        headNow === null || p.openedAtBlock === null
+          ? null
+          : Math.floor(Date.now() / 1000) - Number(headNow - p.openedAtBlock) / 10;
+      const needsClock =
+        existing !== undefined &&
+        estimatedOpenedAt !== null &&
+        existing.firstSeen - estimatedOpenedAt > CLASS_CLOCK_DRIFT_SEC;
+
+      if (!needsLegs && !needsClock) return;
+
+      let quoteToken: string | null = existing?.quoteToken ?? null;
+      let symbol: string | null = existing?.symbol ?? null;
+      let decimals: number = existing?.decimals ?? 18;
+
+      if (needsLegs && p.curve) {
+        try {
+          quoteToken =
+            quoteToken ??
+            ((await client.readContract({
+              address: p.curve as `0x${string}`,
+              abi: [
+                { type: "function", name: "pairToken", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+              ] as const,
+              functionName: "pairToken",
+            })) as string);
+        } catch {
+          /* the next tick retries; a null quote_token is refused, never guessed */
+        }
+        /**
+         * THE SYMBOL IS DERIVED FROM THE ADDRESS, NOT READ FROM THE TOKEN.
+         *
+         * Two reasons, and the first is a bug I nearly shipped. The buy path
+         * keys this row as `symbolOfToken(t) ?? short(t)`, which for a class
+         * token is always the short address — and the cost basis is keyed by
+         * that same symbol. Reading the ERC-20's own `symbol()` here would give
+         * a rebuilt row a DIFFERENT key ("DOGGOS" rather than "0x15e4…5461"),
+         * splitting one position's basis across a restart: the buy booked under
+         * one key, the sell looked under another, and the realised P&L would
+         * come out as if the position had appeared from nowhere.
+         *
+         * The second is that a launch token's symbol is attacker-controlled. It
+         * can call itself USDC. `instrumentClassOf` is address-keyed for exactly
+         * this reason, and a basis key is a worse place to trust a string than a
+         * display label is.
+         *
+         * Decimals stay 18 — the launchpad's shape, and the same constant the
+         * buy path writes — so the two producers cannot disagree.
+         */
+        symbol = symbol ?? short(p.token);
+        decimals = existing?.decimals ?? 18;
+      }
+
+      await upsertClassPosition(agentId, {
+        token: p.token,
+        symbol,
+        decimals,
+        curve: p.curve,
+        quoteToken,
+      });
+
+      /**
+       * THE CLOCK, FROM THE BLOCK THAT OPENED THE POSITION.
+       *
+       * Written separately because `upsertClassPosition` deliberately excludes
+       * the clock — its own comment says a re-record on a top-up must not
+       * rejuvenate a position past its exit. That rule is right and this is its
+       * one exception: restoring a clock that a rebuild reset is the opposite of
+       * rejuvenating it.
+       */
+      if (needsClock && p.openedAtBlock !== null) {
+        try {
+          const block = await client.getBlock({ blockNumber: p.openedAtBlock });
+          await setClassFirstSeen(agentId, p.token, Number(block.timestamp));
+        } catch {
+          /* leave it; the next tick retries rather than inventing a start time */
+        }
+      }
+    } catch {
+      // Never fatal. This repairs a row; failing it must not cost the caller the
+      // money columns it just reconciled from chain.
+    }
+  }
+
+  async function reconcileClassFromChain(
+    agentId: string,
+    vault: `0x${string}`,
+    client: PublicClient,
+  ): Promise<void> {
+    try {
+      const head = await client.getBlockNumber();
+      const from = head > CLASS_LOG_LOOKBACK_BLOCKS ? head - CLASS_LOG_LOOKBACK_BLOCKS : 0n;
+      const scan = await readClassLog(client, vault, from, head);
+      const folded = foldClassEvents(scan.events);
+
+      // The cache's tokens join the candidate list so a position whose entry
+      // predates the window is still ASKED about. It contributes nothing but a
+      // question.
+      const cachedRows = (await classPositions(agentId)) ?? [];
+      const candidates = [...new Set([...folded.keys(), ...cachedRows.map((r) => r.token)])];
+      if (candidates.length === 0) return;
+
+      const custody = await readClassCustody(client, vault, candidates as `0x${string}`[]);
+      const rec = reconcileClassBook({
+        folded,
+        balances: custody.balances,
+        cached: cachedRows.map((r) => r.token),
+        logComplete: !scan.failed,
+        balancesComplete: custody.unread.length === 0,
+      });
+
+      for (const p of rec.positions) {
+        await writeClassLedger(agentId, {
+          token: p.token,
+          vault,
+          curve: p.curve,
+          costRaw: p.costRaw,
+          qtyRaw: p.qtyRaw,
+          proceedsRaw: p.proceedsRaw,
+          openedAtBlock: p.openedAtBlock,
+          entryTx: p.entryTx,
+          exitTx: p.exitTx,
+          state: p.state,
+          sweptRaw: p.sweptRaw,
+        });
+        // THE OTHER HALF OF THE ROW, WITHOUT WHICH THE POSITION CANNOT BE SOLD.
+        await rehydrateClassRow(agentId, p, client);
+        // A SWEEP IS THE OWNER TAKING CAPITAL OUT, AND IT HAS TO BE BOOKED AS ONE.
+        await bookClassSweepWithdrawal(agentId, p);
+        // AND THE COST BASIS THE SELL WILL BE MEASURED AGAINST.
+        await restoreClassCostBasis(agentId, p);
+      }
+
+      const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
+      if (open.length > 0 || rec.incomplete) {
+        console.log(
+          `[class] reconciled ${open.length} open · ${rec.recovered.length} recovered · ` +
+            `scanned ${from}-${head}${rec.incomplete ? ` · INCOMPLETE: ${rec.why}` : ""}`,
+        );
+      }
+      // SAY IT TO THE OWNER, because a position with an unknown basis makes
+      // every P&L that includes it a guess, and they are entitled to know which
+      // number is not trustworthy.
+      if (rec.recovered.length > 0) {
+        await addEvent(
+          agentId,
+          "warn",
+          `found ${rec.recovered.length} token(s) in your class vault whose purchase I could not find in the ` +
+            `last ~7 days of chain history, so I do not know what they cost. They are safe and they are ` +
+            `yours — I just cannot tell you the profit on them, and I will not invent a number. ` +
+            `\`merrymen recover\` moves them out with your own key.`,
+        );
+      }
+    } catch (e) {
+      // A failed reconciliation must never stop an arm. The book stays as it
+      // was, which is the conservative direction: positions are kept, not
+      // closed.
+      console.error("[class] reconcile failed:", e);
+    }
+  }
+
+  /**
+   * Tokens whose sweep this process has already told the owner about.
+   *
+   * Per process, not per tick: `reconcileClassFromChain` runs on every arm and a
+   * durable event each time is its own kind of noise. Same shape as
+   * `trencherRailAnnounced`. Deliberately NOT a substitute for durable
+   * idempotency — it cannot be one, and the comment below is about exactly why.
+   */
+  const sweepsAnnounced = new Set<string>();
+
+  /**
+   * PUT BACK THE COST BASIS A REDEPLOY THREW AWAY, so the SELL can be priced.
+   *
+   * THE FAILURE THIS CLOSES, in full. A class buy DOES write a `cost_basis` row —
+   * `fillPair`/`liveFill` are set for a curve trade and `bookFill` runs, keyed by
+   * `symbolOfToken(t) ?? short(t)`. But `cost_basis` lives in the child's sqlite,
+   * which a container rebuild discards, and unlike `class_positions` nothing
+   * re-derives it. So a position bought before a redeploy is held afterwards with
+   * NO basis at all, and the consequences land exactly where they hurt:
+   *
+   *   `applyFill` meets `prev.qtyRaw <= 0` on the sell, returns
+   *   `basisUnknown: true` and `realizedUsdg: 0n`, and `bookFill` then writes a
+   *   NULL `realized_pnl_usdg` that `getRealizedPnlUsdg` excludes. The round trip
+   *   completes, the money moves, and the book records no result for it.
+   *
+   * The comment on the curve-fill attribution above describes this same failure
+   * arriving by a different route and calls it out as the reason class trades
+   * booked no basis at all. That route is fixed; this one is the redeploy.
+   *
+   * THE CHAIN IS THE SOURCE, as everywhere else in the class ledger.
+   * `class_positions.cost_usdg` is `ClassBuy.quoteIn` — the actual fill, not the
+   * size that was proposed — re-read from the vault's own events on every arm.
+   *
+   * PRO-RATA ON THE BALANCE STILL HELD. A position part-sold before the rebuild
+   * must not have its whole original cost restored against its remaining
+   * quantity; that would book the missing part as profit on the next sell.
+   * Floor division, so the restored basis can only ever be slightly LOW, which
+   * understates profit rather than overstating it.
+   *
+   * IT NEVER OVERWRITES. A basis with anything on it is the live one and wins —
+   * this only ever fills a hole. `applyFill` maintains that row through partial
+   * fills and knows things the chain summary does not.
+   */
+  async function restoreClassCostBasis(
+    agentId: string,
+    p: {
+      token: string;
+      state: string;
+      costRaw: bigint | null;
+      qtyRaw: bigint | null;
+      balanceRaw: bigint;
+    },
+  ): Promise<void> {
+    if (paperActive()) return; // a class vault is a live-money contract
+    const stored0 = (await classPositions(agentId))?.find(
+      (r) => r.token.toLowerCase() === p.token.toLowerCase(),
+    );
+    const key = stored0?.symbol ?? short(p.token);
+    if (p.balanceRaw <= 0n) {
+      // NOTHING HELD — SO NOTHING MAY BE CARRIED AGAINST IT.
+      //
+      // The other direction of the same reconciliation. A basis that outlives
+      // its position is not inert: it is what a re-entry into the same token
+      // would start from, so the next buy would inherit a cost it never paid
+      // and the next sell would report a loss that already happened.
+      //
+      // Shogun is the live case. Its sold-out position still carried 5.000000
+      // USDG of basis after the round trip completed — the tick-level stranded
+      // sweep had logged closing it, and the figure was still there. The chain
+      // says the position is gone; that is the authority, and this runs off the
+      // chain read rather than off a balance the account happens to hold.
+      const left = await getBasis(agentId, "live", key);
+      if (left.qtyRaw > 0n || left.costUsdg > 0n) {
+        await setBasis(agentId, "live", key, { qtyRaw: 0n, costUsdg: 0n });
+        console.log(
+          `[class] cleared the cost basis for ${key}: the vault holds none of it and the chain says the ` +
+            `position is ${p.state} (was ${fmt(left.costUsdg)} USDG)`,
+        );
+      }
+      return;
+    }
+    if (p.costRaw === null || p.qtyRaw === null || p.qtyRaw <= 0n) {
+      // UNKNOWN, AND LEFT UNKNOWN. An invented basis would turn the whole
+      // proceeds of the next sell into reported profit.
+      return;
+    }
+    // THE SAME KEY THE BUY WROTE AND THE QUARANTINE READS. `class_positions`
+    // stores an address-derived symbol precisely so these three cannot drift —
+    // reading the ERC-20's own `symbol()` anywhere here would book the buy under
+    // one name and look for it under another.
+    const symbol = key;
+
+    const existing = await getBasis(agentId, "live", symbol);
+    if (existing.qtyRaw > 0n) return;
+
+    const held = p.balanceRaw > p.qtyRaw ? p.qtyRaw : p.balanceRaw;
+    const costUsdg = (p.costRaw * held) / p.qtyRaw;
+    await setBasis(agentId, "live", symbol, { qtyRaw: held, costUsdg });
+    console.log(
+      `[class] restored cost basis for ${symbol}: ${fmt(costUsdg)} USDG against ` +
+        `${held} raw (from the vault's own ClassBuy events — the sell is priceable again)`,
+    );
+  }
+
+  /**
+   * Say that a sweep happened. DO NOT MOVE MONEY FOR IT.
+   *
+   * THIS FUNCTION USED TO BOOK THE WITHDRAWAL, and the way it was wrong is worth
+   * writing down, because it is the mistake this codebase keeps re-learning: IT
+   * TRIED TO BE IDEMPOTENT AGAINST AN EPHEMERAL LEDGER.
+   *
+   * The guard read `flows` out of the child's own sqlite — a container directory
+   * a redeploy discards. So after every deploy the check answered "not booked
+   * yet" about a withdrawal it had already made, and made it again. Shogun's
+   * durable peak was walked from 49.915968 down to 24.915968, 5.000000 at a
+   * time, across five deploys. `adjustAgentHwm`'s clamp would have taken it to
+   * zero, and a zero peak does not merely understate a drawdown — it switches
+   * the breaker off, because `policy.ts` applies it only above zero.
+   *
+   * THE CHILD CANNOT DO THIS CORRECTLY, and no amount of care inside it will
+   * change that. Booking a capital movement exactly once requires knowing what
+   * has already been booked, and the only process that can know is the one
+   * holding DATABASE_URL. This file says as much a few hundred lines up, about
+   * the deposit scanner's identical temptation: "WHERE THE REPAIR BELONGS. Off
+   * the tick, in an operator tool that can see durable state."
+   *
+   * So the child does what it CAN do honestly: it classifies. The position is
+   * marked `swept` rather than `closed` with zero proceeds, `swept_raw` records
+   * what left, and the owner is told plainly. The accounting belongs to the
+   * repair tool, and `hwm-repair.ts` already values swept positions at cost.
+   *
+   * ONE ANNOUNCEMENT PER TOKEN PER PROCESS. This runs on every reconcile pass,
+   * and a durable event per pass is its own kind of noise.
+   */
+  async function bookClassSweepWithdrawal(
+    agentId: string,
+    p: { token: string; state: string; sweptCostRaw: bigint | null; sweptTx: string | null; sweptLogIndex: number | null },
+  ): Promise<void> {
+    if (p.state !== "swept") return;
+    if (sweepsAnnounced.has(p.token)) return;
+    sweepsAnnounced.add(p.token);
+    const cost =
+      p.sweptCostRaw === null
+        ? "I never saw what it cost, so I cannot say how much capital left with it."
+        : `It cost ${fmt(p.sweptCostRaw)} USDG, and your P&L counts that as capital you took home.`;
+    await addEvent(
+      agentId,
+      "ok",
+      `📤 you swept ${short(p.token)} out of your class vault. That is a withdrawal, not a loss — ` +
+        `nothing was sold, so there is no result to report. ${cost}`,
+    );
+  }
+
+  /**
+   * LEAVING A CLASS POSITION — the half that did not exist.
+   *
+   * `proposeClassEntries` was the only producer in the repo that could set
+   * `target` to the class vault, and it only ever builds a BUY. So the route
+   * could open a position and NOTHING anywhere could close it: `buildClassSellCalls`
+   * and the executor's sell arm were both reachable only from a test. An agent
+   * could buy a coin nobody enumerated and then hold it until its owner
+   * intervened with their own key.
+   *
+   * That is not a missing feature, it is a trap, and it is why this exists
+   * before any canary runs.
+   *
+   * ── WHY A CLOCK AND A CLIFF, AND NOT A PRICE ───────────────────────────
+   *
+   * Every price-based exit is unreachable in the case that matters. A class
+   * token has no oracle by definition, its curve may be drained, and a rugged
+   * one has no price at all — so a stop-loss cannot fire exactly when it is
+   * most needed. Both triggers here are answerable without a valuation:
+   *
+   *   THE CLOCK      how long it has been held. Always knowable.
+   *   THE CLIFF      how far the curve is toward graduation. `PonsClassVault`
+   *                  refuses a graduated curve by name (`CurveGraduated`), so a
+   *                  position still here when its curve graduates can never be
+   *                  sold through it again — the exit does not get worse, it
+   *                  DISAPPEARS. Leaving early costs the last stretch; leaving
+   *                  late costs the position.
+   *
+   * ── AND NO IMPACT CEILING ──────────────────────────────────────────────
+   *
+   * Deliberately unlike the entry, which refuses a buy that moves the curve too
+   * far. Refusing an exit for being expensive locks in precisely the position
+   * that most needs to close. The slippage floor still binds, so the trade is
+   * bounded — it just is not abandoned for being costly.
+   *
+   * ALL OR NOTHING. A partial exit leaves a rump that has to be closed again
+   * later, against a curve that is by then thinner, and the whole point is that
+   * the position stops existing.
+   */
+  async function proposeClassExits(): Promise<TradeIntent[]> {
+    if (paperActive()) return [];
+    if (!active) return [];
+    const vault = grantPonsClassVault(active.grant);
+    if (!vault) return [];
+
+    // NULL IS NOT EMPTY. An unreadable position list must not read as "nothing
+    // held" — that would silently skip every exit at the exact moment the
+    // database is unwell, which is when a stuck position is most likely.
+    const held = await classPositions(active.agentId);
+    if (held === null) return [];
+
+    const now = Math.floor(Date.now() / 1000);
+    const maxHold = cfg.classMaxHoldSec;
+    const exitAtPct = cfg.classExitAtGraduationPct;
+    const out: TradeIntent[] = [];
+
+    for (const p of held) {
+      const balance = lastClassBalances.get(p.token) ?? 0n;
+      if (balance <= 0n) continue; // sold, swept, or never delivered
+      // Both are needed to route a sell, and they travel together in the store
+      // for that reason. A row missing either cannot be exited here — it needs
+      // the owner's `sweep`, and the warning below says so.
+      if (!p.curve || !p.quoteToken) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is in your vault with no curve on record, so I cannot sell it for you. ` +
+            `It is not lost — your own key can move it out with \`merrymen recover\`.`,
+        );
+        continue;
+      }
+
+      // The quote's decimals, cached across the loop. Null means we could not
+      // learn them, and a wrong decimals figure silently misprices the floor by
+      // orders of magnitude — so it is treated exactly like an unreadable curve
+      // rather than defaulted to 18.
+      const quoteDec = await quoteDecimalsOf(
+        active.client,
+        p.quoteToken as `0x${string}`,
+        classQuoteDecimals,
+      ).catch(() => null);
+      const reserves =
+        quoteDec === null
+          ? null
+          : await readCurveReserves(
+              active.client,
+              // THE THRESHOLD COMES FROM THE CURVE, not from this row: the store
+              // does not keep it, and a zero would make `curveDepthFraction`
+              // meaningless — which is the number the graduation cliff is read
+              // from. `readCurveThreshold` asks the contract that owns it.
+              {
+                curve: p.curve as `0x${string}`,
+                graduationThresholdRaw:
+                  (await readCurveThreshold(active.client, p.curve as `0x${string}`).catch(() => null)) ?? 0n,
+              },
+              { quote: quoteDec, token: p.decimals },
+            ).catch(() => null);
+      // AN UNREADABLE CURVE IS NOT A REASON TO SELL BLIND. Without reserves
+      // there is no slippage floor, and a sell with no floor into a curve we
+      // cannot see is how a position leaves for nothing. Said out loud, because
+      // the remedy is the owner's key and they cannot guess that.
+      if (!reserves) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `couldn't read ${p.symbol ?? short(p.token)}'s curve, so I am not selling it blind — a sell with no ` +
+            `floor is how a position leaves for nothing. Retrying each tick; \`merrymen recover\` is the way out if it stays dead.`,
+        );
+        continue;
+      }
+
+      const heldSec = Math.max(0, now - p.firstSeen);
+      const progressPct = (curveDepthFraction(reserves) ?? 0) * 100;
+      const aged = heldSec >= maxHold;
+      const graduating = progressPct >= exitAtPct;
+      if (!aged && !graduating) continue;
+
+      const quoted = curveSellOut(reserves, balance);
+      if (quoted === null || quoted <= 0n) continue;
+      const floor = curveMinOut(quoted, cfg.slippageBps);
+      if (floor === null || floor <= 0n) continue;
+
+      console.log(
+        `[class] exiting ${p.symbol ?? short(p.token)} — ${
+          graduating ? `${progressPct.toFixed(1)}% to graduation (the vault cannot sell a graduated curve)` : `held ${Math.round(heldSec / 60)}m`
+        }`,
+      );
+      out.push({
+        kind: "curve-trade",
+        target: vault,
+        curve: p.curve as `0x${string}`,
+        assetIn: p.token as `0x${string}`,
+        assetOut: p.quoteToken as `0x${string}`,
+        amountInRaw: balance,
+        minAmountOutRaw: floor,
+        // The NOTIONAL is what we expect back, because for a sell the quote leg
+        // is the money. Sizing it off the token amount would report a memecoin
+        // count as USDG.
+        notionalUsdg: quoted,
+      });
+    }
+    return out;
   }
 
   function curveLegsNow(): {
@@ -921,6 +1985,10 @@ async function main() {
       if (!selected.has(symbol)) continue;
       const token = watchTokens.find((t) => t.symbol === symbol)?.address;
       if (!token || !sellable.has(token.toLowerCase())) continue;
+      // THE SAME PREDICATE `legsForUniverse` USES, called from the second of the
+      // two basket filters this comment block warns must agree. One rule, two
+      // call sites — so the SITES stay two and the RULE cannot drift.
+      if (!assetModeAllows(cfg.assetMode, token)) continue;
       legs.set(symbol, { curve: leg.curve, quoteToken: leg.quoteToken, adapter, reserves: leg.reserves });
       tokens.set(symbol, token as `0x${string}`);
     }
@@ -1122,6 +2190,10 @@ async function main() {
       // resolving the universe from a different config than the legs is how a
       // strategy ends up naming a symbol its own universe does not contain.
       alwaysSymbols: officialCoinsIn(c).map((o) => o.symbol),
+      // Read from `c` for the same reason as the line above: resolving the mode
+      // from a different config than the universe is how a strategy ends up
+      // filtered against a setting the owner has since changed.
+      assetMode: c.assetMode,
       trench: {
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
@@ -2018,6 +3090,8 @@ async function main() {
   let anchorCashUsdg: bigint | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
   let anchorHwmUsdg: bigint | null = null;
+  /** Σ withdrawals the shared row already counts. Null means the anchor read none. */
+  let anchorHwmWithdrawnUsdg: bigint | null = null;
   /** The durable accounting epoch this child must file its rows under. */
   let anchorEpoch: number | null = null;
   /** One warning per process, not one per tick, when the fee is being suppressed. */
@@ -2040,6 +3114,7 @@ async function main() {
     const l = accountingLicence(verdict, { hosted: isHostedMode() });
     accounting.openingBalanceLicence = l.licence;
     anchorHwmUsdg = l.highWaterMarkUsdg;
+    anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
     anchorEpoch = l.accountingEpoch;
     // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
@@ -2125,7 +3200,8 @@ async function main() {
    * mark. It is called immediately after `ensureAgent`, which is the first
    * moment the row it writes to exists.
    *
-   * `setAgentHwm` is `MAX(hwm_usdg, ?)` in SQL, a one-way door — so a restored
+   * `setAgentHwm` ratchets in SQL (a CASE, not MAX — MAX is an aggregate in
+   * Postgres), so it is a one-way door and a restored
    * peak can only ever be raised. Too high suppresses a fee; too low charges the
    * owner for their own principal. Between those two the monotonic direction is
    * the safe one, and the store already enforces it.
@@ -2145,11 +3221,33 @@ async function main() {
     // gate on a healthy account.
     if (anchorEpoch !== null) await setAgentEpoch(agentId, anchorEpoch);
 
-    if (anchorHwmUsdg === null || anchorHwmUsdg <= 0n) return;
-    const local = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-    if (anchorHwmUsdg > local) {
-      await setAgentHwm(agentId, usdgNum(anchorHwmUsdg));
-      console.log(`[anchor] restored high-water mark ${fmt(anchorHwmUsdg)} USDG (local was ${fmt(local)})`);
+    // BOTH HALVES OF THE PEAK, and the withdrawn half matters most here.
+    //
+    // The effective peak is gross minus what withdrawals have taken out of it.
+    // Restoring the gross alone would hand a rebuilt child a peak that has
+    // forgotten every withdrawal its owner ever made — which is precisely the
+    // state that had Shogun refused at 5008bps on an account that never lost a
+    // penny. And seeding the withdrawn total at zero is just as wrong in the
+    // other direction: the child's next booked withdrawal would report a total
+    // SMALLER than the shared row already holds, and the mirror's ratchet would
+    // drop it.
+    //
+    // `restoreAgentHwmParts` ratchets each half independently and takes gross
+    // in gross units, so nothing here has to net the two figures — the place
+    // that netting went wrong before is exactly this call site.
+    if (anchorHwmUsdg === null && anchorHwmWithdrawnUsdg === null) return;
+    const before = await getAgentFinancials(agentId);
+    await restoreAgentHwmParts(agentId, {
+      grossUsdg: anchorHwmUsdg === null || anchorHwmUsdg <= 0n ? null : usdgNum(anchorHwmUsdg),
+      withdrawnUsdg: anchorHwmWithdrawnUsdg === null ? null : usdgNum(anchorHwmWithdrawnUsdg),
+    });
+    const after = await getAgentFinancials(agentId);
+    if (after.hwmUsdg !== before.hwmUsdg || after.hwmWithdrawnUsdg !== before.hwmWithdrawnUsdg) {
+      console.log(
+        `[anchor] restored high-water mark ${fmt(usdg(after.hwmUsdg))} USDG ` +
+          `(gross ${fmt(usdg(after.hwmGrossUsdg))} − withdrawn ${fmt(usdg(after.hwmWithdrawnUsdg))}; ` +
+          `local was ${fmt(usdg(before.hwmUsdg))})`,
+      );
     }
   }
 
@@ -2646,6 +3744,8 @@ async function main() {
    */
   // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
   let trencherRailAnnounced = false;
+  /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
+  let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
     // THE RAIL, MADE EXPLICIT rather than removed.
     //
@@ -2658,6 +3758,30 @@ async function main() {
     // replaces every other bound — the scout budget still gates a buy into a
     // token nobody can independently value, the per-trade cap still holds, and
     // the wall still refuses any asset the signature does not name.
+    /**
+     * STOCKS ONLY MEANS NO CANDIDATES AT ALL. A launchpad candidate is crypto
+     * by construction, so there is nothing here for `assetModeAllows` to sift —
+     * the whole feed is excluded.
+     *
+     * ANNOUNCED ONCE PER ARM, for exactly the reason the block below exists: a
+     * feed that empties silently is how an owner ends up reporting "it didn't
+     * take any trades yet" with no evidence but the absence of trades.
+     */
+    if (cfg.assetMode === "stocks") {
+      if (!trencherStocksAnnounced) {
+        trencherStocksAnnounced = true;
+        console.log("[trencher] asset mode is stocks only, so the candidate feed is empty.");
+        if (active) {
+          void addEvent(
+            active.agentId,
+            "ok",
+            "trencher is running but your asset mode is Stocks only, so it sees no candidates. " +
+              "Switch to All assets or Crypto only in Settings if you want it hunting coins.",
+          );
+        }
+      }
+      return [];
+    }
     if (!paperActive() && !cfg.trencherLiveEnabled) {
       // SAY IT. The rail was made explicit in the config and stayed invisible in
       // operation: an owner who picked trencher and armed a real key got an empty
@@ -2841,8 +3965,18 @@ async function main() {
       nowSec,
       intervalSec: PONS_INTERVAL_SEC,
       blocksPerSec: BLOCKS_PER_SEC,
+      // THE WARM-UP. One bounded scan at boot that reaches back over the whole
+      // window the class route reads, so a restarted child sees the live
+      // universe immediately instead of rebuilding it over six hours.
+      coldStartSec: CLASS_WINDOW_SEC,
     });
     if (!window.due) return;
+    if (window.coldStart) {
+      console.log(
+        `[pons] warm-up scan: reaching back ${window.lookbackBlocks} blocks (~${(CLASS_WINDOW_SEC / 3600).toFixed(0)}h) ` +
+          `to refill the candidate table after a restart — one pass, then the usual ${PONS_INTERVAL_SEC}s cadence`,
+      );
+    }
 
     ponsInFlight = true;
     try {
@@ -2870,6 +4004,30 @@ async function main() {
         return;
       }
       lastPonsAt = nowSec;
+
+      // THE WRITE SIDE OF THE FUNNEL, one line per pass.
+      //
+      // Placed before the early return below, because the pass that finds
+      // nothing is the pass that has been happening and the one whose shape
+      // nobody could see. A ratio ("2 of 40") cannot distinguish a window full
+      // of shallow launches from a window the dedupe ate, and cannot show the
+      // quote mix at all — which is the number under suspicion.
+      //
+      // console.log, not addEvent: this is instrumentation aimed at an operator
+      // reading logs, and at ~475 launches/hour a per-pass event would bury the
+      // owner's feed for a question that is not theirs.
+      const cs = scan.census;
+      const mix = (m: { usdg: number; native: number; other: number }) =>
+        `usdg ${m.usdg}/native ${m.native}/other ${m.other}`;
+      console.log(
+        `[pons census] window ${window.elapsedSec}s · ${lookback} blocks · ` +
+          `launched ${scan.scanned} → considered ${cs.considered}` +
+          (scan.skipped > 0 ? ` (capped, ${scan.skipped} unread)` : "") +
+          ` → evaluated ${cs.considered - cs.dropSeen} [${mix(cs.quoteIn)}] · ` +
+          `dropped seen ${cs.dropSeen}, unreadable ${cs.dropUnreadable}, graduated ${cs.dropGraduated}, ` +
+          `shallow ${cs.dropShallow} · wrote ${scan.found.length} [${mix(cs.quoteOut)}]` +
+          (cs.depthPct.length ? ` at ${cs.depthPct.join("%, ")}% of graduation` : ""),
+      );
 
       if (scan.clamped || scan.skipped > 0) {
         // Told to the OWNER, not just the log. This is the one case where the
@@ -3097,7 +4255,7 @@ async function main() {
       return {
         ok: false,
         line:
-          "this agent is on the live rail, so there is no practice book to clear — " +
+          "this agent is on the live rail, so there is no paper book to clear — " +
           "real positions and trades are never deleted.",
       };
     }
@@ -3106,12 +4264,12 @@ async function main() {
     await addEvent(
       id,
       "ok",
-      `practice book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
+      `paper book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
         `and earlier paper trades closed into epoch ${opened - 1} (kept, but no longer counted)`,
     );
     return {
       ok: true,
-      line: `practice book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
+      line: `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
     };
   }
 
@@ -3686,6 +4844,24 @@ async function main() {
             ...(grantV4Adapter(grant) ? { v4AdapterAddress: grantV4Adapter(grant)! } : {}),
             ...(grantPonsAdapter(grant) ? { ponsAdapterAddress: grantPonsAdapter(grant)! } : {}),
             ...(grantPonsClassVault(grant) ? { ponsClassVaultAddress: grantPonsClassVault(grant)! } : {}),
+            // THE FACTORY TRAVELS WITH THE VAULT, ALWAYS.
+            //
+            // Omitted here, and `wallShape` threw on its own two-of-three
+            // guard — the one that refuses a vault nothing can deploy. The
+            // throw was caught, so the only symptom was a log line saying the
+            // wall could not be sized, and the executor quietly fell back to
+            // the flat first-enable ceiling instead of this grant's measured
+            // envelope. Every other capability on this call is passed as a
+            // pair with its own accessor; the class route was passed as half
+            // of one.
+            //
+            // It matters most for exactly the agent it was breaking: the first
+            // class buy is the operation that carries the session-key enable,
+            // so the one trade whose ceiling has to be right is the one this
+            // fallback was sizing by guesswork.
+            ...(grantPonsClassVaultFactory(grant)
+              ? { ponsClassVaultFactoryAddress: grantPonsClassVaultFactory(grant)! }
+              : {}),
           }) as never,
         );
         const env = firstEnableEnvelope(shape);
@@ -3756,7 +4932,7 @@ async function main() {
       console.log(
         cfg.paperTradingEnabled
           ? "[worker] PAPER MODE — fills simulate at live oracle prices, nothing signs. Add a Pimlico key in /settings to trade live."
-          : "[worker] practice mode — no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
+          : "[worker] no bundler key (add a Pimlico key in /settings to trade live). Policy + simulation still run.",
       );
       // SAY IT WHERE THE OWNER WILL LOOK, not only on a console nobody is
       // tailing. Without a bundler NOTHING can ever be signed, so every intent
@@ -3808,7 +4984,7 @@ async function main() {
         "this key was signed before a wall fix and CANNOT trade: it carries a rate-limit policy whose " +
           "contract has no code on this chain, so every operation fails validation. Re-signing is free " +
           "and instant — open the wallet page and use 're-sign this key'. Your funds are untouched, " +
-          "and practice mode still works meanwhile.",
+          "and Paper still works meanwhile.",
       );
     }
 
@@ -3992,19 +5168,40 @@ async function main() {
     // moment the first class buy lands.
     const sealedVault = grantPonsClassVault(grant);
     if (sealedVault) {
-      const vaultCode = await client.getCode({ address: sealedVault }).catch(() => undefined);
+      // The same split as the dispatch, for the same reason: viem returns
+      // `undefined` for an address with no code, so folding a thrown read into
+      // `undefined` makes an absent vault — the ORDINARY state of every grant
+      // that has not class-traded yet — indistinguishable from a failed one.
+      // Here it only mis-worded a warning, but it also made the branch below
+      // unreachable, and that branch is the one that catches a vault nothing
+      // can ever create.
+      let vaultCode: string | undefined;
+      let vaultUnread = false;
+      try {
+        vaultCode = await client.getCode({ address: sealedVault });
+      } catch {
+        vaultUnread = true;
+      }
       const sealedFactory = grantPonsClassVaultFactory(grant);
-      const factoryCode = sealedFactory
-        ? await client.getCode({ address: sealedFactory }).catch(() => undefined)
-        : undefined;
-      if (vaultCode === undefined) {
+      let factoryCode: string | undefined;
+      let factoryUnread = false;
+      if (sealedFactory) {
+        try {
+          factoryCode = await client.getCode({ address: sealedFactory });
+        } catch {
+          factoryUnread = true;
+        }
+      }
+      const noVaultCode = vaultCode === undefined || vaultCode === "0x";
+      const noFactoryCode = factoryCode === undefined || factoryCode === "0x";
+      if (vaultUnread) {
         await addEvent(
           agentId,
           "warn",
           `could not read your class vault at ${short(sealedVault)} on chain ${chain.id}. That is not ` +
             `the same as it being absent — class trades will retry each tick.`,
         );
-      } else if (vaultCode === "0x" && (!sealedFactory || factoryCode === "0x")) {
+      } else if (noVaultCode && (!sealedFactory || (!factoryUnread && noFactoryCode))) {
         // THE REAL SIBLING of the adapter warning: an uncreated vault AND a
         // factory that cannot create it means the vault can never exist. Left
         // alone, a class buy would CALL a codeless address, succeed with empty
@@ -4017,7 +5214,7 @@ async function main() {
             `grant sealed ${sealedFactory ? `(${short(sealedFactory)}) has no code` : "is missing"} ` +
             `on chain ${chain.id}. The class route cannot work — deploy the factory and re-sign.`,
         );
-      } else if (vaultCode === "0x") {
+      } else if (noVaultCode) {
         // Ordinary, and said as ordinary: "ok", not "warn". Every class-enabled
         // grant starts here.
         await addEvent(
@@ -4034,6 +5231,22 @@ async function main() {
             `grant was sealed against (${sealedFactory}). The worker uses the SEALED one — re-sign ` +
             `at /grant to switch.`,
         );
+      }
+
+      // ── AND RECONCILE THE BOOK AGAINST THE CHAIN, EVERY ARM ──────────────
+      //
+      // `class_positions` lives in the CHILD's sqlite, which the orchestrator
+      // rebuilds on every redeploy. So an open position's whole record could
+      // vanish while the tokens sat in the vault, and an empty table read as a
+      // flat book — the worst possible default for money.
+      //
+      // The chain cannot be redeployed. `balanceOf` says what is held and the
+      // vault's own ClassBuy/ClassSell events say what it actually cost, so the
+      // book is rebuilt from evidence rather than remembered. Runs at ARM, not
+      // per tick: it is a bounded log scan, and the answer only changes when a
+      // class trade lands — which re-arms nothing but does write its own row.
+      if (vaultCode !== undefined && vaultCode !== "0x") {
+        await reconcileClassFromChain(agentId, sealedVault, client);
       }
     }
 
@@ -4628,8 +5841,24 @@ async function main() {
       // (above, shared with every rail) and AGAIN on the terms review()
       // returns — fees and slippage included. place() is unreachable except
       // downstream of a review that passed both.
+      /**
+       * THE BROKER LANE CROSSES THE FORK TOO, and it is the one rail that does
+       * not reach it on its own.
+       *
+       * This branch returns before `execMode()` is consulted at the swap fork
+       * below, so `place()` is reached without anyone having asked whether real
+       * execution was wanted. That is harmless today only because
+       * `orderExecutor` is hardwired null a few hundred lines up and every order
+       * paper-fills — which means the hole is invisible, and the first live
+       * `OrderExecutor` (step 6) would land on the wrong side of the consent
+       * gate with nothing failing to say so.
+       *
+       * So the live executor is used only on the live rail. A paper or refused
+       * verdict falls to the simulator exactly as it does today, and consent is
+       * required for the broker lane on the day it grows one.
+       */
       const orderExec =
-        active.orderExecutor ??
+        (execMode().mode === "live" ? active.orderExecutor : null) ??
         createPaperOrderExecutor({
           priceUsd8Of: (ticker) => lastPrices.get(ticker)?.price8 ?? null,
           slippageBps: cfg.slippageBps,
@@ -4985,6 +6214,17 @@ async function main() {
       // report perfect execution on every trade — a metric that cannot fail is
       // worse than an absent one.
       let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint | null; floorOut: bigint } | null = null;
+      /**
+       * Did the CLASS VAULT'S OWN EVENT supply the fill?
+       *
+       * If so it is authoritative and the receipt-delta re-derivation below
+       * must not replace it. The two normally agree — the deltas are taken
+       * across the account AND the vault, so a class leg nets out the same —
+       * but `ClassBuy`/`ClassSell` name the curve's own numbers while a delta
+       * is whatever moved. They diverge exactly when something unrelated
+       * moves in the same transaction, and the event is the one about us.
+       */
+      let fillIsFromClassEvent = false;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -5519,17 +6759,53 @@ async function main() {
         // reverts), but a wrongly-derived SELL would read a USDG figure as a
         // count of class-token units. Cheap to confirm, expensive to get wrong.
         if (!isBuy) {
+          /**
+           * TWO RECORDS MAY CONFIRM THE LEGS, AND A RESTART DESTROYS ONE OF THEM.
+           *
+           * `curveFor` consults the official-coin constant and then
+           * `discovered_pools`. Its own docstring says why the table cannot be
+           * an authority — wiped on every redeploy, and pruned to 5,000 rows
+           * against a launchpad running at ~475 launches an hour. With
+           * OFFICIAL_COINS[4663] empty, that leaves a restarted agent with NO
+           * confirming record at all: every sell of a position it still holds
+           * was refused `class-legs-unconfirmed`, permanently, and the position
+           * could only leave through the owner's own sweep.
+           *
+           * The position row is the better authority anyway. `discovered_pools`
+           * is a record of what was LAUNCHED; `class_positions` is a record of
+           * what this vault actually BOUGHT, restored by the reconciler from the
+           * vault's own ClassBuy events. For a token we hold, that is closer to
+           * the trade than the launch feed is.
+           *
+           * THE CHECK IS NOT WEAKENED, only given a second source. Both still
+           * have to agree with the intent on curve AND quote, which is the
+           * property that matters: a sell carries no asset words — the vault
+           * derives both from the curve — so a wrongly-derived sell would read a
+           * USDG figure as a count of class-token units. Either record
+           * confirming that pairing is a confirmation; neither confirming it is
+           * still a refusal.
+           */
           const ref = await curveFor(intent.assetIn);
-          if (
-            !ref ||
-            ref.curve.toLowerCase() !== intent.curve.toLowerCase() ||
-            ref.quoteToken.toLowerCase() !== intent.assetOut.toLowerCase()
-          ) {
+          const confirms = (r: { curve: string; quoteToken: string } | null | undefined): boolean =>
+            !!r &&
+            r.curve.toLowerCase() === intent.curve.toLowerCase() &&
+            r.quoteToken.toLowerCase() === intent.assetOut.toLowerCase();
+
+          let held: { curve: string; quoteToken: string } | null = null;
+          if (!confirms(ref)) {
+            const rows = await classPositions(agentId);
+            const row = rows?.find((r) => r.token.toLowerCase() === intent.assetIn.toLowerCase());
+            // Both legs or nothing: a row missing either cannot confirm a pair.
+            held = row?.curve && row.quoteToken ? { curve: row.curve, quoteToken: row.quoteToken } : null;
+          }
+
+          if (!confirms(ref) && !confirms(held)) {
             await refuse(
               "class-legs-unconfirmed",
-              `refusing to sell ${short(intent.assetIn)} through the class vault: the launch record ` +
-                `does not confirm this curve and quote pair. The sell's asset legs are not in the ` +
-                `calldata, so this record is the only thing that can check them.`,
+              `refusing to sell ${short(intent.assetIn)} through the class vault: neither the launch ` +
+                `record nor this vault's own position record confirms this curve and quote pair. The ` +
+                `sell's asset legs are not in the calldata, so one of those records is the only thing ` +
+                `that can check them.`,
             );
             releaseBudget();
             return;
@@ -5543,10 +6819,28 @@ async function main() {
         // must never read as "no": a CALL to a codeless address SUCCEEDS with
         // empty returndata, so a buy against an undeployed vault would approve
         // the USDG, no-op, and report a landed trade that bought nothing.
-        const vaultCode = await active.client
-          .getCode({ address: vault })
-          .catch(() => undefined);
-        if (vaultCode === undefined) {
+        //
+        // AND THE FAILURE IS THE CATCH, NOT THE VALUE. viem's `getCode` returns
+        // `undefined` for an address with no code — it maps "0x" to undefined
+        // before we ever see it. So `.catch(() => undefined)` collapsed the two
+        // answers this branch exists to tell apart, and an absent vault read as
+        // an unreadable one.
+        //
+        // That deadlocked the entire route. A vault is created by the first
+        // class buy and by nothing else, so "refuse until the vault exists"
+        // means refuse for ever: every tick produced a valid leg, proposed it,
+        // and turned it back with `class-vault-unreadable` against an address
+        // that was answering perfectly well and saying "nothing here yet".
+        //
+        // The safety property is unchanged and is why the try/catch is split
+        // out rather than the test loosened: a genuine RPC failure still
+        // refuses and still sends nothing, because a buy against a vault that
+        // MIGHT not exist books a purchase that bought nothing. What changes is
+        // that a clear answer of "no code" is now heard as the answer it is.
+        let vaultCode: string | undefined;
+        try {
+          vaultCode = await active.client.getCode({ address: vault });
+        } catch {
           await refuse(
             "class-vault-unreadable",
             `could not read the class vault at ${short(vault)} on chain ${active.grant.chainId}. ` +
@@ -5556,7 +6850,10 @@ async function main() {
           releaseBudget();
           return;
         }
-        const deployed = vaultCode !== "0x";
+        // Both spellings of "no code": viem hands back undefined, but a
+        // transport or version that passes "0x" through must not read as
+        // deployed — that is the codeless-CALL trap, and it fails silently.
+        const deployed = vaultCode !== undefined && vaultCode !== "0x";
 
         if (!deployed && !isBuy) {
           // Different fix from the buy case, so a different rule: there is
@@ -5613,6 +6910,82 @@ async function main() {
               })),
         ]);
 
+        // ── THE ECONOMIC FILL FOR A CLASS TRADE, FROM THE VAULT'S OWN EVENT ──
+        //
+        // THIS ARM BOOKED NOTHING AT ALL, and the whole class round trip had no
+        // result because of it. `kind: "curve-trade"` has TWO executor arms —
+        // this one, chosen when the target is the sealed class vault, and the
+        // adapter arm below. The attribution code lives in the adapter arm,
+        // carrying a long comment about class tokens and `short(token)` keys —
+        // and the adapter arm is the forbidden `PonsSelfTrade` path that
+        // `ponsAdapterForSigning` deliberately makes unreachable. So the fix for
+        // class basis booking sits in the one branch a class trade can never
+        // take, and every class trade this repo has ever made recorded no fill:
+        // `fill_side` NULL, cost basis untouched, `realized_pnl_usdg` NULL.
+        //
+        // Shogun's round trip is the proof — 5.000000 USDG in, 3.226758 back,
+        // and a book that recorded neither a gain nor a loss for it.
+        //
+        // EXACTLY ONE BOOKER. The orphan-receipt reconciler also sees this
+        // transaction and writes a `swap` row for it, but it resolves its symbol
+        // with `symbolOfToken` alone — which is `undefined` for a class token by
+        // construction, since a launch token postdates the grant — so it books
+        // no fill and never will. That row stays what it is: execution evidence.
+        // Teaching it `?? short(token)` would make both arms book the same
+        // receipt and double-count it, so it is deliberately left alone.
+        //
+        // THE AMOUNTS COME FROM `ClassBuy`/`ClassSell` THEMSELVES, not from a
+        // balance and not from the quote. `quoteIn`/`quoteOut` are what the
+        // curve actually paid or took, in the same transaction, so a reward
+        // payment landing in the vault at any other moment cannot reach this
+        // figure. The intent's `notionalUsdg` was 3.227117 where the event says
+        // 3.226758; the event is the one that happened.
+        {
+          const classToken = (isBuy ? intent.assetOut : intent.assetIn).toLowerCase();
+          // The SAME expression `class_positions` and the quarantine use, so the
+          // buy books under the key the sell looks up. Three spellings of this
+          // would be three chances to book against nothing.
+          const symbol = symbolOfToken(classToken as `0x${string}`) ?? short(classToken);
+          // Only this vault's own logs. `parseClassLogs` matches on topic alone,
+          // and a topic is not an authorisation to speak for us.
+          const mine = exec.logs.filter(
+            (l) => String((l as { address?: string }).address ?? "").toLowerCase() === vault.toLowerCase(),
+          );
+          const want = isBuy ? "buy" : "sell";
+          const ev = mine
+            .map((l) => decodeClassLog(l))
+            .find((e) => e !== null && e.kind === want && e.token.toLowerCase() === classToken);
+          if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
+            fillPair = {
+              stockToken: classToken as `0x${string}`,
+              symbol,
+              // No quote to score against at this layer — the curve venue has
+              // none, and `slippage_bps: 0` would read as a measured perfect
+              // fill rather than as a measurement that never ran.
+              quotedOut: null,
+              floorOut: intent.minAmountOutRaw,
+            };
+            liveFill = {
+              side: isBuy ? "buy" : "sell",
+              symbol,
+              qtyRaw: ev.tokenRaw,
+              cashUsdg: ev.quoteRaw,
+              priceUsd: Number(ev.quoteRaw) / 1e6 / (Number(ev.tokenRaw) / 1e18),
+            };
+            fillIsFromClassEvent = true;
+          } else {
+            // SAID OUT LOUD. A class trade that lands without a readable event
+            // is one whose result nobody can compute, and silence here is how
+            // this defect survived a whole round trip.
+            await addEvent(
+              agentId,
+              "warn",
+              `${symbol}: the vault's own ${want} event could not be read off this receipt, so no cost ` +
+                `basis was booked for it and the P&L on this position will be unknown.`,
+            );
+          }
+        }
+
         // REMEMBER THE POSITION, because the vault cannot be asked what it
         // holds. This record is the enumeration — for the custody read, for the
         // provenance union that keeps the exit reachable, and for recovery.
@@ -5627,6 +7000,24 @@ async function main() {
             quoteToken: ref?.quoteToken ?? intent.assetIn,
           });
         }
+        // AND RE-READ THE BOOK FROM THE CHAIN, buy or sell.
+        //
+        // The row above records a CANDIDATE — which token, on which curve. What
+        // it actually cost is in the vault's own ClassBuy event, and only the
+        // chain can say it: the proposal knows the size it ASKED for, and the
+        // fill differs by slippage every time.
+        //
+        // Done here rather than only at arm because the scout budget must bind
+        // WITHIN a session. Without it, a second entry in the same session would
+        // be sized against a ceiling that had not yet noticed the first one —
+        // the budget would bound nothing until the next redeploy, which is the
+        // opposite of what it is for.
+        //
+        // Re-folding the whole tape rather than adding this fill is deliberate:
+        // a fold over (txHash, logIndex) converges, an increment compounds. A
+        // retried reconcile is then free of consequence, which is the property
+        // that makes it safe to call from an execution path at all.
+        await reconcileClassFromChain(agentId, vault, active.client);
       } else if (intent.kind === "curve-trade") {
         // A bonding-curve trade, through the adapter the GRANT was sealed
         // against — never `cfg.ponsAdapterAddress`, which anyone with the
@@ -5697,7 +7088,27 @@ async function main() {
           const outIsUsdg = intent.assetOut.toLowerCase() === usdgAddr;
           if (inIsUsdg !== outIsUsdg) {
             const curveToken = inIsUsdg ? intent.assetOut : intent.assetIn;
-            const symbol = symbolOfToken(curveToken);
+            /**
+             * AND FOR A CLASS TOKEN, THE ADDRESS IS THE NAME.
+             *
+             * `symbolOfToken` covers the watch set and STOCK_TOKENS, neither of
+             * which can contain a class token — it postdates the grant by
+             * definition. So this was undefined for every class trade, the
+             * `if (symbol)` below never ran, `fillPair` stayed null, and
+             * `bookFill` was never called. Every bonding-curve round trip this
+             * repo could produce booked NO cost basis at all: the sell then met
+             * `prev.qtyRaw <= 0` in applyFill, returned basisUnknown, and wrote
+             * a NULL realised P&L that getRealizedPnlUsdg excludes. The position
+             * was also invisible to the stop floor and the take-profit, both of
+             * which skip what they cannot price against an entry.
+             *
+             * THE SAME EXPRESSION THE POSITION ROW USES, deliberately. The buy
+             * path writes `symbolOfToken(t) ?? short(t)` into class_positions,
+             * and the basis is keyed by symbol — so any other spelling here
+             * would book the buy under one key and look for it under another.
+             * One expression, and the two cannot drift.
+             */
+            const symbol = symbolOfToken(curveToken) ?? short(curveToken);
             if (symbol) {
               fillPair = {
                 stockToken: curveToken,
@@ -5852,7 +7263,11 @@ async function main() {
       // Prefer the receipt over the quote. The quote is what we hoped for; the
       // receipt is what happened, and only the receipt's quantity matches the
       // balance a later sell will try to dispose of.
-      let basisSource: "receipt" | "quote" = "quote";
+      // THE EVENT IS THE RECEIPT. A class fill taken from `ClassBuy`/`ClassSell`
+      // was read off this transaction's own logs, so it is evidence of the same
+      // kind the delta path produces, and calling it a quote-derived basis
+      // would understate what is actually known about it.
+      let basisSource: "receipt" | "quote" = fillIsFromClassEvent ? "receipt" : "quote";
       let slippageBps: number | null = null;
       if (fillPair) {
         // EVERY HOLDER THAT IS US. A class buy delivers its token to the vault,
@@ -5867,7 +7282,9 @@ async function main() {
           symbol: fillPair.symbol,
         });
         if (measured) {
-          liveFill = measured;
+          // THE VAULT'S OWN EVENT WINS. Quality measurement below still runs;
+          // only the economic figures are left alone.
+          if (!fillIsFromClassEvent) liveFill = measured;
           basisSource = "receipt";
           // Execution quality, measured rather than assumed. The received side
           // is the stock leg on a buy and the cash leg on a sell.
@@ -6389,10 +7806,14 @@ async function main() {
     // ── AND SAY WHY IT IS NOT LIVE ──────────────────────────────────────
     //
     // A tester funded an agent with ETH and USDG, set their key, watched it
-    // run, saw "Paper trading", and asked where the switch to real trading
-    // was. There is no switch, and there should not be: paper is PERMISSION to
-    // simulate, not a request to — execModeOf asks canTradeForReal first, so a
-    // working agent goes live on its own. What was missing was the sentence.
+    // run, saw "Paper trading", and asked where the switch to real trading was.
+    //
+    // FOR A LONG TIME THE ANSWER WAS "THERE ISN'T ONE", and this block said so
+    // in the feed. That answer was true and it was the bug: a working agent
+    // went live on its own, so an owner who had chosen to practise was promoted
+    // to real money by funding an account. There is a switch now —
+    // `liveTradingEnabled`, a required term of canTradeForReal — and the line
+    // below had to stop telling every owner in the fleet it does not exist.
     //
     // Once per CHANGE, not once per tick: the same line sixty times an hour
     // teaches an owner to scroll past it, and this repo already carries the
@@ -6410,12 +7831,36 @@ async function main() {
       );
       void addEvent(
         active.agentId,
-        blocking === null ? "ok" : "warn",
+        // `live-not-enabled` is an "ok", not a "warn". The feed colours these,
+        // and a warning stripe against "your agent is practising, as you asked"
+        // is the same false alarm the red banner was.
+        blocking === null || blocking === "live-not-enabled" ? "ok" : "warn",
         blocking === null
           ? "trading for real — every leg of the live rail is available"
-          : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
-            `Fills below are simulated at live prices until that is fixed. There is no ` +
-            `paper/live switch to find — your agent goes live by itself once this clears.`,
+          : blocking === "live-not-enabled"
+            ? // NOT A WARNING, and the level above is "ok" for it. This is the
+              // agent reporting that it is doing what it was told.
+              //
+              // TWO STATES SHARE THIS RULE and they are not the same sentence:
+              // with paper trading on the agent simulates, with it off it does
+              // nothing at all. Here — unlike the shared vocabulary in core —
+              // the verdict is in hand, so it can say which.
+              (verdict.mode === "paper"
+                ? `Paper mode: simulating fills at live prices and placing no real orders. `
+                : `Live trading is off and paper trading is off too, so nothing is being traded or ` +
+                  `simulated. `) +
+              `Turn on Live trading in Settings when you want it to trade your real funds.` +
+              // AND WHAT WOULD STILL BE IN THE WAY, said NOW rather than as a
+              // surprise on the day they switch. Without this the owner turns
+              // Live on, lands straight in a red BLOCKED banner, and learns that
+              // the thing they were told to do did not work — which is the exact
+              // shape of the complaint this whole change came from.
+              (verdict.mode !== "live" && verdict.wouldBlockLive
+                ? ` One thing to know first: when you do turn it on, ${liveBlockerText(verdict.wouldBlockLive)}.`
+                : "")
+            : `NOT trading for real yet: ${liveBlockerText(blocking)}. ` +
+              `Fills below are simulated at live prices until that is fixed. Live trading is a ` +
+              `switch in Settings, and it stays off until you turn it on.`,
       );
     }
   }
@@ -6689,9 +8134,112 @@ async function main() {
       );
       classBook = {
         ok: classRead.unread.length === 0,
-        symbols: classHeldRows.map((r) => r.symbol ?? short(r.token)),
-        tokens: classHeldRows.map((r) => r.token),
+        // THE CASH TOKEN IS NOT A POSITION — see classCashUsdg below. Filtered
+        // here rather than at the reconciler, because the class LEDGER should go
+        // on recording every token the vault holds; it is only the VALUATION
+        // that must not treat a dollar as an unpriceable asset.
+        symbols: classHeldRows
+          .filter((r) => r.token.toLowerCase() !== CASH.USDG.toLowerCase())
+          .map((r) => r.symbol ?? short(r.token)),
+        tokens: classHeldRows
+          .filter((r) => r.token.toLowerCase() !== CASH.USDG.toLowerCase())
+          .map((r) => r.token),
       };
+      // WHAT THE CHAIN SAYS EACH HELD CLASS POSITION COST, keyed the way the
+      // quarantine looks costs up.
+      //
+      // The quarantine reads `cost_basis`, and no class buy writes one — so a
+      // class token arrived in `unpricedByDesign` with a cost of ZERO, which is
+      // the one value that means "we know neither what it is worth nor what was
+      // paid" and makes the whole book unvaluable. Equity, the high-water mark,
+      // the fee AND the drawdown breaker are then all skipped for the tick.
+      //
+      // That is right when a cost is genuinely unknown and wrong here, because
+      // it is not unknown at all: `ClassBuy.quoteIn` is on chain, it is exact,
+      // `writeClassLedger` already persists it, and it is re-derived from the
+      // chain on every arm — so unlike a `cost_basis` row it survives the
+      // container rebuild that wipes the child's sqlite.
+      //
+      // Shogun is the live case: 5.000000 USDG into 0x34d7…b4af at block
+      // 63155033, on chain and in the class ledger, and its book still reported
+      // "unpriced AND no cost on record" — so the breaker it needs most was the
+      // thing being skipped.
+      classCostBySymbol = new Map(
+        classHeldRows
+          .filter((r) => r.costRaw !== null)
+          .map((r) => [r.symbol ?? short(r.token), r.costRaw as bigint]),
+      );
+      // THE QUOTE ASSET IN THE VAULT IS CASH, NOT AN UNPRICEABLE POSITION.
+      //
+      // The class ledger enumerates every token the vault holds, and that
+      // includes USDG left behind as change. As a "position" it is nonsense in
+      // both directions: it has no ClassBuy, so it has no cost basis and reads
+      // as unknown — which made the whole book unvaluable and paused the
+      // breaker — and it has no price feed to look up, because it IS the unit
+      // everything else is priced in.
+      //
+      // Shogun hit exactly this the moment the real position started valuing
+      // correctly: `book incomplete (0x5fc5…d168 unpriced AND no cost on
+      // record)`, where 0x5fc5…d168 is USDG.
+      //
+      // Excluding it without counting it would be the opposite error — that is
+      // the owner's money, sitting at an address the account-balance read does
+      // not cover. So it leaves the quarantine and joins the CASH term at face
+      // value, which is the only honest valuation of a dollar.
+      classCashUsdg = classHeldRows
+        .filter((r) => r.token.toLowerCase() === CASH.USDG.toLowerCase())
+        .reduce((sum, r) => sum + (classRead.balances.get(r.token) ?? 0n), 0n);
+      // Kept for the exit producer, which needs the balance AT THE VAULT and
+      // must not pay for a second read of it. Replaced wholesale, never merged,
+      // for the same reason `lastCurveLegs` is: a token that stopped answering
+      // this tick must not leave a stale balance behind for a sell to size
+      // against.
+      lastClassBalances = classRead.balances;
+      // AND WHAT THEY ACTUALLY COST, for the scout budget.
+      //
+      // `quarantine` books these at ZERO, because it reads `cost_basis` and the
+      // class executor never writes one — so the budget that is documented as
+      // the only risk control for unpriceable money was, for the least
+      // priceable asset on the chain, counting nothing. Every class entry was
+      // free as far as the ceiling was concerned.
+      //
+      // The figure comes from the vault's own ClassBuy events via
+      // `writeClassLedger`, so it is the ACTUAL fill rather than the size that
+      // was proposed, and it survives a redeploy because the chain does.
+      // `scoutCostOf` keeps the existing semantics — what was SPENT, open
+      // positions only — rather than inventing a second definition here.
+      const classCost = scoutCostOf(
+        classHeldRows.map((r) => ({
+          token: r.token,
+          curve: r.curve,
+          costRaw: r.costRaw,
+          qtyRaw: r.qtyRaw,
+          proceedsRaw: r.proceedsRaw,
+          openedAtBlock: r.openedAtBlock,
+          entryTx: r.entryTx,
+          exitTx: r.exitTx,
+          state: (r.state === "closed" || r.state === "swept" || r.state === "recovered"
+            ? r.state
+            : "open") as "open" | "closed" | "recovered" | "swept",
+          // HELD ROWS ONLY REACH HERE (`classHeldRows` filters on balance > 0),
+          // so nothing has been swept out of them and there is no sweep to
+          // price or to book. Null throughout rather than 0: `scoutCostOf`
+          // reads none of these, and a zero would be a claim.
+          sweptRaw: null,
+          sweptCostRaw: null,
+          sweptTx: null,
+          sweptLogIndex: null,
+          balanceRaw: classRead.balances.get(r.token) ?? 0n,
+        })),
+      );
+      lastClassCostUsdg = classCost.spentRaw;
+      // A HELD POSITION WHOSE COST WE CANNOT NAME does not silently pass as
+      // zero. It cannot be added to the budget honestly, so it is surfaced —
+      // the owner is the one who gets to decide what to do about a holding
+      // nobody can price.
+      if (classCost.unknown.length > 0) {
+        console.log(`[class] ${classCost.unknown.length} held position(s) with an unknown basis — not counted against the scout budget`);
+      }
       // A CLASS POSITION IS UNPRICEABLE BY CONSTRUCTION, so it joins the set the
       // quarantine carries at cost. Without this it is in no equity term at all:
       // the buy reads as a pure cash decrease with nothing arriving, equity
@@ -6769,7 +8317,25 @@ async function main() {
     // synchronous cost lookup (the ledger read is async now).
     const qMode: BasisMode = paper ? "paper" : "live";
     const qCost = new Map<string, bigint>();
-    for (const s of unpricedByDesign) qCost.set(s, (await getBasis(agentId, qMode, s)).costUsdg);
+    /** Σ class cost the quarantine has now counted, so the budget cannot double it. */
+    let classCostInQuarantine = 0n;
+    for (const s of unpricedByDesign) {
+      const basis = (await getBasis(agentId, qMode, s)).costUsdg;
+      if (basis > 0n) {
+        qCost.set(s, basis);
+        continue;
+      }
+      // NO cost_basis ROW — fall back to what the CHAIN says this position cost.
+      //
+      // Only ever a fallback, and only upward from zero: a real basis row always
+      // wins, so nothing that already worked changes. The class ledger's figure
+      // is `ClassBuy.quoteIn`, the actual fill rather than the size that was
+      // proposed, re-derived from the vault's own events on every arm — which is
+      // why it is still there after the redeploy that wipes `cost_basis`.
+      const fromClass = classCostBySymbol.get(s) ?? 0n;
+      if (fromClass > 0n) classCostInQuarantine += fromClass;
+      qCost.set(s, fromClass);
+    }
     const quarantine = quarantineOf(
       unpricedByDesign,
       (symbol) => qCost.get(symbol) ?? 0n,
@@ -6842,7 +8408,30 @@ async function main() {
       if (p.priceSource !== "curve") continue;
       curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
     }
-    lastQuarantinedUsdg = quarantine.totalCostUsdg + curveCostUsdg;
+    // PLUS WHAT THE CLASS VAULT HOLDS, which the quarantine counts at zero.
+    //
+    // `quarantine.totalCostUsdg` reads `cost_basis`, and the class executor
+    // never writes one — so every class position was free as far as this
+    // ceiling was concerned, and the budget documented as the ONLY risk control
+    // for unpriceable money bounded nothing at all for the least priceable
+    // asset on the chain. No double count: there is no cost_basis row to have
+    // counted it once already, which is precisely the defect.
+    // MINUS WHAT THE QUARANTINE HAS NOW ALREADY COUNTED.
+    //
+    // The comment above says "No double count: there is no cost_basis row to
+    // have counted it once already, which is precisely the defect." The defect
+    // is fixed — the quarantine now falls back to the class ledger's
+    // chain-derived cost — so the premise of that sentence no longer holds and
+    // the same class money would be added twice.
+    //
+    // Subtracting exactly what the fallback contributed keeps this figure
+    // byte-identical in both directions: when every held class symbol got its
+    // cost from the fallback, `classCostInQuarantine` equals `lastClassCostUsdg`
+    // and the two cancel; when the class book could not be read at all, nothing
+    // reached `unpricedByDesign`, the fallback contributed nothing, and the
+    // subtrahend is zero.
+    lastQuarantinedUsdg =
+      quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
     const bookIncomplete = unknownCost.length > 0;
@@ -6854,7 +8443,21 @@ async function main() {
       const why = unpricedByDesign
         .map((s) => `${s} (${poolRefusals.get(s) ?? "no Chainlink feed and no usable pool"})`)
         .join(", ");
-      console.log(`[tick] held ${why} — trading continues, equity/breaker paused while held`);
+      // AND SAY WHAT ACTUALLY HAPPENS NOW, which is no longer "paused".
+      //
+      // This line predates the class basis fallback, when an unpriceable holding
+      // with no `cost_basis` row read as cost 0n and took equity, the HWM, the
+      // fee and the breaker down with it. A holding whose cost the chain knows
+      // is now carried AT COST and none of that is skipped — so the old wording
+      // would tell an owner their breaker was off while it was running. Only a
+      // holding whose cost is unknown too still stops the book, and that is the
+      // condition `bookIncomplete` reports separately and by name.
+      console.log(
+        `[tick] held ${why} — carried at cost, not at a mark` +
+          (bookIncomplete
+            ? `; ${unknownCost.join(",")} has no cost on record either, so equity and the breaker are paused`
+            : `; equity and the breaker keep running`),
+      );
       await addEvent(
         agentId,
         "warn",
@@ -6869,7 +8472,11 @@ async function main() {
     // reading as an instant loss: cash left the wallet, so without it equity
     // would drop by the full spend and book a drawdown that never happened.
     const equityUsdg = composeEquityUsdg({
-      cashUsdg: balances.cashUsdg,
+      // PLUS THE QUOTE ASSET SITTING IN THE CLASS VAULT. It is the owner's
+      // money at an address `readAccountBalances` does not cover, and it is
+      // USDG, so it is worth its balance. No double count: the vault is a
+      // different address from the account this cash figure reads.
+      cashUsdg: balances.cashUsdg + classCashUsdg,
       vaultUsdg: balances.vaultUsdg,
       positionsUsdg,
       quarantinedCostUsdg: quarantine.totalCostUsdg,
@@ -7058,7 +8665,7 @@ async function main() {
     // A CURVE-VALUED POSITION MAY NOT RATCHET ANY HIGH-WATER MARK.
     //
     // Both marks are monotonic and persisted -- the live one through
-    // setAgentHwm (MAX(hwm_usdg, ?), with a performance fee written in the same
+    // setAgentHwm (a one-way CASE ratchet, with a performance fee written in the same
     // breath) and the paper one through setPaperBook. Nothing walks either
     // back. A bonding-curve mark has no oracle behind it, moves 1,546 bps at
     // p99 over four minutes, and arrives DISCONTINUOUSLY: the tick a curve
@@ -7178,7 +8785,7 @@ async function main() {
       const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
-      // `setAgentHwm` is MAX(hwm_usdg, ?) — a one-way door in SQL, with a real
+      // `setAgentHwm` is a one-way ratchet in SQL, with a real
       // performance fee written in the same breath. There is no procedure that
       // walks either back. A bonding-curve mark has no oracle behind it and can
       // be moved a long way by one small trade (p99 move over four minutes:
@@ -8045,7 +9652,31 @@ async function main() {
     // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
     // this repo already carries the incident where 1,242 identical rows told
     // nobody anything. The same de-duplication the live-rail blocker uses.
-    const idleNow = idle ? renderWhy(idle) : null;
+    /**
+     * A MODE THAT LEAVES NOTHING TO TRADE MUST SAY SO.
+     *
+     * The one way the asset mode could be worse than no feature at all: an
+     * owner picks "crypto only" with a basket of equities, every strategy
+     * resolves zero legs, and the agent goes quiet with nothing on any screen
+     * to connect the silence to the dropdown they just moved. That is the exact
+     * shape of the trencher incident this file already carries — "it didn't
+     * take any trades yet", then "I think I'm stuck in paper mode".
+     *
+     * Computed from the same inputs `makeStrategy` resolves legs from, so it
+     * cannot disagree with them, and only when the mode is actually narrowing
+     * something. It rides the once-per-change idle channel below rather than
+     * inventing a second one.
+     */
+    const modeEmptied =
+      cfg.assetMode !== "all" &&
+      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), cfg.assetMode)
+        .length === 0 &&
+      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
+        ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
+          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade. ` +
+          `Change the mode in Settings, or add something it allows to your basket.`
+        : null;
+    const idleNow = idle ? renderWhy(idle) : modeEmptied;
     if (idleNow !== lastIdleReason) {
       lastIdleReason = idleNow;
       if (idleNow) {
@@ -8081,7 +9712,7 @@ async function main() {
         await addDecision({
           id: newDecisionId(),
           agent_id: agentId,
-          source: `strategy:${strategy.name}`,
+          source: publicationSourceFor(strategy.name),
           reason: idleNow,
         });
       }
@@ -8096,7 +9727,7 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
-      await ensureDecision(intent, `strategy:${strategy.name}`, w ? renderWhy(w) : undefined);
+      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w) : undefined);
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
@@ -8105,11 +9736,44 @@ async function main() {
 
     // ── THE CLASS ROUTE ────────────────────────────────────────────────────
     //
+    // PROVENANCE IS RE-READ HERE, EVERY TICK, and that is the whole reason this
+    // block exists before the producers.
+    //
+    // `limits.knownCurves` was built by `limitsFromGrant` at ARM TIME and
+    // refreshed only when strategy settings change. Every curve discovered
+    // after the arm was therefore absent from it, and `curve-provenance` fails
+    // closed — so the one route whose entire purpose is trading a launch that
+    // did not exist at signing could only ever have traded a launch that DID.
+    //
+    // Worse on a hosted child, where it is not a narrow window but a total one:
+    // `discovered_pools` lives in the child's ephemeral home, so at arm time
+    // the table is EMPTY. The snapshot was empty, and no launch could ever pass.
+    //
+    // Refreshed as a whole, never patched in place: `provenanceCurves` returns
+    // undefined if EITHER read failed, and undefined means the rule cannot run,
+    // which for a class trade is a refusal. A partial list would silently
+    // refuse exactly the positions it dropped — including a position's own exit.
+    if (active) {
+      const fresh = provenanceCurves(await knownCurves(), await classPositionCurves(active.agentId));
+      if (fresh) active.limits = { ...active.limits, knownCurves: fresh };
+    }
+
     // Driven here rather than from inside a strategy, deliberately. A strategy
     // decides WHICH of the assets it was given to trade; this decides whether
     // to reach for an asset nobody gave it, which is a different kind of
     // decision and belongs where it can be read as one. It also keeps every
     // existing strategy unable to reach the route by accident.
+    // EXITS BEFORE ENTRIES, and the order is load-bearing rather than tidy.
+    //
+    // Both compete for the same per-tick budget, the same daily cap and the
+    // same ops allowance. Running entries first means a tick that spends its
+    // allowance opening a new position cannot close one that is about to become
+    // unsellable — a curve at 85% of graduation has a deadline, and a new
+    // candidate never does. The way out goes first.
+    for (const intent of await proposeClassExits()) {
+      await ensureDecision(intent, "class-route");
+      await processIntent(intent, equityUsdg, !bookIncomplete);
+    }
     for (const intent of await proposeClassEntries()) {
       await ensureDecision(intent, "class-route");
       await processIntent(intent, equityUsdg, !bookIncomplete);
@@ -8298,7 +9962,7 @@ async function main() {
     // which surfaces to the owner and reads like a crash rather than a decision.
     if (paperActive()) {
       return no(
-        `${symbol} trades on a bonding curve, and curve trading is live-only for now — the practice book ` +
+        `${symbol} trades on a bonding curve, and curve trading is live-only for now — the paper book ` +
         `can't simulate a curve yet. Nothing was sent.`
       );
     }
@@ -8469,15 +10133,39 @@ async function main() {
         // not the practice trade — and ok:false is what gets it onto a surface
         // the owner actually reads.
         return no(
-          `📝 practised ${what}${note} instead of trading — I cannot trade for real right now` +
+          `📝 simulated ${what}${note} instead of trading for real` +
             `${outcome.rejectRule ? ` (${outcome.rejectRule})` : ""}. Your money did not move.`,
         );
       case "reverted":
         return no(
           `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`,
         );
-      default:
-        return no(`🧱 refused: ${outcome.rejectRule ?? outcome.status}. Nothing was sent and nothing was spent.`);
+      default: {
+        /**
+         * THE SLUG IS NOT AN EXPLANATION, and this line was handing one to
+         * owners: "🧱 refused: no-exit. Nothing was sent and nothing was spent.
+         * What does this mean if my agent tries to buy some custom token i
+         * added?" — asked in the beta, about a rule whose whole meaning and
+         * remedy were already written down two modules away.
+         *
+         * The vocabulary is the same one the public feed reads, so the two
+         * cannot drift; the remedy is the owner's register and carries /grant,
+         * which the public one deliberately does not.
+         *
+         * The slug SURVIVES as a parenthetical rather than being replaced. It
+         * is what support triages on, and an unknown rule must still be
+         * traceable — it just stops being the whole sentence.
+         */
+        const label = rejectRuleLabel(outcome.rejectRule);
+        const remedy = rejectRuleRemedy(outcome.rejectRule);
+        const slug = outcome.rejectRule ?? outcome.status;
+        if (!label) {
+          return no(`🧱 refused. Nothing was sent and nothing was spent.${slug ? ` (${slug})` : ""}`);
+        }
+        return no(
+          `🧱 refused: ${label}.${remedy ? ` ${remedy}` : ""} Nothing was sent and nothing was spent. (${slug})`,
+        );
+      }
     }
   }
 
@@ -8677,6 +10365,18 @@ async function main() {
     buildStatusContext,
     getAlertInputs: () => ({
       grantExpiresAt: active?.grant.expiresAt ?? null,
+      // THE EFFECTIVE CEILING, derived the same way the strategist derives it:
+      // `min(llmMaxActionUsdg, the per-trade cap sealed into the grant)`. The
+      // strategist has computed this every window for months and reported it
+      // only inside its own prose — so an owner whose cap made every action
+      // pointless had the explanation written for them and never delivered.
+      maxActionUsdg: active
+        ? Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6)
+        : null,
+      // Real cash only. `lastEquityUsdg` includes positions, and a ceiling is
+      // judged against what can actually be DEPLOYED — an agent fully invested
+      // in one holding is not being throttled by its cap.
+      cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
         highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
           ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)

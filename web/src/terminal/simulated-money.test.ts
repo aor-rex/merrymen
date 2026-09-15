@@ -91,14 +91,68 @@ describe("an owner who needs to re-sign is told so where the money is", () => {
   it("the renewal is rendered, and only when the owner alone can clear it", () => {
     const desktop = SURFACES["Desktop.tsx"];
     assert.match(desktop, /needsOwnerAction/, "the CTA must be gated on the verdict, not on mode");
-    assert.match(desktop, /free permission renewal/i, "the sentence the owner reads must be present");
+    // THE SENTENCE COMES FROM THE VERDICT NOW, and this assertion moved with it.
+    //
+    // It used to require the literal "free permission renewal" in this file.
+    // That pinned the surface to ONE sentence for every owner-clearable rule,
+    // which is exactly the defect a tester hit: told to renew a key whose
+    // problem was the network, he renewed, nothing changed, and the banner
+    // returned. Requiring the hardcoded string here would have kept the fix out.
+    assert.match(desktop, /autonomy\.headline/, "the headline takes its words from the verdict");
+    assert.ok(
+      !/free permission renewal/.test(desktop.replace(/\{\/\*[\s\S]*?\*\/\}/g, "")),
+      "no surface may hardcode a remedy — it cannot know which rule it is rendering",
+    );
     assert.match(desktop, /autonomy\.action\.label/, "the button takes its words from the verdict");
   });
 
   it("it routes to the screen where re-signing actually happens", () => {
     // A tester was once told to "head to the wallet screen", spent minutes
     // looking, and reported there was no such thing. The button navigates.
-    assert.match(SURFACES["Desktop.tsx"], /kind:\s*"grant"/, "the CTA must open the grant screen");
+    // ANCHORED TO THE BUTTON, not to the string "/grant".
+    //
+    // The old assertion matched `onScreen({kind:"grant"})`, which existed once
+    // in this file. When the mechanism changed to a URL — `pathForScreen` drops
+    // descriptor fields, so the chain intent could not survive — the obvious
+    // replacement `/\/grant/` also matched the unrelated sidebar link
+    // `<Link href="/grant">`, and would have passed with the CTA deleted
+    // entirely. A regex that survives the removal of the thing it is about is
+    // not a test.
+    assert.match(
+      SURFACES["Desktop.tsx"],
+      /window\.location\.href = mine\.autonomy\.action\?\.chain/,
+      "the CTA itself must navigate to the grant screen",
+    );
+  });
+
+  it("AND IT CARRIES THE NETWORK IT NAMED", () => {
+    // The half that was missing, and the reason a second beta owner re-signed
+    // over and over without ever clearing his banner.
+    //
+    // `wrong-chain` is the one rule whose remedy is a signature on a DIFFERENT
+    // network, and its button says so: "Re-sign on Robinhood Chain". It opened
+    // `{kind:"grant"}`, which `pathForScreen` flattens to the string "/grant" —
+    // so the destination pinned its selector to the testnet grant being
+    // replaced, the prominent control read "re-sign this key (free)", and the
+    // signature minted another testnet grant.
+    const chained = autonomyOf({ mode: "paper", liveBlocker: "wrong-chain" });
+    assert.equal(chained.action?.chain, 4663, "the verdict names the target network");
+    assert.match(
+      SURFACES["Desktop.tsx"],
+      /action\.chain/,
+      "and the surface must carry it rather than dropping it",
+    );
+
+    // ONLY where the network is the problem. Everywhere else the grant screen's
+    // selector is already right, and overriding it is how a mainnet owner would
+    // silently re-sign onto the sandbox — the same bug, mirrored.
+    for (const rule of ["dead-policy", "not-armed", "grant-too-wide"] as const) {
+      assert.equal(
+        autonomyOf({ mode: "paper", liveBlocker: rule }).action?.chain,
+        undefined,
+        `${rule} must not move the selector`,
+      );
+    }
   });
 
   it("and it never offers a signature for a problem money would fix", () => {

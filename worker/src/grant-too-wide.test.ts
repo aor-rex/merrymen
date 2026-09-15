@@ -30,6 +30,10 @@ const base = {
   gasWei: 0n,
   gasSponsored: true,
   paperTradingEnabled: true,
+  // CONSENT GIVEN. Every case in this file is about the RAIL — which leg of the
+  // machinery carries a trade and which stops it — so the owner's own decision
+  // is held constant at yes. The cases where it is NO live in live-intent.test.ts.
+  liveTradingEnabled: true,
 };
 
 describe("an unsupported wall stops the agent before the bundler", () => {
@@ -130,11 +134,21 @@ describe("the owner is told, in the shared vocabulary", () => {
     assert.ok(!say.includes("grant-too-wide"), "never the slug echoed back");
   });
 
-  it("RAISES THE RENEWAL CTA, because only the owner can fix it", () => {
+  it("RAISES AN OWNER SIGNATURE CTA — and one that says SMALLER, not just again", () => {
     const a = autonomyOf({ mode: "idle", liveBlocker: "grant-too-wide" });
     assert.equal(a.state, "blocked");
     assert.equal(a.needsOwnerAction, true);
-    assert.deepEqual(a.action, { label: "Renew permission", kind: "renew-grant" });
+    assert.equal(a.action?.kind, "renew-grant");
+    // THE LABEL CHANGED AND THE REASON IS IN THIS FILE'S OWN SUBJECT.
+    //
+    // It asserted `{label: "Renew permission"}`, which contradicted the rule it
+    // is testing: liveBlockerText says "Re-signing with fewer tokens or fewer
+    // venues fixes it", and exec-mode.ts says "re-signing the same wall changes
+    // nothing, so the owner has to sign a smaller one". A button reading
+    // "Renew permission" invites precisely the no-op both of those warn about.
+    assert.notEqual(a.action?.label, "Renew permission");
+    assert.match(a.action!.label, /smaller/i);
+    assert.ok(a.headline && !/free permission renewal/i.test(a.headline));
   });
 
   it("and never offers funding, which would change nothing", () => {
@@ -146,5 +160,47 @@ describe("the owner is told, in the shared vocabulary", () => {
     const label = rejectRuleLabel("grant-too-wide");
     assert.ok(label && label.length > 0, "an unnamed rule renders as unlabelled amber");
     assert.ok(!label!.includes("grant-too-wide"), "and not as the slug");
+  });
+});
+
+/**
+ * THE EXCEPTION MOVED WHEN CONSENT BECAME A TERM, and the move was deliberate.
+ *
+ * `execModeOf` refuses outright — rather than simulating — when the wall cannot
+ * be installed, because "pretend fills against an uninstallable wall tell the
+ * owner their agent is working while the one thing that would make it work goes
+ * unsaid". That reasoning is about an owner who is TRYING to trade for real.
+ *
+ * It does not hold for someone who has not asked to. They are not being misled
+ * about a live rail they are not using, and refusing to simulate would deny
+ * them the practice they did ask for — which is the same paternalism that told
+ * a practising owner he was BLOCKED.
+ *
+ * So the exception now applies to owners who opted in, and the wall is reported
+ * to everyone else through `wouldBlockLive` instead of by refusing.
+ */
+describe("an uninstallable wall, for someone who never asked to go live", () => {
+  const paperIntent = { ...base, liveTradingEnabled: false, wallTooWide: true };
+
+  it("SIMULATES rather than refusing — they asked to practise, not to trade", () => {
+    const m = execModeOf({ ...paperIntent, paperTradingEnabled: true });
+    assert.equal(m.mode, "paper");
+    assert.equal(m.mode === "paper" ? m.rule : null, "live-not-enabled");
+  });
+
+  it("but the wall is still REPORTED, not hidden", () => {
+    // The whole justification for simulating here. If the wall went unsaid this
+    // would be the original defect — an agent that looks like it works and a
+    // problem the owner meets only on the day they switch.
+    const m = execModeOf({ ...paperIntent, paperTradingEnabled: true });
+    assert.equal(m.mode === "paper" ? m.wouldBlockLive : null, "grant-too-wide");
+  });
+
+  it("and the refusal is intact for an owner who HAS opted in", () => {
+    // The case the exception was written for, unchanged.
+    const m = execModeOf({ ...base, liveTradingEnabled: true, wallTooWide: true, paperTradingEnabled: true });
+    assert.equal(m.mode, "refuse");
+    assert.equal(m.mode === "refuse" ? m.rule : null, "grant-too-wide");
+    assert.equal(publishedMode(m), "idle");
   });
 });

@@ -155,6 +155,40 @@ export interface MerrymenSettings {
   paperTradingEnabled?: boolean;
   /** Starting paper cash, USDG. */
   paperStartUsdg?: number;
+  /**
+   * WHICH KINDS OF THING THE AGENT MAY BUY — "all" | "stocks" | "crypto".
+   *
+   * A FILTER OVER TRADE LEGS, NOT OVER THE WATCH SET, and the distinction is
+   * the whole safety of the feature. See `assetModeAllows` in tokens.ts: the
+   * watch set is what `snap.holdings` is built from, and every stop-loss and
+   * take-profit iterates that. A class switched off stays watched, priced,
+   * valued and sellable — only new buys of it stop.
+   *
+   * SETTINGS-ONLY, NO RE-SIGNATURE. Narrowing off-chain is always safe —
+   * policy.ts: "a mirror STRICTER than the chain, which is the one direction
+   * that is always safe." The shipped precedent is `officialCoinsEnabled`,
+   * which filters a token set that is sealed into every grant. Note the
+   * corollary: "crypto" cannot make the wall stop covering the stock tokens
+   * without a re-sign, and does not need to — nothing on-chain initiates a
+   * trade, so refusing off-chain is sufficient.
+   */
+  assetMode?: "all" | "stocks" | "crypto";
+  /**
+   * THE OWNER'S CONSENT TO SPEND REAL MONEY. Off until they say otherwise.
+   *
+   * Separate from `paperTradingEnabled` because they answer different
+   * questions: this one is "may real orders reach the chain", that one is
+   * "when they may not, should I simulate instead". For a while there was only
+   * the second, and it could not do this job — it is consulted only after the
+   * live rail has already failed, so an agent whose rail was healthy traded for
+   * real no matter what its owner had chosen. Funding an account was enough to
+   * cross that line, which is not a thing funding should be able to do.
+   *
+   * A REQUIRED TERM of `canTradeForReal` (worker/src/exec-mode.ts), not a
+   * fallback — see the long note on `ExecInputs.liveTradingEnabled` for why the
+   * distinction is the whole fix.
+   */
+  liveTradingEnabled?: boolean;
 
   // ── trading ────────────────────────────────────────────────────────────
   /** Builtin ("steady-basket" | "weekend-gap" | "llm-strategist") or the
@@ -491,6 +525,33 @@ export interface MerrymenSettings {
   /** Max simultaneous class positions. 0 = no limit beyond the scout budget. */
   classMaxPositions?: number;
   /**
+   * How long a class position may be held before it is sold back, seconds.
+   *
+   * THE EXIT THAT CANNOT BE BLOCKED BY A MISSING PRICE, which is why it is a
+   * clock and not a stop-loss. A class token has no oracle and may have no
+   * depth; a rugged one has no price at all. Every price-based exit is
+   * unreachable in exactly the case an exit matters most, so the one exit that
+   * always works has to be time.
+   *
+   * A position that cannot be closed is not a position. Until this existed, the
+   * route could open one and nothing in the codebase could ever close it.
+   */
+  classMaxHoldSec?: number;
+  /**
+   * Sell once the curve is this far toward graduation, percent.
+   *
+   * NOT A PROFIT TARGET — a trap door. `PonsClassVault` refuses a trade on a
+   * graduated curve by name (`CurveGraduated`), because a graduated curve
+   * resets its reserves and reports a live market that has actually moved to a
+   * pool. So a position still in the vault when its curve graduates can never
+   * be sold through that curve again, and the only way out becomes the owner's
+   * own key via `sweep`.
+   *
+   * Leaving early costs whatever the last stretch would have paid. Leaving late
+   * costs the whole position, and costs it in a way the agent cannot fix.
+   */
+  classExitAtGraduationPct?: number;
+  /**
    * Minimum REAL curve depth, USDG, before a class entry is considered.
    *
    * Real, not reported: a Pons curve's quote reserve includes a virtual seed
@@ -703,8 +764,27 @@ export type PcCapability = (typeof PC_CAPABILITIES)[number];
 export const SLIPPAGE_BPS_MAX = 1_000;
 
 export const SETTINGS_DEFAULTS = {
+  /**
+   * EVERYTHING THE GRANT COVERS. The only default that changes nothing for
+   * anybody who never touches it — which is the bar a filter added to a live
+   * fleet has to clear.
+   */
+  assetMode: "all" as const,
   paperTradingEnabled: true,
   paperStartUsdg: 1000,
+  /**
+   * OFF. The only safe default for a term that means "spend my money", and the
+   * one place in this file where the default is a promise rather than a
+   * preference: no agent trades for real until a person says so.
+   *
+   * MIGRATION — this default is why the rollout is two deploys, not one.
+   * `worker/src/settings.ts` resolves an absent field to the default, so
+   * shipping enforcement and this default together would move every existing
+   * tenant to paper at once, including agents whose owners are watching them
+   * trade real money right now. The backfill in `scripts/backfill-live-intent`
+   * writes the flag explicitly for anyone already live BEFORE enforcement lands.
+   */
+  liveTradingEnabled: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,
@@ -755,6 +835,17 @@ export const SETTINGS_DEFAULTS = {
   classSnipeEnabled: false,
   classPerEntryUsdg: 0,
   classMaxPositions: 0,
+  // SIX HOURS, and unlike the two above this one is NOT a closed door — it is
+  // the door out, so it defaults to a real value rather than to zero. A
+  // launchpad coin's depth has a measured half-life of hours (of the 14 deepest
+  // USDG curves, 7 fell under the tradable floor in 3.5), so a hold window
+  // longer than that is holding through the part where the exit stops working.
+  classMaxHoldSec: 6 * 3600,
+  // Well clear of the cliff. Graduation is not gradual — the curve resets — and
+  // the vault refuses a graduated curve outright, so the margin is the whole
+  // protection. 85% leaves room for a tick to be missed and for the last read
+  // to be stale.
+  classExitAtGraduationPct: 85,
   // ON, unlike everything above it. See MerrymenSettings.officialCoinsEnabled
   // for why a curated listing defaults differently from a discovered one.
   officialCoinsEnabled: true,
