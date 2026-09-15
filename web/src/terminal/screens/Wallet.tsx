@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { verifiedAdapter } from "@/lib/verified-adapter";
+import { isWallTooWide } from "@merrymen/core";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
@@ -1131,7 +1132,7 @@ export default function GrantPage() {
                 which is every desync. A refusal here was therefore invisible no
                 matter which path produced it, and pressing re-arm looked like a
                 button that did nothing. */}
-            {error && <div className="grant-error mono">{error}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
             {/* WHAT IS ACTUALLY IN IT, and the key to it. A wallet reaches this
                 panel precisely when the server won't arm it, which is also when
                 someone is most likely to think their money has vanished. The
@@ -1450,7 +1451,7 @@ export default function GrantPage() {
                 </button>
               </>
             )}
-            {error && <div className="grant-error mono">{error}</div>}
+            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
 
           </div>
         )}

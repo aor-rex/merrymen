@@ -263,6 +263,21 @@ export function wallShapeOfGrant<C>(
   return wallShape(buildPermissions(grant.caps, grant.smartAccount, opts));
 }
 
+/**
+ * THE MARKER A SURFACE KEYS ITS REMEDY OFF.
+ *
+ * Every too-wide refusal opens with this, so a screen can offer the owner a way
+ * to act on it without parsing prose or re-deriving the verdict. Matching on a
+ * sentence fragment is how a remedy quietly stops appearing the day somebody
+ * rewords the copy.
+ */
+export const WALL_TOO_WIDE = "your trading permission is too large to sign safely";
+
+/** Does this error carry a too-wide refusal? For surfaces that only see a message. */
+export function isWallTooWide(message: string | null | undefined): boolean {
+  return typeof message === "string" && message.toLowerCase().includes(WALL_TOO_WIDE);
+}
+
 /** What a refusal can tell the owner about their own basket. */
 export interface TooWideBasket {
   /** Custom tokens this wall carries right now. */
@@ -353,7 +368,7 @@ export function wallSignable(
   const removeAtLeast = maxTokens === null || opts.basket === undefined ? null : opts.basket.count - maxTokens;
 
   const head =
-    `your trading permission is too large to sign safely: installing it would need about ` +
+    `${WALL_TOO_WIDE}: installing it would need about ` +
     `${env.expectedBounded.toLocaleString()} gas against a limit of ` +
     `${FIRST_ENABLE_HARD_MAX_BOUNDED.toLocaleString()}.`;
 
