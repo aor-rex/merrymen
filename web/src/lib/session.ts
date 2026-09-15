@@ -492,7 +492,45 @@ async function mintGrant(
   // here. Two implementations of one policy is exactly how the two sides came
   // to disagree, and `wall-policy-lockstep.test.ts` fails if either grows its
   // own.
-  const signable = wallSignable(wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)));
+  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
+  //
+  // A fact about the account, read from the chain, not a constant. It used to be
+  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
+  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
+  // this ceiling that is the difference between signable and refused. A beta
+  // owner was told to delete a fifth token when four was the true answer.
+  //
+  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
+  // that would have fitted, which the owner can retry; under-charging mints one
+  // whose first operation the executor then refuses forever, which they cannot.
+  // Only one of those is recoverable, so the RPC failing picks that one.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
+  const signable = wallSignable(
+    wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)),
+    {
+      deploying: !alreadyDeployed,
+      // THE OWNER'S OWN ARITHMETIC. Re-shaped through the SAME builder, so the
+      // maximum it reports is true for this owner's venues and adapters rather
+      // than a constant measured on somebody else's feature set.
+      basket: {
+        count: sealedTokens.length,
+        shapeWith: (n) =>
+          wallShape(
+            buildCallPermissions(caps, sudoOnlyAccount.address, {
+              ...wallOpts,
+              extraTokens: sealedTokens.slice(0, n),
+            }),
+          ),
+      },
+    },
+  );
   if (!signable.ok) throw new Error(signable.why);
 
   const { policies, now, expiresAt } = buildWallPolicies({
