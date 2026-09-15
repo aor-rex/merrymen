@@ -2145,6 +2145,238 @@ async function runHwmRepairIfAsked(): Promise<void> {
 let enableClassRan = false;
 let haltClassEntriesRan = false;
 
+let classPnlRepairRan = false;
+
+/**
+ * BOOK THE RESULT OF CLASS ROUND TRIPS THAT COMPLETED WITHOUT ONE.
+ *
+ * `MERRYMEN_REPAIR_CLASS_PNL=report` prints and writes nothing; `apply` writes,
+ * and refuses without `MERRYMEN_REPAIR_CLASS_PNL_ONLY` naming the tenants. Same
+ * shape as the high-water-mark repair beside it, for the same reason: every
+ * write here lands on a figure an owner reads as their result.
+ *
+ * THE EVIDENCE IS THE CHAIN. For each closed class position the vault's own
+ * `ClassBuy`/`ClassSell` events are re-read and folded — the same
+ * `foldClassEvents` the worker uses, so the repair and the engine cannot reach
+ * different numbers from the same tape. A balance is never consulted: the vault
+ * also holds unrelated reward USDG, and a balance would turn Shogun's 1.77 loss
+ * into a gain.
+ *
+ * IDEMPOTENT ON CHAIN IDENTITY. The write lands on the `curve-trade` row the
+ * EXIT TRANSACTION identifies, and only where that row has no realised figure
+ * yet. Running twice is a no-op; running after the live path has booked the same
+ * trip is refused by the planner rather than doubled. The `swap` row the
+ * orphan-receipt reconciler writes for the same transaction is execution
+ * evidence and is never touched — a result on both rows is the double count this
+ * exists to avoid, which is why the planner refuses unless exactly one
+ * `curve-trade` row carries that hash.
+ */
+async function runClassPnlRepairIfAsked(): Promise<void> {
+  const mode = (process.env.MERRYMEN_REPAIR_CLASS_PNL ?? "").trim().toLowerCase();
+  if (!mode) return;
+  if (classPnlRepairRan) return;
+  classPnlRepairRan = true;
+
+  if (mode !== "report" && mode !== "apply") {
+    log(`class-pnl| MERRYMEN_REPAIR_CLASS_PNL=${mode} is not a mode. Use "report" or "apply".`);
+    return;
+  }
+  const applying = mode === "apply";
+  const only = new Set(
+    (process.env.MERRYMEN_REPAIR_CLASS_PNL_ONLY ?? "")
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.startsWith("0x")),
+  );
+  if (applying && only.size === 0) {
+    log("class-pnl| REFUSING to apply without MERRYMEN_REPAIR_CLASS_PNL_ONLY — name the tenants");
+    return;
+  }
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    log("class-pnl| asked for, but there is no DATABASE_URL");
+    return;
+  }
+
+  try {
+    const { planClassPnlRepair, classPnlRepairLines } = await import("./class-pnl-repair");
+    const { foldClassEvents, parseClassLogs } = await import("./venues/class-log");
+    const shared = await makePgDb(url);
+    await applyLedgerSchema(shared);
+
+    const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let rpcId = 1;
+    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
+      const r = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
+      });
+      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
+      if (j.error) throw new Error(j.error.message ?? "rpc error");
+      return j.result ?? null;
+    };
+
+    const gs = getGrantStore();
+    const plans: Awaited<ReturnType<typeof planClassPnlRepair>>[] = [];
+    const targets: { plan: (typeof plans)[number]; account: string }[] = [];
+
+    for (const tenant of await gs.listTenants()) {
+      if (only.size && !only.has(tenant.toLowerCase())) continue;
+      const g = await gs.get(tenant);
+      const acct = g?.smartAccount ? String(g.smartAccount) : null;
+      const vault = custodyAddressesOf(g)[0] ?? null;
+      if (!acct || !vault) continue;
+
+      const rows = (await shared
+        .prepare(
+          `SELECT token, symbol, state, entry_tx, exit_tx
+             FROM class_positions WHERE lower(agent_id) = lower($1)`,
+        )
+        .all(acct)) as unknown as Record<string, unknown>[];
+      if (rows.length === 0) continue;
+
+      // THE WHOLE TAPE, ONCE. Folded by the same function the worker uses, so
+      // the repair cannot reach a different number from the same evidence.
+      type Entry = { costRaw: bigint; proceedsRaw: bigint; soldRaw: bigint; sweptRaw: bigint };
+      let folded: Map<string, Entry> | null = null;
+      try {
+        const head = BigInt((await rpc("eth_blockNumber", [])) as string);
+        const logs = (await rpc("eth_getLogs", [
+          { address: vault, fromBlock: "0x0", toBlock: "0x" + head.toString(16) },
+        ])) as { topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }[];
+        const events = parseClassLogs(
+          logs.map((l) => ({
+            topics: l.topics,
+            data: l.data,
+            blockNumber: BigInt(l.blockNumber),
+            transactionHash: l.transactionHash,
+            logIndex: Number(l.logIndex),
+          })),
+        );
+        folded = foldClassEvents(events) as unknown as Map<string, Entry>;
+      } catch (e) {
+        log(`class-pnl| ${tenant}: vault log unreadable — ${e instanceof Error ? e.message.slice(0, 90) : e}`);
+      }
+
+      for (const r of rows) {
+        const token = String(r.token).toLowerCase();
+        const entry = folded?.get(token) ?? null;
+        const exitTx = r.exit_tx === null || r.exit_tx === undefined ? null : String(r.exit_tx);
+
+        // THE ROW THE RESULT WOULD LAND ON, identified by the EXIT TRANSACTION.
+        let intentRows = 0;
+        let recorded: number | null = null;
+        if (exitTx) {
+          const t = (await shared
+            .prepare(
+              `SELECT id, realized_pnl_usdg FROM trades
+                WHERE lower(agent_id) = lower($1) AND lower(tx_hash) = lower($2) AND kind = 'curve-trade'`,
+            )
+            .all(acct, exitTx)) as unknown as Record<string, unknown>[];
+          intentRows = t.length;
+          const v = t[0]?.realized_pnl_usdg;
+          recorded = v === null || v === undefined ? null : Number(v);
+        }
+        const b = (await shared
+          .prepare(
+            `SELECT qty_raw, cost_usdg FROM cost_basis
+              WHERE lower(agent_id) = lower($1) AND mode = 'live' AND symbol = $2`,
+          )
+          .get(acct, String(r.symbol ?? ""))) as { cost_usdg: string } | undefined;
+
+        const plan = planClassPnlRepair({
+          tenant,
+          smartAccount: acct,
+          token,
+          symbol: String(r.symbol ?? token),
+          entryTx: r.entry_tx === null || r.entry_tx === undefined ? null : String(r.entry_tx),
+          exitTx,
+          costRaw: entry ? entry.costRaw : null,
+          proceedsRaw: entry ? entry.proceedsRaw : null,
+          qtySoldRaw: entry ? entry.soldRaw : null,
+          sweptRaw: entry ? entry.sweptRaw : null,
+          state: String(r.state ?? "?"),
+          exitIntentRows: intentRows,
+          recordedRealizedUsdg: recorded,
+          basisRemainingRaw: b === undefined ? 0n : BigInt(b.cost_usdg || "0"),
+          scanComplete: folded !== null,
+        });
+        plans.push(plan);
+        targets.push({ plan, account: acct });
+      }
+    }
+
+    if (plans.length === 0) {
+      log("class-pnl| no class round trips found for the named tenant(s)");
+      return;
+    }
+    for (const line of classPnlRepairLines(plans)) log(`class-pnl| ${line}`);
+
+    if (!applying) {
+      log("class-pnl| REPORT ONLY — nothing was written. Remove MERRYMEN_REPAIR_CLASS_PNL now.");
+      return;
+    }
+
+    for (const { plan, account } of targets) {
+      if (plan.ambiguous || plan.realizedRaw === null) continue;
+      const x = plan.facts;
+      const realized = Number(plan.realizedRaw) / 1e6;
+
+      // THE GUARD IS IN THE WRITE ITSELF, not only in the planner. The predicate
+      // is the chain's own identity for this trip — its exit transaction — plus
+      // the requirement that no result is there yet, so a concurrent booking by
+      // the live path cannot be overwritten and a second run changes nothing.
+      const res = (await shared
+        .prepare(
+          `UPDATE trades
+              SET realized_pnl_usdg = $1, fill_side = 'sell', fill_qty_raw = $2,
+                  fill_cash_usdg = $3, basis_source = 'receipt'
+            WHERE lower(agent_id) = lower($4) AND lower(tx_hash) = lower($5)
+              AND kind = 'curve-trade' AND realized_pnl_usdg IS NULL`,
+        )
+        .run(
+          realized,
+          x.qtySoldRaw === null ? null : x.qtySoldRaw.toString(),
+          x.proceedsRaw === null ? null : Number(x.proceedsRaw) / 1e6,
+          account,
+          x.exitTx,
+        )) as unknown;
+      void res;
+
+      const after = (await shared
+        .prepare(
+          `SELECT realized_pnl_usdg, fill_side FROM trades
+            WHERE lower(agent_id) = lower($1) AND lower(tx_hash) = lower($2) AND kind = 'curve-trade'`,
+        )
+        .all(account, x.exitTx)) as unknown as Record<string, unknown>[];
+      const got = after[0]?.realized_pnl_usdg;
+      const ok = after.length === 1 && got !== null && got !== undefined && Math.abs(Number(got) - realized) < 1e-9;
+
+      await shared
+        .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
+        .run(
+          account,
+          "ok",
+          `class P&L repair: ${x.symbol} booked ${realized.toFixed(6)} USDG realised on exit ${x.exitTx}. ` +
+            `${plan.reason}. Derived from the vault's own events, never from a balance — this vault also ` +
+            `holds unrelated reward USDG.`,
+        );
+
+      log(
+        ok
+          ? `class-pnl| ${x.tenant} ${x.symbol} APPLIED — realised ${realized.toFixed(6)} USDG on ${x.exitTx}`
+          : `class-pnl| ${x.tenant} ${x.symbol} *** VERIFY FAILED — read back ${String(got)} across ` +
+            `${after.length} row(s), wanted ${realized.toFixed(6)} ***`,
+      );
+    }
+    log("class-pnl| APPLY COMPLETE. Remove MERRYMEN_REPAIR_CLASS_PNL now.");
+  } catch (e) {
+    log(`class-pnl| FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+
 /**
  * TURN THE CLASS ROUTE ON FOR ONE NAMED TENANT.
  *
@@ -3627,6 +3859,7 @@ export async function runOrchestrator(): Promise<void> {
       await runHwmRepairIfAsked();
       await runEnableClassIfAsked();
       await runHaltClassEntriesIfAsked();
+      await runClassPnlRepairIfAsked();
       await reconcile();
       watchdog();
       await mirrorLedgers();
