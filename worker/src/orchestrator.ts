@@ -2740,6 +2740,21 @@ async function runTenantInspectIfAsked(): Promise<void> {
         | null;
       error: string | null;
     } = { tradesByStatus: null, openPositions: null, classPositions: null, error: null };
+    /**
+     * THE CEILING'S OWN ROWS, READ WHILE THE CONNECTION IS STILL OPEN.
+     *
+     * Declared out here and filled inside the `try` below, because the section
+     * that PRINTS them belongs further down with the rest of the report. The
+     * first version did the query where it printed — after `client.end()` — and
+     * its production run said `class positions COULD NOT BE READ — Client was
+     * closed and is not queryable`. It reported the failure instead of showing
+     * an empty ceiling, which is the only reason it was noticed rather than
+     * believed.
+     */
+    let positionRows: { token: string; symbol: string | null; quoteToken: string | null; state: string | null }[] =
+      [];
+    let positionsError: string | null = null;
+
     const moves: {
       landed:
         | { kind: string; target: string; amountUsdg: number; status: string; txHash: string | null }[]
@@ -2909,6 +2924,29 @@ async function runTenantInspectIfAsked(): Promise<void> {
           moves.error = e instanceof Error ? e.message : String(e);
         }
       }
+
+      // Keyed by SMART ACCOUNT, like every other row in `class_positions` —
+      // `agent_id` is the smart account, and joining on the tenant would
+      // silently return nothing at all.
+      // `acctAddr` rather than `smartAccount`: the latter is declared below
+      // this try block, and the same fact is already in scope here.
+      if (acctAddr) {
+        try {
+          const pos = await client.query(
+            `SELECT token, symbol, quote_token, state FROM class_positions WHERE agent_id = $1`,
+            [acctAddr],
+          );
+          const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+          positionRows = pos.rows.map((r) => ({
+            token: String(r.token ?? ""),
+            symbol: str(r.symbol),
+            quoteToken: str(r.quote_token),
+            state: str(r.state),
+          }));
+        } catch (e) {
+          positionsError = e instanceof Error ? e.message : String(e);
+        }
+      }
     } finally {
       await client.end();
     }
@@ -3026,45 +3064,29 @@ async function runTenantInspectIfAsked(): Promise<void> {
     for (const line of describeLedger(ledger)) log(`inspect: ${line}`);
     for (const line of describeMovements(moves)) log(`inspect: ${line}`);
 
-    // THE CEILING'S OWN ARITHMETIC. Keyed by smart account, like every other
-    // row in `class_positions` — `agent_id` IS the smart account, and joining
-    // on the tenant would silently return nothing.
-    if (smartAccount) {
-      try {
-        /**
-         * IMPORTED FOR ITS REAL TYPE, NOT THROUGH A CAST.
-         *
-         * This read `as never as { describeClassPositions: (c: {states: …}) => string[] }`,
-         * and a hand-written structural type over `as never` erases the
-         * module's own signature — so widening the census from states to whole
-         * rows type-checked perfectly and would have thrown at runtime, on the
-         * one code path that only ever runs when somebody is already mid-
-         * incident. The other casts in this file are for `pg`, which is
-         * genuinely runtime-only; this module is ours and has types.
-         */
-        const { describeClassPositions } = await import("./inspect-tenant");
-        const pos = await client.query(
-          `SELECT token, symbol, quote_token, state FROM class_positions WHERE agent_id = $1`,
-          [smartAccount],
-        );
-        const ceiling = facts.classMaxPositions;
-        const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
-        for (const line of describeClassPositions({
-          rows: pos.rows.map((r) => ({
-            token: String(r.token ?? ""),
-            symbol: str(r.symbol),
-            quoteToken: str(r.quote_token),
-            state: str(r.state),
-          })),
-          ceiling: typeof ceiling === "number" ? ceiling : null,
-        }))
-          log(`inspect: ${line}`);
-      } catch (e) {
-        // Said out loud. An unreadable position table is not an empty one, and
-        // "the ceiling is fine" is exactly the wrong thing to infer from a
-        // failed read on the gate that shuts the route silently.
-        log(`inspect: class positions COULD NOT BE READ — ${e instanceof Error ? e.message : String(e)}`);
-      }
+    // THE CEILING'S OWN ARITHMETIC, formatted from the rows read above.
+    //
+    // IMPORTED FOR ITS REAL TYPE, NOT THROUGH A CAST. This read
+    // `as never as { describeClassPositions: (c: { states: … }) => string[] }`,
+    // and a hand-written structural type over `as never` erases the module's
+    // own signature — so widening the census from states to whole rows
+    // type-checked perfectly and would have thrown at runtime, on the one code
+    // path that only ever runs when somebody is already mid-incident. The other
+    // casts in this file are for `pg`, which is genuinely runtime-only; this
+    // module is ours and has types.
+    if (positionsError !== null) {
+      // Said out loud. An unreadable position table is not an empty one, and
+      // "the ceiling is fine" is exactly the wrong thing to infer from a failed
+      // read on the gate that shuts the route silently.
+      log(`inspect: class positions COULD NOT BE READ — ${positionsError}`);
+    } else if (smartAccount) {
+      const { describeClassPositions } = await import("./inspect-tenant");
+      const ceiling = facts.classMaxPositions;
+      for (const line of describeClassPositions({
+        rows: positionRows,
+        ceiling: typeof ceiling === "number" ? ceiling : null,
+      }))
+        log(`inspect: ${line}`);
     }
     log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
   } catch (e) {
