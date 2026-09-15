@@ -42,6 +42,21 @@ export interface TenantFacts {
   /** Settings, each null when the tenant has no stored value for it. */
   assetMode: string | null;
   liveTradingEnabled: boolean | null;
+  /**
+   * THE SUPPLY SIDE, and the reason this field is here at all.
+   *
+   * Every other setting below governs whether a candidate may be BOUGHT. This
+   * one governs whether a candidate ever EXISTS: `runPonsDiscovery` opens with
+   * `if (!cfg.discoveryEnabled ...) return` and that return is silent, so with
+   * it off the launchpad scanner never runs, `discovered_pools` is never
+   * written, and the class funnel honestly reports `scanned 0 → 0 qualified`
+   * forever.
+   *
+   * Left out, this module reported "every gate this module can see is OPEN"
+   * about an agent that could not see a single launch — which is worse than
+   * silence, because it moves the search to the gates that were already fine.
+   */
+  discoveryEnabled: boolean | null;
   classSnipeEnabled: boolean | null;
   classPerEntryUsdg: number | null;
   classMaxPositions: number | null;
@@ -63,6 +78,7 @@ export interface TenantFacts {
 const DEFAULTS: Record<string, string> = {
   assetMode: '"all"',
   liveTradingEnabled: "false",
+  discoveryEnabled: "true",
   classSnipeEnabled: "false",
   classPerEntryUsdg: "0",
   classMaxPositions: "0",
@@ -79,6 +95,7 @@ const DEFAULTS: Record<string, string> = {
 const SETTING_ORDER = [
   "assetMode",
   "liveTradingEnabled",
+  "discoveryEnabled",
   "classSnipeEnabled",
   "classPerEntryUsdg",
   "classMaxPositions",
@@ -148,12 +165,33 @@ export function describeTenant(f: TenantFacts): string[] {
   if ((f.classMaxPositions ?? 0) <= 0) blockers.push("classMaxPositions is 0");
   if (f.liveTradingEnabled !== true) blockers.push("liveTradingEnabled is not true");
   if (f.assetMode === "stocks") blockers.push('assetMode is "stocks", which excludes the whole route');
+  // EXPLICIT FALSE, not falsy. Every other test above reads an unset field as
+  // off, because those fields default off. This one defaults ON, so `null` here
+  // means "discovery is running under the default" and treating it as a blocker
+  // would report a starved route for most of the fleet.
+  if (f.discoveryEnabled === false) {
+    blockers.push(
+      "discoveryEnabled is false — the launchpad scanner never runs, so the candidate table stays empty " +
+        "and the funnel reports `scanned 0` however open the gates below are",
+    );
+  }
 
   lines.push(``);
   lines.push(
     blockers.length === 0
       ? `class route: every gate this module can see is OPEN`
       : `class route BLOCKED BY: ${blockers.join("; ")}`,
+  );
+  // WHAT THIS MODULE STILL CANNOT SEE, said out loud next to the verdict.
+  //
+  // The candidate table is `discovered_pools` in the CHILD's sqlite, which is
+  // ephemeral and reachable from nowhere but the child. So "every gate is OPEN"
+  // is a statement about configuration and never a statement about supply: a
+  // route with every gate open and an empty table buys nothing, and the only
+  // thing that can report that is the child's own `[class census]` line.
+  lines.push(
+    `not visible from here: the candidate table itself (child sqlite) — ` +
+      `read the child's "[class census] curve rows N all" line for supply`,
   );
   return lines;
 }

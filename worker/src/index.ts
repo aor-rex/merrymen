@@ -322,7 +322,8 @@ import {
   realQuoteRaw,
   type CurveReserves,
 } from "./venues/pons-price";
-import { chooseEntry } from "./venues/candidate-score";
+import { chooseEntry, type RefusalKind } from "./venues/candidate-score";
+import { classFunnelKey, classFunnelLine, classFunnelStages } from "./venues/class-funnel";
 import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
@@ -862,24 +863,21 @@ async function main() {
     /** The launchpad tape could not be read this pass, so no entry may qualify. */
     activityUnknown?: boolean;
   }): void {
-    const by = (k: string) => a.choice.refused.filter((r) => r.kind === k).length;
-    const depthOut = by("depth");
-    const impactOut = by("impact") + by("unpriceable");
-    const gradOut = by("graduation");
-    const passedDepth = a.verified - depthOut;
-    const passedImpact = passedDepth - impactOut;
-    const passedGrad = passedImpact - gradOut;
-    const qualified = a.choice.pick ? 1 : 0;
+    const counts = {
+      discovered: a.discovered,
+      withCurve: a.pairs,
+      tradable: a.verified,
+      refused: a.choice.refused as readonly { kind: RefusalKind }[],
+      picked: a.choice.pick !== null,
+      buying: a.buying,
+    };
+    const st = classFunnelStages(counts);
+    const { passedDepth, passedImpact, passedGraduation: passedGrad, passedActivity } = st;
 
-    const key =
-      `${a.discovered}/${a.pairs}/${a.verified}/${passedDepth}/${passedImpact}/${passedGrad}/${qualified}/${a.buying ? 1 : 0}`;
+    const key = classFunnelKey(counts, st);
     if (key !== lastClassFunnelKey) {
       lastClassFunnelKey = key;
-      console.log(
-        `[class funnel] scanned ${a.discovered} → ${a.pairs} usdg pairs → ${a.verified} tradable → ` +
-          `${passedDepth} passed depth → ${passedImpact} passed impact → ${passedGrad} passed graduation safety → ` +
-          `${qualified} qualified${a.buying ? "" : " · BUYING OFF (scan only)"}`,
-      );
+      console.log(classFunnelLine(counts, st));
     }
 
     /**
@@ -906,6 +904,14 @@ async function main() {
       scanning = `Found ${passedDepth} deep enough, but getting in and out would cost too much.`;
     } else if (passedGrad <= 0) {
       scanning = `Found ${passedImpact} worth pricing, but they are too close to graduating to sell safely afterwards.`;
+    } else if (passedActivity <= 0) {
+      // THE OWNER'S HALF OF THE MISSING STAGE. Without this arm the sentence
+      // fell through to "Scanning N tokens…", which is true and answers
+      // nothing: the agent had found a token it liked and declined it, and the
+      // owner was told only that it was still looking.
+      scanning =
+        `Found ${passedGrad} deep and cheap enough, but nobody is trading ${passedGrad === 1 ? "it" : "them"} right now — ` +
+        `waiting for real buyers before putting money in.`;
     } else {
       scanning = `Scanning ${a.discovered} tokens on the launchpad…`;
     }

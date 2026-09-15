@@ -2986,6 +2986,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
       vaultDeployed,
       assetMode: pick("assetMode"),
       liveTradingEnabled: pick("liveTradingEnabled"),
+      discoveryEnabled: pick("discoveryEnabled"),
       classSnipeEnabled: pick("classSnipeEnabled"),
       classPerEntryUsdg: pick("classPerEntryUsdg"),
       classMaxPositions: pick("classMaxPositions"),

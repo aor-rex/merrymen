@@ -26,6 +26,7 @@ const facts = (over: Partial<TenantFacts> = {}): TenantFacts => ({
   vaultDeployed: false,
   assetMode: null,
   liveTradingEnabled: true,
+  discoveryEnabled: null,
   classSnipeEnabled: null,
   classPerEntryUsdg: null,
   classMaxPositions: null,
@@ -113,6 +114,50 @@ describe("it names the blocker rather than leaving it to be inferred", () => {
   it("and counts assetMode 'stocks' as a blocker, because it excludes the route", () => {
     const out = describeTenant(facts({ assetMode: "stocks" })).join("\n");
     assert.match(out, /assetMode is "stocks"/);
+  });
+
+  /**
+   * THE GATE THAT STARVES THE ROUTE INSTEAD OF REFUSING IT.
+   *
+   * Shogun sat for hours with every gate below open, printing
+   * `[class funnel] scanned 0 → … → 0 qualified` — because a funnel with no
+   * input reports the same zeroes as a funnel that rejected everything. This
+   * module said "every gate this module can see is OPEN" and sent the search
+   * to the gates that were already fine.
+   */
+  const OPEN = {
+    grantClassVault: "0xC8776FAFf15212C359b23BAe531fF3aC7d760E0F",
+    classSnipeEnabled: true,
+    classPerEntryUsdg: 5,
+    classMaxPositions: 3,
+    liveTradingEnabled: true,
+    assetMode: "all",
+  } as const;
+
+  it("names discoveryEnabled=false as a blocker even with every buy-side gate open", () => {
+    const out = describeTenant(facts({ ...OPEN, discoveryEnabled: false })).join("\n");
+    assert.match(out, /class route BLOCKED BY/);
+    assert.match(out, /discoveryEnabled is false/);
+    assert.match(out, /candidate table stays empty/);
+    assert.doesNotMatch(out, /every gate this module can see is OPEN/);
+  });
+
+  it("but UNSET is not off — this field defaults on, unlike every other gate here", () => {
+    // The whole fleet leaves it unset. Reading null as false would report a
+    // starved route for almost every tenant and make the real one invisible.
+    const out = describeTenant(facts({ ...OPEN, discoveryEnabled: null })).join("\n");
+    assert.doesNotMatch(out, /discoveryEnabled is false/);
+    assert.match(out, /every gate this module can see is OPEN/);
+    assert.match(out, /discoveryEnabled\s+\(unset\) -> default true/);
+  });
+
+  it("AND SAYS WHAT IT STILL CANNOT SEE — an open gate is not a candidate", () => {
+    // "Every gate is OPEN" is a statement about configuration. Supply lives in
+    // the child's ephemeral sqlite, reachable from nowhere but the child, and
+    // conflating the two is what cost the hours this test exists to prevent.
+    const out = describeTenant(facts({ ...OPEN })).join("\n");
+    assert.match(out, /not visible from here: the candidate table itself/);
+    assert.match(out, /class census/);
   });
 });
 
