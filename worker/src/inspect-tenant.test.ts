@@ -14,7 +14,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { describeAccounting, describeTenant, type TenantFacts } from "./inspect-tenant";
+import {
+  describeAccounting,
+  describeClassPositions,
+  describeTenant,
+  type TenantFacts,
+} from "./inspect-tenant";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -333,5 +338,52 @@ describe("the accounting report reads the EFFECTIVE peak", () => {
       error: null,
     }).join("\n");
     assert.match(out, /durable peak \(effective\)\s+25\.487111\s+= gross 56\.272455 − withdrawn 30\.785344/);
+  });
+});
+
+/**
+ * THE CEILING THAT COUNTS FINISHED POSITIONS.
+ *
+ * `proposeClassEntries` compares `classMaxPositions` against
+ * `classPositions(agentId)`, which selects `WHERE agent_id = ?` and applies no
+ * state predicate — so a closed round trip occupies a slot for ever. The gate
+ * is below the funnel and writes nothing, so the symptom is a funnel that says
+ * `1 qualified` on every tick beside an agent that never buys.
+ */
+describe("the position ceiling reports both numbers, because they can differ", () => {
+  const census = (states: (string | null)[], ceiling: number | null) =>
+    describeClassPositions({ states, ceiling }).join("\n");
+
+  it("SHUTS THE ROUTE on finished rows, and says that is what happened", () => {
+    const out = census(["closed", "closed", "swept"], 3);
+    assert.match(out, /ENTRIES ARE SHUT: 3 >= 3/);
+    assert.match(out, /COUNTING 3 FINISHED POSITION\(S\)/);
+    assert.match(out, /standing \(open\/recovered\): 0/);
+  });
+
+  it("distinguishes a genuinely full book from a book full of exits", () => {
+    // Same count, same refusal, completely different remedy: one agent is
+    // working and one is stuck.
+    const real = census(["open", "open", "recovered"], 3);
+    assert.match(real, /ENTRIES ARE SHUT/);
+    assert.doesNotMatch(real, /FINISHED POSITION/);
+  });
+
+  it("reports room when there is room, by the count the gate actually uses", () => {
+    const out = census(["closed"], 3);
+    assert.match(out, /room for 2 more/);
+    assert.doesNotMatch(out, /ENTRIES ARE SHUT/);
+  });
+
+  it("names the no-state-filter cause rather than leaving the two numbers unexplained", () => {
+    assert.match(census(["closed"], 3), /classPositions applies no state filter/);
+  });
+
+  it("and an unset or zero ceiling is reported as inert, not as shut", () => {
+    for (const c of [null, 0]) {
+      const out = census(["closed", "closed", "closed", "closed"], c);
+      assert.match(out, /the ceiling does not bind/);
+      assert.doesNotMatch(out, /ENTRIES ARE SHUT/);
+    }
   });
 });

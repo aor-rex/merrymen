@@ -3025,6 +3025,31 @@ async function runTenantInspectIfAsked(): Promise<void> {
       log(`inspect: ${line}`);
     for (const line of describeLedger(ledger)) log(`inspect: ${line}`);
     for (const line of describeMovements(moves)) log(`inspect: ${line}`);
+
+    // THE CEILING'S OWN ARITHMETIC. Keyed by smart account, like every other
+    // row in `class_positions` — `agent_id` IS the smart account, and joining
+    // on the tenant would silently return nothing.
+    if (smartAccount) {
+      try {
+        const { describeClassPositions } = (await import("./inspect-tenant")) as never as {
+          describeClassPositions: (c: { states: readonly (string | null)[]; ceiling: number | null }) => string[];
+        };
+        const pos = await client.query(`SELECT state FROM class_positions WHERE agent_id = $1`, [
+          smartAccount,
+        ]);
+        const ceiling = facts.classMaxPositions;
+        for (const line of describeClassPositions({
+          states: pos.rows.map((r) => (r.state === null || r.state === undefined ? null : String(r.state))),
+          ceiling: typeof ceiling === "number" ? ceiling : null,
+        }))
+          log(`inspect: ${line}`);
+      } catch (e) {
+        // Said out loud. An unreadable position table is not an empty one, and
+        // "the ceiling is fine" is exactly the wrong thing to infer from a
+        // failed read on the gate that shuts the route silently.
+        log(`inspect: class positions COULD NOT BE READ — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     log("inspect: READ ONLY — nothing was written. Remove MERRYMEN_INSPECT_TENANT now.");
   } catch (e) {
     log(`inspect: FAILED — ${e instanceof Error ? e.message : String(e)}`);

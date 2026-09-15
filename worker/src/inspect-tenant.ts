@@ -197,6 +197,72 @@ export function describeTenant(f: TenantFacts): string[] {
 }
 
 /**
+ * THE POSITION CEILING, AND WHAT IT IS ACTUALLY COUNTING.
+ *
+ * `proposeClassEntries` ends with
+ *   `if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return []`
+ * where `held` is `classPositions(agentId)` — which selects
+ * `WHERE agent_id = ?` and applies NO state predicate. So CLOSED, SWEPT and
+ * RECOVERED rows count against the ceiling exactly like open ones, and nothing
+ * ever deletes them.
+ *
+ * WHY IT MATTERS MORE THAN AN ORDINARY OFF-BY-ONE. The gate sits BELOW the
+ * funnel, writes no log line, and is not covered by the `· BUYING OFF` suffix
+ * (which keys only on `classSnipeEnabled` and `classPerEntryUsdg`). An agent at
+ * the ceiling therefore prints `… → 1 qualified` every tick and never buys,
+ * which is the exact reading that sends an operator to the executor and the
+ * wall. A route that has completed `classMaxPositions` round trips is off
+ * permanently, and says nothing.
+ *
+ * Reported as BOTH numbers, never one: the count the gate uses, and the count
+ * of positions actually standing. When they differ, the difference is the bug
+ * and this says so rather than leaving it to be noticed.
+ */
+export interface ClassPositionCensus {
+  /** Every row for this agent, whatever its state — what the ceiling counts. */
+  states: readonly (string | null)[];
+  /** `classMaxPositions`, or null when unset (the gate is then inert). */
+  ceiling: number | null;
+}
+
+/** States that are a position the agent still has money or tokens in. */
+const STANDING = new Set(["open", "recovered"]);
+
+export function describeClassPositions(c: ClassPositionCensus): string[] {
+  const lines: string[] = [];
+  const total = c.states.length;
+  const standing = c.states.filter((s) => s !== null && STANDING.has(s)).length;
+  const tally = new Map<string, number>();
+  for (const s of c.states) tally.set(s ?? "(null)", (tally.get(s ?? "(null)") ?? 0) + 1);
+  const shown = [...tally].sort().map(([s, n]) => `${n}×${s}`).join(", ");
+
+  lines.push(``);
+  lines.push(`class positions: ${total} row(s) — ${shown || "none"}`);
+  lines.push(`  standing (open/recovered): ${standing}`);
+  lines.push(`  counted by the ceiling:    ${total}   <- classPositions applies no state filter`);
+  if (c.ceiling === null || c.ceiling <= 0) {
+    lines.push(`  classMaxPositions is ${c.ceiling === null ? "unset" : String(c.ceiling)} — the ceiling does not bind`);
+    return lines;
+  }
+  lines.push(`  classMaxPositions:         ${c.ceiling}`);
+  if (total >= c.ceiling) {
+    lines.push(
+      `  *** ENTRIES ARE SHUT: ${total} >= ${c.ceiling}. proposeClassEntries returns [] with NO log line, ` +
+        `below the funnel — so the funnel keeps printing "qualified" and nothing is ever bought.`,
+    );
+    if (standing < c.ceiling) {
+      lines.push(
+        `  *** AND IT IS COUNTING ${total - standing} FINISHED POSITION(S). Only ${standing} are standing; ` +
+          `the ceiling is held shut by rows the agent has already exited.`,
+      );
+    }
+  } else {
+    lines.push(`  room for ${c.ceiling - total} more by the count the gate uses`);
+  }
+  return lines;
+}
+
+/**
  * THE SECOND QUESTION THIS MODULE GETS ASKED: why is the breaker refusing?
  *
  * The drawdown breaker divides by `agents.hwm_usdg` (policy.ts:725-731), and
