@@ -166,3 +166,21 @@ describe("the four places a cash row could still do damage", () => {
     assert.match(CODE, /cashUsdg: balances\.cashUsdg \+ classCashUsdg,/, "and it joins equity");
   });
 });
+
+describe("and the P&L inventory does not ask what the cash cost", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  it("classHeldRows excludes it at the source, not only at the valuation", () => {
+    // `classHeldRows` feeds `scoutCostOf` — the class P&L inventory — which
+    // read a cash row as "a held position whose cost we cannot name". Shogun
+    // printed `[class] 1 held position(s) with an unknown basis` every tick,
+    // about its own USDG. The two valuation sites below it already filtered the
+    // cash token; this one did not, because it was added for a different
+    // question and nobody joined them up.
+    assert.match(
+      CODE,
+      /const classHeldRows = \(classRows \?\? \[\]\)\.filter\([\s\S]{0,600}!isQuoteTokenRow\(r\) &&/,
+      "the cash token must not enter the held-position inventory",
+    );
+  });
+});

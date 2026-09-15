@@ -8286,7 +8286,13 @@ async function main() {
       // stranded and should close, which is the one case the guard must not
       // block.
       const classHeldRows = (classRows ?? []).filter(
-        (r) => (classRead.balances.get(r.token) ?? 0n) > 0n,
+        // THE CASH TOKEN IS EXCLUDED HERE, not only at the two valuation sites
+        // below. This set also feeds `scoutCostOf`, the class P&L inventory,
+        // which reads a cash row as "a held position whose cost we cannot
+        // name" — Shogun printed exactly that, every tick, about its own USDG.
+        // The balance still reaches equity: `classCashUsdg` reads it straight
+        // from the custody call, which no longer depends on a row at all.
+        (r) => !isQuoteTokenRow(r) && (classRead.balances.get(r.token) ?? 0n) > 0n,
       );
       classBook = {
         ok: classRead.unread.length === 0,
