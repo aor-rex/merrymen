@@ -292,10 +292,54 @@ describe("the cost basis a class sell is measured against is restorable", () => 
       /const existing = await getBasis\(agentId, "live", symbol\);\s*\n\s*if \(existing\.qtyRaw > 0n\) return;/,
       "applyFill maintains that row through partial fills and knows more than a chain summary",
     );
+    // ONE KEY FOR BOTH DIRECTIONS. The restore and the clear resolve the symbol
+    // once, before either branch, so a basis can never be restored under one
+    // spelling and cleared under another.
     assert.match(
       CODE,
-      /const symbol = stored\?\.symbol \?\? short\(p\.token\);/,
+      /const key = stored0\?\.symbol \?\? short\(p\.token\);/,
       "and it must key on the same address-derived symbol the buy wrote",
     );
+    assert.match(CODE, /const symbol = key;/);
+  });
+});
+
+/**
+ * A BASIS MUST NOT OUTLIVE ITS POSITION.
+ *
+ * The other direction of the same reconciliation. A cost basis carried against a
+ * position the vault no longer holds is not inert: it is what a re-entry into
+ * the same token starts from, so the next buy inherits a cost it never paid and
+ * the next sell reports a loss that already happened.
+ *
+ * Shogun's sold-out position still carried 5.000000 USDG of basis after the
+ * round trip completed, with the tick-level stranded sweep having logged closing
+ * it. The chain says the position is gone; that is the authority.
+ */
+describe("a position the chain says is gone carries no basis", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const fn = CODE.slice(
+    CODE.indexOf("async function restoreClassCostBasis("),
+    CODE.indexOf("async function bookClassSweepWithdrawal("),
+  );
+
+  it("clears it when nothing is held", () => {
+    assert.ok(fn.length > 400, "the function must be found");
+    assert.match(
+      fn,
+      /if \(p\.balanceRaw <= 0n\) \{[\s\S]*setBasis\(agentId, "live", key, \{ qtyRaw: 0n, costUsdg: 0n \}\)/,
+      "a zero balance must clear the basis, not merely skip the restore",
+    );
+  });
+
+  it("only when there is something to clear, so it is not a write per tick", () => {
+    assert.match(fn, /if \(left\.qtyRaw > 0n \|\| left\.costUsdg > 0n\) \{/);
+  });
+
+  it("and it uses the SAME key the restore and the buy use", () => {
+    // Three spellings of this symbol would be three chances to clear the wrong
+    // row — or to leave the right one standing.
+    assert.match(fn, /const key = stored0\?\.symbol \?\? short\(p\.token\);/);
+    assert.match(fn, /const symbol = key;/);
   });
 });

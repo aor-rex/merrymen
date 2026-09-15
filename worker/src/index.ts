@@ -1680,7 +1680,33 @@ async function main() {
     },
   ): Promise<void> {
     if (paperActive()) return; // a class vault is a live-money contract
-    if (p.balanceRaw <= 0n) return; // nothing held, nothing to price a sell against
+    const stored0 = (await classPositions(agentId))?.find(
+      (r) => r.token.toLowerCase() === p.token.toLowerCase(),
+    );
+    const key = stored0?.symbol ?? short(p.token);
+    if (p.balanceRaw <= 0n) {
+      // NOTHING HELD — SO NOTHING MAY BE CARRIED AGAINST IT.
+      //
+      // The other direction of the same reconciliation. A basis that outlives
+      // its position is not inert: it is what a re-entry into the same token
+      // would start from, so the next buy would inherit a cost it never paid
+      // and the next sell would report a loss that already happened.
+      //
+      // Shogun is the live case. Its sold-out position still carried 5.000000
+      // USDG of basis after the round trip completed — the tick-level stranded
+      // sweep had logged closing it, and the figure was still there. The chain
+      // says the position is gone; that is the authority, and this runs off the
+      // chain read rather than off a balance the account happens to hold.
+      const left = await getBasis(agentId, "live", key);
+      if (left.qtyRaw > 0n || left.costUsdg > 0n) {
+        await setBasis(agentId, "live", key, { qtyRaw: 0n, costUsdg: 0n });
+        console.log(
+          `[class] cleared the cost basis for ${key}: the vault holds none of it and the chain says the ` +
+            `position is ${p.state} (was ${fmt(left.costUsdg)} USDG)`,
+        );
+      }
+      return;
+    }
     if (p.costRaw === null || p.qtyRaw === null || p.qtyRaw <= 0n) {
       // UNKNOWN, AND LEFT UNKNOWN. An invented basis would turn the whole
       // proceeds of the next sell into reported profit.
@@ -1690,10 +1716,7 @@ async function main() {
     // stores an address-derived symbol precisely so these three cannot drift —
     // reading the ERC-20's own `symbol()` anywhere here would book the buy under
     // one name and look for it under another.
-    const stored = (await classPositions(agentId))?.find(
-      (r) => r.token.toLowerCase() === p.token.toLowerCase(),
-    );
-    const symbol = stored?.symbol ?? short(p.token);
+    const symbol = key;
 
     const existing = await getBasis(agentId, "live", symbol);
     if (existing.qtyRaw > 0n) return;
