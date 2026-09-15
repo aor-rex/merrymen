@@ -175,6 +175,8 @@ describe("describeAccounting separates a stale peak from a real drawdown", () =>
   const base = {
     smartAccount: "0x05a198A677Fbcd8f5c168d397Fa7ef5eB6D65487",
     durableAccruedFeeUsdg: 0,
+    durableHwmGrossUsdg: null,
+    durableHwmWithdrawnUsdg: null,
     durableEpoch: 1,
     maxDrawdownBps: 500,
     error: null,
@@ -237,5 +239,54 @@ describe("describeAccounting separates a stale peak from a real drawdown", () =>
     }).join("\n");
     assert.match(out, /OUT\s+5\.785344\s+running\s+24\.915968/);
     assert.match(out, /net contributions\s+24\.915968/);
+  });
+});
+
+/**
+ * THE DIAGNOSTIC MUST NOT BE THE THING THAT REPORTS A WRONG NUMBER.
+ *
+ * It printed "→ breaker reads 5470bps — REFUSING every buy" about an account the
+ * engine was reading at 0bps and trading normally. It had read `hwm_usdg`
+ * directly, which since the withdrawal split is the GROSS peak; the figure the
+ * breaker divides by is gross minus what withdrawals have taken out of it.
+ *
+ * A module whose whole premise is "an unknown is not a zero" producing a
+ * confident wrong number is worth a test of its own.
+ */
+describe("the accounting report reads the EFFECTIVE peak", () => {
+  it("SHOGUN AFTER THE REPAIR: 0bps, not 5470", () => {
+    const out = describeAccounting({
+      smartAccount: "0x05a198A677Fbcd8f5c168d397Fa7ef5eB6D65487",
+      durableHwmUsdg: 25.487111, // 56.272455 − 30.785344
+      durableHwmGrossUsdg: 56.272455,
+      durableHwmWithdrawnUsdg: 30.785344,
+      durableAccruedFeeUsdg: 0,
+      durableEpoch: 1,
+      equityUsdg: 25.487111,
+      maxDrawdownBps: 500,
+      flows: [{ direction: "in", amountUsdg: 25, source: "inferred", txHash: null, blockNumber: null }],
+      trades: 7,
+      error: null,
+    }).join("\n");
+
+    assert.match(out, /→ breaker reads\s+0bps/, "the engine reads 0bps, so this must too");
+    assert.doesNotMatch(out, /REFUSING every buy/);
+  });
+
+  it("and shows both halves, so the figure can be checked rather than trusted", () => {
+    const out = describeAccounting({
+      smartAccount: "0x05",
+      durableHwmUsdg: 25.487111,
+      durableHwmGrossUsdg: 56.272455,
+      durableHwmWithdrawnUsdg: 30.785344,
+      durableAccruedFeeUsdg: 0,
+      durableEpoch: 1,
+      equityUsdg: 25.487111,
+      maxDrawdownBps: 500,
+      flows: [],
+      trades: 0,
+      error: null,
+    }).join("\n");
+    assert.match(out, /durable peak \(effective\)\s+25\.487111\s+= gross 56\.272455 − withdrawn 30\.785344/);
   });
 });

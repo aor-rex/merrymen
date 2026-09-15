@@ -2333,6 +2333,8 @@ async function runTenantInspectIfAsked(): Promise<void> {
     // operator can reach, which is the whole reason for the round trip.
     const acct: {
       durableHwmUsdg: number | null;
+      durableHwmGrossUsdg: number | null;
+      durableHwmWithdrawnUsdg: number | null;
       durableAccruedFeeUsdg: number | null;
       durableEpoch: number | null;
       equityUsdg: number | null;
@@ -2349,6 +2351,8 @@ async function runTenantInspectIfAsked(): Promise<void> {
       error: string | null;
     } = {
       durableHwmUsdg: null,
+      durableHwmGrossUsdg: null,
+      durableHwmWithdrawnUsdg: null,
       durableAccruedFeeUsdg: null,
       durableEpoch: null,
       equityUsdg: null,
@@ -2397,12 +2401,22 @@ async function runTenantInspectIfAsked(): Promise<void> {
       if (acctAddr) {
         try {
           const a = await client.query(
-            "SELECT hwm_usdg, accrued_fee_usdg, epoch FROM agents WHERE lower(smart_account) = lower($1)",
+            "SELECT hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg, epoch FROM agents WHERE lower(smart_account) = lower($1)",
             [acctAddr],
           );
           const r = a.rows[0];
           if (r) {
-            acct.durableHwmUsdg = Number(r.hwm_usdg);
+            // THE EFFECTIVE PEAK, which is what the breaker actually divides
+            // by — gross minus what withdrawals have taken out of it. Reading
+            // the raw column here printed "5470bps — REFUSING every buy" about
+            // an account the engine was reading at 0bps, which is precisely the
+            // confidently-wrong number this module exists to stop.
+            acct.durableHwmUsdg = Math.max(
+              0,
+              Number(r.hwm_usdg) - Number(r.hwm_withdrawn_usdg ?? 0),
+            );
+            acct.durableHwmGrossUsdg = Number(r.hwm_usdg);
+            acct.durableHwmWithdrawnUsdg = Number(r.hwm_withdrawn_usdg ?? 0);
             acct.durableAccruedFeeUsdg = Number(r.accrued_fee_usdg);
             acct.durableEpoch = Number(r.epoch);
           }
@@ -2604,6 +2618,8 @@ async function runTenantInspectIfAsked(): Promise<void> {
     for (const line of describeAccounting({
       smartAccount,
       durableHwmUsdg: acct.durableHwmUsdg,
+      durableHwmGrossUsdg: acct.durableHwmGrossUsdg,
+      durableHwmWithdrawnUsdg: acct.durableHwmWithdrawnUsdg,
       durableAccruedFeeUsdg: acct.durableAccruedFeeUsdg,
       durableEpoch: acct.durableEpoch,
       equityUsdg: acct.equityUsdg,

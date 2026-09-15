@@ -179,8 +179,19 @@ export function describeTenant(f: TenantFacts): string[] {
  */
 export interface AccountingFacts {
   smartAccount: string | null;
-  /** `agents.hwm_usdg` as the SHARED database holds it. Null when unread. */
+  /**
+   * The EFFECTIVE peak: `hwm_usdg − hwm_withdrawn_usdg`, floored at zero.
+   *
+   * What the drawdown breaker actually divides by. Reporting the raw column
+   * instead printed "5470bps — REFUSING every buy" about an account the engine
+   * was reading at 0bps — the confidently-wrong number this module exists to
+   * stop, produced by this module.
+   */
   durableHwmUsdg: number | null;
+  /** Σ every upward move. Shown so the effective figure can be checked. */
+  durableHwmGrossUsdg: number | null;
+  /** Σ withdrawals that have taken the peak down. */
+  durableHwmWithdrawnUsdg: number | null;
   durableAccruedFeeUsdg: number | null;
   durableEpoch: number | null;
   /** On-chain equity right now, in USDG. Null when the chain would not answer. */
@@ -222,7 +233,10 @@ export function describeAccounting(f: AccountingFacts): string[] {
 
   lines.push(`smartAccount                  ${f.smartAccount ?? "UNKNOWN"}`);
   lines.push(
-    `durable hwm_usdg              ${f.durableHwmUsdg === null ? "UNKNOWN" : usd(f.durableHwmUsdg)}`,
+    `durable peak (effective)      ${f.durableHwmUsdg === null ? "UNKNOWN" : usd(f.durableHwmUsdg)}` +
+      (f.durableHwmGrossUsdg === null
+        ? ""
+        : `  = gross ${usd(f.durableHwmGrossUsdg)} − withdrawn ${usd(f.durableHwmWithdrawnUsdg ?? 0)}`),
   );
   lines.push(
     `durable accrued_fee_usdg      ${f.durableAccruedFeeUsdg === null ? "UNKNOWN" : usd(f.durableAccruedFeeUsdg)}`,
