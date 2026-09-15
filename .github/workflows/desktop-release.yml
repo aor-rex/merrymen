@@ -93,6 +93,23 @@ jobs:
           # trying to sign. (Add CSC_LINK/CSC_KEY_PASSWORD later to sign.)
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+      # Gate: the update feed must contain literals, never templates.
+      # electron-builder performs NO ${env.…} substitution in `publish`, so a
+      # template ships verbatim into app-update.yml and every update check
+      # 404s on a URL containing literal "${env…}". Shipped broken once.
+      - name: Verify update feed has no templates
+        shell: bash
+        working-directory: desktop
+        run: |
+          test -f dist/linux-unpacked/resources/app-update.yml
+          if grep -q '${' dist/linux-unpacked/resources/app-update.yml; then
+            echo "app-update.yml contains an unexpanded template:"; cat dist/linux-unpacked/resources/app-update.yml
+            exit 1
+          fi
+          grep -E "^owner: millw14$" dist/linux-unpacked/resources/app-update.yml
+          grep -E "^repo: merrymen$" dist/linux-unpacked/resources/app-update.yml
+          echo "update feed is literal"
+
       # Always available: download the .AppImage from the run itself.
       - name: Upload run artifacts
         if: always()
