@@ -9,7 +9,7 @@
 # launchers (the same files the app itself refreshes on boot — reinstalling
 # or updating never leaves a stale tile).
 # Safe to re-run: re-installs/updates to the latest release. Override with:
-#   MERRY_MEN_VERSION=desktop-beta-v0.1.8-dev.1 curl -fsSL ... | bash  # pin a version
+#   MERRY_MEN_VERSION=v0.1.9-beta.1 curl -fsSL ... | bash  # pin a version
 #   MERRY_MEN_CHANNEL=beta curl -fsSL ... | bash  # latest beta pre-release
 #   MERRY_MEN_BIN_DIR=/usr/local/bin ...              # system-wide (needs sudo)
 #
