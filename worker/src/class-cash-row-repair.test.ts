@@ -11,6 +11,7 @@
  * four must hold and any single one failing must refuse the row.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import {
@@ -156,5 +157,49 @@ describe("the plan separates the three populations", () => {
     assert.match(out, /REFUSING/);
     assert.match(out, /cost_usdg is recorded/);
     assert.doesNotMatch(out, /would delete/);
+  });
+});
+
+/**
+ * THE SQL, WHICH IS WHERE THIS PASS ACTUALLY FAILED.
+ *
+ * The planner was right first time; the query around it was not. Its first
+ * production run said `class-cash-row: FAILED — column "smart_account" does
+ * not exist`, because `grants` keeps the account inside `grant_json` and there
+ * is no such column. A repair whose reads are wrong reports nothing to repair,
+ * which is indistinguishable from a clean ledger.
+ */
+describe("the pass reads the tables that exist", () => {
+  const SRC = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const PASS = SRC.slice(
+    SRC.indexOf("async function runCashRowRepairIfAsked("),
+    SRC.indexOf("async function runTenantInspectIfAsked("),
+  );
+
+  it("resolves the smart account out of grant_json, not a column", () => {
+    assert.ok(PASS.length > 0, "the pass must exist to be checked");
+    assert.match(PASS, /grant_json->>'smartAccount' AS smart_account/);
+    assert.doesNotMatch(
+      PASS,
+      /SELECT tenant, smart_account FROM grants/,
+      "there is no smart_account column on grants",
+    );
+  });
+
+  it("re-states every clause in the DELETE, so it cannot widen", () => {
+    // Belt and braces against the plan being wrong about a row: even then the
+    // statement can only remove something with no curve, no entry and no cost.
+    assert.match(
+      PASS,
+      /DELETE FROM class_positions WHERE lower\(agent_id\) = lower\(\?\) AND lower\(token\) = lower\(\?\) [\s\S]{0,80}AND curve IS NULL AND entry_tx IS NULL AND cost_usdg IS NULL/,
+    );
+  });
+
+  it("refuses to apply across the fleet", () => {
+    assert.match(PASS, /REFUSING to apply without MERRYMEN_REPAIR_CLASS_CASH_ROW_ONLY/);
+  });
+
+  it("and VERIFIES the row is gone rather than assuming the delete worked", () => {
+    assert.match(PASS, /VERIFY FAILED/);
   });
 });

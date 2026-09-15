@@ -2707,7 +2707,10 @@ async function runCashRowRepairIfAsked(): Promise<void> {
     // TENANT -> SMART ACCOUNT. `class_positions.agent_id` IS the smart account
     // and knows nothing about tenants; `grants` is the only bridge.
     const grants = (await shared
-      .prepare("SELECT tenant, smart_account FROM grants")
+      // The account lives INSIDE the grant blob; there is no `smart_account`
+      // column and asking for one fails the whole pass. Same projection the
+      // other repair passes use.
+      .prepare(`SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`)
       .all()) as unknown as Record<string, unknown>[];
     for (const g of grants) {
       const tenant = String(g.tenant ?? "").toLowerCase();
