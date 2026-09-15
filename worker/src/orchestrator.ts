@@ -2319,8 +2319,38 @@ async function runClassPnlRepairIfAsked(): Promise<void> {
     }
 
     for (const { plan, account } of targets) {
-      if (plan.ambiguous || plan.realizedRaw === null) continue;
       const x = plan.facts;
+
+      // ── THE STALE SHARED BASIS, CLEARED FIRST AND ON ITS OWN TERMS ──────
+      //
+      // BEFORE the `ambiguous` guard, deliberately. A position whose result is
+      // already booked still has this row to clean up, and gating the cleanup on
+      // "did the P&L need writing" means the very run that books a result is the
+      // only run that can ever clear it — so the second attempt, after the first
+      // one's SQL failed, would skip it forever.
+      //
+      // The child holds NO cost_basis row: `setBasis` deletes at zero rather
+      // than zeroing, and the mirror reports `cost_basis 0` for this tenant on
+      // every pass. But the mirror skips its own `DELETE FROM cost_basis`
+      // whenever the child is flagged `rebuilt` — it cannot tell "I closed this"
+      // from "I have forgotten everything" — so the deletion had nothing to
+      // upsert over and the shared row sits there indefinitely, reading as a
+      // position still carrying cost that closed hours ago.
+      //
+      // Safe outright, and it stays deleted: there is no child row to re-push
+      // and the mirror's upsert only writes rows the child has. Idempotent — a
+      // DELETE of a row that is not there is a no-op.
+      if (x.state === "closed" || x.state === "swept") {
+        await shared
+          .prepare(
+            `DELETE FROM cost_basis
+              WHERE lower(agent_id) = lower($1) AND mode = 'live' AND symbol = $2`,
+          )
+          .run(account, x.symbol);
+        log(`class-pnl| ${x.symbol} stale shared cost basis cleared (${x.state}; the child holds none)`);
+      }
+
+      if (plan.ambiguous || plan.realizedRaw === null) continue;
       const realized = Number(plan.realizedRaw) / 1e6;
 
       // THE GUARD IS IN THE WRITE ITSELF, not only in the planner. The predicate
@@ -2353,20 +2383,6 @@ async function runClassPnlRepairIfAsked(): Promise<void> {
       const got = after[0]?.realized_pnl_usdg;
       const ok = after.length === 1 && got !== null && got !== undefined && Math.abs(Number(got) - realized) < 1e-9;
 
-      // AND CONSUME THE BASIS, which is what `applyFill` would have done had it
-      // run. The child already deleted its own row — `setBasis` deletes at zero
-      // rather than zeroing — but the mirror skips its `DELETE FROM cost_basis`
-      // whenever the child is flagged `rebuilt`, so the deletion had nothing to
-      // upsert over and the SHARED row sits there indefinitely. It reads as a
-      // position still carrying 5.000000 of cost that closed hours ago.
-      //
-      // Safe to delete outright here and it stays deleted: the child holds no
-      // row to re-push, and the upsert only writes rows the child has.
-      await shared
-        .prepare(
-          `DELETE FROM cost_basis WHERE lower(agent_id) = lower($1) AND mode = live AND symbol = $2`,
-        )
-        .run(account, x.symbol);
 
       await shared
         .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")

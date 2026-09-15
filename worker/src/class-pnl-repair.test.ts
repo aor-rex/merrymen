@@ -12,6 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 import { classPnlRepairLines, planClassPnlRepair, type ClassRoundTripFacts } from "./class-pnl-repair";
 
 const shogun = (over: Partial<ClassRoundTripFacts> = {}): ClassRoundTripFacts => ({
@@ -105,5 +106,51 @@ describe("the report shows what it is deciding from", () => {
     const lines = classPnlRepairLines([planClassPnlRepair(shogun({ state: "swept" }))]).join("\n");
     assert.match(lines, /0 would be booked · 1 left alone/);
     assert.match(lines, /NO CHANGE — the owner swept this position out/);
+  });
+});
+
+/**
+ * THE SQL THE REPAIR ACTUALLY SENDS.
+ *
+ * A string literal lost its quotes in a patch round-trip and shipped as
+ * `mode = live`, which Postgres parses as a COLUMN. The statement threw, the
+ * outer catch swallowed it, and the repair reported nothing wrong while leaving
+ * a stale cost basis in the shared ledger — the one post-condition it was added
+ * to satisfy.
+ *
+ * Typechecking cannot see inside a SQL string, so the guard has to be here.
+ * These assert the shape of the predicates rather than the whole statement, so
+ * ordinary rewording stays free.
+ */
+describe("the repair's own SQL", () => {
+  const CODE = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+  const pass = CODE.slice(
+    CODE.indexOf("async function runClassPnlRepairIfAsked"),
+    CODE.indexOf("async function runHwmRepairIfAsked") > CODE.indexOf("async function runClassPnlRepairIfAsked")
+      ? CODE.indexOf("async function runHwmRepairIfAsked")
+      : CODE.length,
+  );
+
+  it("quotes every string literal it compares against", () => {
+    // `mode = live` and `kind = curve-trade` are column references, not values.
+    assert.doesNotMatch(pass, /mode\s*=\s*live\b/, "mode = live is a column reference, not a string");
+    assert.doesNotMatch(pass, /kind\s*=\s*curve-trade\b/);
+    assert.match(pass, /mode = 'live'/);
+    assert.match(pass, /kind = 'curve-trade'/);
+  });
+
+  it("books onto the exit transaction and only where no result is there yet", () => {
+    assert.match(pass, /lower\(tx_hash\) = lower\(\$5\)/, "keyed on the chain's own identity");
+    assert.match(pass, /AND realized_pnl_usdg IS NULL/, "the idempotency guard is in the write itself");
+  });
+
+  it("clears the stale basis BEFORE the ambiguous guard, not after", () => {
+    // Gating the cleanup on "did the P&L need writing" means the run that books
+    // a result is the only run that can ever clear it — so a second attempt,
+    // after the first one's SQL failed, would skip it forever.
+    const del = pass.indexOf("DELETE FROM cost_basis");
+    const guard = pass.indexOf("if (plan.ambiguous || plan.realizedRaw === null) continue;");
+    assert.ok(del > 0 && guard > 0, "both must be present");
+    assert.ok(del < guard, "the cleanup must not be gated on the booking");
   });
 });
