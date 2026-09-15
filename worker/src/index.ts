@@ -399,7 +399,7 @@ import {
   type TradeRow,  knownCurves,
 } from "./store";
 import { quoteDecimalsOf, readCurveReserves, readCurveThreshold } from "./venues/pons";
-import { foldClassEvents, readClassLog } from "./venues/class-log";
+import { decodeClassLog, foldClassEvents, readClassLog } from "./venues/class-log";
 import { reconcileClassBook, scoutCostOf } from "./class-reconcile";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
@@ -6191,6 +6191,17 @@ async function main() {
       // report perfect execution on every trade — a metric that cannot fail is
       // worse than an absent one.
       let fillPair: { stockToken: `0x${string}`; symbol: string; quotedOut: bigint | null; floorOut: bigint } | null = null;
+      /**
+       * Did the CLASS VAULT'S OWN EVENT supply the fill?
+       *
+       * If so it is authoritative and the receipt-delta re-derivation below
+       * must not replace it. The two normally agree — the deltas are taken
+       * across the account AND the vault, so a class leg nets out the same —
+       * but `ClassBuy`/`ClassSell` name the curve's own numbers while a delta
+       * is whatever moved. They diverge exactly when something unrelated
+       * moves in the same transaction, and the event is the one about us.
+       */
+      let fillIsFromClassEvent = false;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
       if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
@@ -6876,6 +6887,82 @@ async function main() {
               })),
         ]);
 
+        // ── THE ECONOMIC FILL FOR A CLASS TRADE, FROM THE VAULT'S OWN EVENT ──
+        //
+        // THIS ARM BOOKED NOTHING AT ALL, and the whole class round trip had no
+        // result because of it. `kind: "curve-trade"` has TWO executor arms —
+        // this one, chosen when the target is the sealed class vault, and the
+        // adapter arm below. The attribution code lives in the adapter arm,
+        // carrying a long comment about class tokens and `short(token)` keys —
+        // and the adapter arm is the forbidden `PonsSelfTrade` path that
+        // `ponsAdapterForSigning` deliberately makes unreachable. So the fix for
+        // class basis booking sits in the one branch a class trade can never
+        // take, and every class trade this repo has ever made recorded no fill:
+        // `fill_side` NULL, cost basis untouched, `realized_pnl_usdg` NULL.
+        //
+        // Shogun's round trip is the proof — 5.000000 USDG in, 3.226758 back,
+        // and a book that recorded neither a gain nor a loss for it.
+        //
+        // EXACTLY ONE BOOKER. The orphan-receipt reconciler also sees this
+        // transaction and writes a `swap` row for it, but it resolves its symbol
+        // with `symbolOfToken` alone — which is `undefined` for a class token by
+        // construction, since a launch token postdates the grant — so it books
+        // no fill and never will. That row stays what it is: execution evidence.
+        // Teaching it `?? short(token)` would make both arms book the same
+        // receipt and double-count it, so it is deliberately left alone.
+        //
+        // THE AMOUNTS COME FROM `ClassBuy`/`ClassSell` THEMSELVES, not from a
+        // balance and not from the quote. `quoteIn`/`quoteOut` are what the
+        // curve actually paid or took, in the same transaction, so a reward
+        // payment landing in the vault at any other moment cannot reach this
+        // figure. The intent's `notionalUsdg` was 3.227117 where the event says
+        // 3.226758; the event is the one that happened.
+        {
+          const classToken = (isBuy ? intent.assetOut : intent.assetIn).toLowerCase();
+          // The SAME expression `class_positions` and the quarantine use, so the
+          // buy books under the key the sell looks up. Three spellings of this
+          // would be three chances to book against nothing.
+          const symbol = symbolOfToken(classToken as `0x${string}`) ?? short(classToken);
+          // Only this vault's own logs. `parseClassLogs` matches on topic alone,
+          // and a topic is not an authorisation to speak for us.
+          const mine = exec.logs.filter(
+            (l) => String((l as { address?: string }).address ?? "").toLowerCase() === vault.toLowerCase(),
+          );
+          const want = isBuy ? "buy" : "sell";
+          const ev = mine
+            .map((l) => decodeClassLog(l))
+            .find((e) => e !== null && e.kind === want && e.token.toLowerCase() === classToken);
+          if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
+            fillPair = {
+              stockToken: classToken as `0x${string}`,
+              symbol,
+              // No quote to score against at this layer — the curve venue has
+              // none, and `slippage_bps: 0` would read as a measured perfect
+              // fill rather than as a measurement that never ran.
+              quotedOut: null,
+              floorOut: intent.minAmountOutRaw,
+            };
+            liveFill = {
+              side: isBuy ? "buy" : "sell",
+              symbol,
+              qtyRaw: ev.tokenRaw,
+              cashUsdg: ev.quoteRaw,
+              priceUsd: Number(ev.quoteRaw) / 1e6 / (Number(ev.tokenRaw) / 1e18),
+            };
+            fillIsFromClassEvent = true;
+          } else {
+            // SAID OUT LOUD. A class trade that lands without a readable event
+            // is one whose result nobody can compute, and silence here is how
+            // this defect survived a whole round trip.
+            await addEvent(
+              agentId,
+              "warn",
+              `${symbol}: the vault's own ${want} event could not be read off this receipt, so no cost ` +
+                `basis was booked for it and the P&L on this position will be unknown.`,
+            );
+          }
+        }
+
         // REMEMBER THE POSITION, because the vault cannot be asked what it
         // holds. This record is the enumeration — for the custody read, for the
         // provenance union that keeps the exit reachable, and for recovery.
@@ -7153,7 +7240,11 @@ async function main() {
       // Prefer the receipt over the quote. The quote is what we hoped for; the
       // receipt is what happened, and only the receipt's quantity matches the
       // balance a later sell will try to dispose of.
-      let basisSource: "receipt" | "quote" = "quote";
+      // THE EVENT IS THE RECEIPT. A class fill taken from `ClassBuy`/`ClassSell`
+      // was read off this transaction's own logs, so it is evidence of the same
+      // kind the delta path produces, and calling it a quote-derived basis
+      // would understate what is actually known about it.
+      let basisSource: "receipt" | "quote" = fillIsFromClassEvent ? "receipt" : "quote";
       let slippageBps: number | null = null;
       if (fillPair) {
         // EVERY HOLDER THAT IS US. A class buy delivers its token to the vault,
@@ -7168,7 +7259,9 @@ async function main() {
           symbol: fillPair.symbol,
         });
         if (measured) {
-          liveFill = measured;
+          // THE VAULT'S OWN EVENT WINS. Quality measurement below still runs;
+          // only the economic figures are left alone.
+          if (!fillIsFromClassEvent) liveFill = measured;
           basisSource = "receipt";
           // Execution quality, measured rather than assumed. The received side
           // is the stock leg on a buy and the cash leg on a sell.

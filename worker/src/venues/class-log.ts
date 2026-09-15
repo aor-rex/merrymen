@@ -71,6 +71,56 @@ function word(data: string, i: number): bigint {
   return BigInt(`0x${data.slice(2 + i * 64, 2 + (i + 1) * 64)}`);
 }
 
+/** What a class log says happened, before anything positional is attached. */
+export type ClassEventBody = Pick<ClassEvent, "kind" | "curve" | "token" | "quoteRaw" | "tokenRaw">;
+
+/**
+ * Decode ONE class log. The only place these fields are read off the wire.
+ *
+ * Split out of `parseClassLogs` so an EXECUTION RECEIPT can be decoded by the
+ * same code that decodes a historical scan. A receipt's logs carry no block
+ * number or log index — the transaction has not been indexed yet, it is the
+ * thing that just happened — and the scan path needs both. Without this split
+ * the executor either grows a second decoder, which is free to drift from this
+ * one, or invents positional values to satisfy a signature that does not use
+ * them. Both are worse than a function that returns exactly what a log says.
+ *
+ * The buy/sell word order is the trap this centralises: `ClassBuy` is
+ * (quoteIn, tokensOut) and `ClassSell` is (tokensIn, quoteOut). Reversed, a
+ * memecoin count reads as USDG.
+ */
+export function decodeClassLog(log: { topics: readonly string[]; data: string }): ClassEventBody | null {
+  const t0 = log.topics[0]?.toLowerCase();
+  if (typeof log.data !== "string") return null;
+
+  if (t0 === CLASS_BUY_TOPIC || t0 === CLASS_SELL_TOPIC) {
+    if (log.topics.length < 3) return null;
+    if (log.data.length < 2 + 64 * 2) return null;
+    const a = word(log.data, 0);
+    const b = word(log.data, 1);
+    const isBuy = t0 === CLASS_BUY_TOPIC;
+    return {
+      kind: isBuy ? "buy" : "sell",
+      curve: addressFromTopic(log.topics[1]!),
+      token: addressFromTopic(log.topics[2]!),
+      quoteRaw: isBuy ? a : b,
+      tokenRaw: isBuy ? b : a,
+    };
+  }
+
+  if (t0 === CLASS_SWEPT_TOPIC) {
+    if (log.topics.length < 2) return null;
+    if (log.data.length < 2 + 64) return null;
+    return {
+      kind: "swept",
+      curve: null,
+      token: addressFromTopic(log.topics[1]!),
+      quoteRaw: 0n,
+      tokenRaw: word(log.data, 0),
+    };
+  }
+  return null;
+}
 /**
  * Parse raw logs into events, skipping anything malformed.
  *
@@ -90,46 +140,17 @@ export function parseClassLogs(
 ): ClassEvent[] {
   const out: ClassEvent[] = [];
   for (const log of logs) {
-    const t0 = log.topics[0]?.toLowerCase();
+    // POSITION FIRST. A log with no place in the chain cannot be folded — the
+    // fold converges on (txHash, logIndex) and orders on blockNumber.
     if (log.blockNumber === null || log.transactionHash === null || log.logIndex === null) continue;
-    if (typeof log.data !== "string") continue;
-
-    if (t0 === CLASS_BUY_TOPIC || t0 === CLASS_SELL_TOPIC) {
-      if (log.topics.length < 3) continue;
-      if (log.data.length < 2 + 64 * 2) continue;
-      const a = word(log.data, 0);
-      const b = word(log.data, 1);
-      const isBuy = t0 === CLASS_BUY_TOPIC;
-      out.push({
-        kind: isBuy ? "buy" : "sell",
-        curve: addressFromTopic(log.topics[1]!),
-        token: addressFromTopic(log.topics[2]!),
-        // buy: (quoteIn, tokensOut). sell: (tokensIn, quoteOut). The order is
-        // reversed between them, which is exactly the kind of thing that reads
-        // a memecoin count as USDG if it is got wrong once.
-        quoteRaw: isBuy ? a : b,
-        tokenRaw: isBuy ? b : a,
-        blockNumber: log.blockNumber,
-        txHash: log.transactionHash.toLowerCase() as `0x${string}`,
-        logIndex: log.logIndex,
-      });
-      continue;
-    }
-
-    if (t0 === CLASS_SWEPT_TOPIC) {
-      if (log.topics.length < 2) continue;
-      if (log.data.length < 2 + 64) continue;
-      out.push({
-        kind: "swept",
-        curve: null,
-        token: addressFromTopic(log.topics[1]!),
-        quoteRaw: 0n,
-        tokenRaw: word(log.data, 0),
-        blockNumber: log.blockNumber,
-        txHash: log.transactionHash.toLowerCase() as `0x${string}`,
-        logIndex: log.logIndex,
-      });
-    }
+    const body = decodeClassLog(log);
+    if (body === null) continue;
+    out.push({
+      ...body,
+      blockNumber: log.blockNumber,
+      txHash: log.transactionHash.toLowerCase() as `0x${string}`,
+      logIndex: log.logIndex,
+    });
   }
   // Chain order, so a replay folds identically every time.
   return out.sort((x, y) =>
