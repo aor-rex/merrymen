@@ -218,3 +218,84 @@ describe("USDG left in the class vault is cash, not an unpriceable position", ()
     );
   });
 });
+
+/**
+ * THE SELL MUST BE PRICEABLE AFTER A REDEPLOY.
+ *
+ * A class buy DOES write a `cost_basis` row. But `cost_basis` lives in the
+ * child's sqlite, which a container rebuild discards, and unlike
+ * `class_positions` nothing re-derives it. A position bought before a redeploy
+ * is therefore held afterwards with no basis at all, and the consequence lands
+ * exactly where it hurts:
+ *
+ *   `applyFill` meets `prev.qtyRaw <= 0` on the sell, returns
+ *   `basisUnknown: true` and `realizedUsdg: 0n`, and `bookFill` writes a NULL
+ *   `realized_pnl_usdg` that `getRealizedPnlUsdg` excludes. The round trip
+ *   completes, the money moves, and the book records no result for it.
+ *
+ * Shogun is holding 1,006,167.866057921304348465 of 0x34d7…b4af bought for
+ * 5.000000 USDG, across several redeploys, with an exit due on its own clock.
+ */
+describe("the cost basis a class sell is measured against is restorable", () => {
+  /** The rule `restoreClassCostBasis` applies, as arithmetic. */
+  const restore = (costRaw: bigint | null, boughtRaw: bigint | null, balanceRaw: bigint) => {
+    if (balanceRaw <= 0n) return null;
+    if (costRaw === null || boughtRaw === null || boughtRaw <= 0n) return null;
+    const held = balanceRaw > boughtRaw ? boughtRaw : balanceRaw;
+    return { qtyRaw: held, costUsdg: (costRaw * held) / boughtRaw };
+  };
+
+  const BOUGHT = 1_006_167_866_057_921_304_348_465n;
+
+  it("SHOGUN'S POSITION: the whole basis comes back", () => {
+    const b = restore(COST, BOUGHT, BOUGHT);
+    assert.deepEqual(b, { qtyRaw: BOUGHT, costUsdg: COST }, "5.000000 USDG against the full quantity");
+  });
+
+  it("PART-SOLD: pro-rata, so the missing part is not booked as profit", () => {
+    // Half sold before the rebuild. Restoring the WHOLE 5.000000 against the
+    // remaining half would make the next sell report the other half's cost as
+    // gain — the exact error a naive restore makes.
+    const half = BOUGHT / 2n;
+    const b = restore(COST, BOUGHT, half)!;
+    assert.equal(b.qtyRaw, half);
+    // 2499999, not 2500000: BOUGHT is odd, so `half` floors and the pro-rata
+    // floors again. One micro-unit LOW, which understates profit — the only
+    // direction a rounding error in a cost basis is allowed to go.
+    assert.equal(b.costUsdg, 2_499_999n);
+    assert.ok(b.costUsdg <= COST / 2n, "never more than the share it represents");
+  });
+
+  it("floors, so a restored basis is never too HIGH", () => {
+    // Too high understates profit; too low overstates it. Floor division picks
+    // the direction that cannot flatter the book.
+    const odd = restore(7n, 3n, 2n)!;
+    assert.equal(odd.costUsdg, 4n, "7 * 2 / 3 = 4.67 floored to 4");
+  });
+
+  it("AN UNKNOWN COST STAYS UNKNOWN — no basis is invented", () => {
+    // An invented basis would turn the entire proceeds of the next sell into
+    // reported profit. Nothing is worse than a confident zero here.
+    assert.equal(restore(null, BOUGHT, BOUGHT), null);
+    assert.equal(restore(COST, null, BOUGHT), null);
+    assert.equal(restore(COST, 0n, BOUGHT), null);
+  });
+
+  it("a position that is gone gets nothing", () => {
+    assert.equal(restore(COST, BOUGHT, 0n), null);
+  });
+
+  it("and the tick never overwrites a live basis", () => {
+    const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(
+      CODE,
+      /const existing = await getBasis\(agentId, "live", symbol\);\s*\n\s*if \(existing\.qtyRaw > 0n\) return;/,
+      "applyFill maintains that row through partial fills and knows more than a chain summary",
+    );
+    assert.match(
+      CODE,
+      /const symbol = stored\?\.symbol \?\? short\(p\.token\);/,
+      "and it must key on the same address-derived symbol the buy wrote",
+    );
+  });
+});

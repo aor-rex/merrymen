@@ -1594,6 +1594,8 @@ async function main() {
         await rehydrateClassRow(agentId, p, client);
         // A SWEEP IS THE OWNER TAKING CAPITAL OUT, AND IT HAS TO BE BOOKED AS ONE.
         await bookClassSweepWithdrawal(agentId, p);
+        // AND THE COST BASIS THE SELL WILL BE MEASURED AGAINST.
+        await restoreClassCostBasis(agentId, p);
       }
 
       const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
@@ -1633,6 +1635,77 @@ async function main() {
    * idempotency — it cannot be one, and the comment below is about exactly why.
    */
   const sweepsAnnounced = new Set<string>();
+
+  /**
+   * PUT BACK THE COST BASIS A REDEPLOY THREW AWAY, so the SELL can be priced.
+   *
+   * THE FAILURE THIS CLOSES, in full. A class buy DOES write a `cost_basis` row —
+   * `fillPair`/`liveFill` are set for a curve trade and `bookFill` runs, keyed by
+   * `symbolOfToken(t) ?? short(t)`. But `cost_basis` lives in the child's sqlite,
+   * which a container rebuild discards, and unlike `class_positions` nothing
+   * re-derives it. So a position bought before a redeploy is held afterwards with
+   * NO basis at all, and the consequences land exactly where they hurt:
+   *
+   *   `applyFill` meets `prev.qtyRaw <= 0` on the sell, returns
+   *   `basisUnknown: true` and `realizedUsdg: 0n`, and `bookFill` then writes a
+   *   NULL `realized_pnl_usdg` that `getRealizedPnlUsdg` excludes. The round trip
+   *   completes, the money moves, and the book records no result for it.
+   *
+   * The comment on the curve-fill attribution above describes this same failure
+   * arriving by a different route and calls it out as the reason class trades
+   * booked no basis at all. That route is fixed; this one is the redeploy.
+   *
+   * THE CHAIN IS THE SOURCE, as everywhere else in the class ledger.
+   * `class_positions.cost_usdg` is `ClassBuy.quoteIn` — the actual fill, not the
+   * size that was proposed — re-read from the vault's own events on every arm.
+   *
+   * PRO-RATA ON THE BALANCE STILL HELD. A position part-sold before the rebuild
+   * must not have its whole original cost restored against its remaining
+   * quantity; that would book the missing part as profit on the next sell.
+   * Floor division, so the restored basis can only ever be slightly LOW, which
+   * understates profit rather than overstating it.
+   *
+   * IT NEVER OVERWRITES. A basis with anything on it is the live one and wins —
+   * this only ever fills a hole. `applyFill` maintains that row through partial
+   * fills and knows things the chain summary does not.
+   */
+  async function restoreClassCostBasis(
+    agentId: string,
+    p: {
+      token: string;
+      state: string;
+      costRaw: bigint | null;
+      qtyRaw: bigint | null;
+      balanceRaw: bigint;
+    },
+  ): Promise<void> {
+    if (paperActive()) return; // a class vault is a live-money contract
+    if (p.balanceRaw <= 0n) return; // nothing held, nothing to price a sell against
+    if (p.costRaw === null || p.qtyRaw === null || p.qtyRaw <= 0n) {
+      // UNKNOWN, AND LEFT UNKNOWN. An invented basis would turn the whole
+      // proceeds of the next sell into reported profit.
+      return;
+    }
+    // THE SAME KEY THE BUY WROTE AND THE QUARANTINE READS. `class_positions`
+    // stores an address-derived symbol precisely so these three cannot drift —
+    // reading the ERC-20's own `symbol()` anywhere here would book the buy under
+    // one name and look for it under another.
+    const stored = (await classPositions(agentId))?.find(
+      (r) => r.token.toLowerCase() === p.token.toLowerCase(),
+    );
+    const symbol = stored?.symbol ?? short(p.token);
+
+    const existing = await getBasis(agentId, "live", symbol);
+    if (existing.qtyRaw > 0n) return;
+
+    const held = p.balanceRaw > p.qtyRaw ? p.qtyRaw : p.balanceRaw;
+    const costUsdg = (p.costRaw * held) / p.qtyRaw;
+    await setBasis(agentId, "live", symbol, { qtyRaw: held, costUsdg });
+    console.log(
+      `[class] restored cost basis for ${symbol}: ${fmt(costUsdg)} USDG against ` +
+        `${held} raw (from the vault's own ClassBuy events — the sell is priceable again)`,
+    );
+  }
 
   /**
    * Say that a sweep happened. DO NOT MOVE MONEY FOR IT.
