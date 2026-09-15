@@ -149,6 +149,54 @@ function ensureBootableApp() {
 }
 const PAUSED_MARKER = path.join(HOME, "paused"); // present = agent paused (worker honors it)
 const ICON = path.join(APP_DIR, "build", "icon.png");
+// Advisory single-worker lock, shared with the CLI (`merrymen start` honors
+// the same file): the desktop is the canonical launcher, but a terminal left
+// over from before can still spawn a second worker against the same HOME —
+// two workers, one account, double trades. Exclusive-create wins; a stale PID
+// is stolen, a live one refuses loudly. Released on quit.
+const WORKER_LOCK = path.join(HOME, ".lock");
+function lockAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function acquireWorkerLock() {
+  try {
+    mkdirSync(HOME, { recursive: true });
+    writeFileSync(WORKER_LOCK, String(process.pid), { flag: "wx" });
+    return { ok: true };
+  } catch {
+    /* taken — read the holder below */
+  }
+  let holder = 0;
+  try {
+    holder = Number(readFileSync(WORKER_LOCK, "utf8").trim());
+  } catch {
+    return { ok: false, holder: 0 };
+  }
+  if (!lockAlive(holder)) {
+    try {
+      writeFileSync(WORKER_LOCK, String(process.pid));
+      return { ok: true, stole: true };
+    } catch {
+      return { ok: false, holder };
+    }
+  }
+  return { ok: false, holder };
+}
+function releaseWorkerLock() {
+  try {
+    if (readFileSync(WORKER_LOCK, "utf8").trim() === String(process.pid)) {
+      rmSync(WORKER_LOCK, { force: true });
+    }
+  } catch {
+    /* best effort — a stale file self-heals on next acquire */
+  }
+}
 
 // ── OS integration self-repair: the launcher tile ──────────────────────────
 // The in-app updater replaces ONLY the AppImage file — never the launcher
@@ -421,8 +469,10 @@ function makeMain() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
   // Closing the window keeps the agent running in the tray — only "Quit" stops it.
+  // Tray-less exception (see trayNoHost): with nowhere for the tray to display,
+  // hiding would orphan a headless agent nothing can quit, so close quits.
   mainWin.on("close", (e) => {
-    if (quitting) return;
+    if (quitting || trayNoHost) return;
     e.preventDefault();
     mainWin.hide();
     if (process.platform === "win32" && tray && !closeHintShown) {
@@ -500,7 +550,27 @@ function makeTray() {
   if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
   tray = new Tray(img);
   tray.on("click", showWindow); // left-click reopens the dashboard
+  trayNoHost = isTrayHostMissing();
   refreshTray();
+}
+// Best-effort tray-host detection: on tray-less Wayland compositors the Tray
+// constructs fine but has nowhere to display — and close→hide then leaves an
+// unkillable headless agent (no tray menu, no menu bar). When no host is
+// found, closing the window quits instead; the dashboard Quit button covers
+// the same path deliberately. Tray users see zero behavior change.
+let trayNoHost = false;
+function isTrayHostMissing() {
+  // Destroyed right after creation = nowhere to display. Anything else (real
+  // display, or an inconclusive answer) keeps the classic hide behavior.
+  try {
+    if (tray && typeof tray.isDestroyed === "function" && tray.isDestroyed()) return true;
+  } catch {
+    /* inconclusive — keep hide */
+  }
+  if (process.platform === "linux" && !process.env.XDG_CURRENT_DESKTOP && !process.env.DESKTOP_SESSION) {
+    return true;
+  }
+  return false;
 }
 
 // ── updates (GitHub releases via electron-updater) ──────────────────────────
@@ -742,6 +812,24 @@ if (!app.requestSingleInstanceLock()) {
     try {
       if (!ensureBootableApp()) return;
       ensureDesktopIntegration(); // tile + icon self-repair (best effort)
+      const lock = acquireWorkerLock();
+      if (!lock.ok) {
+        // Second launcher: the CLI or another desktop holds the worker lock.
+        // Refuse loudly instead of double-trading one account — same message
+        // shape as the port conflict below.
+        const holder = lock.holder ? ` (held by PID ${lock.holder})` : "";
+        dialog.showMessageBoxSync({
+          type: "warning",
+          title: "merrymen — already running",
+          message: "Another merrymen worker is already running.",
+          detail: `Quit it first (tray → Quit, or kill PID ${lock.holder || "?"}), then launch again.${holder}`,
+          buttons: ["Quit"],
+        });
+        quitting = true;
+        app.quit();
+        return;
+      }
+      if (lock.stole) console.log("[main] stole a stale worker lock — previous run did not release it");
       if (!(await ensurePortFree())) return;
       startBackend();
       await waitForServer();
@@ -765,6 +853,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     quitting = true;
     killBackend();
+    releaseWorkerLock();
   });
 }
-process.on("exit", killBackend);
+process.on("exit", () => {
+  killBackend();
+  releaseWorkerLock();
+});
