@@ -1,17 +1,24 @@
 name: Desktop release
 
-# Push a tag like `desktop-v0.1.0` and this builds the installers on GitHub's own
-# runners and publishes them to a Release. Also downloadable as
-# run artifacts (Actions → the run → Artifacts) even before the release is cut.
-# Or trigger manually from the Actions tab (workflow_dispatch).
+# Push a tag like `v0.1.9` (stable) or `v0.1.9-beta.1` (pre-release) and this
+# builds the installers on GitHub's own runners and publishes them to a
+# Release. Also downloadable as run artifacts (Actions → the run → Artifacts)
+# even before the release is cut. Or trigger manually from the Actions tab
+# (workflow_dispatch).
 #
+# Tag names MUST stay bare semver (`v` + version, optional `-beta.N`): the
+# in-app updater (electron-updater GitHub provider) skips every tag that fails
+# semver.valid(), so a prefixed tag (desktop-v*, mobile-v*) is invisible to
+# update checks and they fail with "No published versions on GitHub". Beta
+# releases use the `-beta.N` prerelease identifier specifically (not `-dev.N`):
+# the provider only auto-follows alpha/beta/same-channel tags, so a `dev`
+# channel is a one-way trap that can never see stable releases again.
 # Linux-only for now: Windows/macOS stay out of the matrix until they can be
 # tested on real hardware. Re-add them when ready.
 on:
   push:
     tags:
-      - "desktop-v*"
-      - "desktop-beta-v*"
+      - "v*"
   workflow_dispatch: {}
 
 permissions:
@@ -95,14 +102,13 @@ jobs:
           path: |
             desktop/dist/*.AppImage
             desktop/dist/latest-linux.yml
-            desktop/build/icon.png
 
-      # Stable (`desktop-v*`) ships as a full release; beta tags
-      # (`desktop-beta-v*`) ship as prereleases so only beta-channel apps
-      # (in-app toggle → allowPrerelease) are offered them.
+      # Stable (`vX.Y.Z`) ships as a full release; beta tags (`vX.Y.Z-beta.N`)
+      # ship as prereleases so only beta-channel apps (in-app toggle →
+      # allowPrerelease) are offered them.
       # Titles follow the maintainer style ("Desktop 0.1.7"), derived from
       # the tag instead of echoing it raw.
-      # Changelog: desktop-scoped commit subjects since the previous desktop-*
+      # Changelog: desktop-scoped commit subjects since the previous `v*`
       # tag, so every release note lists what actually changed. Unscoped the
       # range drowns in unrelated mainline history (600+ commits); the desktop
       # release only names what it ships. A commit appears if it touches any
@@ -117,7 +123,7 @@ jobs:
         shell: bash
         run: |
           REF="${{ github.ref }}"
-          PREV="$(git tag --list 'desktop-*' --sort=-creatordate | grep -v "${REF#refs/tags/}" | head -n 1)"
+          PREV="$(git tag --list 'v*' --sort=-creatordate | grep -v "${REF#refs/tags/}" | head -n 1)"
           SCOPE="desktop web/src/terminal .github/workflows/desktop-release.yml .github/workflows/desktop-dev.yml"
           {
             echo "PREV_TAG=$PREV"
@@ -135,14 +141,14 @@ jobs:
         shell: bash
         run: |
           REF="${{ github.ref }}"
-          if [[ "$REF" == refs/tags/desktop-beta-* ]]; then
+          if [[ "$REF" == refs/tags/v*-beta.* ]]; then
             echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
             echo "CHANNEL_LINE=**Channel:** beta — offered only to apps with the beta toggle on." >> "$GITHUB_ENV"
-            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/desktop-beta-v}" >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/v}" >> "$GITHUB_ENV"
           else
             echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
             echo "CHANNEL_LINE=**Channel:** stable." >> "$GITHUB_ENV"
-            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/desktop-v}" >> "$GITHUB_ENV"
+            echo "DISPLAY_NAME=Desktop ${REF#refs/tags/v}" >> "$GITHUB_ENV"
           fi
 
       # On a tag: attach the installers to a public GitHub Release.
@@ -173,4 +179,3 @@ jobs:
           files: |
             desktop/dist/*.AppImage
             desktop/dist/latest-linux.yml
-            desktop/build/icon.png
