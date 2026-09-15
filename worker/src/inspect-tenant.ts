@@ -390,6 +390,7 @@ export interface MovementFacts {
         costUsdg: string | null;
         proceedsUsdg: string | null;
         qtyRaw: string | null;
+        openedAtBlock: string | null;
         entryTx: string | null;
         exitTx: string | null;
       }[]
@@ -422,7 +423,8 @@ export function describeMovements(f: MovementFacts): string[] {
         `    cost ${c.costUsdg ?? "UNKNOWN"} · proceeds ${c.proceedsUsdg ?? "UNKNOWN"} · qty ${c.qtyRaw ?? "UNKNOWN"}`,
       );
       lines.push(
-        `    entry ${c.entryTx ? c.entryTx.slice(0, 12) + "…" : "(none)"} · exit ${c.exitTx ? c.exitTx.slice(0, 12) + "…" : "(none)"}`,
+        `    opened at block ${c.openedAtBlock ?? "UNKNOWN"} · entry ${c.entryTx ? c.entryTx.slice(0, 12) + "…" : "(none)"} · ` +
+          `exit ${c.exitTx ? c.exitTx.slice(0, 12) + "…" : "(none)"}`,
       );
     }
   return lines;

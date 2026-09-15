@@ -2509,6 +2509,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
             costUsdg: x.cost_usdg === null ? null : String(x.cost_usdg),
             proceedsUsdg: x.proceeds_usdg === null ? null : String(x.proceeds_usdg),
             qtyRaw: x.qty_raw === null ? null : String(x.qty_raw),
+            openedAtBlock: x.opened_at_block === null ? null : String(x.opened_at_block),
             entryTx: x.entry_tx === null ? null : String(x.entry_tx),
             exitTx: x.exit_tx === null ? null : String(x.exit_tx),
           }));
