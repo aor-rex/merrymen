@@ -288,6 +288,8 @@ const CLASS_WINDOW_SEC = 6 * 3600;
 /** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
 let lastClassFunnelKey = "";
 let lastClassIdleKey = "";
+/** The counted set the ceiling last refused on — change-keyed, like its siblings. */
+let lastClassCeilingKey = "";
 
 /**
  * THE LAUNCHPAD'S TAPE, CACHED, because the entry pass runs far more often than
@@ -324,6 +326,13 @@ import {
 } from "./venues/pons-price";
 import { chooseEntry, type RefusalKind } from "./venues/candidate-score";
 import { classFunnelKey, classFunnelLine, classFunnelStages } from "./venues/class-funnel";
+import {
+  activeClassPositions,
+  ceilingBlocks,
+  describeCeiling,
+  isActiveClassState,
+  isQuoteTokenRow,
+} from "./class-active";
 import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
 import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
@@ -862,6 +871,14 @@ async function main() {
     buying: boolean;
     /** The launchpad tape could not be read this pass, so no entry may qualify. */
     activityUnknown?: boolean;
+    /**
+     * The position ceiling is full, so nothing will be bought whatever qualifies.
+     *
+     * Carried into the REPORT rather than left at the gate, because the gate is
+     * 200 lines below this and returns silently. Without it the owner is told
+     * the market was the obstacle when the obstacle was his own book.
+     */
+    ceilingFull?: boolean;
   }): void {
     const counts = {
       discovered: a.discovered,
@@ -888,7 +905,26 @@ async function main() {
      */
     const held = a.holding > 0 ? `Holding ${a.holding} position${a.holding === 1 ? "" : "s"}. ` : "";
     let scanning: string;
-    if (a.discovered === 0) {
+    if (a.ceilingFull && a.buying) {
+      /**
+       * FIRST, BECAUSE IT OUTRANKS EVERY OTHER REASON.
+       *
+       * When the book is full nothing will be bought however the scan went, so
+       * leading with a market reason — "nothing has enough liquidity", or worse
+       * "X looks worth a position" — tells the owner to wait for a market that
+       * was never the obstacle. This is also the one arm on this ladder the
+       * owner can actually act on.
+       *
+       * AND ONLY WHEN BUYING IS ON. "Waiting for one to close before buying
+       * again" promises a buy on the other side of that wait; an agent with the
+       * route switched off would not buy at 0/3 either, so to that owner the
+       * sentence is simply false. They get the ordinary scanning arms and the
+       * "Trading is paused." suffix, which is the true answer for them.
+       */
+      scanning =
+        `That is my limit of ${a.holding} open position${a.holding === 1 ? "" : "s"} — ` +
+        `waiting for one to close before buying again.`;
+    } else if (a.discovered === 0) {
       scanning = `Scanning the launchpad — no new tokens have appeared yet.`;
     } else if (a.choice.pick) {
       scanning = `Scanning ${a.discovered} tokens — ${a.choice.pick.symbol} looks worth a position.`;
@@ -977,7 +1013,24 @@ async function main() {
     // would let the ceiling free itself exactly when the book is unknown.
     const held = await classPositions(active.agentId);
     if (held === null) return [];
+    /**
+     * TWO SETS FROM ONE READ, AND THEY ARE DELIBERATELY DIFFERENT.
+     *
+     * `alreadyHeld` keeps EVERY row, because its question is "have I traded
+     * this token before" and for that the history is the answer. Narrowing it
+     * would turn "never buy this twice" into "buy it again the moment you have
+     * sold it" — a trading change nobody asked for, and the worst kind to make
+     * as a side effect of fixing a counter.
+     *
+     * `activeHeld` is the ceiling's set: positions still standing, cash rows
+     * and finished rows excluded. See class-active.ts.
+     */
     const alreadyHeld = new Set(held.map((h) => h.token));
+    const activeHeld = activeClassPositions(held);
+    // DECIDED HERE, not at the gate 250 lines below, because BOTH reports
+    // need it — including the one on the no-candidates path. An owner whose
+    // book is full is owed that answer on a quiet launchpad too.
+    const ceilingFull = ceilingBlocks(held, cfg.classMaxPositions);
 
     // THE ONLY ADMISSIBLE SOURCE. recentCandidates without `poolsOnly`, whose
     // rows carry the curve — and curve-provenance.invariant.test.ts pins that
@@ -1054,7 +1107,8 @@ async function main() {
         verified: 0,
         refusedByVenue: 0,
         choice: { pick: null, refused: [] },
-        holding: held.length,
+        holding: activeHeld.length,
+        ceilingFull,
         buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
         activityUnknown: classActivity === null,
       });
@@ -1227,6 +1281,7 @@ async function main() {
       thresholds,
     );
 
+
     // THE FUNNEL, EVERY TICK, WHETHER OR NOT ANYTHING IS BOUGHT. An agent that
     // looked at the market and declined is doing its job; one that cannot say
     // so is indistinguishable from one that is broken.
@@ -1236,7 +1291,8 @@ async function main() {
       verified: legs.length,
       refusedByVenue: refused.length,
       choice,
-      holding: held.length,
+      holding: activeHeld.length,
+      ceilingFull,
       buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
       activityUnknown: classActivity === null,
     });
@@ -1250,7 +1306,31 @@ async function main() {
      */
     if (!cfg.classSnipeEnabled) return [];
     if (cfg.classPerEntryUsdg <= 0) return [];
-    if (cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions) return [];
+    /**
+     * THE CEILING, AGAINST POSITIONS RATHER THAN AGAINST HISTORY.
+     *
+     * This compared `held.length` — every row `class_positions` has ever
+     * carried, in every state. So each completed round trip permanently
+     * consumed a slot, and after `classMaxPositions` of them the route was off
+     * for good. Shogun reached 3 of 3 holding nothing at all: a closed round
+     * trip, a swept token, and a row for USDG, which is the vault's cash and
+     * was never a position in the first place.
+     *
+     * AND IT SAID NOTHING. The gate sits below the funnel, wrote no log line
+     * and no event, and is not covered by the `· BUYING OFF` suffix — that
+     * keys only on `classSnipeEnabled` and `classPerEntryUsdg`. So the agent
+     * printed a healthy scan every tick and silently never bought, which reads
+     * from outside as an executor or a wall problem and sends the search to the
+     * far end of the route.
+     */
+    if (ceilingFull) {
+      const line = describeCeiling(held, cfg.classMaxPositions);
+      if (line !== lastClassCeilingKey) {
+        lastClassCeilingKey = line;
+        console.log(`[class] ${line} — waiting for a position to close`);
+      }
+      return [];
+    }
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
     // proposal keeps the decision legible: an owner reading the feed sees one
@@ -1570,14 +1650,46 @@ async function main() {
       // predates the window is still ASKED about. It contributes nothing but a
       // question.
       const cachedRows = (await classPositions(agentId)) ?? [];
-      const candidates = [...new Set([...folded.keys(), ...cachedRows.map((r) => r.token)])];
+      /**
+       * THE QUOTE ASSET IS CUSTODY, NOT A POSITION — AND THIS IS WHERE IT GETS IN.
+       *
+       * `folded` is keyed by the token of every class event the vault emitted,
+       * and a `Swept` of leftover USDG carries USDG as its token. So the quote
+       * asset entered this candidate list, `reconcileClassBook` found a balance
+       * and no `ClassBuy` behind it, and classified it `recovered` — a standing
+       * position, for ever, in the asset everything else is priced in.
+       *
+       * What that row then did: occupied a slot under `classMaxPositions`
+       * (Shogun's route was shut by it), offered itself to `proposeClassExits`
+       * with no curve to sell through, took a hold clock it can never age out
+       * of, and sat in the class P&L inventory with an unknown basis.
+       *
+       * EXCLUDED AT THE SOURCE rather than at each of those four readers,
+       * because a row that is never written cannot be miscounted by a reader
+       * nobody has written yet. The money is not lost by doing this: the
+       * vault's USDG balance is read directly into the equity CASH term, which
+       * is where a dollar belongs — see `classCashUsdg`.
+       *
+       * Address-keyed. A launch token may call itself USDG; it cannot BE USDG.
+       */
+      const isCash = (t: string) => t.toLowerCase() === CASH.USDG.toLowerCase();
+      const candidates = [...new Set([...folded.keys(), ...cachedRows.map((r) => r.token)])].filter(
+        (t) => !isCash(t),
+      );
       if (candidates.length === 0) return;
 
       const custody = await readClassCustody(client, vault, candidates as `0x${string}`[]);
       const rec = reconcileClassBook({
         folded,
         balances: custody.balances,
-        cached: cachedRows.map((r) => r.token),
+        // FILTERED HERE TOO, and not only in `candidates`.
+        //
+        // `writeClassLedger` refuses a cash row, so nothing would be written
+        // either way — but `rec.positions` is also walked below to book sweeps
+        // and restore cost bases, and a legacy USDG row left in this list would
+        // reach `bookClassSweepWithdrawal` and tell the owner they had swept
+        // their own cash out of the vault, with a cost it "never saw".
+        cached: cachedRows.map((r) => r.token).filter((t) => !isCash(t)),
         logComplete: !scan.failed,
         balancesComplete: custody.unread.length === 0,
       });
@@ -1604,7 +1716,10 @@ async function main() {
         await restoreClassCostBasis(agentId, p);
       }
 
-      const open = rec.positions.filter((p) => p.state === "open" || p.state === "recovered");
+      // THE SAME QUESTION THE CEILING ASKS, THROUGH THE SAME ANSWER. This was
+      // an inline state filter — correct, and the second of three different
+      // filters this repo had invented for one question. See class-active.ts.
+      const open = rec.positions.filter((p) => isActiveClassState(p.state));
       if (open.length > 0 || rec.incomplete) {
         console.log(
           `[class] reconciled ${open.length} open · ${rec.recovered.length} recovered · ` +
@@ -1842,6 +1957,23 @@ async function main() {
     const out: TradeIntent[] = [];
 
     for (const p of held) {
+      /**
+       * THE VAULT'S CASH IS NOT SOMETHING TO SELL.
+       *
+       * Identity only — deliberately NOT the state half. This loop already has
+       * its truth test one line down (`balance > 0n`), and a row marked closed
+       * or swept that turns out to still hold a balance must stay sellable;
+       * that is the case the balance test exists for.
+       *
+       * Without this, a legacy USDG row warns the owner every pass that "USDG
+       * is in your vault with no curve on record, so I cannot sell it for you"
+       * — about their own cash, which is not stuck and is already counted in
+       * equity. And the warning got LOUDER with the equity fix, because
+       * `readClassCustody` is now asked for the cash token unconditionally, so
+       * `lastClassBalances` always carries a USDG balance for the guard above
+       * to wave through.
+       */
+      if (isQuoteTokenRow(p)) continue;
       const balance = lastClassBalances.get(p.token) ?? 0n;
       if (balance <= 0n) continue; // sold, swept, or never delivered
       // Both are needed to route a sell, and they travel together in the store
@@ -8123,7 +8255,25 @@ async function main() {
           ? readClassCustody(
               client,
               classVaultAddr,
-              classRows.map((r) => r.token as `0x${string}`),
+              /**
+               * THE CASH TOKEN IS ASKED ABOUT WHETHER OR NOT A ROW NAMES IT.
+               *
+               * It used to arrive here only because the reconciler had written
+               * a `class_positions` row for USDG — so the vault's cash reached
+               * `classCashUsdg`, and therefore EQUITY, as a side effect of a
+               * phantom position. Stopping the reconciler writing that row
+               * without this line would have silently dropped the vault's USDG
+               * out of equity, deepened the drawdown against a peak that only
+               * ratchets up, and moved the breaker. The money is read directly
+               * now, which is what should always have been true: cash in a
+               * wallet is a balance to read, not a position to record.
+               */
+              [
+                ...new Set([
+                  ...classRows.map((r) => r.token.toLowerCase()),
+                  CASH.USDG.toLowerCase(),
+                ]),
+              ] as `0x${string}`[],
             )
           : Promise.resolve({ balances: new Map<string, bigint>(), unread: classUnread }),
       ]);
@@ -8192,9 +8342,20 @@ async function main() {
       // the owner's money, sitting at an address the account-balance read does
       // not cover. So it leaves the quarantine and joins the CASH term at face
       // value, which is the only honest valuation of a dollar.
-      classCashUsdg = classHeldRows
-        .filter((r) => r.token.toLowerCase() === CASH.USDG.toLowerCase())
-        .reduce((sum, r) => sum + (classRead.balances.get(r.token) ?? 0n), 0n);
+      /**
+       * READ FROM THE BALANCE, NOT FROM A ROW.
+       *
+       * This used to fold over `classHeldRows`, so the vault's cash counted
+       * towards equity only while a `class_positions` row existed for USDG —
+       * the phantom position that shut Shogun's entry route. The reconciler no
+       * longer writes that row, so a row-derived cash term would now read zero
+       * and quietly remove real money from equity.
+       *
+       * `readClassCustody` is asked for the cash token unconditionally above,
+       * so this is the same number by a shorter path, and it no longer depends
+       * on a bookkeeping artefact to be correct.
+       */
+      classCashUsdg = classRead.balances.get(CASH.USDG.toLowerCase()) ?? 0n;
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
       // for the same reason `lastCurveLegs` is: a token that stopped answering

@@ -23,6 +23,8 @@
  * larger thing to leave armed by accident.
  */
 
+import { activeClassPositions, isActiveClassState, isQuoteTokenRow } from "./class-active";
+
 /** Exactly the fields this diagnostic reports. Nothing else may be passed in. */
 export interface TenantFacts {
   tenant: string;
@@ -219,45 +221,75 @@ export function describeTenant(f: TenantFacts): string[] {
  * and this says so rather than leaving it to be noticed.
  */
 export interface ClassPositionCensus {
-  /** Every row for this agent, whatever its state — what the ceiling counts. */
-  states: readonly (string | null)[];
+  /**
+   * Every row for this agent, whole — not just its state.
+   *
+   * It used to be a list of states, and that was not enough to answer the
+   * question this section exists for. Shogun's phantom is `recovered`, a
+   * perfectly good standing state, so a state-only census reported
+   * "standing: 1" about a row that is the vault's own cash. Identity and state
+   * are independent tests and the census needs both — see class-active.ts.
+   */
+  rows: readonly {
+    token: string;
+    quoteToken: string | null;
+    state: string | null;
+    symbol?: string | null;
+  }[];
   /** `classMaxPositions`, or null when unset (the gate is then inert). */
   ceiling: number | null;
 }
 
-/** States that are a position the agent still has money or tokens in. */
-const STANDING = new Set(["open", "recovered"]);
-
 export function describeClassPositions(c: ClassPositionCensus): string[] {
   const lines: string[] = [];
-  const total = c.states.length;
-  const standing = c.states.filter((s) => s !== null && STANDING.has(s)).length;
+  const total = c.rows.length;
+  // THE SAME FUNCTION THE GATE USES. A census that counted its own way could
+  // report a route open that the agent has shut, which is worse than no census.
+  const active = activeClassPositions(c.rows);
+  const standing = active.length;
   const tally = new Map<string, number>();
-  for (const s of c.states) tally.set(s ?? "(null)", (tally.get(s ?? "(null)") ?? 0) + 1);
+  for (const r of c.rows) tally.set(r.state ?? "(null)", (tally.get(r.state ?? "(null)") ?? 0) + 1);
   const shown = [...tally].sort().map(([s, n]) => `${n}×${s}`).join(", ");
 
   lines.push(``);
   lines.push(`class positions: ${total} row(s) — ${shown || "none"}`);
-  lines.push(`  standing (open/recovered): ${standing}`);
-  lines.push(`  counted by the ceiling:    ${total}   <- classPositions applies no state filter`);
+  for (const r of c.rows) {
+    const why = isQuoteTokenRow(r)
+      ? "NOT COUNTED — this is the vault's cash, not a position"
+      : isActiveClassState(r.state)
+        ? "counted"
+        : `not counted — ${r.state ?? "unknown state"}`;
+    lines.push(`    ${r.symbol ?? "(no symbol)"} ${r.token}  state=${r.state ?? "(null)"}  ${why}`);
+  }
+  lines.push(`  standing (open/recovered, excluding cash): ${standing}`);
+  lines.push(`  counted by the ceiling:                    ${standing}`);
   if (c.ceiling === null || c.ceiling <= 0) {
     lines.push(`  classMaxPositions is ${c.ceiling === null ? "unset" : String(c.ceiling)} — the ceiling does not bind`);
     return lines;
   }
-  lines.push(`  classMaxPositions:         ${c.ceiling}`);
-  if (total >= c.ceiling) {
+  lines.push(`  classMaxPositions:                         ${c.ceiling}`);
+  if (standing >= c.ceiling) {
     lines.push(
-      `  *** ENTRIES ARE SHUT: ${total} >= ${c.ceiling}. proposeClassEntries returns [] with NO log line, ` +
-        `below the funnel — so the funnel keeps printing "qualified" and nothing is ever bought.`,
+      `  *** ENTRIES ARE SHUT: ${standing} >= ${c.ceiling} — the book is genuinely full. ` +
+        `Entries resume when a position closes.`,
     );
-    if (standing < c.ceiling) {
+  } else {
+    lines.push(`  ceiling OPEN — room for ${c.ceiling - standing} more`);
+    if (total >= c.ceiling) {
+      /**
+       * THE LINE THAT PROVES THE FIX, and the reason the old count is still
+       * computed at all.
+       *
+       * Before `activeClassPositions`, this gate compared the ceiling against
+       * every row the ledger had ever carried, so Shogun sat at 3 of 3 holding
+       * nothing. Saying only "OPEN" would leave an operator unable to tell a
+       * tenant that was never stuck from one this repaired.
+       */
       lines.push(
-        `  *** AND IT IS COUNTING ${total - standing} FINISHED POSITION(S). Only ${standing} are standing; ` +
-          `the ceiling is held shut by rows the agent has already exited.`,
+        `  (the old count would have shut it: ${total} ledger rows >= ${c.ceiling}. ` +
+          `${total - standing} of them are closed, swept or cash.)`,
       );
     }
-  } else {
-    lines.push(`  room for ${c.ceiling - total} more by the count the gate uses`);
   }
   return lines;
 }

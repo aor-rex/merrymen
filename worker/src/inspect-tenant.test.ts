@@ -342,46 +342,91 @@ describe("the accounting report reads the EFFECTIVE peak", () => {
 });
 
 /**
- * THE CEILING THAT COUNTS FINISHED POSITIONS.
+ * THE CEILING COUNTED HISTORY, AND THE CENSUS MUST COUNT THE WAY THE GATE DOES.
  *
- * `proposeClassEntries` compares `classMaxPositions` against
- * `classPositions(agentId)`, which selects `WHERE agent_id = ?` and applies no
- * state predicate — so a closed round trip occupies a slot for ever. The gate
- * is below the funnel and writes nothing, so the symptom is a funnel that says
- * `1 qualified` on every tick beside an agent that never buys.
+ * `proposeClassEntries` compared `classMaxPositions` against every row
+ * `class_positions` had ever carried, so a closed round trip held a slot for
+ * ever and Shogun sat at 3 of 3 owning nothing. The gate now counts through
+ * `activeClassPositions`; a census that counted its own way could report a
+ * route open that the agent has shut, which is worse than no census at all.
  */
-describe("the position ceiling reports both numbers, because they can differ", () => {
-  const census = (states: (string | null)[], ceiling: number | null) =>
-    describeClassPositions({ states, ceiling }).join("\n");
+describe("the position census counts the way the gate counts", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+  const T = (n: number) => `0x${String(n).repeat(40).slice(0, 40)}`;
 
-  it("SHUTS THE ROUTE on finished rows, and says that is what happened", () => {
-    const out = census(["closed", "closed", "swept"], 3);
-    assert.match(out, /ENTRIES ARE SHUT: 3 >= 3/);
-    assert.match(out, /COUNTING 3 FINISHED POSITION\(S\)/);
-    assert.match(out, /standing \(open\/recovered\): 0/);
-  });
+  const census = (
+    rows: { token: string; quoteToken?: string | null; state: string | null; symbol?: string | null }[],
+    ceiling: number | null,
+  ) =>
+    describeClassPositions({
+      rows: rows.map((r) => ({ quoteToken: null, symbol: null, ...r })),
+      ceiling,
+    }).join("\n");
 
-  it("distinguishes a genuinely full book from a book full of exits", () => {
-    // Same count, same refusal, completely different remedy: one agent is
-    // working and one is stuck.
-    const real = census(["open", "open", "recovered"], 3);
-    assert.match(real, /ENTRIES ARE SHUT/);
-    assert.doesNotMatch(real, /FINISHED POSITION/);
-  });
-
-  it("reports room when there is room, by the count the gate actually uses", () => {
-    const out = census(["closed"], 3);
-    assert.match(out, /room for 2 more/);
+  it("SHOGUN'S BOOK — closed + swept + cash counts 0, and the ceiling is OPEN", () => {
+    const out = census(
+      [
+        { token: T(1), state: "closed", symbol: "SOLD" },
+        { token: T(2), state: "swept", symbol: "DOGGOS" },
+        { token: USDG, state: "recovered" },
+      ],
+      3,
+    );
+    assert.match(out, /ceiling OPEN — room for 3 more/);
     assert.doesNotMatch(out, /ENTRIES ARE SHUT/);
+    // It must SAY the cash row is cash rather than silently dropping it.
+    assert.match(out, /NOT COUNTED — this is the vault's cash/);
+    // And keep the old arithmetic visible, so a repaired tenant stays
+    // distinguishable from one that was never stuck.
+    assert.match(out, /the old count would have shut it: 3 ledger rows >= 3/);
   });
 
-  it("names the no-state-filter cause rather than leaving the two numbers unexplained", () => {
-    assert.match(census(["closed"], 3), /classPositions applies no state filter/);
+  it("A GENUINELY FULL BOOK still shuts, without the repair note", () => {
+    const out = census(
+      [
+        { token: T(1), state: "open" },
+        { token: T(2), state: "open" },
+        { token: T(3), state: "recovered" },
+      ],
+      3,
+    );
+    assert.match(out, /ENTRIES ARE SHUT: 3 >= 3/);
+    assert.match(out, /the book is genuinely full/);
+    assert.doesNotMatch(out, /old count would have shut it/);
+  });
+
+  it("shows every row and why it did or did not count", () => {
+    const out = census(
+      [
+        { token: T(1), state: "open", symbol: "AAA" },
+        { token: T(2), state: "closed", symbol: "BBB" },
+      ],
+      3,
+    );
+    assert.match(out, /AAA .*state=open .*counted/);
+    assert.match(out, /BBB .*state=closed .*not counted — closed/);
+  });
+
+  it("a cash row that is standing BY STATE is still not a position", () => {
+    // The exact phantom: `recovered` is a good standing state, so a state-only
+    // census reported "standing: 1" about the vault's own cash.
+    assert.match(
+      census([{ token: USDG, state: "recovered" }], 3),
+      /standing \(open\/recovered, excluding cash\): 0/,
+    );
   });
 
   it("and an unset or zero ceiling is reported as inert, not as shut", () => {
     for (const c of [null, 0]) {
-      const out = census(["closed", "closed", "closed", "closed"], c);
+      const out = census(
+        [
+          { token: T(1), state: "open" },
+          { token: T(2), state: "open" },
+          { token: T(3), state: "open" },
+          { token: T(4), state: "open" },
+        ],
+        c,
+      );
       assert.match(out, /the ceiling does not bind/);
       assert.doesNotMatch(out, /ENTRIES ARE SHUT/);
     }

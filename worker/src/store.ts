@@ -3842,6 +3842,25 @@ export async function classPositionCurves(agentId: string): Promise<string[] | n
  * Contrast `upsertClassPosition` below, which records a CANDIDATE — a token to
  * ask the chain about. This records the answer.
  */
+
+/**
+ * THE QUOTE ASSET IS NEVER A POSITION, AT THE WRITE.
+ *
+ * The reconciler no longer offers it one, and this is the backstop for the
+ * producer nobody has written yet. A row for USDG is not a harmless extra
+ * record: it occupies a slot under `classMaxPositions`, offers itself to the
+ * exit producer with no curve to sell through, takes a hold clock it can
+ * never age out of, and enters the class P&L inventory with a basis that
+ * cannot exist. Shogun's entry route was shut by exactly one of these.
+ *
+ * Returns TRUE when the row must be refused. Address-keyed — a launch token
+ * can call itself USDG, and must still be recorded.
+ */
+function isCashRow(token: string, quoteToken?: string | null): boolean {
+  const t = token.toLowerCase();
+  if (t === CASH.USDG.toLowerCase()) return true;
+  return quoteToken != null && t === quoteToken.toLowerCase();
+}
 export async function writeClassLedger(
   agentId: string,
   row: {
@@ -3866,6 +3885,11 @@ export async function writeClassLedger(
     sweptRaw: bigint | null;
   },
 ): Promise<void> {
+  // Cash in the vault is custody. See isCashRow. This row carries no
+  // `quoteToken` column, so only the address test applies here — which is the
+  // one that catches the real case, since a cash row has no curve to read a
+  // pair token from in the first place.
+  if (isCashRow(row.token)) return;
   try {
     await getDb()
       .prepare(
@@ -3918,6 +3942,8 @@ export async function upsertClassPosition(
   // a re-record on a top-up must not rejuvenate a position past its exit.
   row: Pick<ClassPositionRow, "token" | "symbol" | "decimals" | "curve" | "quoteToken">,
 ): Promise<void> {
+  // Cash in the vault is custody. See isCashRow.
+  if (isCashRow(row.token, row.quoteToken)) return;
   try {
     await getDb()
       .prepare(

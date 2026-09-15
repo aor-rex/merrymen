@@ -3031,15 +3031,31 @@ async function runTenantInspectIfAsked(): Promise<void> {
     // on the tenant would silently return nothing.
     if (smartAccount) {
       try {
-        const { describeClassPositions } = (await import("./inspect-tenant")) as never as {
-          describeClassPositions: (c: { states: readonly (string | null)[]; ceiling: number | null }) => string[];
-        };
-        const pos = await client.query(`SELECT state FROM class_positions WHERE agent_id = $1`, [
-          smartAccount,
-        ]);
+        /**
+         * IMPORTED FOR ITS REAL TYPE, NOT THROUGH A CAST.
+         *
+         * This read `as never as { describeClassPositions: (c: {states: …}) => string[] }`,
+         * and a hand-written structural type over `as never` erases the
+         * module's own signature — so widening the census from states to whole
+         * rows type-checked perfectly and would have thrown at runtime, on the
+         * one code path that only ever runs when somebody is already mid-
+         * incident. The other casts in this file are for `pg`, which is
+         * genuinely runtime-only; this module is ours and has types.
+         */
+        const { describeClassPositions } = await import("./inspect-tenant");
+        const pos = await client.query(
+          `SELECT token, symbol, quote_token, state FROM class_positions WHERE agent_id = $1`,
+          [smartAccount],
+        );
         const ceiling = facts.classMaxPositions;
+        const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
         for (const line of describeClassPositions({
-          states: pos.rows.map((r) => (r.state === null || r.state === undefined ? null : String(r.state))),
+          rows: pos.rows.map((r) => ({
+            token: String(r.token ?? ""),
+            symbol: str(r.symbol),
+            quoteToken: str(r.quote_token),
+            state: str(r.state),
+          })),
           ceiling: typeof ceiling === "number" ? ceiling : null,
         }))
           log(`inspect: ${line}`);

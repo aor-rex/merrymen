@@ -302,7 +302,12 @@ describe("three layers must hold before an agent reaches for a class token", () 
     const scan = PRODUCER.indexOf("reportClassScan(");
     const snipe = PRODUCER.indexOf("if (!cfg.classSnipeEnabled) return [];");
     const size = PRODUCER.indexOf("if (cfg.classPerEntryUsdg <= 0) return [];");
-    const positions = PRODUCER.indexOf("cfg.classMaxPositions > 0 && held.length >= cfg.classMaxPositions");
+    // The ceiling moved behind `ceilingBlocks`, which is the point: the
+    // comparison used to be inline here and compared `held.length` — every row
+    // the ledger had ever carried — so a completed round trip consumed a slot
+    // for ever. What this test cares about is unchanged: it still gates
+    // EXECUTION, after the scan has reported.
+    const positions = PRODUCER.indexOf("if (ceilingFull) {");
     assert.ok(scan > 0, "the scan must report");
     for (const [name, at] of [
       ["classSnipeEnabled", snipe],
@@ -312,6 +317,31 @@ describe("three layers must hold before an agent reaches for a class token", () 
       assert.ok(at > 0, `${name} must still gate execution`);
       assert.ok(at > scan, `${name} must gate EXECUTION, not the scan`);
     }
+
+    /**
+     * AND IT MUST COUNT POSITIONS, NOT LEDGER ROWS.
+     *
+     * `classPositions` returns every row in every state, so comparing its
+     * length against the ceiling made each finished round trip permanent.
+     * Shogun reached 3 of 3 holding nothing — a closed position, a swept one,
+     * and a row for USDG — and the gate is silent, so the agent printed a
+     * healthy funnel every tick and never bought.
+     */
+    assert.ok(
+      !PRODUCER.includes("held.length >= cfg.classMaxPositions"),
+      "the ceiling must never be compared against the raw row count again",
+    );
+    assert.match(
+      PRODUCER,
+      /const ceilingFull = ceilingBlocks\(held, cfg\.classMaxPositions\)/,
+      "the decision belongs to the shared helper, where it can be tested",
+    );
+    // Decided ABOVE the report, so both registers can name it — the gate itself
+    // sits 20 lines lower and returns silently.
+    assert.ok(
+      PRODUCER.indexOf("const ceilingFull = ceilingBlocks(") < scan,
+      "the report must be able to say the ceiling is full",
+    );
   });
 
   it("targets the sealed vault, so the executor's fork and the mirror agree", () => {

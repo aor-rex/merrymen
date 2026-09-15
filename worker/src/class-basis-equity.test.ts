@@ -201,21 +201,67 @@ describe("USDG left in the class vault is cash, not an unpriceable position", ()
     );
     assert.match(
       CODE,
-      /classCashUsdg = classHeldRows[\s\S]{0,200}CASH\.USDG\.toLowerCase\(\)[\s\S]{0,160}classRead\.balances\.get/,
+      /classCashUsdg = classRead\.balances\.get\(CASH\.USDG\.toLowerCase\(\)\)/,
       "and it is the vault's real balance, not a cost",
     );
   });
 
-  it("the class LEDGER still records it — only the valuation changes", () => {
-    // The filter is at the valuation, not at `reconcileClassBook`. The ledger
-    // should go on knowing every token the vault holds; a recovery disclosure
-    // that stopped listing stranded USDG is exactly the defect that shipped
-    // once already.
+  /**
+   * AND IT NO LONGER DEPENDS ON A ROW EXISTING TO SAY SO.
+   *
+   * This used to fold over `classHeldRows`, so the vault's cash counted towards
+   * equity only while `class_positions` carried a row for USDG. That row was
+   * the phantom position that shut Shogun's entry route, and removing it
+   * without this would have silently taken real money out of equity, deepened
+   * the drawdown against a peak that only ratchets up, and moved the breaker.
+   */
+  it("reads the cash balance whether or not any row names the token", () => {
+    assert.match(
+      CODE,
+      /new Set\(\[\s*\.\.\.classRows\.map\(\(r\) => r\.token\.toLowerCase\(\)\),\s*CASH\.USDG\.toLowerCase\(\),/,
+      "readClassCustody must be asked for the cash token unconditionally",
+    );
     assert.doesNotMatch(
       CODE,
-      /reconcileClassBook\([\s\S]{0,400}CASH\.USDG/,
-      "the reconciler must stay ignorant of which token is the unit",
+      /classCashUsdg = classHeldRows/,
+      "a row-derived cash term reads zero once the phantom row is gone",
     );
+  });
+
+  /**
+   * THE RECONCILER NOW REFUSES IT — A REVERSAL, AND WHY IT IS SAFE.
+   *
+   * This file used to assert the opposite: that the filter belonged at the
+   * valuation and `reconcileClassBook` should stay ignorant, so the ledger went
+   * on recording every token the vault holds. The reasoning was that a recovery
+   * disclosure which stopped listing stranded USDG is a defect this repo has
+   * already shipped once.
+   *
+   * What changed is the cost of keeping the row, which was not visible then. It
+   * is not an inert record: it occupied a slot under `classMaxPositions` and
+   * shut Shogun's entry route permanently and silently, offered itself to the
+   * exit producer with no curve to sell through, and took a hold clock it can
+   * never age out of.
+   *
+   * The disclosure survives because it never depended on this row. `recover.ts`
+   * enumerates the vault from `readClassLog` — the chain's own events — and
+   * `class-owner-recovery.test.ts` pins that it must NOT read `classPositions`,
+   * precisely because it exists for the case where the database is gone.
+   */
+  it("keeps the cash token out of the reconciler's candidate set", () => {
+    assert.match(
+      CODE,
+      /const isCash = \(t: string\) => t\.toLowerCase\(\) === CASH\.USDG\.toLowerCase\(\);/,
+      "the exclusion is address-keyed — a launch token may call itself USDG",
+    );
+    assert.match(CODE, /\.filter\(\s*\(t\) => !isCash\(t\),?\s*\)/, "and applied to the candidate list");
+  });
+
+  it("AND THE DISCLOSURE THAT JUSTIFIED THE OLD RULE STILL HOLDS", () => {
+    // The whole basis for reversing the earlier decision. If recovery read the
+    // database, removing the row WOULD hide the owner's stranded USDG.
+    const RECOVER = readFileSync(new URL("./recover.ts", import.meta.url), "utf8");
+    assert.match(RECOVER, /readClassLog/, "recovery enumerates the vault from chain logs");
   });
 });
 
