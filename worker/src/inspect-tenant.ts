@@ -380,7 +380,22 @@ export function describeLedger(f: LedgerFacts): string[] {
  */
 export interface MovementFacts {
   landed:
-    | { kind: string; target: string; amountUsdg: number; status: string; txHash: string | null }[]
+    | {
+        kind: string;
+        target: string;
+        amountUsdg: number;
+        status: string;
+        txHash: string | null;
+        /**
+         * NULL is the honest value and the one that matters here.
+         *
+         * `applyFill` returns `basisUnknown` when a sell meets no cost basis,
+         * and `bookFill` then writes NULL rather than a zero — so a round trip
+         * that completed with no basis reads as "no result recorded", not as
+         * "broke even". `getRealizedPnlUsdg` excludes these rows.
+         */
+        realizedPnlUsdg: number | null;
+      }[]
     | null;
   classRows:
     | {
@@ -423,7 +438,8 @@ export function describeMovements(f: MovementFacts): string[] {
     for (const t of f.landed)
       lines.push(
         `  ${t.status.padEnd(10)} ${t.kind.padEnd(12)} ${t.amountUsdg.toFixed(6).padStart(12)} USDG ` +
-          `→ ${t.target}  ${t.txHash ? t.txHash.slice(0, 12) + "…" : "(no tx)"}`,
+          `→ ${t.target}  ${t.txHash ? t.txHash.slice(0, 12) + "…" : "(no tx)"}  ` +
+          `realised ${t.realizedPnlUsdg === null ? "NOT RECORDED" : t.realizedPnlUsdg.toFixed(6)}`,
       );
 
   lines.push(``);

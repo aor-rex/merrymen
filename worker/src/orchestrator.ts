@@ -2485,7 +2485,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
 
         try {
           const lt = await client.query(
-            `SELECT kind, target, amount_usdg, status, tx_hash FROM trades
+            `SELECT kind, target, amount_usdg, status, tx_hash, realized_pnl_usdg FROM trades
               WHERE lower(agent_id) = lower($1) AND status <> 'rejected'
               ORDER BY created_at ASC`,
             [acctAddr],
@@ -2496,6 +2496,10 @@ async function runTenantInspectIfAsked(): Promise<void> {
             amountUsdg: Number(x.amount_usdg),
             status: String(x.status),
             txHash: x.tx_hash === null ? null : String(x.tx_hash),
+            realizedPnlUsdg:
+              x.realized_pnl_usdg === null || x.realized_pnl_usdg === undefined
+                ? null
+                : Number(x.realized_pnl_usdg),
           }));
           const cr = await client.query(
             `SELECT token, symbol, state, cost_usdg, proceeds_usdg, qty_raw, opened_at_block, first_seen, curve, quote_token, entry_tx, exit_tx
