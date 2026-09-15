@@ -395,6 +395,16 @@ export interface MovementFacts {
          * "broke even". `getRealizedPnlUsdg` excludes these rows.
          */
         realizedPnlUsdg: number | null;
+        /**
+         * Whether `bookFill` ran at all for this trade.
+         *
+         * NULL means it did not: the fill columns are written only by that
+         * function. It is the difference between "the sell had no cost basis to
+         * measure against" and "the sell was never booked as a fill", which read
+         * identically in a NULL realised P&L and need opposite fixes.
+         */
+        fillSide: string | null;
+        basisSource: string | null;
       }[]
     | null;
   classRows:
@@ -439,7 +449,8 @@ export function describeMovements(f: MovementFacts): string[] {
       lines.push(
         `  ${t.status.padEnd(10)} ${t.kind.padEnd(12)} ${t.amountUsdg.toFixed(6).padStart(12)} USDG ` +
           `→ ${t.target}  ${t.txHash ? t.txHash.slice(0, 12) + "…" : "(no tx)"}  ` +
-          `realised ${t.realizedPnlUsdg === null ? "NOT RECORDED" : t.realizedPnlUsdg.toFixed(6)}`,
+          `realised ${t.realizedPnlUsdg === null ? "NOT RECORDED" : t.realizedPnlUsdg.toFixed(6)}` +
+          `  fill ${t.fillSide ?? "NEVER BOOKED"}/${t.basisSource ?? "-"}`,
       );
 
   lines.push(``);
