@@ -27,6 +27,8 @@ export interface CanarySettings {
   classMinDepthUsdg: number;
   classMaxHoldSec: number;
   classExitAtGraduationPct: number;
+  /** "all" — "stocks" excludes the entire class route. See DAVE_CLASS. */
+  assetMode: string;
 }
 
 /**
@@ -51,6 +53,7 @@ export const CANARY: CanarySettings = Object.freeze({
   classMinDepthUsdg: 250,
   classMaxHoldSec: 6 * 3600,
   classExitAtGraduationPct: 85,
+  assetMode: "all",
 });
 
 /**
@@ -102,7 +105,6 @@ export const MUST_PRESERVE = [
   "basketSymbols",
   "customTokens",
   "telegramBotToken",
-  "assetMode",
 ] as const;
 
 /**
@@ -166,4 +168,88 @@ export function mergeResumeEntries(
   current: Record<string, unknown> | null,
 ): Record<string, unknown> {
   return { ...(current ?? {}), ...RESUME_ENTRIES };
+}
+/**
+ * ── WHY `assetMode` IS SET HERE AND NOT PRESERVED ─────────────────────────
+ *
+ * It was in `MUST_PRESERVE`, and that was wrong in a way that would have
+ * enabled the route and left it inert.
+ *
+ * `assetModeAllows` filters trade legs by instrument class, and `"stocks"`
+ * excludes the entire class route — `proposeClassEntries` returns nothing,
+ * whatever the other seven fields say. So an owner who chose stocks-only could
+ * be "enabled" with every class field written and verified, and never take a
+ * single launch: eight green fields and an agent that cannot act on any of them.
+ *
+ * Shogun never showed it because his `assetMode` is UNSET and defaults to
+ * `"all"`. Dave's is explicitly `"stocks"`, which is the whole reason this was
+ * found before the write rather than after it.
+ *
+ * `maxImpactBps` and `slippageBps` stay in `MUST_PRESERVE` and stay his: they
+ * are tuning an owner chose, they are looser than the defaults, and nothing
+ * about turning a venue on justifies moving them.
+ */
+
+/** Dave's class-route configuration — the owner's agreed numbers, and only these. */
+export const DAVE_CLASS: CanarySettings = Object.freeze({
+  classSnipeEnabled: true,
+  classPerEntryUsdg: 5,
+  classMaxPositions: 3,
+  scoutEnabled: true,
+  /**
+   * 10, not the canary's 15.
+   *
+   * It has to clear `classPerEntryUsdg` or the budget silently caps the position
+   * count below what `classMaxPositions` claims — and it must not be 0, because
+   * `scoutAllows` refuses at 0 outright, which is the shape that leaves a route
+   * looking configured and doing nothing. Dave's is unset today, so it defaults
+   * to exactly that 0.
+   */
+  scoutBudgetUsdg: 10,
+  classMinDepthUsdg: 250,
+  /** Written at their NORMAL values so the record says plainly they were not shortened. */
+  classMaxHoldSec: 6 * 3600,
+  classExitAtGraduationPct: 85,
+  assetMode: "all",
+});
+
+/** What must be true of the GRANT before the route may be switched on. */
+export interface ClassGrantFacts {
+  /** `grantPonsClassVault(grant)` — the vault the SIGNATURE sealed. Null when none. */
+  sealedVault: string | null;
+  /** `vaultFor(smartAccount)` — deterministic, whether or not it was sealed. */
+  derivedVault: string | null;
+}
+
+/**
+ * Refuse to enable a route the signature cannot execute.
+ *
+ * ENABLING WITHOUT A SEALED VAULT IS NOT MERELY INERT — it is an agent that
+ * scouts, scores, qualifies candidates and builds entry intents that its own key
+ * can never sign, every tick, forever. The owner sees an agent working and no
+ * trades, which is the single most expensive failure shape this product has.
+ *
+ * And a MISMATCH is worse than an absence: a grant sealed against some other
+ * address means the wall pins a vault the executor will not use, so the whole
+ * class route is pinned to somewhere the agent cannot reach.
+ *
+ * Returns the reasons, so the operator log says which one rather than "failed".
+ */
+export function classEnableBlockers(facts: ClassGrantFacts): string[] {
+  const out: string[] = [];
+  if (facts.sealedVault === null) {
+    out.push("the grant carries no class vault — the owner must re-sign before the route can be enabled");
+    return out;
+  }
+  if (facts.derivedVault === null) {
+    out.push("could not derive this account's vault address, so the sealed one cannot be checked");
+    return out;
+  }
+  if (facts.sealedVault.toLowerCase() !== facts.derivedVault.toLowerCase()) {
+    out.push(
+      `the grant seals ${facts.sealedVault} but this account's vault is ${facts.derivedVault} — ` +
+        `the wall would pin a vault the executor never uses`,
+    );
+  }
+  return out;
 }

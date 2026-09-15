@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries, RESUME_ENTRIES, mergeResumeEntries } from "./enable-class";
+import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries, RESUME_ENTRIES, mergeResumeEntries, DAVE_CLASS, classEnableBlockers } from "./enable-class";
 
 describe("enabling the class route preserves everything else", () => {
   it("KEEPS EVERY FIELD IT DOES NOT SET", () => {
@@ -199,5 +199,112 @@ describe("resuming entries is the exact inverse of halting them", () => {
     for (const k of HALT_MUST_PRESERVE) {
       assert.deepEqual(after[k], (owner as Record<string, unknown>)[k], `${k} must not move`);
     }
+  });
+});
+
+/**
+ * ENABLING A ROUTE THE SIGNATURE CANNOT EXECUTE IS THE EXPENSIVE FAILURE.
+ *
+ * Not "inert" — an agent that scouts, scores, qualifies candidates and builds
+ * entry intents its own key can never sign, every tick, forever, while the owner
+ * watches it work and sees no trades.
+ *
+ * And a MISMATCH is worse than an absence: a grant sealed against some other
+ * address pins the wall to a vault the executor never uses.
+ */
+describe("the class route is only enabled when the grant can execute it", () => {
+  const VAULT = "0xC8776FAFf15212C359b23BAe531fF3aC7d760E0F";
+
+  it("refuses when no vault is sealed — the owner must re-sign first", () => {
+    const b = classEnableBlockers({ sealedVault: null, derivedVault: VAULT });
+    assert.equal(b.length, 1);
+    assert.match(b[0]!, /carries no class vault.*re-sign/);
+  });
+
+  it("REFUSES A MISMATCH, naming both addresses", () => {
+    const b = classEnableBlockers({ sealedVault: "0xdead", derivedVault: VAULT });
+    assert.equal(b.length, 1);
+    assert.match(b[0]!, /0xdead/);
+    assert.match(b[0]!, new RegExp(VAULT));
+    assert.match(b[0]!, /pin a vault the executor never uses/);
+  });
+
+  it("refuses when the vault cannot be derived, rather than assuming a match", () => {
+    const b = classEnableBlockers({ sealedVault: VAULT, derivedVault: null });
+    assert.equal(b.length, 1);
+    assert.match(b[0]!, /could not derive/);
+  });
+
+  it("allows a sealed vault that matches, case-insensitively", () => {
+    assert.deepEqual(classEnableBlockers({ sealedVault: VAULT, derivedVault: VAULT }), []);
+    assert.deepEqual(
+      classEnableBlockers({ sealedVault: VAULT.toLowerCase(), derivedVault: VAULT }),
+      [],
+      "an address is a number; its casing is not a fact about it",
+    );
+  });
+});
+
+/**
+ * THE FIELD THAT WOULD HAVE ENABLED DAVE INTO SILENCE.
+ *
+ * `assetMode: "stocks"` excludes the entire class route — `assetModeAllows`
+ * filters trade legs by instrument class, so `proposeClassEntries` returns
+ * nothing whatever the other seven fields say. It used to sit in MUST_PRESERVE,
+ * so the enabler would have written eight green fields onto an owner who could
+ * not act on any of them.
+ *
+ * Shogun never showed it: his `assetMode` is unset and defaults to "all".
+ * Dave's is explicitly "stocks".
+ */
+describe("enabling the class route sets the asset mode that permits it", () => {
+  it("both presets write assetMode:all", () => {
+    assert.equal(CANARY.assetMode, "all");
+    assert.equal(DAVE_CLASS.assetMode, "all");
+  });
+
+  it("and it is no longer claimed as preserved — that claim was the bug", () => {
+    assert.equal(
+      (MUST_PRESERVE as readonly string[]).includes("assetMode"),
+      false,
+      "a field the enabler writes cannot also be a field it promises not to touch",
+    );
+  });
+
+  it("A STOCKS-ONLY OWNER IS ACTUALLY SWITCHED OVER", () => {
+    const dave = { assetMode: "stocks", maxImpactBps: 500, slippageBps: 200, liveTradingEnabled: true };
+    const after = mergeCanary(dave, DAVE_CLASS);
+    assert.equal(after.assetMode, "all", "otherwise the route is on and unreachable");
+    assert.equal(after.classSnipeEnabled, true);
+  });
+
+  it("but his tuned limits are still his", () => {
+    const dave = { assetMode: "stocks", maxImpactBps: 500, slippageBps: 200, liveTradingEnabled: true };
+    const after = mergeCanary(dave, DAVE_CLASS);
+    assert.equal(after.maxImpactBps, 500, "looser than default, and his");
+    assert.equal(after.slippageBps, 200);
+    assert.equal(after.liveTradingEnabled, true);
+    for (const k of MUST_PRESERVE) {
+      if (k in dave) assert.deepEqual(after[k], (dave as Record<string, unknown>)[k], `${k} moved`);
+    }
+  });
+
+  it("DAVE'S SCOUT BUDGET CLEARS HIS ENTRY SIZE, and is never zero", () => {
+    // `scoutAllows` refuses at 0 outright, and Dave's is unset — so leaving it
+    // out is exactly the shape that looks configured and does nothing. It must
+    // also clear one entry, or the budget caps the position count below what
+    // classMaxPositions claims.
+    assert.ok(DAVE_CLASS.scoutBudgetUsdg > 0, "zero is a silent off switch");
+    assert.ok(
+      DAVE_CLASS.scoutBudgetUsdg >= DAVE_CLASS.classPerEntryUsdg,
+      "a budget below one entry funds no entries",
+    );
+  });
+
+  it("and the hold and graduation triggers are written at their normal values", () => {
+    // Recorded rather than omitted, so the record says plainly they were not
+    // shortened to make a proof finish sooner.
+    assert.equal(DAVE_CLASS.classMaxHoldSec, 21_600);
+    assert.equal(DAVE_CLASS.classExitAtGraduationPct, 85);
   });
 });

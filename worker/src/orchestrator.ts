@@ -2471,17 +2471,85 @@ async function runEnableClassIfAsked(): Promise<void> {
     return;
   }
   try {
-    const { CANARY, describeCanaryChange, mergeCanary } = await import("./enable-class");
+    const { CANARY, DAVE_CLASS, classEnableBlockers, describeCanaryChange, mergeCanary } =
+      await import("./enable-class");
     const { getSettingsStore } = await import("./settings-store");
+    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import("../../packages/core/src/index");
     const store = getSettingsStore();
+
+    // WHICH CONFIGURATION. Named per tenant rather than one set for everyone:
+    // the numbers were agreed per owner, and `scoutBudgetUsdg` differs between
+    // them for a reason a shared constant would quietly erase.
+    const preset = (process.env.MERRYMEN_ENABLE_CLASS_PRESET ?? "canary").trim().toLowerCase();
+    if (preset !== "canary" && preset !== "dave") {
+      log(`enable-class: MERRYMEN_ENABLE_CLASS_PRESET=${preset} is not a preset. Use "canary" or "dave".`);
+      return;
+    }
+    const values = preset === "dave" ? DAVE_CLASS : CANARY;
+    log(`enable-class: preset ${preset}`);
+
+    // ── THE GRANT MUST BE ABLE TO EXECUTE WHAT THIS SWITCHES ON ─────────
+    //
+    // Enabling the route without a sealed vault is not merely inert: the agent
+    // scouts, scores, qualifies and builds entry intents its own key can never
+    // sign, every tick, forever. The owner sees an agent working and no trades,
+    // which is the most expensive failure shape this product has.
+    //
+    // Read through the SAME accessors the executor and the policy use, so the
+    // vault this check approves and the vault the wall pins cannot be two
+    // different addresses.
+    const url0 = process.env.DATABASE_URL;
+    if (!url0) {
+      log("enable-class: no DATABASE_URL — cannot read the grant to check it can execute this");
+      return;
+    }
+    let sealedVault: string | null = null;
+    let derivedVault: string | null = null;
+    try {
+      const g = await getGrantStore().get(want as `0x${string}`);
+      sealedVault = (grantPonsClassVault(g as never) as string | null) ?? null;
+      const acct = g && g.smartAccount ? String(g.smartAccount) : null;
+      const factory = PONS_CLASS_VAULT_FACTORY[Number(g && g.chainId ? g.chainId : 4663)];
+      if (acct && factory) {
+        const { createPublicClient, http } = await import("viem");
+        const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+        const c = createPublicClient({ transport: http(rpcUrl) });
+        derivedVault = String(
+          await c.readContract({
+            address: factory as `0x${string}`,
+            abi: [
+              {
+                type: "function",
+                name: "vaultFor",
+                stateMutability: "view",
+                inputs: [{ name: "owner_", type: "address" }],
+                outputs: [{ type: "address" }],
+              },
+            ],
+            functionName: "vaultFor",
+            args: [acct as `0x${string}`],
+          }),
+        );
+      }
+    } catch (e) {
+      log(`enable-class: could not read the grant (${e instanceof Error ? e.message.slice(0, 90) : e})`);
+      return;
+    }
+    const blockers = classEnableBlockers({ sealedVault, derivedVault });
+    if (blockers.length > 0) {
+      for (const b of blockers) log(`enable-class: REFUSING — ${b}`);
+      log("enable-class: nothing was written.");
+      return;
+    }
+    log(`enable-class: grant seals ${sealedVault} and it matches this account's vault`);
 
     const current = (await store.get(want as `0x${string}`)) as unknown as Record<
       string,
       unknown
     > | null;
-    for (const line of describeCanaryChange(current, CANARY)) log(`enable-class: ${line}`);
+    for (const line of describeCanaryChange(current, values)) log(`enable-class: ${line}`);
 
-    const next = mergeCanary(current, CANARY);
+    const next = mergeCanary(current, values);
     await store.put(want as `0x${string}`, next as never);
 
     // READ IT BACK. A write that reported success and changed nothing is the
@@ -2490,10 +2558,10 @@ async function runEnableClassIfAsked(): Promise<void> {
       string,
       unknown
     > | null;
-    const wrong = Object.entries(CANARY).filter(([k, v]) => after?.[k] !== v);
+    const wrong = Object.entries(values).filter(([k, v]) => after?.[k] !== v);
     log(
       wrong.length === 0
-        ? `enable-class: WROTE and verified all ${Object.keys(CANARY).length} fields for ${want}`
+        ? `enable-class: WROTE and verified all ${Object.keys(values).length} fields for ${want}`
         : `enable-class: *** VERIFY FAILED — ${wrong.map(([k]) => k).join(", ")} did not stick ***`,
     );
     log("enable-class: remove MERRYMEN_ENABLE_CLASS_FOR now.");
