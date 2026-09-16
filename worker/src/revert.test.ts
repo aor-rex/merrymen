@@ -190,11 +190,52 @@ describe("Pons adapter reverts", () => {
       "0x5048bd62", // IdenticalAssets
       "0x1f2a2005", // ZeroAmount
       "0xed3ba6a6", // Reentrant
+      "0xe6208274", // TokenDoesNotMatchCurve — the vault's, raised since v1 shipped
     ]) {
       const v = classifyRevert(revertData(sel));
       assert.equal(v.rule, "curve-unsupported", sel);
       assert.equal(v.retryable, false, sel);
     }
+  });
+
+  it("a v2 spend cap is the SAME verdict as a v1 one, through a different selector", () => {
+    // THE REGRESSION THIS TEST EXISTS TO CATCH. PonsClassVaultV2 keys its ceiling
+    // by the asset the trade was funded in, so the error names that asset —
+    // SpendCapExceeded(address,uint256,uint256) rather than (uint256,uint256) —
+    // and a wider signature is a different four bytes. Versioning the contract
+    // would otherwise have dropped v2 reverts into `unclassified`, which is
+    // retryable, against a window that is a DAY: up to a thousand reverted
+    // UserOperations paying gas to be told the same thing. That is the exact
+    // loop this file was written to stop, reintroduced by a contract upgrade.
+    const v1 = classifyRevert(revertData("0x605cd727"));
+    const v2 = classifyRevert(revertData("0xa6dfc94a"));
+    assert.equal(v1.rule, "spend-cap");
+    assert.equal(v2.rule, "spend-cap", "a v2 spend cap must not fall through to unclassified");
+    assert.equal(v2.retryable, false);
+    assert.equal(v1.detail, v2.detail, "same remedy, so the owner reads the same sentence");
+  });
+
+  it("BOTH spend-cap selectors stay, because v1 is deployed and may still be traded", () => {
+    // Not a redundant restatement of the test above: that one asserts v2 is
+    // recognised, this one asserts v1 was not REPLACED. A version bump that
+    // swapped the selector instead of adding to it would pass the first test and
+    // silently un-classify every trade on the live v1 vault.
+    assert.ok(PONS_ERROR_SELECTORS.includes("0x605cd727"), "v1 SpendCapExceeded");
+    assert.ok(PONS_ERROR_SELECTORS.includes("0xa6dfc94a"), "v2 SpendCapExceeded");
+  });
+
+  it("QuoteNotApproved is its own answer, because waiting is the wrong one", () => {
+    // Both are non-retryable, so collapsing them into one class would have been
+    // mechanically correct and practically useless. A spend cap clears when the
+    // window rolls. This never clears on its own: in v2 a cap of zero IS how an
+    // asset is refused, and only the owner's key can seal one. The only thing
+    // anyone does with this class is read the sentence and act.
+    const v = classifyRevert(revertData("0xae9665be"));
+    assert.equal(v.rule, "quote-not-approved");
+    assert.equal(v.retryable, false);
+    assert.notEqual(v.rule, "spend-cap", "the whole point is that these are different instructions");
+    assert.match(v.detail, /seal a cap/, "it has to say what to DO about it");
+    assert.doesNotMatch(v.detail, /window/, "and must not tell the owner to wait for a window");
   });
 
   it("InsufficientOutput is slippage and IS worth retrying", () => {

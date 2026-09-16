@@ -55,8 +55,9 @@ export type RevertClass =
   | "curve-graduated"
   /**
    * The adapter refused the trade's SHAPE — a native-quoted curve, assets that do
-   * not match the curve, a non-contract asset, identical legs, a zero size. None
-   * of these change by waiting, and all are decided before any money moves.
+   * not match the curve, a curve whose own `token()` is not the token named, a
+   * non-contract asset, identical legs, a zero size. None of these change by
+   * waiting, and all are decided before any money moves.
    */
   | "curve-unsupported"
   /**
@@ -72,6 +73,22 @@ export type RevertClass =
    * can raise the cap at any moment.
    */
   | "spend-cap"
+  /**
+   * The vault holds NO ceiling for the asset this trade was funded in.
+   *
+   * A DIFFERENT FACT FROM `spend-cap`, and the distinction is the reason
+   * PonsClassVaultV2 raises two errors where v1 raised one. A spend cap clears
+   * when the window rolls; this one never clears by waiting, because a cap of
+   * zero IS the allowlist and only the owner's own key can seal one. A loop that
+   * could not tell them apart would wait out a day for a condition that a day
+   * does not change, and then wait out another.
+   *
+   * Both are non-retryable, so the taxonomy could have collapsed them and been
+   * mechanically correct. It does not, because the only thing anyone does with
+   * this class is read the sentence and act: one says wait, the other says
+   * re-seal.
+   */
+  | "quote-not-approved"
   /** We do not recognise it. Retryable, deliberately — see the header. */
   | "unclassified";
 
@@ -131,6 +148,37 @@ const PONS_ERR = {
    * `toFunctionSelector("function SpendCapExceeded(uint256,uint256)")`.
    */
   SpendCapExceeded: "0x605cd727",
+  /**
+   * The SAME error, one argument wider, from PonsClassVaultV2.
+   *
+   * `SpendCapExceeded(address quoteAsset, uint256 wanted, uint256 remaining)` —
+   * contracts/contracts/PonsClassVaultV2.sol:130. v2 keys its ceiling by the
+   * asset the trade was funded in, so the error names that asset, and a wider
+   * signature is a DIFFERENT SELECTOR. Without this line a v2 spend-cap revert
+   * would classify `unclassified`, which is retryable — and the window is a day,
+   * so it would put up to a thousand reverted UserOperations on chain being told
+   * the same thing. That is the precise loop this file exists to have stopped,
+   * and versioning the contract would have quietly reintroduced it.
+   *
+   * Both selectors stay. v1 is deployed on mainnet 4663 and may still be traded.
+   */
+  SpendCapExceededV2: "0xa6dfc94a",
+  /**
+   * `QuoteNotApproved(address quoteAsset)` — PonsClassVaultV2.sol:129. The vault
+   * has no ceiling sealed for this asset at all, which in v2 means it is not
+   * approved: the cap doubles as the allowlist and zero means refused.
+   */
+  QuoteNotApproved: "0xae9665be",
+  /**
+   * `TokenDoesNotMatchCurve(address curveToken)` — PonsClassVault.sol:218 and
+   * PonsClassVaultV2.sol:144, identical in both. The vault was handed a curve
+   * whose own `token()` is not the token the trade named.
+   *
+   * A PRE-EXISTING GAP, not a v2 one: v1 has raised this since it was deployed
+   * and the table never carried it, so it has been classifying `unclassified`
+   * and therefore retryable. Nothing about a mismatched curve changes by waiting.
+   */
+  TokenDoesNotMatchCurve: "0xe6208274",
   Expired: "0x203d82d8",
   ZeroAmount: "0x1f2a2005",
   NotAContract: "0x09ee12d5",
@@ -152,7 +200,7 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
   {
     // ABOVE the other four-byte matches only for readability; they cannot
     // collide with each other.
-    re: new RegExp(PONS_ERR.SpendCapExceeded, "i"),
+    re: new RegExp([PONS_ERR.SpendCapExceeded, PONS_ERR.SpendCapExceededV2].join("|"), "i"),
     rule: "spend-cap",
     retryable: false,
     detail:
@@ -160,6 +208,18 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
       "ceiling that bounds how much a compromised key could take one capped call at a time. Nothing " +
       "moved. It clears when the window rolls, and the owner's own key can raise it; retrying before " +
       "either happens would pay gas to be refused again, so this is suppressed for now.",
+  },
+  {
+    // BESIDE the spend cap rather than folded into it. Same answer to "retry?",
+    // opposite answer to "what do I do about it?".
+    re: new RegExp(PONS_ERR.QuoteNotApproved, "i"),
+    rule: "quote-not-approved",
+    retryable: false,
+    detail:
+      "the vault holds no spending ceiling for the asset this trade was funded in, and in this vault a " +
+      "ceiling of zero is how an asset is refused rather than merely limited. Nothing moved. Waiting " +
+      "will not change it — the owner has to seal a cap for this asset with their own key — so the " +
+      "intent is suppressed rather than repeated every tick.",
   },
   {
     // ABOVE the generic entries. These are exact four-byte matches and cannot
@@ -181,6 +241,7 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
         PONS_ERR.IdenticalAssets,
         PONS_ERR.ZeroAmount,
         PONS_ERR.Reentrant,
+        PONS_ERR.TokenDoesNotMatchCurve,
       ].join("|"),
       "i",
     ),
@@ -188,8 +249,9 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     retryable: false,
     detail:
       "the adapter refused the shape of this trade before any money moved — a native-quoted curve, " +
-      "assets that do not belong to it, a non-contract asset, identical legs, or a zero size. None of " +
-      "these change by waiting, so the intent is suppressed rather than repeated every tick.",
+      "assets that do not belong to it, a curve whose own token is not the one this trade named, a " +
+      "non-contract asset, identical legs, or a zero size. None of these change by waiting, so the " +
+      "intent is suppressed rather than repeated every tick.",
   },
   {
     // The adapter's own floor, measured against the ACCOUNT's balance delta
