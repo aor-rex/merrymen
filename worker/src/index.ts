@@ -1702,7 +1702,15 @@ async function main() {
         // reach `bookClassSweepWithdrawal` and tell the owner they had swept
         // their own cash out of the vault, with a cost it "never saw".
         cached: cachedRows.map((r) => r.token).filter((t) => !isCash(t)),
-        logComplete: !scan.failed,
+        // A LOG THIS CODE COULD NOT PARSE IS NOT A COMPLETE HISTORY EITHER.
+        // `failed` means the node refused a window; `unreadable` means the node
+        // answered and the vault said something this build does not understand.
+        // Both leave the tape short, and the whole safety story of
+        // class-reconcile rests on this flag: treating a dialect we cannot read
+        // as "nothing happened" is what closes an open position from silence.
+        // The filter is address-only, so every unreadable log came from this
+        // vault — there is no third-party noise to tolerate here.
+        logComplete: !scan.failed && scan.unreadable === 0,
         balancesComplete: custody.unread.length === 0,
       });
 
