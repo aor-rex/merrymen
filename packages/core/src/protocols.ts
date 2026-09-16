@@ -132,7 +132,8 @@ export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> =
 
 /**
  * PonsClassVaultFactoryV2 — the factory whose vaults hold ONE CEILING PER QUOTE
- * ASSET. NOT YET DEPLOYED ANYWHERE; both entries are `null`.
+ * ASSET. Deployed on mainnet 2026-09-16; testnet is `null` and will stay that
+ * way until the deploy script has a per-chain quote table, which it does not.
  *
  * A SECOND CONSTANT, NOT A REPLACEMENT, and the v1 table above must never be
  * emptied. A v1 vault is a deployed contract at a CREATE2 address derived from
@@ -173,9 +174,46 @@ export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> =
  * distinguishable from "the factory answered zero".
  */
 export const PONS_CLASS_VAULT_FACTORY_V2: Readonly<Record<number, string | null>> = Object.freeze({
-  /** Robinhood Chain mainnet — not deployed. */
-  4663: null,
-  /** Robinhood Chain testnet — not deployed. */
+  /**
+   * Robinhood Chain mainnet. Deployed 2026-09-16, 10,344 bytes.
+   *
+   * SEEDED USDG ONLY, at `250_000_000` raw — which is exactly v1's
+   * `DEFAULT_SPEND_CAP`, so the cutover changes the vault and nothing else.
+   * NVDA and SPY were deliberately left out: the seed is the one refusal that
+   * can never be narrowed, and every vault this factory makes is born with this
+   * set and no other. Reaching a second quote needs an owner-key `setQuoteCaps`
+   * operation, which has no caller off chain yet.
+   *
+   * Verified from a process that did not deploy it
+   * (`scripts/verify-classfactoryv2.mts`), which is the point: the deploy
+   * script's own gates are claims by the code under test. Independently
+   * established, all five green with no warnings:
+   *
+   *   - the deployed bytecode is BYTE-IDENTICAL to this tree's compiled
+   *     artifact, not merely non-empty
+   *   - `FACTORY_VERSION` answers 2
+   *   - `seedQuoteSet` decodes back to exactly $250.00 through the same
+   *     arithmetic that sealed it, so the ceiling is the money it was meant to be
+   *   - `deployments.json` names this exact address and the same raw cap
+   *   - for three owners including Shogun, `vaultFor`, a locally recomputed
+   *     CREATE2 from the chain's own seed, and a SIMULATED `deploy()` all agree
+   *
+   * That last one is the check the v1 entry below calls decisive, done three
+   * ways instead of one. The wall pins a vault as a literal target before the
+   * contract exists, and a CALL to a codeless address SUCCEEDS with empty
+   * returndata — so a prediction that disagreed with production would let the
+   * approve land, the buy no-op, and the trade report `landed`.
+   *
+   * Shogun's vault under this factory: 0x77b3a9EEB8c6f40A68dfD6DEb239534023e7845a
+   */
+  4663: "0xcdaf6bbd4947c00d8396c55f0ad53e6d345f4bf0",
+  /**
+   * Robinhood Chain testnet — not deployed, and not deployable today.
+   *
+   * The deploy script's quote table holds mainnet addresses only, so on 46630
+   * every token reads as a non-contract and it refuses the chain by name. A
+   * testnet factory needs a per-chain address table first.
+   */
   46630: null,
 });
 

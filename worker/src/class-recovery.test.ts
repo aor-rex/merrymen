@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatUnits } from "viem";
 import { classSweepCandidates, findClassVault, findClassVaults, planClassSweep, readClassHoldings } from "./class-recovery";
+import { PONS_CLASS_VAULT_FACTORY, PONS_CLASS_VAULT_FACTORY_V2 } from "../../packages/core/src/index";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
 const VAULT = "0x00000000000000000000000000000000000000c0" as const;
@@ -305,28 +306,56 @@ describe("a holding is formatted at its own decimals", () => {
  * negative is the failure this whole module exists to prevent.
  */
 describe("finding every vault an account could have, not the best one", () => {
-  const V1_FACTORY = "0x48a560371230ece659b2ba40fb19e8335866ab3d" as const;
+  /**
+   * THE FACTORIES THIS CHAIN ACTUALLY PINS, read from the constants rather than
+   * pasted.
+   *
+   * These tests used to hard-code v1's address and script only that, which was
+   * correct exactly while v2 was null — and it broke the moment the v2 factory
+   * was deployed and pinned, because the finder then asked an address the fake
+   * client had never been told about. A test that encodes a snapshot of a
+   * constant fails when the constant does its job.
+   *
+   * Reading the table instead means these stay true on the day a testnet factory
+   * appears too, and it makes the point of the suite literal: whatever this chain
+   * pins, recovery must ask ALL of it.
+   */
+  const PINNED = [PONS_CLASS_VAULT_FACTORY_V2[4663], PONS_CLASS_VAULT_FACTORY[4663]].filter(
+    (f): f is string => typeof f === "string",
+  );
+  const V1_FACTORY = PONS_CLASS_VAULT_FACTORY[4663]!;
   const V1_VAULT = "0x00000000000000000000000000000000000000d1" as const;
   const V2_VAULT = "0x00000000000000000000000000000000000000d2" as const;
+  /** One scripted answer per pinned factory, so nothing is an unscripted read. */
+  const allPinned = (answers: Record<string, unknown>) =>
+    client({ ...Object.fromEntries(PINNED.map((f, i) => [`vaultFor:${f}`, i === 0 ? V2_VAULT : V1_VAULT])), ...answers });
 
-  it("with no grant, a v1 factory still yields its vault", async () => {
-    // The regression guard for every owner recovering today. v2 is unpinned
-    // (null on both chains until it is deployed), so this is the live path.
+  it("with no grant, EVERY pinned factory is asked", async () => {
+    // The regression guard for every owner recovering today, and the reason the
+    // plural finder exists: with no grant there is nothing to prefer, so asking
+    // one factory is a guess and a guess is a false negative waiting to happen.
     const { candidates, unreadable } = await findClassVaults({
-      client: client({ [`vaultFor:${V1_FACTORY}`]: V1_VAULT }) as never,
+      client: allPinned({}) as never,
       chainId: 4663,
       smartAccount: ACCOUNT,
       grant: null,
     });
-    assert.equal(candidates.length, 1, "the deployed v1 factory must still be asked");
-    assert.equal(candidates[0]!.vault, V1_VAULT.toLowerCase());
-    assert.equal(candidates[0]!.version, 1, "and labelled, so a report can say which is which");
+    assert.equal(candidates.length, PINNED.length, "every factory this chain pins must be asked");
     assert.deepEqual(unreadable, []);
+    // v1 is deployed on mainnet and may still hold a position. It must be in
+    // the list whatever else is, and it must be labelled.
+    const v1 = candidates.find((c) => c.factory?.toLowerCase() === V1_FACTORY.toLowerCase());
+    assert.ok(v1, "the deployed v1 factory must still be asked");
+    assert.equal(v1!.vault, V1_VAULT.toLowerCase());
+    assert.equal(v1!.version, 1, "and labelled, so a report can say which is which");
+    for (const c of candidates) {
+      assert.notEqual(c.version, null, "a pinned factory's version is known, never guessed");
+    }
   });
 
   it("the grant's sealed vault is first and is never derived away", async () => {
     const { candidates } = await findClassVaults({
-      client: client({ [`vaultFor:${FACTORY}`]: VAULT, [`vaultFor:${V1_FACTORY}`]: V1_VAULT }) as never,
+      client: allPinned({ [`vaultFor:${FACTORY}`]: VAULT }) as never,
       chainId: 4663,
       smartAccount: ACCOUNT,
       grant: classGrant,
@@ -345,16 +374,16 @@ describe("finding every vault an account could have, not the best one", () => {
     // The collapse that would reintroduce the false negative: treating any
     // failure as "we could not ask" and reporting nothing.
     const { candidates, unreadable } = await findClassVaults({
-      client: client({
-        [`vaultFor:${FACTORY}`]: new Error("node refused"),
-        [`vaultFor:${V1_FACTORY}`]: V1_VAULT,
-      }) as never,
+      client: allPinned({ [`vaultFor:${FACTORY}`]: new Error("node refused") }) as never,
       chainId: 4663,
       smartAccount: ACCOUNT,
       grant: { grantFeatures: ["pons-class"], ponsClassVaultAddress: undefined, ponsClassVaultFactoryAddress: FACTORY },
     });
-    assert.equal(candidates.length, 1, "the factory that DID answer still yields its vault");
-    assert.equal(candidates[0]!.vault, V1_VAULT.toLowerCase());
+    assert.equal(candidates.length, PINNED.length, "every factory that DID answer still yields its vault");
+    assert.ok(
+      candidates.some((c) => c.vault === V1_VAULT.toLowerCase()),
+      "including v1, which is the one that may still hold a balance",
+    );
     assert.equal(unreadable.length, 1, "and the one that refused is named rather than forgotten");
     assert.equal(unreadable[0]!.factory.toLowerCase(), FACTORY.toLowerCase());
   });
@@ -373,7 +402,9 @@ describe("finding every vault an account could have, not the best one", () => {
 
   it("a factory answering the zero address yields NO candidate, never an address of nothing", async () => {
     const { candidates } = await findClassVaults({
-      client: client({ [`vaultFor:${V1_FACTORY}`]: "0x0000000000000000000000000000000000000000" }) as never,
+      client: client(
+        Object.fromEntries(PINNED.map((f) => [`vaultFor:${f}`, "0x0000000000000000000000000000000000000000"])),
+      ) as never,
       chainId: 4663,
       smartAccount: ACCOUNT,
       grant: null,
