@@ -1600,7 +1600,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
             <Field
               label="Class vault factory contract"
-              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here."
+              hint="PonsClassVaultFactory on your wallet’s network — version 1 or version 2. Leave it empty to use the one this chain pins. This lets your agent buy tokens that did not exist when you signed; they are held in a vault of your own, because a token your account holds directly cannot be sold. THE TWO VERSIONS LOOK IDENTICAL FROM OUTSIDE and behave differently — v1 holds one spending ceiling for everything, v2 holds one per funding asset — so the signer reads the version off the address you paste and tells you which one it is about to seal before you sign. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here. Changing it after you hold a position points your agent at a DIFFERENT, empty vault — sell and sweep first."
             >
               <input
                 type="text"

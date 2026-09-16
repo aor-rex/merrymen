@@ -3255,6 +3255,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
       smartAccount,
       grantClassVault,
       derivedClassVault,
+      derivedFromFactory: factory ?? null,
       vaultDeployed,
       assetMode: pick("assetMode"),
       liveTradingEnabled: pick("liveTradingEnabled"),

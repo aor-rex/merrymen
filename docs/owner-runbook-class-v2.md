@@ -163,9 +163,38 @@ absence of trades.
 
 ## Step 3 — re-sign
 
-*(Filled in once the signing path lands. The vault address is a CREATE2 function
-of the factory, so a v2 factory means a different vault address, which means a
-new signature. Nothing about an existing v1 grant changes or expires on its own.)*
+Paste the deployed address into **Class vault factory contract** in /settings,
+then re-sign at /grant.
+
+The vault address is a CREATE2 function of the factory, so a v2 factory means a
+different vault address, which means a new signature. Nothing about an existing
+v1 grant changes or expires on its own — which is why Step 0 comes first.
+
+**The signer checks the address before it seals anything.** It reads
+`FACTORY_VERSION` and tells you which family you are about to commit to.
+
+That check is not a formality. `vaultFor`, `deploy`, `buy`, `sell` and `sweep`
+have identical signatures in both versions, so the permission wall built from a
+v1 address is byte-identical to the one built from a v2 address. A v1 address
+pasted here answers plausibly, returns a real deployed vault, pins a real target
+and reports a successful re-sign — while the chain quietly enforces v1's single
+global ceiling. Nothing downstream can tell.
+
+A revert from `FACTORY_VERSION` means version 1, not an error. v1 declares no
+such function and has no fallback.
+
+The signer also refuses a v2 factory whose seed carries no USDG cap, or a USDG
+cap of zero. A vault is created inside the same operation as its first buy, so a
+bad seed has no second transaction to be fixed in: every buy the wall permits
+would revert after the USDG approve leg had already landed, every tick, forever.
+
+**Then check the agent can be put into service.** `classEnableBlockers` compares
+the vault your signature sealed against the one the factory derives, and refuses
+if they differ — that is a wall pinning a vault the executor never uses. It
+derives from the factory the grant itself sealed, so a correctly signed v2 grant
+produces no blockers. If it does produce one, the two sides really do disagree,
+and the answer is not to override it.
+
 
 ## Step 4 — prove USDG still works, before anything else
 
@@ -203,11 +232,23 @@ what makes the second a proof rather than a coincidence.
 
 ## If something goes wrong
 
-`merrymen recover` takes your owner key and reaches a vault with no grant. It has
-to probe **both** factories now, because a v1 vault may hold a position while new
-grants point at v2. The failure mode that matters is a false negative: a position
-that exists and is not found.
+`merrymen recover` takes your owner key and reaches a vault with no grant. It
+probes **both** factories and reports what each holds, separately and labelled by
+version, because a v1 vault may hold a position while new grants point at v2. A
+factory that will not answer is named rather than collapsed into a single "class
+vault" failure — one blinking read must not hide the other vault.
+
+It sweeps **one operation per vault**. The batch is atomic, so two vaults sharing
+one operation would let a dead one take the live one down with it, and the report
+could not say which failed.
+
+The browser recovery panel discloses every vault, and its confirmation says what
+that press will *not* move: one approval covers one vault, so a balance in the
+other needs a second run and the screen says so before you press.
 
 `sweep` is owner-only, consults no cap and no approved set, and neither does
-`sell`. Un-approving a quote must never strand a position entered in it — that
-is written into the contract and tested, not left as a convention.
+`sell`. Un-approving a quote must never strand a position entered in it — that is
+written into the contract and tested, not left as a convention. A sweep now
+reports what **arrived** rather than what it asked for, so a token that returns
+success and moves nothing is refused by name instead of booking a withdrawal that
+never happened.
