@@ -72,17 +72,53 @@ proves the measurement. So there is no second transaction in which to seal caps
 before the first buy needs them. A vault that was born empty and had to be
 configured afterwards would fail its own first buy, every time.
 
-The asymmetry is deliberate. **A birth default that is too low costs you a
-refusal you can fix. One that is too high is a ceiling nobody agreed to.** Seed
-small.
+### Right now the seed is the LAST word, not the first
 
-You refine your own ceilings afterwards with `setQuoteCaps`, which is owner-only
-and **never moves the vault's address**. That last property is the load-bearing
-one in the whole design: caps live in storage rather than in the CREATE2 init
-code, precisely so that editing one cannot strand a position. A raw cap is
-derived from a dollar allowance and a live price, so it differs at almost every
-signing — and if the address moved with it, a routine re-sign would pin a fresh
-empty vault and leave the open position behind in the old one.
+The contract has `setQuoteCaps`, it is owner-only, and it never moves the vault's
+address. **But nothing off chain can call it.** There is no `merrymen vault
+set-caps`, and no other code path anywhere in this repo builds that operation —
+`grep -rn setQuoteCaps` outside the contract and its tests returns nothing. The
+caller has to be the smart account itself, via a sudo UserOperation, and that
+operation has never been written.
+
+So until that tooling exists, **whatever quotes the factory is seeded with are
+the only quotes any vault from it will ever have.** Treat the seed as permanent.
+
+Two things follow, and they point in opposite directions:
+
+- **Seed every asset you intend to reach.** The planned canary picks NVDA *or*
+  SPY by measured liquidity at test time. If only one is seeded, that choice is
+  already made, and making it the other way needs code that does not exist.
+- **Seed nothing you do not intend to reach.** A cap is a ceiling somebody has to
+  be willing to defend, and you cannot lower it.
+
+The asymmetry inside a chosen asset still favours small. **A birth default that
+is too low costs you a refusal you can fix by deploying a new factory. One that
+is too high is a ceiling nobody agreed to and cannot take back.**
+
+### Seeding a quote is not enabling it
+
+A seeded NVDA cap means the *vault* would accept an NVDA-funded buy. Nothing else
+would. The wall still pins the class buy's quote word to USDG alone, the producer
+still refuses any candidate quoted in anything else, and the ledger now refuses to
+book a non-USDG fill rather than converting it. A seeded quote with no other layer
+behind it is **inert**, not live — which is exactly why it is safe to seed the
+canary's candidates now and decide between them later.
+
+### Why the address does not move when a cap changes
+
+Caps live in storage rather than in the CREATE2 init code. That is the
+load-bearing decision in the whole design: a raw cap is derived from a dollar
+allowance and a live price, so it differs at almost every signing — and if the
+address moved with it, a routine re-sign would pin a fresh empty vault and leave
+the open position behind in the old one.
+
+The **seed** is a different matter, and it is in the init code: it is a
+constructor argument, so two factories with different seeds produce different
+vault addresses for the same owner. Re-deploying the factory to change the seed
+therefore moves every vault. That is the real cost of getting it wrong, and it is
+why this section is longer than it looks like it needs to be.
+
 
 ## Step 0 — flatten the v1 vault first
 
@@ -125,6 +161,21 @@ Node's ESM loader, which has no TypeScript handler, and it dies with
 `ERR_UNKNOWN_FILE_EXTENSION` before touching the network. The loader rides in the
 script entry itself.
 
+
+### Rehearse it first — no key, no gas
+
+```bash
+MERRYMEN_V2_DRY_RUN=1 MERRYMEN_V2_SEED="USDG:250,NVDA:25,SPY:25" npm run --prefix contracts deploy:classfactoryv2:mainnet
+```
+
+Same code path, same feeds, same refusals. It prints the raw caps it *would*
+seal and stops. Run it once to see the numbers and confirm the seed parses, then
+run it again for real inside market hours and expect the caps to differ — they
+are sized from a live price.
+
+What it cannot tell you is whether `deploy()` would succeed. That gate needs the
+factory to exist, so it only runs for real.
+
 **Run it inside US market hours.** Chainlink's equity feeds run 24/5. The script
 refuses a feed older than two hours rather than quietly sizing a grant off
 Friday's close, because a cap derived from a price nobody can trade at is a cap
@@ -151,6 +202,31 @@ The deployer key comes from the shell, is never logged, and should be unset
 afterwards.
 
 ## Step 2 — pin the address
+
+### Verify it from outside the process that deployed it
+
+```bash
+npx tsx scripts/verify-classfactoryv2.mts 0x<the-new-factory>
+```
+
+Read-only and keyless — run it from a shell that never held the deployer key.
+The deploy script's own four gates are claims by the process under test; this
+re-establishes the same facts from different sources, and adds three the deploy
+script cannot make:
+
+- the deployed bytecode is compared to the compiled artifact, not merely checked
+  for being non-empty
+- the seed is decoded back into **dollars**, so you read the ceiling as money
+- `deploy()` is simulated for **Shogun**, the account that will actually use it,
+  and the CREATE2 address is recomputed locally rather than taken from the
+  factory's own view
+
+It exits non-zero on any failure and prints the Shogun vault address, which is
+the number the grant must seal in Step 3.
+
+**If it says FAIL, do not pin the address and do not re-sign.** The factory is
+immutable; the only remedy is a different deploy.
+
 
 Put the deployed address in `PONS_CLASS_VAULT_FACTORY_V2` in
 `packages/core/src/protocols.ts`, and **leave the v1 constant exactly as it is.**
