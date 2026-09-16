@@ -3913,6 +3913,16 @@ async function mirrorLedgers(): Promise<void> {
     // clock, so a fresh deploy heals itself.
     await applyLedgerSchema(shared);
     await shared.exec(translateSchema(MIRROR_STATE_DDL));
+    // `CREATE TABLE IF NOT EXISTS` adds no column to a table that already
+    // exists, and every live deployment already has this one — so without the
+    // ALTER the new witness column would exist only on a database nobody has.
+    // Swallowed the way every other migration here is: it throws on the second
+    // pass and on every pass after it.
+    try {
+      await shared.exec(`ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER`);
+    } catch {
+      /* already there */
+    }
     // Same clock, same reasoning: the one process that can reach this database
     // creates what it writes, so a fresh deploy heals itself rather than
     // needing DDL run by hand.

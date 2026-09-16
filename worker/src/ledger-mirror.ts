@@ -43,9 +43,9 @@ export const MIRROR_BATCH = 500;
 
 /** The append-only tables, and the column their watermark is measured in. */
 const LOG_TABLES = [
-  { table: "events", cols: ["agent_id", "level", "message", "created_at"] },
+  { table: "events", probe: true, stamp: "created_at", cols: ["agent_id", "level", "message", "created_at"] },
   {
-    table: "trades",
+    table: "trades", probe: true, stamp: "created_at",
     cols: [
       "agent_id",
       "kind",
@@ -102,7 +102,7 @@ const LOG_TABLES = [
   // the published drawdown would all go on measuring the step between two books
   // as performance.
   {
-    table: "equity",
+    table: "equity", probe: true, stamp: "at",
     cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "at"],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
@@ -123,7 +123,7 @@ const LOG_TABLES = [
   // unique index on both engines, so the constraint could never fire on the
   // shared side no matter what the child wrote.
   {
-    table: "flows",
+    table: "flows", probe: false, stamp: "at",
     cols: [
       "agent_id",
       "direction",
@@ -140,7 +140,7 @@ const LOG_TABLES = [
   // What the house actually accrued, per agent. Read straight off `agents` by
   // the scoreboard, but the per-accrual history is what makes a fee auditable.
   {
-    table: "fee_accruals",
+    table: "fee_accruals", probe: true, stamp: "at",
     cols: ["agent_id", "profit_usdg", "fee_usdg", "hwm_before_usdg", "hwm_after_usdg", "epoch", "at"],
   },
 ] as const;
@@ -169,12 +169,26 @@ const RESYNC_LIMIT = 200;
  * Lives in the destination rather than on disk so it commits with the rows it
  * describes. `last_id` is the source database's id, which is meaningful only
  * alongside the tenant it came from — hence the composite key.
+ *
+ * `last_stamp` IS WHAT MAKES `last_id` MEAN ANYTHING.
+ *
+ * An id alone cannot say WHICH ledger it came from. A rebuilt child restarts
+ * its ids at 1, and once it has written `last_id` rows again, a test that asks
+ * only whether SOME row occupies that id finds one — a different row wearing
+ * the same number — and declares the cursor healthy. The stamp is the row's
+ * creation time, which nothing ever updates, so comparing it distinguishes the
+ * row we copied from a stranger standing where it used to be.
+ *
+ * Nullable: every tenant alive when this shipped has a cursor and no witness.
+ * See the one-time reconciliation in `mirrorTenant`.
  */
 export const MIRROR_STATE_DDL = `
   CREATE TABLE IF NOT EXISTS mirror_state (
     tenant TEXT NOT NULL,
     table_name TEXT NOT NULL,
     last_id INTEGER NOT NULL DEFAULT 0,
+    -- last_stamp: creation time of the row last_id points at. See the doc above.
+    last_stamp INTEGER,
     updated_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant, table_name)
   );
@@ -274,12 +288,14 @@ export async function mirrorTenant(args: {
   const restarted: Record<string, { was: number }> = {};
 
   // ── append-only tables ────────────────────────────────────────────────────
-  for (const { table, cols } of LOG_TABLES) {
+  for (const { table, cols, stamp, probe } of LOG_TABLES) {
     try {
       const mark = (await shared
-        .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
-        .get(tenant, table)) as { last_id: number } | undefined;
+        .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+        .get(tenant, table)) as { last_id: number; last_stamp: number | null } | undefined;
       let from = Number(mark?.last_id ?? 0);
+      const witnessed =
+        mark?.last_stamp === null || mark?.last_stamp === undefined ? null : Number(mark.last_stamp);
 
       // ── THE CURSOR OUTLIVES THE LEDGER IT POINTS INTO ──────────────────────
       //
@@ -298,26 +314,98 @@ export async function mirrorTenant(args: {
       // id cursor — arrived normally, and why `decisions`, which is cursored on
       // a TIMESTAMP with a lookback, kept flowing past the same stalled state.
       //
-      // THE TEST IS "IS THE ROW WE LAST COPIED STILL THERE", not MAX(id).
-      // Within one incarnation the watermark IS an id we copied, and these
-      // tables are append-only — nothing in this repo deletes from them — so
-      // that row can only be missing because the id space restarted underneath
-      // us. It cannot false-positive, which matters more than completeness
-      // here: this file's exactly-once property rests solely on the watermark
-      // (the INSERT below has no ON CONFLICT), so a spurious rewind would
-      // duplicate the tape, and a trade shown twice is worse than one shown
-      // late. MAX(id) < from would miss the case where the reborn ledger has
-      // grown to exactly the old mark; asking for the row itself does not.
+      // ── AND WHY ASKING 'IS THE ROW STILL THERE' WAS NOT ENOUGH ────────────
+      //
+      // The first fix tested `SELECT 1 FROM <table> WHERE id = from`, reasoning
+      // that an append-only table can only lose that row to a rebuild. True —
+      // but a rebuilt child that has since written `from` rows again puts a
+      // DIFFERENT row at that id, the test finds it, and the cursor is declared
+      // healthy. Shogun hit exactly this: an autonomous ClassBuy landed, its
+      // `class_positions` row (a snapshot, no cursor) mirrored fine, and the
+      // `trades` row carrying `fill_side` and `basis_source` never arrived,
+      // with the orchestrator printing `trades 0` every pass.
+      //
+      // So the question is not whether SOME row occupies the watermark. It is
+      // whether it is THE SAME ROW. `stamp` is the row's creation time, which
+      // nothing updates — the resync pass below rewrites status, tx_hash and
+      // every fill column of a trade in place, so a witness over mutable
+      // columns would read an ordinary settlement as a rebuild and DUPLICATE
+      // THE TAPE. Duplication is the one error this file must never make.
       if (from > 0) {
-        const still = (await child
-          .prepare(`SELECT 1 AS ok FROM ${table} WHERE id = ?`)
-          .get(from)) as { ok: number } | undefined;
-        if (!still) {
+        const at = (await child
+          .prepare(`SELECT ${stamp} AS s, agent_id FROM ${table} WHERE id = ?`)
+          .get(from)) as { s: number | null; agent_id: string } | undefined;
+
+        if (!at) {
+          // The plain case: the rebuilt ledger has not yet reached that id.
           restarted[table] = { was: from };
           from = 0;
+        } else if (witnessed !== null) {
+          // The ordinary case once a witness exists. A pure local comparison,
+          // no query against the destination.
+          if (Number(at.s) !== witnessed) {
+            restarted[table] = { was: from };
+            from = 0;
+          }
+        } else {
+          // ── ONE-TIME RECONCILIATION, for cursors older than the witness ────
+          //
+          // Every tenant alive when this shipped has a `last_id` and no
+          // `last_stamp`, and some of those cursors are ALREADY stranded — that
+          // is the bug being fixed, so seeding the witness from whatever sits at
+          // the watermark would freeze the wrong answer in permanently.
+          //
+          // Reseeding them all instead is the other wrong answer and the worse
+          // one: it re-copies rows already in the destination, and `trades`
+          // carries no unique key for `ON CONFLICT DO NOTHING` to bite on, so a
+          // fleet-wide reseed duplicates every tape that money is summed from.
+          //
+          // So ask the destination a question only a real rebuild answers NO to:
+          // was the row now sitting at the watermark ever mirrored? If the child
+          // is the one we have been copying, that row IS a row we copied and its
+          // stamp is present. If the ledger was rebuilt beneath us, the row there
+          // now belongs to an incarnation the destination has never seen.
+          //
+          // Existence, not uniqueness — two rows can share a second. That makes
+          // the test err towards NOT rewinding, which is the safe direction.
+          // ── ONLY WHERE ABSENCE CAN ONLY MEAN A REBUILD ───────────────────
+          //
+          // The probe reads its answer out of the DESTINATION, so it is sound
+          // only for a table nothing ever deletes there. `flows` is deleted
+          // from by accounting-repair.ts, and a quarantined row sitting at a
+          // tenant's watermark would make the probe answer NO and rewind a
+          // perfectly healthy cursor. Flows with a tx hash would dedupe on
+          // `flows_chain_identity`, but the inferred and epoch-carry rows
+          // carry no identity at all and no index can catch them — so that
+          // rewind would duplicate exactly the rows contributions are summed
+          // from, and contributions set the high-water mark.
+          //
+          // So `flows` keeps the old existence test on this one pass and gains
+          // its witness for every pass after. It is the table that was never
+          // the problem: `trades` is what Shogun lost.
+          const seen = !probe
+            ? { ok: 1 }
+            : ((await shared
+                // `lower()` on both sides. Neighbouring writers use lower(agent_id)
+                // in places and not in others; a case difference here would read as
+                // a rebuild and reseed a healthy cursor.
+                .prepare(`SELECT 1 AS ok FROM ${table} WHERE lower(agent_id) = lower(?) AND ${stamp} = ? LIMIT 1`)
+                .get(at.agent_id, at.s)) as { ok: number } | undefined);
+          if (!seen) {
+            restarted[table] = { was: from };
+            from = 0;
+          } else {
+            // Healthy, and now witnessed — so this query never runs again.
+            await shared
+              .prepare(
+                `INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT (tenant, table_name) DO UPDATE SET last_stamp = excluded.last_stamp`,
+              )
+              .run(tenant, table, from, at.s, nowSec);
+          }
         }
       }
-
       const rows = (await child
         .prepare(`SELECT id, ${cols.join(", ")} FROM ${table} WHERE id > ? ORDER BY id ASC LIMIT ?`)
         .all(from, batch)) as Record<string, unknown>[];
@@ -359,12 +447,17 @@ export async function mirrorTenant(args: {
            ON CONFLICT DO NOTHING`,
         );
         for (const r of rows) await ins.run(...cols.map((c) => r[c] ?? null));
+        // THE WITNESS MOVES WITH THE WATERMARK, in the same transaction and for
+        // the same reason: a cursor whose stamp belongs to a different row is
+        // exactly the state this column exists to make impossible.
         await db
           .prepare(
-            `INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at`,
+            `INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id,
+               last_stamp = excluded.last_stamp, updated_at = excluded.updated_at`,
           )
-          .run(tenant, table, highest, nowSec);
+          .run(tenant, table, highest, rows[rows.length - 1]![stamp] ?? null, nowSec);
       });
       copied[table] = rows.length;
     } catch (e) {
