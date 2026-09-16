@@ -288,6 +288,15 @@ const CLASS_WINDOW_SEC = 6 * 3600;
 /** Change-keyed so an unchanged answer is not repeated every fifteen seconds. */
 let lastClassFunnelKey = "";
 let lastClassIdleKey = "";
+/**
+ * Tokens whose basis is owed to a fill that has not been booked yet.
+ *
+ * The class executor re-reads the book from chain immediately after a sell
+ * lands, and that reconcile would otherwise clear the basis `bookFill` is
+ * about to read — see basis-order.ts for the full account.
+ */
+const pendingBasis = new PendingBasis();
+
 /** The counted set the ceiling last refused on — change-keyed, like its siblings. */
 let lastClassCeilingKey = "";
 
@@ -326,6 +335,7 @@ import {
 } from "./venues/pons-price";
 import { chooseEntry, type RefusalKind } from "./venues/candidate-score";
 import { classFunnelKey, classFunnelLine, classFunnelStages } from "./venues/class-funnel";
+import { PendingBasis } from "./basis-order";
 import { scoutFlagsFor } from "./class-side";
 import {
   activeClassPositions,
@@ -1819,6 +1829,17 @@ async function main() {
       // sweep had logged closing it, and the figure was still there. The chain
       // says the position is gone; that is the authority, and this runs off the
       // chain read rather than off a balance the account happens to hold.
+      // NOT WHILE A FILL STILL HAS TO READ IT. A sell that has landed but not
+      // yet booked is about to consume this basis and needs it to compute
+      // realised P&L; clearing here is what made every class sell record
+      // `realised NOT RECORDED`. Deferred, never skipped — the next pass over
+      // this token clears it if the fill never arrived. See basis-order.ts.
+      if (!pendingBasis.mayClear(p.token)) {
+        console.log(
+          `[class] holding the cost basis for ${key} — a landed fill has not been booked yet`,
+        );
+        return;
+      }
       const left = await getBasis(agentId, "live", key);
       if (left.qtyRaw > 0n || left.costUsdg > 0n) {
         await setBasis(agentId, "live", key, { qtyRaw: 0n, costUsdg: 0n });
@@ -6353,6 +6374,10 @@ async function main() {
       // settles (see below). basis_source records which one we ended up with,
       // so analysis never mistakes an estimate for a settled figure.
       let liveFill: { side: "buy" | "sell"; symbol: string; qtyRaw: bigint; cashUsdg: bigint; priceUsd: number } | null = null;
+      // The token whose basis this execution has reserved, so the release is
+      // the same string the hold used and does not have to re-narrow the
+      // intent union at a point where only some kinds carry an asset leg.
+      let heldBasisToken: string | null = null;
       // The pair this trade is about, kept so the receipt can be attributed.
       // `quotedOut` is NULLABLE, and only the curve venue passes null. Execution
       // quality is measured against what the venue QUOTED; a curve trade is
@@ -7165,6 +7190,16 @@ async function main() {
         // a fold over (txHash, logIndex) converges, an increment compounds. A
         // retried reconcile is then free of consequence, which is the property
         // that makes it safe to call from an execution path at all.
+        // THE BASIS THIS SELL IS ABOUT TO BE MEASURED AGAINST IS SPOKEN FOR.
+        //
+        // The reconcile below reads the vault, finds it empty because the sell
+        // just landed, and would clear the position's basis as stranded — ~316
+        // lines before `bookFill` reads it. That ordering is why every class
+        // sell recorded `fill sell/receipt` with no realised P&L beside it.
+        // Released in the `finally` around the booking, so a throw cannot leave
+        // a basis permanently unclearable. See basis-order.ts.
+        heldBasisToken = intent.assetIn;
+        pendingBasis.hold(heldBasisToken);
         await reconcileClassFromChain(agentId, vault, active.client);
       } else if (intent.kind === "curve-trade") {
         // A bonding-curve trade, through the adapter the GRANT was sealed
@@ -7481,7 +7516,16 @@ async function main() {
       }
 
       // Only a LANDED swap moves the basis — a revert must never book P&L.
-      const booked = liveFill ? await bookFill(agentId, "live", liveFill, basisSource) : null;
+      let booked: Awaited<ReturnType<typeof bookFill>> | null = null;
+      try {
+        booked = liveFill ? await bookFill(agentId, "live", liveFill, basisSource) : null;
+      } finally {
+        // Whatever happened, the basis is no longer owed to an unbooked fill.
+        // A `finally` rather than a happy-path release: a throw between the
+        // reconcile and here would otherwise leave this token's basis
+        // unclearable for the life of the process.
+        pendingBasis.release(heldBasisToken);
+      }
       // AND THE FLOOR FOR THIS POSITION, graded once, here.
       //
       // HERE and not inside bookFill, which has five callers — two of them
