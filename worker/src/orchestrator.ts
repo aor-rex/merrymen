@@ -793,6 +793,74 @@ async function writeSettingsForChild(
  * agent that cannot get an anchor still arms, still runs its risk controls and
  * still reconciles. What it does not do is book contributions.
  */
+
+/**
+ * GIVE A REBUILT CHILD BACK ITS COST BASIS BEFORE IT ARMS.
+ *
+ * A child's ledger is in its container's own sqlite with no volume, so every
+ * redeploy destroys `cost_basis`. The mirror carries it UP and nothing carries
+ * it back, so a position bought before the redeploy sells with no basis and its
+ * realised P&L is dropped — `applyFill` reports `basisUnknown`, correctly, for
+ * a sell with nothing on the books.
+ *
+ * `restoreClassCostBasis` already solves this for CLASS positions off the
+ * vault's own ClassBuy events. An ordinary swap has no such event: the cost was
+ * only ever known to the ledger, so the ledger is where it comes back from.
+ *
+ * BEFORE spawn, with the grant and the anchor, and for the same reason — the
+ * child reads its book while arming, and a basis that landed a moment later
+ * would be read as absent.
+ */
+async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return; // self-hosted: the child's own sqlite is the only copy
+  const handle = openChildLedger(childHome(tenant));
+  if (!handle) return;
+  try {
+    const { planBasisSeed, basisSeedLine } = await import("./basis-seed");
+    const shared = await makePgDb(url);
+    const have = (await handle.db
+      .prepare("SELECT COUNT(*) AS n FROM cost_basis")
+      .get()) as { n: number } | undefined;
+    const rows = (await shared
+      .prepare("SELECT mode, symbol, qty_raw, cost_usdg FROM cost_basis WHERE lower(agent_id) = lower($1)")
+      .all(smartAccount)) as unknown as Record<string, unknown>[];
+    // WHAT THE BOOK STILL SAYS IS HELD. The shared cost_basis copy goes stale
+    // in one way — the mirror skips its DELETE while the child reads rebuilt —
+    // so without this the seed would restore the cost of a position already
+    // sold. See planBasisSeed.
+    const heldRows = (await shared
+      .prepare("SELECT symbol FROM positions WHERE lower(agent_id) = lower($1) AND raw_balance <> '0'")
+      .all(smartAccount)) as unknown as Record<string, unknown>[];
+    const plan = planBasisSeed({
+      childRowCount: Number(have?.n ?? 0),
+      heldSymbols: heldRows.map((r) => String(r.symbol ?? "")),
+      shared: rows.map((r) => ({
+        mode: String(r.mode ?? "live"),
+        symbol: String(r.symbol ?? ""),
+        qtyRaw: String(r.qty_raw ?? "0"),
+        costUsdg: String(r.cost_usdg ?? "0"),
+      })),
+    });
+    log(basisSeedLine(tenant, plan));
+    for (const r of plan.rows) {
+      await handle.db
+        .prepare(
+          `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+           VALUES (?, ?, ?, ?, ?, unixepoch())
+           ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
+        )
+        .run(smartAccount, r.mode, r.symbol, r.qtyRaw, r.costUsdg);
+    }
+  } catch (e) {
+    // Loud, because a silent failure here is a book that sells with no cost and
+    // reports no P&L — the exact defect this exists to close.
+    log(`basis seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    handle.close();
+  }
+}
+
 async function writeBootstrapForChild(
   tenant: `0x${string}`,
   /**
@@ -876,6 +944,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // closed, so the agent would run with contributions marked unknown for no
   // reason other than a race.
   await writeBootstrapForChild(tenant, smartAccount);
+  // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
+  // out of the child's sqlite. Same placement and same reason as the anchor.
+  await seedBasisForChild(tenant, smartAccount);
   // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.

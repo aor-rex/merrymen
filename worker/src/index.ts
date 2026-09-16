@@ -336,6 +336,7 @@ import {
 import { chooseEntry, type RefusalKind } from "./venues/candidate-score";
 import { classFunnelKey, classFunnelLine, classFunnelStages } from "./venues/class-funnel";
 import { PendingBasis } from "./basis-order";
+import { swapFillLegs } from "./swap-fill";
 import { scoutFlagsFor } from "./class-side";
 import {
   activeClassPositions,
@@ -6774,6 +6775,32 @@ async function main() {
           if (verdict.note) await addEvent(agentId, "warn", verdict.note);
         }
         sim = { sim_quote_out: quote.buyAmountRaw?.toString() };
+        // THE FILL LEGS, which this arm never booked.
+        //
+        // Rialto is a full live swap path — real calldata, real router — and it
+        // set neither `fillPair` nor `liveFill`. So a landed Rialto buy wrote no
+        // cost basis and a landed Rialto sell recorded no realised P&L, on a
+        // venue that otherwise worked. Same helper the v4 arm uses: a second
+        // implementation of "which side is the money" is how two venues drift,
+        // and the failure is a silent 10^12 error rather than a crash.
+        {
+          const legs = swapFillLegs({
+            sellToken: intent.sellToken,
+            buyToken: intent.buyToken,
+            sellAmountRaw: intent.sellAmountRaw,
+            // This arm has no minOut to floor against — the API supplies the
+            // calldata — so the quote is the only figure available, and the
+            // receipt replaces it wherever one parses.
+            receivedRaw: quote.buyAmountRaw,
+            quotedOutRaw: quote.buyAmountRaw,
+            usdg: CASH.USDG as string,
+            symbolOf: symbolOfToken,
+          });
+          if (legs) {
+            fillPair = legs.fillPair;
+            liveFill = legs.liveFill;
+          }
+        }
         const approve = {
           to: intent.sellToken,
           value: 0n,

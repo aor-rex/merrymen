@@ -121,7 +121,11 @@ describe("the ledger mirror follows the lease", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
     const guard = src.indexOf("if (!lease || !lease.healthy()) continue;");
-    const open = src.indexOf("const handle = openChildLedger(childHome(tenant));");
+    // THE MIRROR'S open, specifically. `openChildLedger` has more than one call
+    // site now — `seedBasisForChild` opens the same database before spawn — so
+    // taking the first occurrence in the file would silently start measuring a
+    // different guard than this test is about.
+    const open = src.indexOf("const handle = openChildLedger(childHome(tenant));", guard);
     assert.ok(guard > 0 && open > guard, "the lease check must precede the open");
   });
 
@@ -132,5 +136,34 @@ describe("the ledger mirror follows the lease", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
     assert.match(src, /!lease\.healthy\(\)/);
+  });
+});
+
+/**
+ * THE OTHER CALL SITE THAT OPENS A CHILD'S DATABASE.
+ *
+ * `seedBasisForChild` gives a rebuilt child back the cost basis the redeploy
+ * destroyed, and it opens the child's sqlite to do it. Everything the lease
+ * protects applies to it exactly as it applies to the mirror: only the replica
+ * that owns a child may write into its ledger.
+ */
+describe("the basis seed is inside the lease too", () => {
+  it("runs from spawnChild, which has already checked the lease", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    const guard = src.indexOf("log(`${tenant}: no healthy lease — not spawning");
+    const seed = src.indexOf("await seedBasisForChild(tenant, smartAccount);");
+    assert.ok(guard > 0, "spawnChild must still refuse without a healthy lease");
+    assert.ok(seed > guard, "the seed must sit below that refusal");
+  });
+
+  it("and BEFORE spawn, like the grant and the anchor", async () => {
+    // The child reads its book while arming. A basis that landed a moment later
+    // would be read as absent — which is the defect, not the fix.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    const seed = src.indexOf("await seedBasisForChild(tenant, smartAccount);");
+    const spawned = src.indexOf("const proc = spawn(", seed);
+    assert.ok(seed > 0 && spawned > seed, "seed then spawn, never the other way round");
   });
 });
