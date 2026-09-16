@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PolicyFlags } from "@zerodev/permissions";
 import { ParamCondition } from "@zerodev/permissions/policies";
-import { encodeFunctionData, pad } from "viem";
+import { encodeFunctionData, pad, toFunctionSelector } from "viem";
 import test from "node:test";
 import {
   CASH,
@@ -781,6 +781,64 @@ test("a class grant carries buy, sell AND deploy — three, not two", () => {
   const onFactory = list.filter((p) => p.target.toLowerCase() === CLASS_FACTORY);
   assert.equal(onFactory.length, 1);
   assert.equal(onFactory[0]!.functionName, "deploy");
+});
+
+test("the vault's permitted SELECTORS are exactly two, and setQuoteCaps is not one", () => {
+  /**
+   * THE PRE-DEPLOY GATE PonsClassVaultV2 ASKS FOR BY NAME.
+   *
+   * The test above enumerates function NAMES, which is the right shape and
+   * catches an added permission — but it names only what must be PRESENT. The
+   * contract's own header explains why that is not enough: `owner` IS the smart
+   * account, so a compromised session key's calls arrive as `msg.sender ==
+   * owner` and the contract's NotOwner check stops a stranger EOA and nothing
+   * more. The only thing keeping `setQuoteCaps` out of a session key's reach is
+   * THE WALL NOT NAMING IT. v1's header claimed such a pin existed before it
+   * did; this is it, and it exists before v2 is deployed.
+   *
+   * BY SELECTOR, not by name, and derived rather than pasted. A rename in the
+   * .sol that kept the same arguments would keep the same four bytes and slip
+   * past a name check; a name check also cannot see a permission whose ABI entry
+   * was edited. The selector is what the policy actually compares.
+   */
+  const list = buildCallPermissions(CAPS, SELF, classOpts);
+  const onVault = list.filter((p) => p.target.toLowerCase() === CLASS_VAULT);
+
+  const selectorOf = (p: (typeof onVault)[number]) => {
+    const item = (p.abi as readonly { type: string; name?: string }[]).find(
+      (a) => a.type === "function" && a.name === p.functionName,
+    );
+    assert.ok(item, `${p.functionName} must exist in the ABI the wall pins it with`);
+    return toFunctionSelector(item as never);
+  };
+  const granted = onVault.map(selectorOf).sort();
+  assert.deepEqual(
+    granted,
+    [
+      toFunctionSelector("function buy(address,address,uint256,uint256,uint256)"),
+      toFunctionSelector("function sell(address,uint256,uint256,uint256)"),
+    ].sort(),
+    "the vault answers exactly buy and sell to a session key",
+  );
+
+  // AND WHAT MUST STAY ABSENT, named one by one so the reason survives:
+  //
+  //   setQuoteCaps — rewrites the ceilings this wall exists to respect. A key
+  //     that can raise its own cap has no cap. It is an OWNER action.
+  //   sweep        — moves a token into the ACCOUNT, where it cannot be sold for
+  //     want of the very approve this whole design avoids. Also owner-only.
+  //   setSpendCap  — v1's single-ceiling setter, kept here because a wall built
+  //     against a v1 ABI must not reach it either.
+  for (const [name, sig] of [
+    ["setQuoteCaps", "function setQuoteCaps(address[],uint256[])"],
+    ["sweep", "function sweep(address)"],
+    ["setSpendCap", "function setSpendCap(uint256)"],
+  ] as const) {
+    assert.ok(
+      !granted.includes(toFunctionSelector(sig)),
+      `the session key must never reach ${name} — it is an owner action`,
+    );
+  }
 });
 
 test("a vault with no factory is REFUSED, not silently granted", () => {

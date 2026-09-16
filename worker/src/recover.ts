@@ -16,7 +16,7 @@
  * locally and only the signed op reaches the bundler.
  */
 
-import { classSweepCandidates, findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { classSweepCandidates, findClassVaults, planClassSweep, readClassHoldings } from "./class-recovery";
 import { readClassLog } from "./venues/class-log";
 import {
   createPublicClient,
@@ -129,6 +129,31 @@ export interface RecoverPlan {
    * `unreadable` exists.
    */
   classNote: string | null;
+  /**
+   * EVERY vault this account could have, because after v2 there are two.
+   *
+   * `classVault` above is still the PRIMARY one and every existing reader keeps
+   * working through it — with one factory pinned there is exactly one candidate
+   * and the two agree exactly, which is the state on this chain today.
+   *
+   * The second one is not hypothetical and the timing is the point. When an
+   * owner re-signs onto a v2 factory their v1 vault stops being reachable by the
+   * session key, so recovery becomes the only way left to whatever is still
+   * sitting in it. A recovery that looks in one place reports "nothing found"
+   * over a real balance.
+   *
+   * THE SWEEP TARGET TRAVELS WITH THE HOLDING. `sweep(token)` is a call ON a
+   * vault, so a plural book needs a plural target — and the batch is atomic, so
+   * two vaults cannot share one operation without a dead one taking the live one
+   * down with it.
+   */
+  classVaults: {
+    vault: Address;
+    /** 1, 2, or null when the factory is in neither pinned table. Never guessed. */
+    version: 1 | 2 | null;
+    holdings: { token: Address; symbol: string; raw: bigint; amount: string; decimals: number }[];
+    note: string | null;
+  }[];
 }
 
 export interface RecoverResult extends RecoverPlan {
@@ -499,21 +524,28 @@ export async function planRecovery(opts: {
   let classVault: Address | null = null;
   let classHoldings: RecoverPlan["classHoldings"] = [];
   let classNote: string | null = null;
+  const classVaults: RecoverPlan["classVaults"] = [];
   try {
-    const lookup = await findClassVault({
+    const lookup = await findClassVaults({
       client: publicClient,
       chainId: opts.chain.id,
       smartAccount: account.address,
       // NO GRANT. Recovery may run from a pasted key with nothing else, so the
-      // vault is derived from the factory constant — which is exactly why that
-      // constant is a deploy fact and not a setting.
+      // vaults are derived from the factory constants — which is exactly why
+      // those constants are a deploy fact and not a setting.
       grant: null,
     });
-    if (lookup.kind === "found") {
-      classVault = lookup.vault;
+    for (const u of lookup.unreadable) {
+      // NAMED PER FACTORY. "class vault" as one label cannot say which of two
+      // could not be asked, and an owner reading it would not know whether the
+      // empty list they are looking at covers one vault or none.
+      unreadable.push(`class vault factory ${u.factory}`);
+      classNote = `the class vault factory at ${u.factory} could not be read (${u.why}), so this list may be short`;
+    }
+    for (const candidate of lookup.candidates) {
       const head = await publicClient.getBlockNumber();
       const from = head > CLASS_RECOVERY_LOOKBACK ? head - CLASS_RECOVERY_LOOKBACK : 0n;
-      const scan = await readClassLog(publicClient, lookup.vault, from, head);
+      const scan = await readClassLog(publicClient, candidate.vault, from, head);
       /**
        * TWO SOURCES, BECAUSE THE LOGS CANNOT NAME THE QUOTE ASSET.
        *
@@ -546,10 +578,10 @@ export async function planRecovery(opts: {
       );
       const contents = await readClassHoldings({
         client: publicClient,
-        vault: lookup.vault,
+        vault: candidate.vault,
         candidates,
       });
-      classHoldings = contents.holdings.map((h) => ({
+      const holdings = contents.holdings.map((h) => ({
         token: h.token,
         symbol: h.symbol,
         raw: h.raw,
@@ -571,17 +603,39 @@ export async function planRecovery(opts: {
          */
         amount: formatUnits(h.raw, h.decimals),
       }));
+      let note: string | null = null;
       if (scan.failed) {
-        classNote =
+        note =
           "the vault's history could not be read in full, so this list may be short — there may be more in the vault than it shows";
+      } else if (scan.unreadable > 0) {
+        // A log this build cannot decode is not an absent log. A v2 vault read
+        // by a v1-era build looks exactly like a vault that never traded.
+        note =
+          `${scan.unreadable} of this vault's own log entries could not be decoded by this build, so its ` +
+          `history is incomplete — update before trusting this list`;
       } else if (contents.kind === "partial") {
-        classNote = contents.why;
+        note = contents.why;
       }
-    } else if (lookup.kind === "unreadable" || lookup.kind === "conflict") {
-      // NOT "no vault". An owner whose RPC blinked must not be told their class
-      // book is empty on the one screen where believing it costs the most.
-      classNote = lookup.why;
-      unreadable.push("class vault");
+      classVaults.push({ vault: candidate.vault, version: candidate.version, holdings, note });
+    }
+
+    /**
+     * THE PRIMARY VAULT, for every reader that still asks for one address.
+     *
+     * The first candidate that actually HOLDS something, else the first at all.
+     * With one factory pinned there is one candidate and this is exactly the old
+     * behaviour — which is the state on this chain today, so nothing changes
+     * until a second factory is deployed.
+     *
+     * "Holds something" rather than "is first" because the singular field is a
+     * disclosure, and a disclosure that names an empty vault while a full one
+     * goes unmentioned is the failure this plurality exists to remove.
+     */
+    const primary = classVaults.find((v) => v.holdings.length > 0) ?? classVaults[0] ?? null;
+    if (primary) {
+      classVault = primary.vault;
+      classHoldings = primary.holdings;
+      classNote = primary.note ?? classNote;
     }
   } catch (e) {
     classNote = `could not check the class vault: ${e instanceof Error ? e.message : String(e)}`;
@@ -625,6 +679,7 @@ export async function planRecovery(opts: {
     classVault,
     classHoldings,
     classNote,
+    classVaults,
   };
 }
 
@@ -822,7 +877,6 @@ export async function recoverFunds(opts: {
   //
   // Failures here are REPORTED AND SURVIVED. A vault that will not give up its
   // tokens must not stop an owner recovering the USDG and ETH they can see.
-  let classSweepTx: `0x${string}` | null = null;
   // ── WHAT THE OWNER APPROVED IS WHAT GETS ATTEMPTED ──────────────────────
   //
   // The approved intent overrides the re-plan for IDENTITY — which vault, which
@@ -831,7 +885,6 @@ export async function recoverFunds(opts: {
   // balanceOf(vault) a moment before signing, below.
   const approved = opts.approvedClass ?? null;
   const requireClass = opts.requireApprovedClassSweep === true && approved !== null;
-  const classVault = approved?.vault ?? plan.classVault;
   // FATAL, BEFORE THE ACCOUNT SWEEP. Each of these says the operation about to
   // be signed is not the one that was shown, and on a withdrawal that is a
   // reason to stop rather than to proceed with the part that still works.
@@ -845,12 +898,21 @@ export async function recoverFunds(opts: {
     if (approved.destination.toLowerCase() !== opts.to.toLowerCase()) {
       fail(`the approved destination was ${approved.destination}, but this call would send to ${opts.to}`);
     }
-    if (!plan.classVault || plan.classVault.toLowerCase() !== approved.vault.toLowerCase()) {
+    // MEMBERSHIP, not equality, and this is the only rule here that loosens.
+    //
+    // The plan now names every vault this account could have, so an approval of
+    // the v1 vault is legitimate while `plan.classVault` reports the v2 one. It
+    // is still a closed set derived on THIS side from the account — nothing the
+    // caller supplies can add to it — so an approval naming a vault this account
+    // does not derive is refused exactly as before. Every other check in this
+    // block is untouched.
+    const derivable = plan.classVaults.map((v) => v.vault.toLowerCase());
+    if (!derivable.includes(approved.vault.toLowerCase())) {
       // The vault is a CREATE2 prediction from the account, so a disagreement
       // here means the two sides derived different accounts.
       fail(
         `the approved class vault was ${approved.vault}, but this account derives ` +
-          `${plan.classVault ?? "none"}`,
+          `${derivable.length > 0 ? derivable.join(", ") : "none"}`,
       );
     }
     const vaultOwner = (await publicClient
@@ -862,13 +924,36 @@ export async function recoverFunds(opts: {
     }
   }
 
-  if (classVault && (requireClass || plan.classHoldings.length > 0)) {
+  /**
+   * ONE OPERATION PER VAULT, because the batch is atomic.
+   *
+   * `sweep(token)` is a call ON a vault, so the target travels with the holding
+   * and two vaults cannot share one operation. If they did, a dead v1 vault
+   * would take the live v2 recovery down with it and `skipped` could not name
+   * which one failed — the owner would be told the whole class leg failed when
+   * half of it would have worked.
+   *
+   * An APPROVED sweep is narrowed to the one vault that was approved. An
+   * unapproved one (the CLI path) sweeps every vault that holds something,
+   * which is the behaviour an owner running `merrymen recover` expects: get my
+   * money out of wherever it is.
+   */
+  const vaultsToSweep = approved
+    ? plan.classVaults.filter((v) => v.vault.toLowerCase() === approved.vault.toLowerCase())
+    : plan.classVaults.filter((v) => v.holdings.length > 0);
+  for (const target of vaultsToSweep) {
+    await sweepOneVault(target.vault, target.holdings);
+  }
+
+  async function sweepOneVault(
+    classVault: Address,
+    vaultHoldings: RecoverPlan["classHoldings"],
+  ): Promise<void> {
+    if (!classVault || !(requireClass || vaultHoldings.length > 0)) return;
     // THE AMOUNT IS READ FRESH, ALWAYS. The approved intent names the tokens;
     // the chain says how many there are, at this moment, so a stale UI figure
     // can never become a transfer amount.
-    const wanted = approved
-      ? approved.tokens
-      : plan.classHoldings.map((h) => h.token);
+    const wanted = approved ? approved.tokens : vaultHoldings.map((h) => h.token);
     const live: { token: Address; symbol: string; raw: bigint }[] = [];
     for (const token of wanted) {
       const raw = (await publicClient
@@ -913,7 +998,7 @@ export async function recoverFunds(opts: {
     }
     if (sweepable.length > 0) {
       try {
-        classSweepTx = await client.sendUserOperation({
+        const sent = await client.sendUserOperation({
           calls: sweepable.map((h) => ({
             to: classVault,
             value: 0n,
@@ -924,7 +1009,7 @@ export async function recoverFunds(opts: {
             }),
           })),
         });
-        await client.waitForUserOperationReceipt({ hash: classSweepTx });
+        await client.waitForUserOperationReceipt({ hash: sent });
         // The account now holds them. Re-read so op 2 moves the REAL amount
         // rather than the one predicted before the sweep ran.
         for (const h of sweepable) {
@@ -959,13 +1044,17 @@ export async function recoverFunds(opts: {
               "The account sweep has NOT been attempted, so nothing has moved. Your tokens are still in the vault.",
           );
         }
+        // NAMES THE VAULT. With one vault "the class vault sweep failed" was a
+        // complete sentence; with two it is a question the owner cannot answer,
+        // and they would not know which address still holds their tokens.
         skipped.push({
-          symbol: `class vault (${sweepable.length} token(s))`,
-          reason: `the vault sweep did not go through: ${why}. Your tokens are still in the vault — rerun this command.`,
+          symbol: `class vault ${classVault} (${sweepable.length} token(s))`,
+          reason: `the vault sweep did not go through: ${why}. Your tokens are still in that vault — rerun this command.`,
         });
       }
     }
   }
+
   const movable: TokenBalance[] = [];
   for (const b of plan.balances) {
     try {

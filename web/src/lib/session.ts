@@ -80,6 +80,7 @@ import {
   officialCoinTokens,
   ponsAdapterForSigning,
   PONS_CLASS_VAULT_FACTORY,
+  PONS_CLASS_VAULT_FACTORY_V2,
   robinhoodChain,
   
   GRANT_V4,
@@ -87,6 +88,7 @@ import {
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
   resolveClassVault,
+  probeClassFactory,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -457,12 +459,83 @@ async function mintGrant(
 
   let ponsClassVaultAddress: `0x${string}` | undefined;
   if (sealedClassFactory) {
+    /**
+     * ── WHICH VAULT FAMILY IS THIS, AND DOES IT MATCH WHAT WAS ASKED FOR ────
+     *
+     * NOTHING ELSE CAN TELL. `vaultFor`, `deploy`, `buy`, `sell` and `sweep` are
+     * signature-identical across the two versions, so the wall this signature
+     * seals is BYTE-IDENTICAL either way. A v1 address answers `vaultFor`
+     * plausibly, returns a real deployed vault, mints the marker, pins a real
+     * target, and reports a successful re-sign — while the chain quietly
+     * enforces v1's single global ceiling in raw units, which is ~250 for USDG
+     * and eight orders of magnitude wrong for anything else.
+     *
+     * The factory address is free text in /settings and that setting takes
+     * PRECEDENCE over the constant, so this is not a hypothetical paste.
+     *
+     * CHECKED AGAINST BOTH CONSTANTS RATHER THAN AGAINST PROVENANCE. An address
+     * that equals a pinned constant must be the version that constant is for;
+     * anything else is the owner's own and is reported rather than refused. A
+     * provenance rule ("it came from the constant, so it is v1") would quietly
+     * stop being true the day the default is repointed.
+     */
+    onStatus("checking the class vault factory…");
+    const probe = await probeClassFactory(publicClient, sealedClassFactory);
+    const lower = sealedClassFactory.toLowerCase();
+    const pinnedV1 = (PONS_CLASS_VAULT_FACTORY[chainId] ?? "").toLowerCase();
+    const pinnedV2 = (PONS_CLASS_VAULT_FACTORY_V2[chainId] ?? "").toLowerCase();
+    if (pinnedV1 && lower === pinnedV1 && probe.version !== 1) {
+      throw new Error(
+        `refusing to seal a class permission: ${sealedClassFactory} is pinned as this chain's v1 class ` +
+          `vault factory, but it answers version ${probe.version}. One of the two is wrong, and signing ` +
+          `would seal a vault nobody meant.`,
+      );
+    }
+    if (pinnedV2 && lower === pinnedV2 && probe.version !== 2) {
+      throw new Error(
+        `refusing to seal a class permission: ${sealedClassFactory} is pinned as this chain's v2 class ` +
+          `vault factory, but it does not answer FACTORY_VERSION — which is what a v1 factory looks ` +
+          `like. A v1 vault charges every buy against one global ceiling whatever asset funded it.`,
+      );
+    }
+
+    if (probe.version === 2) {
+      /**
+       * A V2 VAULT IS BORN WITH ITS FACTORY'S SEED CAPS, AND THERE IS NO SECOND
+       * TRANSACTION TO FIX THEM IN. The vault is created inside the same
+       * operation as its first class buy and that batch reverts whole, so a
+       * seed without USDG means every buy the wall permits reverts
+       * `QuoteNotApproved` AFTER the USDG approve leg has already landed — a
+       * grant that looks complete, burns gas every tick, and can never trade.
+       *
+       * SUBSET, NOT EQUALITY. The wall pins the class buy's quote word to USDG
+       * alone, and a multi-quote factory's seed is legitimately wider. What has
+       * to hold is that everything the wall permits, the vault will accept.
+       */
+      const usdg = CASH.USDG.toLowerCase();
+      const i = probe.seedQuotes.findIndex((q) => q.toLowerCase() === usdg);
+      if (i < 0) {
+        throw new Error(
+          `refusing to seal a class permission: the v2 factory at ${sealedClassFactory} seeds no USDG ` +
+            `cap, and the wall only ever permits a class buy funded in USDG. Every buy would revert ` +
+            `after the approve had landed.`,
+        );
+      }
+      if (probe.seedCaps[i] === 0n) {
+        throw new Error(
+          `refusing to seal a class permission: the v2 factory at ${sealedClassFactory} seeds USDG at a ` +
+            `cap of zero, and in this vault a cap of zero is how an asset is refused.`,
+        );
+      }
+    }
+
     onStatus("locating your class vault…");
     ponsClassVaultAddress = await resolveClassVault(
       publicClient,
       sealedClassFactory,
       sudoOnlyAccount.address,
     );
+    onStatus(`class vault v${probe.version} at ${ponsClassVaultAddress.slice(0, 10)}…`);
   }
 
   const wallOpts = {

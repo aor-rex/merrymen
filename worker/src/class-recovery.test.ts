@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatUnits } from "viem";
-import { classSweepCandidates, findClassVault, planClassSweep, readClassHoldings } from "./class-recovery";
+import { classSweepCandidates, findClassVault, findClassVaults, planClassSweep, readClassHoldings } from "./class-recovery";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
 const VAULT = "0x00000000000000000000000000000000000000c0" as const;
@@ -287,5 +287,119 @@ describe("a holding is formatted at its own decimals", () => {
     // and that pressure is what produced the hard-coded 18 in the first place.
     const kept = planClassSweep([{ token: PEPE, symbol: "PEPE", raw: 5n }]);
     assert.equal(kept.length, 1);
+  });
+});
+
+/**
+ * TWO VAULT VERSIONS, AND RECOVERY IS THE ONLY PATH THAT MUST SEE BOTH.
+ *
+ * `findClassVault` answers with ONE address, grant first, which is right for
+ * signing and for the executor: there is one sealed vault and one wall. Recovery
+ * is the opposite problem. It runs from a pasted owner key with no grant at all,
+ * and the moment two factory versions exist, one address is a guess.
+ *
+ * The timing is what makes it urgent rather than tidy. When an owner re-signs
+ * onto v2, their v1 vault stops being reachable by the session key — recovery
+ * becomes the only way left to whatever is still sitting in it. A recovery that
+ * looks in one place reports "nothing found" over a real balance, and that false
+ * negative is the failure this whole module exists to prevent.
+ */
+describe("finding every vault an account could have, not the best one", () => {
+  const V1_FACTORY = "0x48a560371230ece659b2ba40fb19e8335866ab3d" as const;
+  const V1_VAULT = "0x00000000000000000000000000000000000000d1" as const;
+  const V2_VAULT = "0x00000000000000000000000000000000000000d2" as const;
+
+  it("with no grant, a v1 factory still yields its vault", async () => {
+    // The regression guard for every owner recovering today. v2 is unpinned
+    // (null on both chains until it is deployed), so this is the live path.
+    const { candidates, unreadable } = await findClassVaults({
+      client: client({ [`vaultFor:${V1_FACTORY}`]: V1_VAULT }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: null,
+    });
+    assert.equal(candidates.length, 1, "the deployed v1 factory must still be asked");
+    assert.equal(candidates[0]!.vault, V1_VAULT.toLowerCase());
+    assert.equal(candidates[0]!.version, 1, "and labelled, so a report can say which is which");
+    assert.deepEqual(unreadable, []);
+  });
+
+  it("the grant's sealed vault is first and is never derived away", async () => {
+    const { candidates } = await findClassVaults({
+      client: client({ [`vaultFor:${FACTORY}`]: VAULT, [`vaultFor:${V1_FACTORY}`]: V1_VAULT }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: classGrant,
+    });
+    assert.equal(candidates[0]!.vault, VAULT.toLowerCase(), "the address the wall actually pinned leads");
+    assert.equal(candidates[0]!.source, "grant");
+    // And the chain's own factory is still asked, because a grant sealing one
+    // vault says nothing about what a different factory holds for this account.
+    assert.ok(
+      candidates.some((c) => c.vault === V1_VAULT.toLowerCase()),
+      "sealing a vault must not stop the search",
+    );
+  });
+
+  it("A FAILED READ IS PER FACTORY — one blinking must not hide the other", async () => {
+    // The collapse that would reintroduce the false negative: treating any
+    // failure as "we could not ask" and reporting nothing.
+    const { candidates, unreadable } = await findClassVaults({
+      client: client({
+        [`vaultFor:${FACTORY}`]: new Error("node refused"),
+        [`vaultFor:${V1_FACTORY}`]: V1_VAULT,
+      }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: { grantFeatures: ["pons-class"], ponsClassVaultAddress: undefined, ponsClassVaultFactoryAddress: FACTORY },
+    });
+    assert.equal(candidates.length, 1, "the factory that DID answer still yields its vault");
+    assert.equal(candidates[0]!.vault, V1_VAULT.toLowerCase());
+    assert.equal(unreadable.length, 1, "and the one that refused is named rather than forgotten");
+    assert.equal(unreadable[0]!.factory.toLowerCase(), FACTORY.toLowerCase());
+  });
+
+  it("one vault is listed once however many sources point at it", async () => {
+    // A grant sealing exactly what its factory derives is the ordinary case, and
+    // it must not produce two sweeps of one address.
+    const { candidates } = await findClassVaults({
+      client: client({ [`vaultFor:${FACTORY}`]: VAULT }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: { ...classGrant, ponsClassVaultAddress: VAULT },
+    });
+    assert.equal(candidates.filter((c) => c.vault === VAULT.toLowerCase()).length, 1);
+  });
+
+  it("a factory answering the zero address yields NO candidate, never an address of nothing", async () => {
+    const { candidates } = await findClassVaults({
+      client: client({ [`vaultFor:${V1_FACTORY}`]: "0x0000000000000000000000000000000000000000" }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: null,
+    });
+    assert.deepEqual(candidates, [], "sweeping a zero address reports success over an untouched book");
+  });
+
+  it("a vault from a factory in neither table is listed with an UNKNOWN version, not a guessed one", async () => {
+    const { candidates } = await findClassVaults({
+      client: client({ [`vaultFor:${FACTORY}`]: V2_VAULT }) as never,
+      chainId: 4663,
+      smartAccount: ACCOUNT,
+      grant: { grantFeatures: ["pons-class"], ponsClassVaultAddress: undefined, ponsClassVaultFactoryAddress: FACTORY },
+    });
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]!.version, null, "we know the address, not the family");
+  });
+
+  it("no grant and no pinned factory for the chain finds nothing, and says nothing is not an error", async () => {
+    const { candidates, unreadable } = await findClassVaults({
+      client: client({}) as never,
+      chainId: 46630,
+      smartAccount: ACCOUNT,
+      grant: null,
+    });
+    assert.deepEqual(candidates, []);
+    assert.deepEqual(unreadable, [], "nothing to ask is not a failed ask");
   });
 });
