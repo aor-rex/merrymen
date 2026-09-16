@@ -226,3 +226,56 @@ describe("the tick uses the custody seam", () => {
     }
   });
 });
+
+/**
+ * A SETTINGS CHANGE MUST NEVER DELETE THE BASIS OF AN ASSET STILL HELD.
+ *
+ * Every "held" set this predicate takes is derived from `watchTokens`, and
+ * `watchTokens` is rebuilt whenever strategy settings change with no guard for
+ * symbols currently held. Drop a token from the basket — or turn
+ * `officialCoinsEnabled` off — and the symbol vanishes from `positions` while
+ * its `cost_basis` row survives. The sweep then deletes the basis AND the
+ * position floor, so both mechanical exits go blind on a live holding and the
+ * next sell cannot price its own P&L.
+ *
+ * `watchTokens` is not authority for whether an economic position exists.
+ */
+describe("the watch set is not evidence that a position is gone", () => {
+  const held = {
+    basisSymbols: ["PEPE"],
+    positions: [] as string[],
+    unpricedByDesign: [] as string[],
+    missingPrice: [] as string[],
+    classHeld: [] as string[],
+  };
+
+  it("KEEPS the basis when the symbol left the watch set", () => {
+    // The owner un-ticks PEPE while still holding it. It is absent from
+    // `positions` only because nothing looked.
+    assert.deepEqual(strandedBasisSymbols({ ...held, watched: ["TSLA", "NVDA"] }), []);
+  });
+
+  it("but still strands a symbol that WAS looked at and is genuinely flat", () => {
+    // The case the sweep exists for: watched, read, not held anywhere.
+    assert.deepEqual(strandedBasisSymbols({ ...held, watched: ["PEPE", "TSLA"] }), ["PEPE"]);
+  });
+
+  it("and a watched, still-held symbol is never stranded", () => {
+    assert.deepEqual(
+      strandedBasisSymbols({ ...held, positions: ["PEPE"], watched: ["PEPE"] }),
+      [],
+    );
+  });
+
+  it("omitting `watched` keeps every caller's previous behaviour", () => {
+    // Absent means "everything was looked at" — the same shape as classReadOk.
+    assert.deepEqual(strandedBasisSymbols(held), ["PEPE"]);
+  });
+
+  it("AND THE TICK HANDS IT WHAT IT ACTUALLY READ", () => {
+    const SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // The guarantee is only real if the live caller supplies the set; a default
+    // that silently restores the old behaviour is the bug again.
+    assert.match(SRC, /watched: watchTokens\.map\(\(t\) => t\.symbol\)/);
+  });
+});

@@ -8733,6 +8733,11 @@ async function main() {
         missingPrice,
         classHeld: classBook.symbols,
         classReadOk: classBook.ok,
+        // WHAT THIS TICK ACTUALLY READ. Without it, a settings change that stops
+        // WATCHING a token reads as the token being GONE, and the sweep deletes
+        // the basis — and the floor — of a position the owner still holds. See
+        // strandedBasisSymbols.
+        watched: watchTokens.map((t) => t.symbol),
       })) {
         const stranded = await getBasis(agentId, "live", symbol);
         if (stranded.qtyRaw <= 0n) continue;

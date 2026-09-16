@@ -145,6 +145,24 @@ export function strandedBasisSymbols(args: {
    * passes false. Same shape, and the same reasoning, as `equityKnown`.
    */
   classReadOk?: boolean;
+  /**
+   * Symbols this tick actually LOOKED AT on chain — the watch set.
+   *
+   * THE AUTHORITY FOR "GONE" IS A READING, NEVER A SETTING. Every held set
+   * above is derived from `watchTokens`, and `watchTokens` is rebuilt whenever
+   * strategy settings change, with no guard for symbols currently held. So
+   * dropping a token from the basket — or turning `officialCoinsEnabled` off —
+   * removed it from `positions` while its `cost_basis` row survived, and this
+   * function then reported a still-held position as stranded. The sweep deletes
+   * the basis AND the position floor in the same breath, so both mechanical
+   * exits go blind on a live holding and the next sell cannot price its own
+   * P&L.
+   *
+   * A symbol we did not look at is UNKNOWN, not absent. Omitted means "every
+   * basis symbol was looked at", which is what every pre-existing caller
+   * assumed — the same shape, and the same reasoning, as `classReadOk` above.
+   */
+  watched?: readonly string[];
 }): string[] {
   if (args.classReadOk === false) return [];
   const heldNow = new Set([
@@ -153,5 +171,10 @@ export function strandedBasisSymbols(args: {
     ...args.missingPrice,
     ...args.classHeld,
   ]);
-  return args.basisSymbols.filter((symbol) => !heldNow.has(symbol));
+  const looked = args.watched === undefined ? null : new Set(args.watched);
+  return args.basisSymbols.filter(
+    // Not held AND we actually asked about it. Absent from a set that was never
+    // populated for this symbol is not evidence of anything.
+    (symbol) => !heldNow.has(symbol) && (looked === null || looked.has(symbol)),
+  );
 }
