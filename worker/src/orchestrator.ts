@@ -2547,7 +2547,13 @@ async function runEnableClassIfAsked(): Promise<void> {
     const { CANARY, DAVE_CLASS, classEnableBlockers, describeCanaryChange, mergeCanary } =
       await import("./enable-class");
     const { getSettingsStore } = await import("./settings-store");
-    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import("../../packages/core/src/index");
+    const {
+      grantPonsClassVault,
+      grantPonsClassVaultFactory,
+      PONS_CLASS_VAULT_FACTORY,
+      PONS_CLASS_VAULT_FACTORY_V2,
+      PONS_CLASS_VAULT_FACTORY_ABI,
+    } = await import("../../packages/core/src/index");
     const store = getSettingsStore();
 
     // WHICH CONFIGURATION. Named per tenant rather than one set for everyone:
@@ -2582,27 +2588,59 @@ async function runEnableClassIfAsked(): Promise<void> {
       const g = await getGrantStore().get(want as `0x${string}`);
       sealedVault = (grantPonsClassVault(g as never) as string | null) ?? null;
       const acct = g && g.smartAccount ? String(g.smartAccount) : null;
-      const factory = PONS_CLASS_VAULT_FACTORY[Number(g && g.chainId ? g.chainId : 4663)];
-      if (acct && factory) {
+      const chainId = Number(g && g.chainId ? g.chainId : 4663);
+      /**
+       * ── DERIVE FROM THE FACTORY THE GRANT ITSELF SEALED ──────────────────
+       *
+       * This read the v1 constant and nothing else, so for a grant sealed
+       * against a v2 factory the mismatch below is the CORRECT state — and
+       * classEnableBlockers would refuse with "the wall would pin a vault the
+       * executor never uses". A false blocker wearing a real safety refusal's
+       * clothes, and the reason a correctly signed v2 grant could not be put
+       * into service at all.
+       *
+       * The fix is the derivation, never the check. Relaxing the mismatch rule
+       * would remove a guard that catches a genuinely mispinned wall, which is
+       * a far worse failure than the one being fixed.
+       *
+       * GRANT FIRST, then both constants. The signature is the authority: it is
+       * what the wall was built from and what the executor will use. The
+       * constants are only a fallback for a grant that sealed no factory, and
+       * v2 is tried before v1 because a fresh grant is the one likelier to want
+       * it — but either way the answer is checked against what was SEALED.
+       */
+      const candidates = [
+        grantPonsClassVaultFactory(g as never) as string | null,
+        PONS_CLASS_VAULT_FACTORY_V2[chainId],
+        PONS_CLASS_VAULT_FACTORY[chainId],
+      ].filter((f): f is string => typeof f === "string" && /^0x[0-9a-fA-F]{40}$/.test(f));
+      if (acct && candidates.length > 0) {
         const { createPublicClient, http } = await import("viem");
         const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
         const c = createPublicClient({ transport: http(rpcUrl) });
-        derivedVault = String(
-          await c.readContract({
-            address: factory as `0x${string}`,
-            abi: [
-              {
-                type: "function",
-                name: "vaultFor",
-                stateMutability: "view",
-                inputs: [{ name: "owner_", type: "address" }],
-                outputs: [{ type: "address" }],
-              },
-            ],
-            functionName: "vaultFor",
-            args: [acct as `0x${string}`],
-          }),
-        );
+        for (const factory of candidates) {
+          let answered: string;
+          try {
+            answered = String(
+              await c.readContract({
+                // The SHARED abi, not an inline literal. Two copies of one
+                // selector is how a pinned call and an encoded call drift apart,
+                // which is the whole reason this constant exists.
+                address: factory as `0x${string}`,
+                abi: PONS_CLASS_VAULT_FACTORY_ABI,
+                functionName: "vaultFor",
+                args: [acct as `0x${string}`],
+              }),
+            );
+          } catch {
+            continue; // a factory that will not answer is not evidence either way
+          }
+          derivedVault = answered;
+          // A factory whose answer MATCHES what the grant sealed is the one the
+          // grant was signed against. Stop there rather than letting a later
+          // candidate overwrite the agreement with a disagreement.
+          if (sealedVault && answered.toLowerCase() === sealedVault.toLowerCase()) break;
+        }
       }
     } catch (e) {
       log(`enable-class: could not read the grant (${e instanceof Error ? e.message.slice(0, 90) : e})`);
@@ -2868,7 +2906,13 @@ async function runTenantInspectIfAsked(): Promise<void> {
       type?: never;
     };
     void _t;
-    const { grantPonsClassVault, PONS_CLASS_VAULT_FACTORY } = await import(
+    const {
+      grantPonsClassVault,
+      grantPonsClassVaultFactory,
+      PONS_CLASS_VAULT_FACTORY,
+      PONS_CLASS_VAULT_FACTORY_V2,
+      PONS_CLASS_VAULT_FACTORY_ABI,
+    } = await import(
       "../../packages/core/src/index"
     );
     const { getSettingsStore } = await import("./settings-store");
@@ -3148,7 +3192,19 @@ async function runTenantInspectIfAsked(): Promise<void> {
     // sealed — so a NO on sealing can still say which vault is being discussed.
     let derivedClassVault: string | null = null;
     let vaultDeployed: boolean | null = null;
-    const factory = PONS_CLASS_VAULT_FACTORY[chainId];
+    /**
+     * THE FACTORY THE GRANT SEALED, then v2, then v1.
+     *
+     * This read the v1 constant alone, so a tenant sealed against a v2 factory
+     * was reported as pinning a vault other than "this account's own" — sending
+     * an operator to look for a bug that is not there. A diagnostic that prints
+     * one derived address while the grant seals another is worse than printing
+     * nothing, because it looks like evidence.
+     */
+    const factory =
+      (grantPonsClassVaultFactory(grant as never) as string | null) ??
+      PONS_CLASS_VAULT_FACTORY_V2[chainId] ??
+      PONS_CLASS_VAULT_FACTORY[chainId];
     if (factory && smartAccount) {
       try {
         const { createPublicClient, http } = await import("viem");
@@ -3160,16 +3216,10 @@ async function runTenantInspectIfAsked(): Promise<void> {
             : process.env.MERRYMEN_RPC_TESTNET) ?? "https://rpc.mainnet.chain.robinhood.com";
         const client2 = createPublicClient({ transport: http(rpcUrl) });
         derivedClassVault = (await client2.readContract({
+          // The shared ABI rather than an inline literal, so the selector a
+          // diagnostic reads with and the selector the wall pins cannot drift.
           address: factory as `0x${string}`,
-          abi: [
-            {
-              type: "function",
-              name: "vaultFor",
-              stateMutability: "view",
-              inputs: [{ name: "owner_", type: "address" }],
-              outputs: [{ type: "address" }],
-            },
-          ] as const,
+          abi: PONS_CLASS_VAULT_FACTORY_ABI,
           functionName: "vaultFor",
           args: [smartAccount as `0x${string}`],
         })) as string;
