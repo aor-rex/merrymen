@@ -150,17 +150,42 @@ async function main() {
     throw new Error(`refusing to deploy to unknown chain ${chainId}. Check --network.`);
   }
 
+  /**
+   * REHEARSE THE SIZING WITHOUT SPENDING ANYTHING.
+   *
+   *   MERRYMEN_V2_DRY_RUN=1 npm run deploy:classfactoryv2:mainnet
+   *
+   * Reads every feed, every multiplier and every pause switch exactly as a real
+   * run does, prints the raw caps it WOULD seal, and then stops before the
+   * deploy. No deployer key needed, no gas, no state.
+   *
+   * THE SAME CODE PATH, deliberately. A separate "preview" script would be a
+   * second implementation of the one arithmetic in this system that is computed
+   * once and then trusted forever — and it would drift. The only branches are
+   * this one and the two at the deploy itself.
+   *
+   * What it CANNOT tell you is whether deploy() would succeed: that gate needs
+   * the factory to exist. It is the fourth check below, and it only runs for
+   * real.
+   */
+  const dryRun = /^(1|true|yes)$/i.test((process.env.MERRYMEN_V2_DRY_RUN ?? "").trim());
+
   const [deployer] = await hre.viem.getWalletClients();
-  if (!deployer) throw new Error("no deployer — set MERRYMEN_DEPLOYER_PRIVATE_KEY in this shell.");
-  if ((await publicClient.getBalance({ address: deployer.account.address })) === 0n) {
+  if (!deployer && !dryRun) {
+    throw new Error("no deployer — set MERRYMEN_DEPLOYER_PRIVATE_KEY in this shell.");
+  }
+  if (deployer && (await publicClient.getBalance({ address: deployer.account.address })) === 0n) {
     throw new Error(`deployer ${deployer.account.address} holds no ETH on ${KNOWN_CHAINS[chainId]}.`);
   }
 
   const seed = parseSeed(process.env.MERRYMEN_V2_SEED ?? "");
   const now = Math.floor(Date.now() / 1000);
 
-  console.log(`deploying PonsClassVaultFactoryV2 to ${KNOWN_CHAINS[chainId]} (${chainId})`);
-  console.log(`  from ${deployer.account.address}`);
+  console.log(
+    `${dryRun ? "DRY RUN — sizing only, nothing will be deployed" : "deploying"} ` +
+      `PonsClassVaultFactoryV2 ${dryRun ? "for" : "to"} ${KNOWN_CHAINS[chainId]} (${chainId})`,
+  );
+  if (deployer) console.log(`  from ${deployer.account.address}`);
   console.log("");
   console.log("  sizing each seed cap from its live feed and share multiplier:");
 
@@ -188,7 +213,10 @@ async function main() {
       // accepts and the vault refuses, bricking every deploy.
       if (raw === 0n) throw new Error(`${symbol}: ${usd} rounds to zero raw units.`);
       if (raw > MAX_CAP) throw new Error(`${symbol}: ${usd} is ${raw} raw, past the vault's uint96 slot.`);
-      console.log(`    ${symbol.padEnd(6)} ${String(usd).padStart(6)}  →  ${raw} raw (${dp}dp, a dollar by definition)`);
+      // The dollar sign matters here as much as on a stock line: this column is
+      // the allowance an owner agreed to, and it is the only place they see it
+      // as money rather than as raw units.
+      console.log(`    ${symbol.padEnd(6)} $${String(usd).padStart(6)}  →  ${raw} raw (${dp}dp, a dollar by definition)`);
       quotes.push(q.address);
       caps.push(raw);
       continue;
@@ -238,6 +266,28 @@ async function main() {
   console.log("");
   console.log(`  every vault this factory makes is BORN with those ${caps.length} ceilings, and no others.`);
   console.log("");
+
+  if (dryRun) {
+    // The init code hash is a pure function of (owner, quotes, caps) and the
+    // compiled artifact, so it can be shown without deploying — and comparing it
+    // against the real run's is how you prove the two sized the same thing.
+    const artifact = await hre.artifacts.readArtifact("PonsClassVaultV2");
+    const probeOwner = "0x0000000000000000000000000000000000000001" as const;
+    const hash = keccak256(
+      concat([
+        artifact.bytecode as `0x${string}`,
+        encodeAbiParameters(
+          [{ type: "address" }, { type: "address[]" }, { type: "uint256[]" }],
+          [probeOwner, quotes, caps],
+        ),
+      ]),
+    );
+    console.log("  DRY RUN — stopping here. Nothing was deployed and no key was used.");
+    console.log(`  vault init code hash for owner ${probeOwner}: ${hash}`);
+    console.log("  Run again inside US market hours without MERRYMEN_V2_DRY_RUN to deploy,");
+    console.log("  and expect the caps above to DIFFER — they are sized from a live price.");
+    return;
+  }
 
   const factory = await hre.viem.deployContract("PonsClassVaultFactoryV2", [quotes, caps]);
   const code = await publicClient.getCode({ address: factory.address });

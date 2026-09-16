@@ -147,13 +147,36 @@ describe("a vault sweep is two operations, and fails safely", () => {
     assert.equal(kept[0]!.symbol, "A");
   });
 
+  /**
+   * The class-sweep section of recover.ts, bounded by its own STRUCTURE.
+   *
+   * These assertions used to slice a fixed 9,000 characters after the "OP 1"
+   * marker, and that number is a proxy for "the class sweep section" that stops
+   * being true the moment the section grows. It did: going one-operation-per-vault
+   * pushed `skipped.push` to 9,045 characters past the marker.
+   *
+   * WORSE, IT FAILED ONLY ON SOME CHECKOUTS. CRLF costs one byte a line, so a
+   * Windows working tree crossed the boundary while Linux CI stayed 250 bytes
+   * inside it and reported green. A test that depends on line endings is a test
+   * that tells different people different things about the same commit.
+   *
+   * The account sweep begins at `const movable`, which is a real boundary and
+   * cannot drift.
+   */
+  const CLASS_ARM = (() => {
+    const from = RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT");
+    const to = RECOVER.indexOf("const movable: TokenBalance[]", from);
+    assert.ok(from > -1, "the class sweep section must be findable by its own heading");
+    assert.ok(to > from, "and it must end where the account sweep begins");
+    return RECOVER.slice(from, to);
+  })();
+
   it("re-reads the account balance after the sweep rather than predicting it", () => {
     // A Kernel batch cannot thread call N's return into call N+1's arguments,
     // and a curve token is exactly the asset that moves between a pre-read and
     // a send. An oversized transfer reverts, and the batch is atomic — it would
     // take the USDG and the ETH with it.
-    const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 9000), /functionName: "balanceOf"/, "op 2 must size from a fresh read");
+    assert.match(CLASS_ARM, /functionName: "balanceOf"/, "op 2 must size from a fresh read");
   });
 
   it("a failed vault sweep does not stop the rest of the recovery — WHEN IT WAS NOT APPROVED", () => {
@@ -163,9 +186,8 @@ describe("a vault sweep is two operations, and fails safely", () => {
     // caller who approved no class leg, and wrong for one who did.
     // A vault that will not give up its tokens must not strand the USDG and ETH
     // an owner can see. Reported in `skipped`, never silent.
-    const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 9000), /skipped\.push/, "the failure is reported and survived");
-    assert.match(arm.slice(0, 9000), /still in the vault/, "and the owner is told what to do");
+    assert.match(CLASS_ARM, /skipped\.push/, "the failure is reported and survived");
+    assert.match(CLASS_ARM, /still in (the|that) vault/, "and the owner is told what to do");
   });
 
   it("an unreadable vault is NOT reported as an empty one", () => {
