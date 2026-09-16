@@ -19,6 +19,8 @@ import { createGateway, clientIp } from "./lib/core.mjs";
 import { createStore, hasRedis } from "./lib/store.mjs";
 import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
+import { createPartners } from "./lib/partners.mjs";
+import { createPartnerApi } from "./lib/partner-api.mjs";
 
 // ── config (env) ─────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 8787);
@@ -148,6 +150,15 @@ function respond(res, r) {
   res.end(JSON.stringify(r.json ?? {}));
 }
 
+// ── the partner API ─────────────────────────────────────────────────────────
+//
+// A SECOND credential system on the same host, sharing only the rate-limit
+// store. It reuses MERRYMEN_GATEWAY_SECRET as an HMAC PEPPER over per-key
+// secrets rather than as the key material itself, so revoking one partner does
+// not invalidate every holder token at the same time.
+const partners = createPartners({ secret: SECRET });
+const partnerApi = createPartnerApi({ partners, store });
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   const pathname = url.pathname;
@@ -270,6 +281,18 @@ const server = createServer(async (req, res) => {
       }
 
       return respond(res, { status: 405, json: { error: "method not allowed" }, corsHeaders });
+    }
+
+    // Partner routes carry their OWN error envelope, so they are matched before
+    // the catch-all rather than falling through to the holder-shaped 404.
+    if (partnerApi.owns(pathname)) {
+      const r = await partnerApi.handle({
+        method: req.method,
+        pathname,
+        authorization: req.headers.authorization,
+        ip,
+      });
+      if (r) return respond(res, r);
     }
 
     respond(res, { status: 404, json: { error: "not found" } });

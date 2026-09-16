@@ -76,3 +76,36 @@ jobs:
       - name: Test
         working-directory: contracts
         run: npm test
+
+  gateway:
+    name: gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Its own job, and until now it had none at all: the `app` job globs
+    # worker/src, web/src and packages/*, so nothing in gateway/ was ever run by
+    # CI — including signups.test.mjs, which was a real suite executed by nobody.
+    # The gateway holds the only inbound bearer auth in the repo, so "the tests
+    # exist" and "the tests run" being different facts is not survivable here.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install
+        working-directory: gateway
+        run: npm ci --no-audit --no-fund
+
+      # `check` is syntax + selftest, and is exactly what the Dockerfile runs at
+      # image build — so a green check here means the image will build. Tests are
+      # a SEPARATE script on purpose: the image copies only server.mjs, selftest
+      # and lib/, so folding them into check would both break the build and ship
+      # test files to production.
+      - name: Check
+        working-directory: gateway
+        run: npm run check
+
+      - name: Test
+        working-directory: gateway
+        run: npm test

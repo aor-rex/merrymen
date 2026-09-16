@@ -35,7 +35,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # App source (thin http server + shared core in lib/ + the offline selftest).
-COPY server.mjs selftest.mjs ./
+COPY server.mjs selftest.mjs partners-cli.mjs ./
 COPY lib ./lib
 
 # Fail the image build if the security-critical logic (token scheme + single-use
