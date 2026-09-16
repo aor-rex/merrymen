@@ -179,6 +179,7 @@ const SRC = [
   // The migrated shape, the refund counter included (store.ts runs
   // ENERGY_DAYS_ALTERS on the shared ledger every mirror pass).
   "CREATE TABLE energy_days (agent_id TEXT NOT NULL, day TEXT NOT NULL, reviews INTEGER NOT NULL DEFAULT 0, entries INTEGER NOT NULL DEFAULT 0, told_at INTEGER, read_at INTEGER, read_full INTEGER, entries_refunded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent_id, day));",
+  "CREATE TABLE convert_state (agent_id TEXT PRIMARY KEY, fired_at_ms INTEGER NOT NULL DEFAULT 0, considered_wei TEXT NOT NULL DEFAULT '0', completed_ids TEXT NOT NULL DEFAULT '[]', updated_at_ms INTEGER NOT NULL DEFAULT 0);",
 ].join("\n");
 
 const DEST = SRC + MIRROR_STATE_DDL;
