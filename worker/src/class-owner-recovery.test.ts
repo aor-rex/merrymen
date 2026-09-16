@@ -49,7 +49,13 @@ describe("recovery reaches the class vault at all", () => {
       /if \(plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classHoldings\.length === 0\)/,
       "the early return must consider the vault before claiming nothing to recover",
     );
-    assert.match(CLI, /plan\.classHoldings\.length/, "and the CLI must say so too");
+    // ACROSS EVERY VAULT, now that an account can have two. Counting only the
+    // primary one would print "this account is empty" over a full second vault
+    // — the same defect this test was written for, with a different cause.
+    assert.ok(
+      CLI.includes("plan.classVaults.reduce((n, v) => n + v.holdings.length, 0)"),
+      "the CLI must count holdings across every vault before claiming nothing",
+    );
   });
 });
 

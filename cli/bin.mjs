@@ -1240,8 +1240,24 @@ async function recover() {
   // 1,063,408.141815 DOGGOS out of the vault. The engine was right; the
   // disclosure was not, and a confirmation that understates what it moves is
   // not a confirmation.
-  const classHoldings = plan.result.classHoldings ?? [];
-  const classVault = plan.result.classVault ?? null;
+  // EVERY VAULT, not the primary one. After v2 an account has two, and this
+  // early return is the line that used to say "nothing to recover" over a full
+  // vault — printing it over a full SECOND vault would be the same defect with
+  // a different cause. `classVaults` is absent from an older worker's output,
+  // so the singular fields are the fallback rather than the source.
+  const classVaults =
+    plan.result.classVaults ??
+    (plan.result.classVault
+      ? [
+          {
+            vault: plan.result.classVault,
+            version: null,
+            note: plan.result.classNote ?? null,
+            holdings: plan.result.classHoldings ?? [],
+          },
+        ]
+      : []);
+  const classHoldings = classVaults.flatMap((v) => v.holdings ?? []);
   // A BALANCE WE COULD NOT READ IS NOT A ZERO, and this is the one place that
   // forgot. The child already refuses to say "empty" when anything was
   // unreadable — recover-cli writes "that is NOT a zero balance. Check the RPC
@@ -1288,10 +1304,17 @@ async function recover() {
   const list = [...classParts, ...accountParts].join(", ");
   console.log();
   warn("about to sweep — read this before confirming:");
-  if (classParts.length) {
+  // ONE BLOCK PER VAULT, labelled by version. Both are "this account's class
+  // vault" and only one is the current one, so an owner needs to be able to tell
+  // which address a given balance is sitting at — the confirmation naming a
+  // strict subset of what the operation moves has shipped here once already.
+  for (const v of classVaults) {
+    const parts = (v.holdings ?? []).map((h) => `${h.amount} ${h.symbol}`);
+    if (parts.length === 0) continue;
     console.log();
-    console.log(`  ${bold("CLASS VAULT")}${classVault ? ` ${dim(classVault)}` : ""}`);
-    for (const line of classParts) console.log(`  ${bold(line)}`);
+    const label = v.version === null ? "CLASS VAULT" : `CLASS VAULT v${v.version}`;
+    console.log(`  ${bold(label)}${v.vault ? ` ${dim(v.vault)}` : ""}`);
+    for (const line of parts) console.log(`  ${bold(line)}`);
   }
   if (accountParts.length) {
     console.log();
