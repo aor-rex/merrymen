@@ -59,6 +59,19 @@ export type RevertClass =
    * of these change by waiting, and all are decided before any money moves.
    */
   | "curve-unsupported"
+  /**
+   * The contract that holds the allowance refused to spend more this window.
+   *
+   * THE ONE CLASS WHOSE CAUSE CHANGES ON ITS OWN, and it is still not retryable,
+   * which needs saying. The window is a day. Marking it retryable would put a
+   * reverted UserOperation on chain every tick until it rolls — up to a
+   * thousand of them, each paying gas to be told the same thing, which is
+   * precisely the loop this file's header exists to have stopped. Suppression
+   * here is per-arm (index.ts clears the map at every arm), so it self-heals on
+   * the next re-arm rather than lasting forever, and the owner's own sudo key
+   * can raise the cap at any moment.
+   */
+  | "spend-cap"
   /** We do not recognise it. Retryable, deliberately — see the header. */
   | "unclassified";
 
@@ -107,6 +120,17 @@ export interface RevertVerdict {
  * added with the transaction that produced it.
  */
 const PONS_ERR = {
+  /**
+   * The rolling spend ceiling in the contract that holds the allowance, added
+   * to both `PonsSelfTrade` and `PonsClassVault` because a compromised session
+   * key could otherwise drain an account one capped call at a time (the wall
+   * bounds the CALL; `RateLimitPolicy` has no bytecode on 4663, so nothing
+   * bounded the repetition).
+   *
+   * Selector derived here rather than copied from a log, per this file's rule:
+   * `toFunctionSelector("function SpendCapExceeded(uint256,uint256)")`.
+   */
+  SpendCapExceeded: "0x605cd727",
   Expired: "0x203d82d8",
   ZeroAmount: "0x1f2a2005",
   NotAContract: "0x09ee12d5",
@@ -125,6 +149,18 @@ const PONS_ERR = {
 export const PONS_ERROR_SELECTORS: readonly string[] = Object.values(PONS_ERR);
 
 const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; detail: string }[] = [
+  {
+    // ABOVE the other four-byte matches only for readability; they cannot
+    // collide with each other.
+    re: new RegExp(PONS_ERR.SpendCapExceeded, "i"),
+    rule: "spend-cap",
+    retryable: false,
+    detail:
+      "the venue contract refused to spend more of this quote asset in the current window — the " +
+      "ceiling that bounds how much a compromised key could take one capped call at a time. Nothing " +
+      "moved. It clears when the window rolls, and the owner's own key can raise it; retrying before " +
+      "either happens would pay gas to be refused again, so this is suppressed for now.",
+  },
   {
     // ABOVE the generic entries. These are exact four-byte matches and cannot
     // collide with a prose revert string, so specificity costs nothing.

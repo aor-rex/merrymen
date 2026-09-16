@@ -230,6 +230,23 @@ describe("Pons adapter reverts", () => {
     assert.equal(classifyRevert(revertData("0x71c4efed")).retryable, true);
   });
 
+  it("a spend cap is refused for THIS arm, not retried a thousand times until the window rolls", async () => {
+    // The one class whose cause changes on its own — the window is a day — and
+    // still not retryable. A retry every tick is up to a thousand reverted
+    // UserOperations paying gas to be told the same thing, which is the loop
+    // this file's header exists to have stopped. The suppression map is cleared
+    // at every arm (worker/src/index.ts), so this self-heals rather than
+    // lasting for ever, and the owner's own key can raise the cap meanwhile.
+    const { toFunctionSelector } = await import("viem");
+    const sel = toFunctionSelector("function SpendCapExceeded(uint256,uint256)");
+    const v = classifyRevert(revertData(sel));
+    assert.equal(v.rule, "spend-cap");
+    assert.equal(v.retryable, false);
+    assert.match(v.detail, /clears when the window rolls/);
+    // Derived, not remembered: the table's entry must be this selector.
+    assert.ok(PONS_ERROR_SELECTORS.includes(sel), `${sel} is not in the table`);
+  });
+
   it("the selectors are four bytes and all distinct", () => {
     // Cheap guard against a paste error turning two errors into one bucket.
     for (const s of PONS_ERROR_SELECTORS) assert.match(s, /^0x[0-9a-f]{8}$/);
