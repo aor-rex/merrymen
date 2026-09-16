@@ -298,3 +298,54 @@ contract MockKernelBatch {
         }
     }
 }
+
+/**
+ * A token whose `transfer` returns true and moves less than it was asked to —
+ * or nothing at all.
+ *
+ * ORDINARY, NOT EXOTIC. A soft honeypot and a maxTx-clamping memecoin both
+ * behave this way, and the class vault exists precisely to hold tokens written
+ * by whoever launched the curve. `_push` proves only that the call did not
+ * revert and did not return false, so without a post-transfer measurement the
+ * vault would emit a full-size `Swept` for tokens that never arrived — and the
+ * off-chain fold sums those, telling an owner they took home capital that is
+ * still sitting in the vault.
+ */
+contract PonsMockClampingERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint8 public constant decimals = 18;
+
+    /// @dev The most any one transfer will actually move. Zero means "move nothing".
+    uint256 public clampTo;
+
+    constructor(uint256 clampTo_) {
+        clampTo = clampTo_;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    /// @dev Reports success either way. That is the whole point.
+    function transfer(address to, uint256 amount) external returns (bool) {
+        uint256 moved = amount > clampTo ? clampTo : amount;
+        balanceOf[msg.sender] -= moved;
+        balanceOf[to] += moved;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 a = allowance[from][msg.sender];
+        if (a != type(uint256).max) allowance[from][msg.sender] = a - amount;
+        uint256 moved = amount > clampTo ? clampTo : amount;
+        balanceOf[from] -= moved;
+        balanceOf[to] += moved;
+        return true;
+    }
+}

@@ -123,6 +123,14 @@ function parseSeed(raw: string): { symbol: string; usd: number }[] {
     }
     const usd = Number(usdText);
     if (!Number.isFinite(usd) || usd <= 0) throw new Error(`${symbol}: "${usdText}" is not a positive dollar figure`);
+    // A REPEATED SYMBOL IS A TYPO, NEVER AN INTENTION, and it used to be the
+    // cheapest way to brick a factory for ever: two entries resolve to one
+    // address, the vault constructor refuses a duplicate, and every deploy()
+    // reverts for every owner. The factory now refuses it too, so this is the
+    // second of three fences — but it is the one that says which symbol.
+    if (out.some((q) => q.symbol === symbol)) {
+      throw new Error(`MERRYMEN_V2_SEED names ${symbol} twice. Two entries for one asset is one asset.`);
+    }
     out.push({ symbol, usd });
   }
   if (out.length === 0) throw new Error("MERRYMEN_V2_SEED is empty — a factory with no seed mints vaults that can buy nothing");
@@ -174,7 +182,13 @@ async function main() {
       // read and nothing to go stale. SAME FUNCTION as every other quote, so the
       // short-circuit cannot drift into being a second, different rule.
       const raw = rawCapFor(usd, dp, 100_000_000n, UI_ONE);
-      console.log(`    ${symbol.padEnd(6)} $${String(usd).padStart(6)}  →  ${raw} raw (${dp}dp, a dollar by definition)`);
+      // THE SAME TWO GUARDS THE STOCK BRANCH APPLIES. This branch skipped them
+      // because "it is a dollar, what could go wrong" — and an absurd figure
+      // would have sealed a cap past the vault's uint96 slot, which the factory
+      // accepts and the vault refuses, bricking every deploy.
+      if (raw === 0n) throw new Error(`${symbol}: ${usd} rounds to zero raw units.`);
+      if (raw > MAX_CAP) throw new Error(`${symbol}: ${usd} is ${raw} raw, past the vault's uint96 slot.`);
+      console.log(`    ${symbol.padEnd(6)} ${String(usd).padStart(6)}  →  ${raw} raw (${dp}dp, a dollar by definition)`);
       quotes.push(q.address);
       caps.push(raw);
       continue;
@@ -265,8 +279,39 @@ async function main() {
         `Do NOT use this deployment — it was built from a different commit.`,
     );
   }
+  // THE GATE WORTH MORE THAN THE OTHER THREE, because it exercises the path
+  // instead of restating it. The three checks above all pass on a factory that
+  // can never produce a vault: the bytecode is correct and only the constructor
+  // ARGUMENTS are poisoned, so the init code hash matches, vaultFor answers a
+  // real address, and FACTORY_VERSION answers 2. Only calling deploy finds out.
+  //
+  // Simulated, not sent. It must not actually create the probe's vault — that
+  // would consume the CREATE2 address for an owner who never asked for one.
+  let simulated: `0x${string}`;
+  try {
+    const sim = await publicClient.simulateContract({
+      address: factory.address,
+      abi: [{ type: "function", name: "deploy", stateMutability: "nonpayable", inputs: [{ type: "address" }], outputs: [{ type: "address" }] }] as const,
+      functionName: "deploy",
+      args: [probe],
+      account: deployer.account,
+    });
+    simulated = sim.result as `0x${string}`;
+  } catch (e) {
+    throw new Error(
+      `the factory deployed, but deploy() REVERTS — for this owner and therefore for every owner.\n` +
+        `  ${e instanceof Error ? e.message.split("\n")[0] : String(e)}\n` +
+        `The seed is the only thing passed to a vault, so this is the seed. Do NOT record this address; ` +
+        `there is no setter and no admin, so the factory cannot be corrected — fix the seed and redeploy.`,
+    );
+  }
+  if (simulated.toLowerCase() !== predicted.toLowerCase()) {
+    throw new Error(`deploy() would produce ${simulated} but vaultFor predicts ${predicted}. Do NOT use this deployment.`);
+  }
+
   console.log(`  vaultFor(${probe.slice(0, 10)}…) → ${predicted}`);
   console.log(`  init code hash matches the local artifact`);
+  console.log(`  deploy() simulates to the same address, so this factory can actually make a vault`);
 
   const file = path.join(__dirname, "..", "deployments.json");
   let book: Record<string, Record<string, unknown>> = {};

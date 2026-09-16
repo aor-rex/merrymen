@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// The most quote assets one vault will ever track.
+//
+// FILE-LEVEL SO BOTH CONTRACTS BOUND THE SAME SET WITH THE SAME NUMBER. The
+// factory has to refuse a seed the vault would refuse, and Solidity will not
+// let it read PonsClassVaultV2.MAX_QUOTES. Writing 8 in two places is how those
+// two bounds drift apart, and a factory bounded looser than its vault is exactly
+// the failure the factory constructor now exists to prevent.
+uint256 constant MAX_QUOTE_ASSETS = 8;
+
 import {IPonsCurve, IERC20Trade} from "./interfaces/IPonsCurve.sol";
 
 /**
@@ -52,6 +61,7 @@ import {IPonsCurve, IERC20Trade} from "./interfaces/IPonsCurve.sol";
  * bool exactly as v1's is (PonsClassVault.sol:227), so this compiles to the
  * default target like every non-transient contract here.
  */
+
 contract PonsClassVaultV2 {
     /// @notice The smart account this vault belongs to. The only caller, and the
     /// only address any asset can ever be sent to.
@@ -80,7 +90,7 @@ contract PonsClassVaultV2 {
      * burns independently (wall.ts:706-714 concedes the curve is unpinnable). It
      * also keeps `approvedQuotes()` and the `_seal` scan below O(8) forever.
      */
-    uint256 public constant MAX_QUOTES = 8;
+    uint256 public constant MAX_QUOTES = MAX_QUOTE_ASSETS;
 
     /**
      * One quote asset's ceiling and its window, in ONE storage slot.
@@ -272,6 +282,28 @@ contract PonsClassVaultV2 {
         for (uint256 i; i < n; ++i) {
             if (quotes[i] == q) { known = true; break; }
         }
+        // ZEROING AN ASSET THE VAULT NEVER KNEW IS A NO-OP, NOT A PURCHASE OF A
+        // SLOT. Without this test the push happens before the cap is looked at,
+        // so setQuoteCaps([X], [0]) on an unseen address consumes one of the
+        // eight slots for ever — the array is append-only by design, so nothing
+        // can free it again.
+        //
+        // That is not a contrived call. This setter takes a SET, deliberately,
+        // and the natural off-chain screen sends the owner's whole quote
+        // universe with the disabled ones at zero. A few edits with a different
+        // asset disabled each time and the vault can never approve a real quote
+        // again, in a contract with no admin and no upgrade.
+        //
+        // It also restores what MAX_QUOTES is documented to bound: assets that
+        // have actually held a ceiling, and therefore the owner's real exposure.
+        // Counting never-approved addresses would let TooManyQuotes fire at a
+        // total exposure of one quote's cap.
+        if (!known && cap == 0) {
+            // Still emitted, so an owner who zeroed the wrong address sees that
+            // the call did what they asked rather than nothing at all.
+            emit QuoteCapSet(q, 0);
+            return;
+        }
         if (!known) {
             if (n >= MAX_QUOTES) revert TooManyQuotes();
             quotes.push(q);
@@ -448,12 +480,37 @@ contract PonsClassVaultV2 {
         emit ClassSell(curve, token, quoteAsset, tokensIn, quoteOut);
     }
 
-    /// @notice THE UNCONDITIONAL EXIT. No cap, no approved set, no curve. Verbatim
-    /// v1 (PonsClassVault.sol:331-336): one destination, fixed at construction.
+    /**
+     * @notice THE UNCONDITIONAL EXIT. No cap, no approved set, no curve.
+     *
+     * @dev MEASURED, NOT TRUSTED — the rule buy and sell already keep, and the one
+     * place v1 did not. v1 emitted the balance it read BEFORE the transfer
+     * (PonsClassVault.sol:331-336), and _push proves only that the call did not
+     * revert and did not return false. A token whose transfer returns true and
+     * moves nothing — an ordinary soft honeypot on a launchpad minting hundreds
+     * of curves an hour, and precisely the asset this vault exists to hold —
+     * would emit a full-size withdrawal for tokens that never left. A clamping
+     * token would emit one per attempt, and the off-chain fold sums them: five
+     * partial sweeps of a 500-unit position book 1,500 as withdrawn, and the
+     * owner is told they took home three times the capital they put in.
+     *
+     * So the amount is the OWNER'S delta. A sweep that moves nothing reverts by
+     * name instead of succeeding for ever, and the event says what arrived.
+     *
+     * The exit itself is unchanged and must stay so: one destination, fixed at
+     * construction, consulting neither cap nor approved set. Un-approving a quote
+     * must never strand a position entered in it.
+     */
     function sweep(address token) external only returns (uint256 amount) {
-        amount = IERC20Trade(token).balanceOf(address(this));
-        if (amount == 0) revert ZeroAmount();
-        _push(token, owner, amount);
+        uint256 held = IERC20Trade(token).balanceOf(address(this));
+        if (held == 0) revert ZeroAmount();
+        uint256 beforeOwner = IERC20Trade(token).balanceOf(owner);
+        _push(token, owner, held);
+        amount = IERC20Trade(token).balanceOf(owner) - beforeOwner;
+        // NOT ZeroAmount, which above means "there was nothing to sweep". This
+        // means "there was something and it did not arrive", and a caller that
+        // cannot tell those apart retries the one that will never work.
+        if (amount == 0) revert TransferFailed();
         emit Swept(token, amount);
     }
 
@@ -538,15 +595,43 @@ contract PonsClassVaultFactoryV2 {
     error EmptySeed();
     error ZeroSeedQuote();
     error ZeroSeedCap();
+    error TooManySeedQuotes();
+    error DuplicateSeedQuote(address quoteAsset);
+    error SeedCapTooLarge(address quoteAsset, uint256 cap);
 
+    /**
+     * @dev EVERY RULE THE VAULT CONSTRUCTOR KEEPS, KEPT HERE TOO.
+     *
+     * This validated a strict SUBSET of what the vault validates, and the
+     * difference is the worst failure this contract can have. The stored arrays
+     * are passed verbatim to every vault, so a seed that trips a rule only the
+     * vault enforces constructs a factory that then reverts inside deploy for
+     * EVERY owner, for ever — with no setter and no admin to correct it.
+     *
+     * Nothing downstream catches it, which is what makes it worth the O(64)
+     * loop. FACTORY_VERSION answers 2. vaultFor answers a well-formed non-zero
+     * address. vaultInitCodeHash matches the compiled artifact exactly — it
+     * must, since the bytecode is correct and only the constructor ARGUMENTS are
+     * poisoned, and the checker hashes those same arrays. seedQuoteSet answers
+     * without complaint. A factory that can never make a vault passes every gate
+     * the system has, gets written into a constant, and is sealed into grants
+     * before anything exercises deploy.
+     *
+     * One typo reaches it: a duplicated symbol in the deploy script's seed.
+     */
     constructor(address[] memory quotes_, uint256[] memory caps_) {
         if (quotes_.length != caps_.length) revert LengthMismatch();
         // A factory with no seed mints vaults that can buy nothing, whose first
         // class trade reverts after the approve has already landed.
         if (quotes_.length == 0) revert EmptySeed();
+        if (quotes_.length > MAX_QUOTE_ASSETS) revert TooManySeedQuotes();
         for (uint256 i; i < quotes_.length; ++i) {
             if (quotes_[i] == address(0)) revert ZeroSeedQuote();
             if (caps_[i] == 0) revert ZeroSeedCap();
+            if (caps_[i] > type(uint96).max) revert SeedCapTooLarge(quotes_[i], caps_[i]);
+            for (uint256 j; j < i; ++j) {
+                if (quotes_[j] == quotes_[i]) revert DuplicateSeedQuote(quotes_[i]);
+            }
         }
         seedQuotes = quotes_;
         seedCaps = caps_;
