@@ -115,6 +115,48 @@ export const PONS_CLASS_VAULT_FACTORY: Readonly<Record<number, string | null>> =
 });
 
 /**
+ * PonsClassVaultFactoryV2 — the factory whose vaults hold ONE CEILING PER QUOTE
+ * ASSET. NOT YET DEPLOYED ANYWHERE; both entries are `null`.
+ *
+ * A SECOND CONSTANT, NOT A REPLACEMENT, and the v1 table above must never be
+ * emptied. A v1 vault is a deployed contract at a CREATE2 address derived from
+ * the v1 factory, and it may be holding a position right now. Recovery is the
+ * reason the constant exists at all — `merrymen recover` can run from a pasted
+ * owner key with no grant, deriving the vault from the factory — so deleting v1
+ * here would not tidy anything up. It would make a real balance unreachable by
+ * the one path built to reach it without a grant. Both must be probed.
+ *
+ * WHY THE VAULT WAS VERSIONED RATHER THAN RETUNED. v1 holds a single spend cap
+ * in raw units, 250_000_000, which is 250 USDG at 6 decimals — and it charges
+ * every buy against that one number whatever asset funded it. The chain never
+ * restricted the quote: the vault accepts any ERC-20 equal to the curve's own
+ * `pairToken()`, and the only thing pinning buys to USDG is a wall constraint
+ * off chain. So a five-dollar entry in an 18-decimal share hands the vault about
+ * 2.8e16 against a ceiling of 2.5e8, and is refused by eight orders of magnitude
+ * in the one place no off-chain fix can reach. v2 keys the ceiling to the asset
+ * it is denominated in, and the cap doubles as the allowlist: zero means refused.
+ *
+ * WHAT A V2 ADDRESS DOES NOT UNLOCK. Nothing about multi-quote execution follows
+ * from deploying this. The vault would ACCEPT a non-USDG entry and every other
+ * layer would still refuse one — the wall pins the buy's quote word, the
+ * producer filters candidates to USDG, and the ledger books `quoteIn` as USDG at
+ * 6dp. That ordering is deliberate: the contract is the layer that cannot be
+ * corrected later, so it moves first and alone.
+ *
+ * Same rules as v1 in every other respect: a DEPLOY FACT and never a setting,
+ * because recovery signs with the sudo validator and is not bound by the wall,
+ * so a settings-supplied factory could redirect a sweep at a contract holding
+ * nothing. And `null` means "no v2 class route on this chain", which stays
+ * distinguishable from "the factory answered zero".
+ */
+export const PONS_CLASS_VAULT_FACTORY_V2: Readonly<Record<number, string | null>> = Object.freeze({
+  /** Robinhood Chain mainnet — not deployed. */
+  4663: null,
+  /** Robinhood Chain testnet — not deployed. */
+  46630: null,
+});
+
+/**
  * PonsSelfTrade — the adapter that makes a Pons bonding curve constrainable by
  * the permission wall. Per chain, `null` where it is not deployed.
  *
