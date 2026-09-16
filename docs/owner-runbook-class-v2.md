@@ -136,23 +136,77 @@ to avoid than to perform.
 
 ## Step 1 — deploy the v2 factory
 
-Testnet first. The two runs produce two different addresses, which is correct.
+**There is no testnet rehearsal.** The script's quote table holds mainnet
+addresses and only mainnet addresses, so on 46630 every token reads as a
+non-contract. It now refuses that chain by name rather than dying at the first
+`decimals()` read. The keyless dry run below is the rehearsal.
+
+### Seed USDG only
+
+```
+MERRYMEN_V2_SEED="USDG:250"
+```
+
+`250` is not merely a small number: `250_000_000` raw is **exactly v1's
+`DEFAULT_SPEND_CAP`**, so the cutover changes the vault and nothing else. At the
+canary's five-dollar entry size that is about fifty entries of daily headroom — a
+floor, not an allowance.
+
+**Do not seed NVDA and SPY yet**, even though the vault would accept them and no
+other layer would. Three reasons, in order of weight:
+
+1. **The seed is the only refusal that can never be narrowed.** A non-USDG entry
+   is refused in four places today; three of them are a code push away from
+   changing and one is frozen bytecode. Spending the immutable refusal now buys a
+   convenience that is needed once, later.
+2. **A stock seed is sized off a live price, so it inherits the market-hours
+   constraint.** A USDG cap reads no feed, no multiplier and no pause switch — it
+   short-circuits to a price of exactly 1.0 — so a USDG-only deploy can be run at
+   any hour, including a weekend, with nothing to go stale.
+3. **Step 4 wants one variable.** Proving the USDG route on a factory seeded
+   identically to v1's ceiling tests the vault, not a new number.
+
+**The honest cost:** adding NVDA or SPY later needs an owner-key `setQuoteCaps`
+operation, and that script does not exist yet (see the section above). It is
+off-chain work that can be written. The factory is the thing that cannot be
+rewritten, so the trade goes in this direction.
+
 
 The seed is written in **dollars** and sealed in **raw units**. The script does
 that conversion once, from each quote's own Chainlink feed and its own
 `uiMultiplier()`, read live, and prints every number with its arithmetic so you
-can see the ceiling you are actually sealing.
+can see the ceiling you are actually sealing. A USDG cap skips all of that: a
+dollar is a dollar, so it short-circuits to a price of exactly 1.0.
+
+### Rehearse it first — no key, no gas
 
 ```bash
-cd contracts && MERRYMEN_V2_SEED="USDG:250,NVDA:25,SPY:25" npm run deploy:classfactoryv2:testnet
+MERRYMEN_V2_DRY_RUN=1 MERRYMEN_V2_SEED="USDG:250" npm run --prefix contracts deploy:classfactoryv2:mainnet
 ```
 
-In PowerShell the environment prefix does nothing, so set it as its own
-statement first:
+Same code path, same reads, same refusals. It prints the raw caps it *would* seal
+and stops before deploying. **Read the printed line character by character.** It
+must say exactly:
+
+```
+    USDG   $   250  →  250000000 raw (6dp, a dollar by definition)
+```
+
+`250000000` is the number to check. Three extra zeros is the likeliest typo there
+is, and above $10,000 the script refuses outright — but inside the band, the only
+thing standing between a slipped decimal and an immutable ceiling is you reading
+that line.
+
+What the rehearsal cannot tell you is whether `deploy()` would succeed. That gate
+needs the factory to exist, so it only runs for real.
+
+### Then, for real
+
+PowerShell has no inline environment prefix, so set each as its own statement:
 
 ```bash
 $env:MERRYMEN_DEPLOYER_PRIVATE_KEY = "0x..."
-$env:MERRYMEN_V2_SEED = "USDG:250,NVDA:25,SPY:25"
+$env:MERRYMEN_V2_SEED = "USDG:250"
 npm run --prefix contracts deploy:classfactoryv2:mainnet
 ```
 
@@ -161,26 +215,16 @@ Node's ESM loader, which has no TypeScript handler, and it dies with
 `ERR_UNKNOWN_FILE_EXTENSION` before touching the network. The loader rides in the
 script entry itself.
 
+**Market hours only matter for a STOCK seed.** Chainlink's equity feeds run 24/5
+and the script refuses one older than two hours, because a cap derived from a
+price nobody can trade at is a cap nobody agreed to — and unlike a bad trade,
+nothing downstream can notice. The contract compares raw to raw and has no way to
+know. Note the gate is a *staleness* gate, not a *session* gate: forty minutes
+after the close it still passes, on a price the market has stopped making. That
+gap is the operator's to close, which is the whole reason this paragraph exists.
 
-### Rehearse it first — no key, no gas
+A USDG-only seed has no such constraint and can be deployed at any hour.
 
-```bash
-MERRYMEN_V2_DRY_RUN=1 MERRYMEN_V2_SEED="USDG:250,NVDA:25,SPY:25" npm run --prefix contracts deploy:classfactoryv2:mainnet
-```
-
-Same code path, same feeds, same refusals. It prints the raw caps it *would*
-seal and stops. Run it once to see the numbers and confirm the seed parses, then
-run it again for real inside market hours and expect the caps to differ — they
-are sized from a live price.
-
-What it cannot tell you is whether `deploy()` would succeed. That gate needs the
-factory to exist, so it only runs for real.
-
-**Run it inside US market hours.** Chainlink's equity feeds run 24/5. The script
-refuses a feed older than two hours rather than quietly sizing a grant off
-Friday's close, because a cap derived from a price nobody can trade at is a cap
-nobody agreed to — and unlike a bad trade, nothing downstream can notice. The
-contract compares raw to raw and has no way to know.
 
 It also refuses: an unknown chain, an unfunded deployer, a token whose
 `decimals()` disagrees with the registry, a reverting `uiMultiplier()`, a paused
@@ -282,6 +326,18 @@ work, nothing downstream is worth attempting, and the failure is cheap to
 diagnose because only one variable changed.
 
 ## Step 5 — the canary, and what it has to prove
+
+**Prerequisite, because the factory is seeded USDG-only:** the vault must be
+given an NVDA or SPY cap first, with an owner-key `setQuoteCaps` operation.
+**That script does not exist yet.** It is a sudo UserOperation from the smart
+account — the pattern is already in the recovery path — and it has to be written
+before this step can begin. Nothing about it touches the wall, the producer or
+the ledger, all of which still refuse a non-USDG entry; it only opens the vault's
+own ceiling, which is one of four refusals.
+
+Write it, size the cap from a live feed the same way the deploy script does, and
+read the cap back with `quoteCap` before trusting it.
+
 
 One agent, one non-USDG quote, chosen by **measured liquidity at the time of the
 test** rather than by preference. NVDA or SPY.

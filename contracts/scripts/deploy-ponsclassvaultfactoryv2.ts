@@ -123,6 +123,33 @@ function parseSeed(raw: string): { symbol: string; usd: number }[] {
     }
     const usd = Number(usdText);
     if (!Number.isFinite(usd) || usd <= 0) throw new Error(`${symbol}: "${usdText}" is not a positive dollar figure`);
+    /**
+     * A PLAUSIBLE BAND, because the only other ceiling is the uint96 slot.
+     *
+     * For a 6dp dollar that slot does not bind until about 7.9e22, so
+     * "USDG:250000" — three extra zeros, the likeliest fat-finger there is —
+     * parses, prints, deploys, and seals a quarter-million-dollar daily birth
+     * floor into a factory with no setter.
+     *
+     * It is not unbounded harm: a single trade is still capped by the USDG
+     * approve the wall pins per operation, so this removes the per-WINDOW
+     * backstop rather than the per-trade one, and that backstop matters mainly
+     * in the case where the worker is already compromised. But it is a ceiling
+     * nobody agreed to, on the one number in this migration that cannot be
+     * lowered, and a typo is a bad reason to have one.
+     *
+     * The bound is deliberately generous — forty times the intended $250 — so
+     * it catches a slipped decimal and nothing legitimate. Raising it means
+     * editing this line, which is the point: it should be a deliberate act.
+     */
+    const MAX_SEED_USD = 10_000;
+    if (usd > MAX_SEED_USD) {
+      throw new Error(
+        `${symbol}: $${usd} is past the $${MAX_SEED_USD} sanity bound for a SEED cap. The seed is a ` +
+          `fleet-wide birth floor, not a risk allowance — v1's whole daily ceiling was $250. If this ` +
+          `figure is genuinely intended, raise MAX_SEED_USD in this script deliberately.`,
+      );
+    }
     // A REPEATED SYMBOL IS A TYPO, NEVER AN INTENTION, and it used to be the
     // cheapest way to brick a factory for ever: two entries resolve to one
     // address, the vault constructor refuses a duplicate, and every deploy()
@@ -148,6 +175,25 @@ async function main() {
   const chainId = await publicClient.getChainId();
   if (!(chainId in KNOWN_CHAINS)) {
     throw new Error(`refusing to deploy to unknown chain ${chainId}. Check --network.`);
+  }
+  /**
+   * THE QUOTE TABLE IS MAINNET ADDRESSES, AND ONLY MAINNET ADDRESSES.
+   *
+   * QUOTES holds one address per symbol, and those are 4663's. None of them has
+   * code on the testnet, so a testnet run dies at the first `decimals()` read
+   * with viem's raw "returned no data" — an opaque failure, in the middle of a
+   * procedure, on the run an operator was told to do FIRST as a rehearsal.
+   *
+   * Refused by name instead. This is not a policy choice about testnet; it is
+   * the table being honest about what it contains. Deploying here needs testnet
+   * addresses to exist first, and they do not.
+   */
+  if (chainId !== 4663) {
+    throw new Error(
+      `the seed quote table in this script holds MAINNET addresses only, so it cannot size a cap on ` +
+        `${KNOWN_CHAINS[chainId]} — every token would read as a non-contract. Deploying here needs a ` +
+        `per-chain address table that does not exist yet. Use --network robinhood, or add one.`,
+    );
   }
 
   /**
@@ -269,8 +315,14 @@ async function main() {
 
   if (dryRun) {
     // The init code hash is a pure function of (owner, quotes, caps) and the
-    // compiled artifact, so it can be shown without deploying — and comparing it
-    // against the real run's is how you prove the two sized the same thing.
+    // compiled artifact, so it can be shown without deploying.
+    //
+    // IT IS NOT COMPARABLE TO THE REAL RUN’S, and an earlier version of this
+    // comment said it was. The owner is the vault’s FIRST constructor argument,
+    // so a hash for the fixed probe below and a hash for the deployer’s address
+    // differ by construction — and the real run prints no hash at all; it checks
+    // its own against the artifact and throws. What this is good for is
+    // comparing two REHEARSALS: it fingerprints (this artifact + this seed).
     const artifact = await hre.artifacts.readArtifact("PonsClassVaultV2");
     const probeOwner = "0x0000000000000000000000000000000000000001" as const;
     const hash = keccak256(
@@ -284,6 +336,8 @@ async function main() {
     );
     console.log("  DRY RUN — stopping here. Nothing was deployed and no key was used.");
     console.log(`  vault init code hash for owner ${probeOwner}: ${hash}`);
+    console.log("  (that hash is for the fixed probe owner above, NOT for your deployer — the owner is");
+    console.log("   the vault's first constructor argument, so the real run's hash differs by design.)");
     console.log("  Run again inside US market hours without MERRYMEN_V2_DRY_RUN to deploy,");
     console.log("  and expect the caps above to DIFFER — they are sized from a live price.");
     return;
