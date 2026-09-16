@@ -243,6 +243,32 @@ export interface ClassLedgerEntry {
   exitTx: `0x${string}` | null;
   /** Every (txHash, logIndex) folded in, so a caller can dedupe accruals. */
   logKeys: string[];
+  /**
+   * EVERY DENOMINATION THIS POSITION WAS FUNDED IN, lowercased.
+   *
+   * Empty for a v1 position, whose events do not name the asset. ONE entry is
+   * the ordinary case and the only one anything downstream can price.
+   *
+   * MORE THAN ONE MEANS costRaw AND proceedsRaw ARE NOT NUMBERS. Every figure
+   * built on them treats a raw quote amount as micro-USDG — the price line
+   * divides by a literal 1e6, the column is named cost_usdg — so adding an
+   * 18-decimal amount to a 6-decimal one produces a cost roughly a trillion
+   * times what was actually spent, and nothing downstream could tell.
+   *
+   * That is exactly why PonsClassVaultV2 puts the quote asset on the event: so
+   * the book can REFUSE to add two denominations rather than add them wrongly.
+   */
+  quoteAssets: string[];
+  /**
+   * True when this entry's buys were funded in more than one asset.
+   *
+   * CANNOT FIRE UNDER TODAY'S PRODUCER, which funds every class entry in USDG
+   * and refuses any candidate quoted in anything else. That is what makes this
+   * cheap to carry now — and it is what makes the multi-quote deferral honest
+   * rather than merely postponed: the day that filter is lifted, the ledger
+   * says so instead of quietly booking nonsense.
+   */
+  mixedDenomination: boolean;
 }
 
 /**
@@ -273,10 +299,18 @@ export function foldClassEvents(events: readonly ClassEvent[]): Map<string, Clas
         entryTx: e.txHash,
         exitTx: null,
         logKeys: [],
+        quoteAssets: [],
+        mixedDenomination: false,
       };
       byToken.set(key, entry);
     }
     entry.logKeys.push(`${e.txHash}:${e.logIndex}`);
+    // A sweep moves no quote, so it names no denomination and must not add one.
+    if (e.quoteAsset && e.kind !== "swept") {
+      const q = e.quoteAsset.toLowerCase();
+      if (!entry.quoteAssets.includes(q)) entry.quoteAssets.push(q);
+      entry.mixedDenomination = entry.quoteAssets.length > 1;
+    }
     if (e.kind === "buy") {
       // THE CLOCK STARTS AT THE FIRST BUY AND NEVER MOVES. Recorded before the
       // totals are touched, so "have I seen a buy yet" is answered by

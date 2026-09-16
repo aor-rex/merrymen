@@ -7163,7 +7163,37 @@ async function main() {
           const ev = mine
             .map((l) => decodeClassLog(l))
             .find((e) => e !== null && e.kind === want && e.token.toLowerCase() === classToken);
-          if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
+          /**
+           * WHAT WAS THIS FUNDED IN? A v2 event says; a v1 event does not.
+           *
+           * `null` means the log did not name the asset, which for a v1 vault is
+           * every log, and USDG is the only thing the producer has ever funded a
+           * class entry with — so null is read as USDG here and nowhere else.
+           *
+           * A NAMED ASSET THAT IS NOT USDG IS REFUSED, NOT CONVERTED. Every
+           * figure below treats `quoteRaw` as micro-USDG: the price line divides
+           * by a literal 1e6, the column it lands in is called cost_usdg, and
+           * the fold adds these across buys. An 18-decimal quote booked through
+           * that arithmetic is off by a factor of about a trillion, in the
+           * owner's favour on paper and nobody's in fact.
+           *
+           * THIS CANNOT FIRE TODAY, and that is the point of adding it now. The
+           * wall pins the buy's quote word to USDG and the producer refuses any
+           * candidate quoted in anything else, so reaching this branch means one
+           * of those two stopped being true — which is precisely the moment the
+           * ledger must say so rather than book a number nobody can use.
+           */
+          const evQuote = ev?.quoteAsset?.toLowerCase() ?? null;
+          const quoteIsUsdg = evQuote === null || evQuote === CASH.USDG.toLowerCase();
+          if (ev && !quoteIsUsdg) {
+            await addEvent(
+              agentId,
+              "warn",
+              `${symbol}: this trade was funded in ${short(evQuote!)}, not USDG, and every cost figure ` +
+                `here is denominated in USDG — so no basis was booked rather than one that would be ` +
+                `wrong by orders of magnitude. The position is still held and still sellable.`,
+            );
+          } else if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
             fillPair = {
               stockToken: classToken as `0x${string}`,
               symbol,

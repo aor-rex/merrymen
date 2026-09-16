@@ -302,14 +302,7 @@ describe("Pons adapter reverts", () => {
       new URL("../../contracts/contracts/PonsSelfTrade.sol", import.meta.url),
       "utf8",
     );
-    const declared = [...sol.matchAll(/^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/gm)].map((m) => {
-      const args = (m[2] ?? "")
-        .split(",")
-        .map((a) => a.trim().split(/\s+/)[0])
-        .filter(Boolean)
-        .join(",");
-      return `${m[1]}(${args})`;
-    });
+    const declared = errorsIn(sol);
     assert.ok(declared.length >= 12, `expected the .sol to declare errors, found ${declared.length}`);
     for (const sig of declared) {
       const sel = toFunctionSelector(`function ${sig}`);
@@ -320,7 +313,85 @@ describe("Pons adapter reverts", () => {
       );
     }
   });
+
+  it("EVERY error a session key can reach in PonsClassVaultV2.sol is classified", () => {
+    /**
+     * THE GUARD THAT WOULD HAVE CAUGHT THE DEFECT ABOVE.
+     *
+     * v2 widened SpendCapExceeded by one argument, which changes the selector.
+     * A scan of the .sol is the only check of the right shape: the signature
+     * lives in one file and the classification in another, and nothing else
+     * connects them.
+     *
+     * SCOPED TO WHAT A SESSION KEY CAN REACH, and the exclusions are the point
+     * rather than a convenience. The setter and constructor errors are raised
+     * only by an OWNER transaction — the wall does not name `setQuoteCaps`, and
+     * a constructor runs once inside a batch that reverts whole — so a session
+     * key cannot produce them. Classifying an error for a path the worker cannot
+     * take would be a guess wearing a citation, which is exactly what this
+     * file's header forbids.
+     */
+    const sol = readFileSync(
+      new URL("../../contracts/contracts/PonsClassVaultV2.sol", import.meta.url),
+      "utf8",
+    );
+    const OWNER_ONLY = new Set([
+      "CapTooLarge", // setQuoteCaps, owner tx
+      "ZeroCap", // constructor
+      "DuplicateQuote", // constructor
+      "ZeroQuote", // setQuoteCaps / constructor
+      "EmptySeed", // constructor and factory constructor
+      "TooManyQuotes", // setQuoteCaps
+      "LengthMismatch", // setQuoteCaps and factory constructor
+      "TooManySeedQuotes", // factory constructor
+      "DuplicateSeedQuote", // factory constructor
+      "SeedCapTooLarge", // factory constructor
+      "ZeroSeedQuote", // factory constructor
+      "ZeroSeedCap", // factory constructor
+      "ZeroOwner", // constructor
+      "NotOwner", // a wrong caller, which is a wiring fault and not a trade outcome
+    ]);
+    const declared = errorsIn(sol).filter((sig) => !OWNER_ONLY.has(sig.slice(0, sig.indexOf("("))));
+    assert.ok(declared.length >= 8, `expected reachable errors, found ${declared.length}: ${declared}`);
+    for (const sig of declared) {
+      const sel = toFunctionSelector(`function ${sig}`);
+      assert.notEqual(
+        classifyRevert(`execution reverted: ${sel}`).rule,
+        "unclassified",
+        `${sig} (${sel}) is declared in PonsClassVaultV2.sol and a session key can reach it, but it ` +
+          `classifies as unclassified — which this file treats as RETRYABLE`,
+      );
+    }
+  });
+
+  it("and the v1 vault's reachable errors stay classified — it is still deployed", () => {
+    const sol = readFileSync(
+      new URL("../../contracts/contracts/PonsClassVault.sol", import.meta.url),
+      "utf8",
+    );
+    const OWNER_ONLY = new Set(["ZeroOwner", "NotOwner"]);
+    for (const sig of errorsIn(sol).filter((s) => !OWNER_ONLY.has(s.slice(0, s.indexOf("("))))) {
+      const sel = toFunctionSelector(`function ${sig}`);
+      assert.notEqual(
+        classifyRevert(`execution reverted: ${sel}`).rule,
+        "unclassified",
+        `${sig} (${sel}) is declared in the DEPLOYED v1 vault but classifies as unclassified`,
+      );
+    }
+  });
 });
+
+/** Every `error Name(args);` a .sol declares, as a canonical signature. */
+function errorsIn(sol: string): string[] {
+  return [...sol.matchAll(/^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/gm)].map((m) => {
+    const args = (m[2] ?? "")
+      .split(",")
+      .map((a) => a.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .join(",");
+    return `${m[1]}(${args})`;
+  });
+}
 
 /**
  * THE KEY THE WRITER STORES MUST BE THE KEY THE READER LOOKS UP.
