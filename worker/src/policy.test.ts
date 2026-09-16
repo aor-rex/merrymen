@@ -940,6 +940,8 @@ describe("cap refusals are written for the person who has to read them", () => {
     // The remedy differs from the daily cap's: this one is sealed in the
     // signature, so settings cannot move it.
     assert.match(detail, /re-sign/);
+  });
+});
 describe("convertPolicyLimits", () => {
   it("admits WETH plumbing and lifts exposure caps, keeps everything else", async () => {
     const { convertPolicyLimits } = await import("./policy");
