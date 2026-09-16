@@ -1,5 +1,4 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { GATE_COOKIE, GATE_PATH, gatePassword, isGatedPath, sameSecret } from "@/lib/site-gate";
 
 /**
  * The dashboard has NO login and can move real funds (/api/recover sweeps to any
@@ -74,10 +73,9 @@ export function middleware(req: NextRequest) {
 
   // ── the two API guards, unchanged and still API-only ────────────────────
   //
-  // The matcher below now sees pages as well, so these are scoped explicitly.
-  // Applying the host allowlist to a PAGE would newly refuse a self-hosted
-  // install reached over a LAN or a domain — a behaviour change nobody asked
-  // for, hidden inside a change about a holding page.
+  // Scoped explicitly even though the matcher is API-only, because the scoping
+  // is the load-bearing part: applying the host allowlist to a PAGE would newly
+  // refuse a self-hosted install reached over a LAN or a domain.
   const isApi = pathname.startsWith("/api/");
   if (isApi) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
@@ -87,69 +85,23 @@ export function middleware(req: NextRequest) {
     if (site && site !== "same-origin" && site !== "none") {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
-    // Falls through to the gate rather than returning. The API used to be
-    // exempt, which left every agent's name and forty posts of reasoning
-    // readable by anyone who knew the URLs while the pages showing them were
-    // behind a password.
   }
 
-  // ── the holding page ────────────────────────────────────────────────────
-  //
-  // OFF UNLESS A PASSWORD IS SET, which is what keeps every local and
-  // self-hosted install exactly as it was. It is a notice with a doorknob,
-  // not authentication: one password for everyone, no session, and the
-  // things here that actually move money are guarded by the signed-session
-  // checks inside each route handler, which this neither replaces nor
-  // strengthens.
-  const expected = gatePassword();
-  if (!expected || !isGatedPath(pathname)) return NextResponse.next();
-
-  const held = req.cookies.get(GATE_COOKIE)?.value ?? "";
-  if (sameSecret(held, expected)) return NextResponse.next();
-
-  // AN API REQUEST GETS A STATUS, NOT A PAGE. Rewriting it to the notice would
-  // hand a caller expecting JSON a lump of HTML with status 200, which is a
-  // worse answer than a refusal — the browser code reading it would parse the
-  // failure as data. 401 says what happened, and a visitor through the door
-  // never sees it: their cookie rides along on same-origin requests.
-  if (isApi) {
-    return NextResponse.json(
-      { error: "gated", detail: "This deployment is behind a password while it is being worked on." },
-      { status: 401 },
-    );
-  }
-
-  // A REWRITE, NOT A REDIRECT, and the difference is load-bearing here.
-  //
-  // This service runs behind a proxy with `next start -H 0.0.0.0`, so the
-  // origin the server sees is the internal listen address. A redirect built
-  // from it would send the visitor to 0.0.0.0:8080 — which is exactly the bug
-  // the POST handler had, found by asking the deployed site for it.
-  //
-  // A rewrite is resolved server-side and never reaches the browser, so an
-  // internal host cannot leak into one. It also leaves the visitor's own URL
-  // alone, which means that once they are through they are already where they
-  // were trying to go.
-  const to = req.nextUrl.clone();
-  to.pathname = GATE_PATH;
-  to.search = "";
-  return NextResponse.rewrite(to);
+  return NextResponse.next();
 }
 
 /**
- * Pages and the API, but never the framework's own assets.
+ * The API, and nothing else.
  *
- * Gate /_next and the holding page renders unstyled; gate the API and a live
- * fleet stops — Telegram posts webhooks to it and the browser calls it after
- * every page load. isGatedPath() draws the same line again for the paths this
- * pattern cannot express.
+ * This file guards /api/* against DNS rebinding and cross-site POSTs. It once
+ * also rendered a password holding page, which is why the matcher reached
+ * pages at all; that is gone and the matcher is back to what the guards
+ * actually need.
  */
 export const config = {
-  // THE APP ICONS ARE EXEMPT, and they have to be. The Privy login modal runs
-  // in an auth.privy.io iframe and loads our logo cross-origin; the gate cookie
-  // is SameSite, so that request arrives unauthenticated and the gate answered
-  // it with the password page — which the browser rendered as a broken image at
-  // the top of the sign-in dialog. An icon is not a secret; the gate exists to
-  // keep people out of the app, not out of a PNG.
-  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico|icon-|apple-touch-icon|logo\.svg|merrymenlogo).*)"],
+  // API ONLY. Pages were matched solely to render the holding page, which is
+  // gone; the two guards below it are and always were API-only, so matching
+  // a page now would run a Host allowlist over ordinary navigation and newly
+  // refuse a self-hosted install reached over a LAN.
+  matcher: ["/api/:path*"],
 };

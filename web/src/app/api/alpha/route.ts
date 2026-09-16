@@ -20,9 +20,9 @@
  *
  * WHAT THE GATE IS NOT.
  *
- *   NOT the site password. `lib/site-gate.ts` calls itself "A DOORKNOB, NOT A
- *   LOCK — one password for everyone, no session", and warns that somebody will
- *   eventually be tempted to put something real behind it.
+ *   NOT a site password. There used to be one — a shared "not yet" doorknob in
+ *   front of the whole deployment — and it was removed. It never authenticated
+ *   anything, which is exactly why this gate could never have been built on it.
  *
  *   NOT `settings.holderAddress`, which `/api/circle` reads. That is
  *   self-declared and shape-validated only — fine for a fee discount an owner
