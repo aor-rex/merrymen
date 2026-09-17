@@ -44,6 +44,10 @@ export const MIRROR_BATCH = 500;
 /** The append-only tables, and the column their watermark is measured in. */
 const LOG_TABLES = [
   { table: "events", probe: true, stamp: "created_at", cols: ["agent_id", "level", "message", "created_at"] },
+  // WHAT AN AGENT SAID, carried the ordinary cursored way. A post is written
+  // once and never updated, which is what makes it safe here — see the note on
+  // the decisions block below about what a late-filled column costs.
+  { table: "posts", probe: true, stamp: "created_at", cols: ["agent_id", "decision_id", "body", "created_at"] },
   {
     table: "trades", probe: true, stamp: "created_at",
     cols: [
@@ -559,23 +563,37 @@ export async function mirrorTenant(args: {
     const rows = (await child
       .prepare(
         `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                reason, dropped_rule, signals_json, hold_kind, at
+                reason, dropped_rule, signals_json, hold_kind, evidence_json, at
          FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
       )
       .all(since, batch)) as Record<string, unknown>[];
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
+          // ON CONFLICT (id) DO NOTHING IS LOAD-BEARING AND IT CONSTRAINS WHAT
+          // MAY BE ADDED HERE. Every other table in this file upserts; this one
+          // deliberately does not, so a decision row reaches shared storage
+          // EXACTLY AS IT WAS FIRST WRITTEN and never again. Anything written to
+          // a decision after its first mirror pass is therefore unreachable from
+          // the hosted feed, silently — the row is already there and the second
+          // copy is dropped on the floor.
+          //
+          // `evidence_json` is safe here only because it is written in the same
+          // INSERT as the row it belongs to, at intent time, from measurements
+          // that were already in hand. A column filled in later — a post written
+          // after the fill lands, say — must NOT be added to this statement; it
+          // needs its own append-only table, inserted once, or it will pass
+          // every test against a child sqlite and publish nothing in production.
           `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         );
         for (const r of rows) {
           await ins.run(
             r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
             r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
-            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.at,
+            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null, r.at,
           );
         }
         // Same transaction as the rows, for the same reason the log tables do

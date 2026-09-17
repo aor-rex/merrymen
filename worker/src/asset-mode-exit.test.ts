@@ -102,7 +102,7 @@ describe("the routes that are crypto by construction are gated, and say so", () 
   const index = read("index.ts");
 
   it("THE CLASS ROUTE RETURNS NOTHING under stocks only", () => {
-    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return \[\];/);
+    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return NO_CLASS;/);
   });
 
   it("AND THE TRENCHER SAYS SO RATHER THAN GOING QUIET", () => {
@@ -172,6 +172,13 @@ describe("a mode that empties the basket does not go quiet", () => {
   });
 
   it("and rides the existing channel rather than inventing a second one", () => {
-    assert.match(index, /const idleNow = idle \? renderWhy\(idle\) : modeEmptied;/);
+    // TWO REGISTERS, ONE CHANNEL. The owner's copy (with the remedy) is what the
+    // once-per-change gate keys on and what the event log gets; the public copy
+    // (the fact alone) is what becomes the post. Both derive from the same
+    // modeEmptied, so the dedup still fires on the fact and a mode change is
+    // still said exactly once — the pin is on the channel, not on one string.
+    assert.match(index, /const idleNow = idle \? renderWhy\(idle\) : modeEmptiedRemedy;/);
+    assert.match(index, /const idlePublic = idle \? renderWhy\(idle, "public"\) : modeEmptied;/);
+    assert.match(index, /const modeEmptiedRemedy = modeEmptied === null \? null : `\$\{modeEmptied\}\./, "the remedy is appended to the fact, never a second fact");
   });
 });

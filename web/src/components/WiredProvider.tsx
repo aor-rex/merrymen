@@ -32,7 +32,25 @@ interface Wired {
   toggle(slug: string, on: boolean): Promise<void>;
 }
 
-const Ctx = createContext<Wired>({ wired: [], max: 8, known: false, toggle: async () => {} });
+/**
+ * EXPORTED so a test can render a consumer against a KNOWN answer.
+ *
+ * The provider's own state arrives from a `fetch` inside `useEffect`, which
+ * does not run under `renderToStaticMarkup` — so a test driving the real
+ * provider can only ever observe the empty set, i.e. exactly the half of the
+ * property that holds when the feature is deleted. Seeding the context is what
+ * makes "a wired slug draws a ring" falsifiable at all.
+ *
+ * Not a test-only hatch: this is the ordinary shape of a React context, and the
+ * default below is still the thing every unwrapped consumer reads.
+ */
+export const WiredContext = createContext<Wired>({
+  wired: [],
+  max: 8,
+  known: false,
+  toggle: async () => {},
+});
+const Ctx = WiredContext;
 
 export function useWired(): Wired {
   return useContext(Ctx);

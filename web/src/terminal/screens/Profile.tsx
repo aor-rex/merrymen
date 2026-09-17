@@ -16,6 +16,7 @@ import { strategyName } from "../strategy";
 import { Coin, Face } from "../ui";
 import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
+import { WireButton } from "@/components/WireButton";
 
 export function Profile({
   agent,
@@ -23,12 +24,29 @@ export function Profile({
   tokens,
   onBack,
   onToken,
+  isMine = false,
 }: {
   agent: LiveAgent;
   theses: Thesis[];
   tokens: LiveToken[];
   onBack: () => void;
   onToken: (id: string) => void;
+  /**
+   * Is this the viewer's OWN agent?
+   *
+   * Passed in rather than derived here because `LiveMine.slug` is
+   * `string | null` and this screen never receives `mine` — App.tsx holds it.
+   *
+   * It suppresses the wire control, and the reason is not tidiness: an agent
+   * already reads its own published theses. The orchestrator materialises them
+   * into `peers.json` as `own` (peer-files.ts), precisely so an agent's memory
+   * survives the redeploy that wipes its sqlite. Wiring yourself in would spend
+   * one of eight prompt slots duplicating something already in the prompt.
+   *
+   * The server refuses it too — see api/follow/route.ts. This is the courtesy;
+   * that is the rule.
+   */
+  isMine?: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
   const posts = theses
@@ -79,6 +97,12 @@ export function Profile({
           />
         </div>
       </header>
+      {/* ABOVE THE FIRST NUMBER, and that placement is the argument.
+          WireButton.tsx:20-22 says an owner about to hand somebody else's
+          reasoning to something that spends their money is owed the sentence
+          BEFORE they click. Below the return figure it would read as a reaction
+          to the performance; here it reads as what it is. */}
+      {!isMine && <WireButton slug={agent.slug} name={agent.name} />}
       <section className="public-performance" aria-label="Agent performance">
         <div className="public-performance-numbers">
           <div>

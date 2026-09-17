@@ -1,6 +1,7 @@
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { faceSrc } from "./live";
+import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
 
@@ -38,7 +39,29 @@ export function Face({
   const [failed, setFailed] = useState(false);
   const src = faceSrc(slug ?? null);
   useEffect(()=>setFailed(false),[src]);
-  const cls = large ? "face lg" : pin ? "face pin" : small ? "face sm" : "face";
+  /**
+   * THE WIRE RING, AND WHY IT IS READ HERE RATHER THAN PASSED IN.
+   *
+   * Which agents you read is a fact about the VIEWER, and the screens above are
+   * server-rendered and cached — `read-theses.ts` records that its response is
+   * byte-identical for every visitor BY CONSTRUCTION, and that a session read
+   * in that path turns the caching into a leak. So the pages stay cacheable and
+   * the ring is applied in this leaf, after paint, from a route that is already
+   * per-caller and already `force-dynamic`.
+   *
+   * This is the same argument `components/AgentAvatar.tsx` makes, and it is
+   * here because that file is not on any screen — the terminal renders `Face`.
+   * The ring claim ("it appears everywhere that agent appears") was written
+   * there and was false everywhere until this.
+   *
+   * A signed-out viewer has an empty set and sees no rings, which is correct:
+   * they have no agent to wire with. `known` is not consulted, deliberately —
+   * an unknown answer and an empty one both mean "draw no ring", and the only
+   * difference between them is a claim this element does not make.
+   */
+  const { wired } = useWired();
+  const on = slug != null && wired.includes(slug);
+  const cls = `${large ? "face lg" : pin ? "face pin" : small ? "face sm" : "face"}${on ? " wired" : ""}`;
   return (
     <span className={cls} style={{ background: gradient(name) }} aria-hidden>
       {initialsOf(name)}

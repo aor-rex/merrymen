@@ -102,6 +102,10 @@ import { SponsorRefused } from "./paymaster";
 import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
+import type { Why } from "./strategies/reasons";
+import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
+import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
+import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
@@ -141,7 +145,7 @@ import {
 } from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { startupSlotMs } from "./stagger";
-import { resolveLlm } from "./llm";
+import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 import {
@@ -155,7 +159,7 @@ import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, w
 import { TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
-import type { Holding, Snapshot, Strategy } from "./strategies/types";
+import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
 import { startVirtualsStreamer } from "./virtuals-streamer";
@@ -236,6 +240,22 @@ const CURVE_DEADLINE_SEC = 60;
  * on that. Same discipline PONS_MAX_EVALUATE applies to discovery.
  */
 const CLASS_MAX_READS = 8;
+
+/**
+ * A class pass that proposes nothing.
+ *
+ * Both class producers return a `Tick` rather than a bare `TradeIntent[]`, so
+ * that the evidence behind a trade can travel WITH it — the intent itself is
+ * deliberately numbers-only and has nowhere to put a reason. A shared constant
+ * because the two functions between them have eighteen ways of deciding there
+ * is nothing to do, and `{ intents: [], why: [] }` eighteen times invites the
+ * one place somebody writes `{ intents: [], why: [null] }` and pairs a reason
+ * with no trade.
+ *
+ * Frozen: it is returned by reference from every one of those sites.
+ */
+const NO_CLASS: Tick = Object.freeze({ intents: [], why: [] }) as Tick;
+
 /**
  * How much of an immediate round trip may be lost before an entry is refused.
  *
@@ -354,7 +374,11 @@ import {
   addEquity,
   addEvent,
   addFeeAccrual,
+  addPost,
   addTrade,
+  decisionEvidence,
+  hasPost,
+  recentPosts,
   basisSymbols,
   classPositionCurves,
   classPositions,
@@ -982,7 +1006,7 @@ async function main() {
     }
   }
 
-  async function proposeClassEntries(): Promise<TradeIntent[]> {
+  async function proposeClassEntries(): Promise<Tick> {
     // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, and a
     // simulated class fill would need a price for a token with no oracle, no
     // pool and no TWAP — necessarily the curve's own reserves, which
@@ -991,14 +1015,14 @@ async function main() {
     // — the vault holding, delivery, fee-on-transfer, honeypots — is exactly
     // what a simulator cannot model, on the one venue where the tape is written
     // by the adversary.
-    if (paperActive()) return [];
+    if (paperActive()) return NO_CLASS;
     // A class entry is a launchpad coin by construction, so stocks-only excludes
     // the whole route. No symbol set to sift, and therefore no drift surface —
     // this is a gate, not a filter.
-    if (cfg.assetMode === "stocks") return [];
-    if (!active) return [];
+    if (cfg.assetMode === "stocks") return NO_CLASS;
+    if (!active) return NO_CLASS;
     const vault = grantPonsClassVault(active.grant);
-    if (!vault) return [];
+    if (!vault) return NO_CLASS;
 
     /**
      * THE EXECUTION GATES MOVED DOWN, AND THAT IS THE POINT.
@@ -1024,7 +1048,7 @@ async function main() {
     // be read, and an unreadable position count must not read as zero — that
     // would let the ceiling free itself exactly when the book is unknown.
     const held = await classPositions(active.agentId);
-    if (held === null) return [];
+    if (held === null) return NO_CLASS;
     /**
      * TWO SETS FROM ONE READ, AND THEY ARE DELIBERATELY DIFFERENT.
      *
@@ -1124,7 +1148,7 @@ async function main() {
         buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
         activityUnknown: classActivity === null,
       });
-      return [];
+      return NO_CLASS;
     }
 
     const { legs, refused } = await readClassLegs({
@@ -1309,15 +1333,15 @@ async function main() {
       activityUnknown: classActivity === null,
     });
 
-    if (legs.length === 0) return [];
+    if (legs.length === 0) return NO_CLASS;
 
     /**
      * NOW THE EXECUTION GATES. Everything above this line is looking; nothing
      * above it can spend. These three say DO NOT BUY, and they are applied here
      * so that the scan and its report happen first.
      */
-    if (!cfg.classSnipeEnabled) return [];
-    if (cfg.classPerEntryUsdg <= 0) return [];
+    if (!cfg.classSnipeEnabled) return NO_CLASS;
+    if (cfg.classPerEntryUsdg <= 0) return NO_CLASS;
     /**
      * THE CEILING, AGAINST POSITIONS RATHER THAN AGAINST HISTORY.
      *
@@ -1341,14 +1365,14 @@ async function main() {
         lastClassCeilingKey = line;
         console.log(`[class] ${line} — waiting for a position to close`);
       }
-      return [];
+      return NO_CLASS;
     }
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
     // proposal keeps the decision legible: an owner reading the feed sees one
     // considered entry rather than a wall of refusals from a batch that could
     // only ever have filled its first member.
-    if (!choice.pick) return [];
+    if (!choice.pick) return NO_CLASS;
     const leg = scored.find((s) => s.leg.token === choice.pick!.token)!.raw;
 
     // THE LAST FIVE SILENT REFUSALS ON THIS PATH.
@@ -1362,12 +1386,12 @@ async function main() {
     //
     // Logged on CHANGE, like the refusal tally above: the answer is usually the
     // same one and a line per tick is a line nobody reads.
-    const refuse = (why: string): TradeIntent[] => {
+    const refuse = (why: string): Tick => {
       if (why !== lastClassSizingKey) {
         lastClassSizingKey = why;
         console.log(`[class] ${leg.symbol}: ${why}`);
       }
-      return [];
+      return NO_CLASS;
     };
     if (spend <= 0n) return refuse(`nothing to spend — entry size ${cfg.classPerEntryUsdg} against a per-trade cap of ${Number(active.limits.perTradeUsdg) / 1e6}`);
 
@@ -1443,18 +1467,53 @@ async function main() {
       );
     }
 
-    return [
-      {
-        kind: "curve-trade",
-        target: vault,
-        curve: leg.curve,
-        assetIn: leg.quoteToken,
-        assetOut: leg.token,
-        amountInRaw: spend,
-        minAmountOutRaw: floor,
-        notionalUsdg: spend,
-      },
-    ];
+    return {
+      intents: [
+        {
+          kind: "curve-trade",
+          target: vault,
+          curve: leg.curve,
+          assetIn: leg.quoteToken,
+          assetOut: leg.token,
+          amountInRaw: spend,
+          minAmountOutRaw: floor,
+          notionalUsdg: spend,
+        },
+      ],
+      /**
+       * THE EVIDENCE, CARRIED RATHER THAN RE-READ.
+       *
+       * Every figure here was measured in the pass that chose this curve, a few
+       * frames up. Re-reading any of it at publication time would describe a
+       * different market and call it the reason for this trade.
+       *
+       * `recentTrades` and the trader count keep their NULLS. index.ts closes
+       * that gap where the activity map is built — a tape we could not read is
+       * not a quiet tape — and this is the one place downstream that could
+       * quietly undo it with a `?? 0`.
+       */
+      why: [
+        {
+          code: "class-enter",
+          symbol: leg.symbol,
+          usdgRaw: spend,
+          trades: choice.pick.recentTrades,
+          // TRADERS COMES FROM THE SAME MAP AS TRADES, so the two figures are
+          // one tape read rather than two — a breadth ratio built from two
+          // different moments describes neither. Null when the tape is
+          // unreadable, and a measured 0 only when the map HAS the curve.
+          traders: classActivity === null ? null : (classActivity.get(leg.curve.toLowerCase())?.traders ?? 0),
+          depthRaw: choice.pick.realDepthRaw,
+          impactBps: impact,
+          // costBps lives on the scored ENTRY, not the leg: it only exists for a
+          // curve that would quote a buy at this size, which is exactly when a
+          // round-trip cost is a real number rather than an assumption.
+          costBps: scored.find((s) => s.leg.token === choice.pick!.token)?.entry?.costBps ?? null,
+          graduationBps: progressBps,
+          field: scored.length,
+        },
+      ],
+    };
   }
 
   /**
@@ -1970,22 +2029,23 @@ async function main() {
    * later, against a curve that is by then thinner, and the whole point is that
    * the position stops existing.
    */
-  async function proposeClassExits(): Promise<TradeIntent[]> {
-    if (paperActive()) return [];
-    if (!active) return [];
+  async function proposeClassExits(): Promise<Tick> {
+    if (paperActive()) return NO_CLASS;
+    if (!active) return NO_CLASS;
     const vault = grantPonsClassVault(active.grant);
-    if (!vault) return [];
+    if (!vault) return NO_CLASS;
 
     // NULL IS NOT EMPTY. An unreadable position list must not read as "nothing
     // held" — that would silently skip every exit at the exact moment the
     // database is unwell, which is when a stuck position is most likely.
     const held = await classPositions(active.agentId);
-    if (held === null) return [];
+    if (held === null) return NO_CLASS;
 
     const now = Math.floor(Date.now() / 1000);
     const maxHold = cfg.classMaxHoldSec;
     const exitAtPct = cfg.classExitAtGraduationPct;
     const out: TradeIntent[] = [];
+    const whys: Why[] = [];
 
     for (const p of held) {
       /**
@@ -2060,15 +2120,54 @@ async function main() {
       }
 
       const heldSec = Math.max(0, now - p.firstSeen);
-      const progressPct = (curveDepthFraction(reserves) ?? 0) * 100;
+      /**
+       * THE COALESCE IS KEPT FOR THE GATE AND REFUSED FOR THE RECORD.
+       *
+       * `curveDepthFraction` returns null when the curve will not say how close
+       * it is. Coalescing that to 0 is the SAFE direction for deciding — an
+       * unreadable curve never trips the cliff, so we never sell on a figure we
+       * do not have. It is a lie for reporting, because 0% and "we could not
+       * read it" are different facts and only one of them is about the curve.
+       *
+       * So the gate keeps the zero and the evidence keeps the null.
+       */
+      const depthFraction = curveDepthFraction(reserves);
+      const progressPct = (depthFraction ?? 0) * 100;
       const aged = heldSec >= maxHold;
       const graduating = progressPct >= exitAtPct;
       if (!aged && !graduating) continue;
 
       const quoted = curveSellOut(reserves, balance);
-      if (quoted === null || quoted <= 0n) continue;
+      // A POSITION THAT CANNOT BE QUOTED IS STUCK, AND THAT IS NEWS.
+      //
+      // Every other refusal in this loop warns the owner; these two `continue`d
+      // in silence, every tick, forever — so a position whose curve will not
+      // quote a sell was indistinguishable from one that simply had not aged.
+      // It matters more now than it did: the feed is about to start narrating
+      // these exits, and an exit that never happens would otherwise be the one
+      // thing the agent never mentions.
+      //
+      // The de-duplication is the owner's event channel, not a new one:
+      // addEvent is already once-per-change for an unchanged string.
+      if (quoted === null || quoted <= 0n) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is ready to leave but its curve will not quote a sell, so nothing was ` +
+            `sent. Retrying each tick; \`merrymen recover\` is the way out if it stays that way.`,
+        );
+        continue;
+      }
       const floor = curveMinOut(quoted, cfg.slippageBps);
-      if (floor === null || floor <= 0n) continue;
+      if (floor === null || floor <= 0n) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is ready to leave but no minimum-output floor could be derived, and a ` +
+            `sell with no floor is how a position leaves for nothing. Retrying each tick.`,
+        );
+        continue;
+      }
 
       console.log(
         `[class] exiting ${p.symbol ?? short(p.token)} — ${
@@ -2088,8 +2187,30 @@ async function main() {
         // count as USDG.
         notionalUsdg: quoted,
       });
+      /**
+       * WHICH OF THE TWO IT WAS.
+       *
+       * `aged` and `graduating` used to be spent entirely on the log line
+       * above: both branches then pushed byte-identical intents, so from here
+       * on a clock exit and a cliff exit were the same bytes and no reader —
+       * owner, feed or peer — could ever tell them apart.
+       *
+       * THE CLIFF WINS A TIE, and the order is the claim. When a position is
+       * both old enough and close enough to graduating, the cliff is the reason
+       * it is leaving NOW: the clock would have tolerated another tick, and the
+       * cliff is a door closing. Reporting the clock there would be true about
+       * the position and wrong about the decision.
+       */
+      whys.push({
+        code: "class-exit",
+        symbol: p.symbol ?? short(p.token),
+        cause: graduating ? "cliff" : "clock",
+        heldSec,
+        graduationBps: depthFraction === null ? null : Math.round(depthFraction * 10_000),
+        proceedsRaw: quoted,
+      });
     }
-    return out;
+    return { intents: out, why: whys };
   }
 
   function curveLegsNow(): {
@@ -5586,12 +5707,194 @@ async function main() {
    * hits the wall. No-op when already stamped — the strategist journals its own
    * survivors (with the model's reason); this covers deterministic strategies,
    * chat, and selftest so EVERY trade is attributable to a decision. */
-  async function ensureDecision(intent: TradeIntent, source: string, reason?: string): Promise<void> {
+
+  /**
+   * The bounds every evidence band is measured against.
+   *
+   * PASSED IN, NEVER GUESSED INSIDE THE BANDER. "liquidity thin" is a claim about
+   * this owner's market, and it is only defensible because the edges are anchored
+   * to numbers this route already acts on — the depth it refuses below, the round
+   * trip it will not accept, the graduation point at which the vault can no
+   * longer sell. A band function that invented its own round numbers would be
+   * publishing an opinion in the agent's voice that nothing in the system holds.
+   */
+  function classBandBounds(): BandBounds {
+    return {
+      depthFloorUsdg: cfg.classMinDepthUsdg,
+      roundTripCeilingBps: CLASS_MAX_ROUND_TRIP_BPS,
+      exitAtBps: Math.max(1, cfg.classExitAtGraduationPct * 100),
+      activityFloorTrades: ACTIVITY_GATE.minTrades,
+      impactCeilingBps: cfg.maxImpactBps,
+      maxHoldSec: cfg.classMaxHoldSec,
+    };
+  }
+
+  /**
+   * Everything one class `Why` contributes to its decision row, in the order
+   * `ensureDecision` takes it — so the two call sites spread it and cannot pair
+   * a reason with the wrong trade's evidence by getting an argument out of order.
+   *
+   * THE ACTION COMES FROM THE PRODUCER, not from the token addresses.
+   * `describeIntent` reads buy-vs-sell off `assetOut !== USDG`, which is right
+   * only while every class curve is USDG-quoted. Entries are refused unless they
+   * are, but a RECOVERED position need not be — policy.ts records that 42.8% of
+   * Pons curves quote in a stock token — and such a position would have had its
+   * own exit stamped "buy". The producer knows: a `class-exit` Why is a sell
+   * because the function that emitted it only ever sells.
+   */
+  function classDecision(
+    w: Why | null | undefined,
+  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null } | undefined] {
+    if (!w || (w.code !== "class-enter" && w.code !== "class-exit")) return [undefined, undefined];
+    const e = classEvidenceOf(w, classBandBounds());
+    return [
+      // THE PUBLIC REGISTER: this string becomes a post. The owner's copy of
+      // the same Why, remedies included, goes through addEvent elsewhere.
+      renderWhy(w, "public"),
+      {
+        action: w.code === "class-exit" ? "sell" : "buy",
+        symbol: w.symbol,
+        evidence: e === null ? null : JSON.stringify(e),
+      },
+    ];
+  }
+  /**
+   * WRITE THE AGENT'S OWN VIEW OF A TRADE THAT ACTUALLY HAPPENED.
+   *
+   * Every exit here is a normal outcome and none of them is an error: no
+   * evidence (not a class trade), no credentials (this owner runs no model), the
+   * model passing, the gate refusing. The trade is still published — its
+   * deterministic sentence is on the decision row either way. What is absent is
+   * only the agent's voice, and a social layer that must always produce
+   * something is one that will eventually produce anything.
+   *
+   * NOTHING HERE MAY THROW INTO THE TRADING PATH. It is invoked with `void` from
+   * the fill hook, so the whole body is wrapped: a model outage, a malformed
+   * completion or a storage failure costs a post and never a trade.
+   */
+  async function maybePost(decisionId: string, status: string): Promise<void> {
+    try {
+      // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
+      // decision the agent made and a view worth reading. `publishableThesis`
+      // carries the paper flag, so nobody is misled about the money. The
+      // predicate lives in social-post.ts so a test can pin it directly rather
+      // than reading this closure as text.
+      if (!postableStatus(status)) return;
+      if (!active) return;
+
+      // ALREADY SAID IS NOT A REASON TO SAY IT AGAIN, and a read failure is not
+      // permission either — `hasPost` returns null for that, and null is not
+      // false. An agent repeating itself about one trade reads as a bot.
+      const already = await hasPost(decisionId);
+      if (already !== false) return;
+
+      const rawEvidence = await decisionEvidence(decisionId);
+      if (!rawEvidence) return;
+      let evidence: ClassEvidence;
+      try {
+        evidence = JSON.parse(rawEvidence) as ClassEvidence;
+      } catch {
+        return;
+      }
+      if (!evidence?.bands || Object.keys(evidence.bands).length === 0) return;
+
+      const creds = resolveLlm(cfg);
+      if (!creds) return;
+
+      const ctx = {
+        // The owner-chosen name, the same one the desk persona uses. Falls back
+        // rather than inventing one: an unnamed agent still has a view.
+        name: cfg.agentName?.trim() || "this desk",
+        evidence,
+        traits: traitsOf(
+          {
+            maxHoldSec: cfg.classMaxHoldSec,
+            exitAtGraduationPct: cfg.classExitAtGraduationPct,
+            perEntryUsdg: cfg.classPerEntryUsdg,
+            maxImpactBps: cfg.maxImpactBps,
+            minDepthUsdg: cfg.classMinDepthUsdg,
+          },
+          {
+            maxHoldSec: SETTINGS_DEFAULTS.classMaxHoldSec ?? 21600,
+            exitAtGraduationPct: SETTINGS_DEFAULTS.classExitAtGraduationPct ?? 85,
+            perEntryUsdg: SETTINGS_DEFAULTS.classPerEntryUsdg ?? 5,
+            maxImpactBps: SETTINGS_DEFAULTS.maxImpactBps ?? 300,
+            minDepthUsdg: SETTINGS_DEFAULTS.classMinDepthUsdg ?? 100,
+          },
+        ),
+        recent: await recentPosts(active.agentId, VOICE_WINDOW),
+      };
+
+      const raw = await llmText(creds, {
+        system:
+          "You write short posts as a trader, for other traders. You never invent a figure, " +
+          "never predict a price, and you vary how you write.",
+        prompt: writerPrompt(ctx),
+        // ROOM FOR HIDDEN REASONING, NOT FOR A LONG POST. A reasoning model
+        // spends its completion budget thinking BEFORE it writes: gpt-oss-120b
+        // measured 198 reasoning tokens on this prompt and had nothing left, so
+        // a 200 budget returned HTTP 200 with an empty completion on every
+        // call. The post itself is capped at POST_MAX either way.
+        maxTokens: 800,
+      });
+
+      const verdict = admitPost(raw, ctx);
+      if (!verdict.ok || !verdict.body) {
+        // THE REFUSAL IS OPERATOR-FACING ONLY. It names a model's behaviour, and
+        // a reader of the public feed can do nothing with it — the feed simply
+        // carries the deterministic sentence instead.
+        console.log(`[social] no post for ${decisionId} — ${verdict.refusal}`);
+        return;
+      }
+      await addPost(active.agentId, decisionId, verdict.body);
+    } catch (e) {
+      console.error("[social] post failed:", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * `known` is WHAT THE PRODUCER KNOWS AND `describeIntent` CANNOT DERIVE.
+   *
+   * Two things on the class route, and both were wrong before it existed:
+   *
+   *   SYMBOL. `symbolOfToken` searches watchTokens and STOCK_TOKENS. A class
+   *   token is in neither BY DEFINITION — it is a launch discovered at runtime
+   *   — so every class decision row carried symbol NULL, and `headOf` rendered
+   *   the post as "buy 5.00 USDG" with no ticker. It also made those rows
+   *   invisible to every symbol-keyed surface.
+   *
+   *   ACTION. The curve-trade arm decides buy-vs-sell by `assetOut !== USDG`,
+   *   which is right only while every class curve is USDG-quoted. Entries are
+   *   refused unless they are (class-legs.ts), but a RECOVERED row need not be:
+   *   policy.ts records that 42.8% of Pons curves are quoted in a stock token.
+   *   Such a position would have its own EXIT stamped "buy" — an agent
+   *   publicly announcing a purchase as it sold.
+   *
+   * The producer does not have to guess at either: it built the intent, so it
+   * knows which side of the trade it is on and what the thing is called. This
+   * is that knowledge travelling with the trade instead of being re-derived
+   * from token addresses further downstream.
+   */
+  async function ensureDecision(
+    intent: TradeIntent,
+    source: string,
+    reason?: string,
+    known?: { action?: string; symbol?: string; evidence?: string | null },
+  ): Promise<void> {
     if (intent.decisionId || !active) return;
     const id = newDecisionId();
     intent.decisionId = id;
     const d = describeIntent(intent);
-    await addDecision({ id, agent_id: active.agentId, source, symbol: d.symbol, action: d.action, size_usdg: d.sizeUsdg, reason });
+    await addDecision({
+      id,
+      agent_id: active.agentId,
+      source,
+      symbol: known?.symbol ?? d.symbol,
+      action: known?.action ?? d.action,
+      size_usdg: d.sizeUsdg,
+      reason,
+      evidence_json: known?.evidence ?? null,
+    });
   }
 
   /**
@@ -5910,6 +6213,23 @@ async function main() {
       // keeps the initializer's narrowing and resolves the reads to `never`.
       lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
       const wrote = await addTrade({ ...row, decision_id });
+      /**
+       * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
+       *
+       * GATED ON A FILL, NOT ON A DECISION, and this is the whole reason the
+       * call sits here rather than beside `ensureDecision`. A decision row
+       * exists for every intent including ones the wall turns back, and class
+       * entries are re-proposed with a fresh intent every tick — so a writer
+       * hung off the decision would mint a new post, in the agent's own voice,
+       * about a position it never took, once per tick, forever, each one costing
+       * a model call. `narrateTrade` learned this already and gates the same way.
+       *
+       * Deliberately not awaited into the trading path's critical section beyond
+       * what it needs: it writes its own row and cannot fail a trade. `wrote`
+       * matters because a post about a fill whose ledger row did not land would
+       * be the agent talking about a trade the ledger cannot account for.
+       */
+      if (wrote && decision_id) void maybePost(decision_id, row.status);
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
@@ -9970,10 +10290,19 @@ async function main() {
         .length === 0 &&
       legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
         ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
-          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade. ` +
-          `Change the mode in Settings, or add something it allows to your basket.`
+          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade`
         : null;
-    const idleNow = idle ? renderWhy(idle) : modeEmptied;
+    /**
+     * TWO REGISTERS FROM ONE FACT. The owner's event log gets the remedy —
+     * they are the one person who can change the mode. The decision row is a
+     * public post, and "Change the mode in Settings" on a public feed is an
+     * instruction to a stranger about somebody else's account; it was live for
+     * weeks and is the exact texture of a worker log leaking onto a desk.
+     * `renderWhy` draws the same line for its own remedy-bearing arms.
+     */
+    const modeEmptiedRemedy = modeEmptied === null ? null : `${modeEmptied}. Change the mode in Settings, or add something it allows to your basket.`;
+    const idleNow = idle ? renderWhy(idle) : modeEmptiedRemedy;
+    const idlePublic = idle ? renderWhy(idle, "public") : modeEmptied;
     if (idleNow !== lastIdleReason) {
       lastIdleReason = idleNow;
       if (idleNow) {
@@ -10010,7 +10339,9 @@ async function main() {
           id: newDecisionId(),
           agent_id: agentId,
           source: publicationSourceFor(strategy.name),
-          reason: idleNow,
+          // Non-null whenever idleNow is — both derive from the same Why or the
+          // same modeEmptied — but the type cannot see across the two ternaries.
+          reason: idlePublic ?? undefined,
         });
       }
     }
@@ -10024,7 +10355,9 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
-      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w) : undefined);
+      // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
+      // advice for the owner and was going out on every capped keel-top.
+      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined);
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
@@ -10067,12 +10400,29 @@ async function main() {
     // allowance opening a new position cannot close one that is about to become
     // unsellable — a curve at 85% of graduation has a deadline, and a new
     // candidate never does. The way out goes first.
-    for (const intent of await proposeClassExits()) {
-      await ensureDecision(intent, "class-route");
+    /**
+     * AND NOW WITH A REASON — the same third argument every other producer in
+     * this file has always passed.
+     *
+     * `ensureDecision(intent, "class-route")` with no reason is what made the
+     * class route the one rail that traded and said nothing: `addDecision` wrote
+     * NULL, and `class-route` was not in SOURCE_POLICY either, so both the row
+     * and its publication were empty. An agent completed a full autonomous buy
+     * and sell of a launch and its own feed never mentioned it.
+     *
+     * `why` is positionally paired with `intents` — the convention `takeTick`
+     * already established for every strategy — so the reason cannot drift onto
+     * the wrong trade as long as neither array is filtered independently of the
+     * other. Neither is.
+     */
+    const exits = await proposeClassExits();
+    for (const [at, intent] of exits.intents.entries()) {
+      await ensureDecision(intent, "class-route", ...classDecision(exits.why[at]));
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
-    for (const intent of await proposeClassEntries()) {
-      await ensureDecision(intent, "class-route");
+    const entries = await proposeClassEntries();
+    for (const [at, intent] of entries.intents.entries()) {
+      await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
   }

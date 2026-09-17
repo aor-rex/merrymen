@@ -86,6 +86,15 @@ export interface ThesisRow {
    * maps account -> slug over the rows it already has.
    */
   slug?: string | null;
+  /**
+   * THE AGENT'S OWN POST about this decision, joined from the posts table.
+   *
+   * Optional because most decisions have none and never will: it is written
+   * only for a class trade that actually FILLED, and only when the writer had
+   * something to say and cleared its gate. Absent is the common case and is not
+   * a fault.
+   */
+  post?: string | null;
 }
 
 export interface PublicThesis {
@@ -145,6 +154,15 @@ export interface PublicThesis {
    */
   shadow: boolean;
   reason: string | null;
+  /**
+   * What the agent said in its own voice, or null.
+   *
+   * SEPARATE FROM "reason", not a replacement for it. "reason" is our sentence
+   * and is always safe; this is the model's, and carries model trust. A surface
+   * shows this one when it is there and falls back to , so an agent
+   * with nothing to say is never silent about a trade it made.
+   */
+  post: string | null;
   /** How many times this exact thesis was said in the window. */
   said: number;
   /** Epoch seconds. Formatted by the page, so this module stays pure. */
@@ -209,6 +227,29 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
+  /**
+   * THE CLASS ROUTE — the one rail that traded and said nothing.
+   *
+   * Every class-vault entry and exit files under this source, and it was absent
+   * from this map, so `publishableThesis` dropped all of it: two agents
+   * completed full autonomous buy-and-sell round trips of a launch and neither
+   * feed, nor any peer file, nor `read_peers` ever mentioned it. The most
+   * interesting thing this product does was the one thing it never talked about.
+   *
+   * "strategy" TRUST, and that is a claim about authorship, not about
+   * confidence. A class decision's `reason` is `renderWhy` output — our words,
+   * written in advance, from a typed `Why` a deterministic producer emitted. It
+   * is the same trust `strategy:even-keel` has and for exactly the same reason;
+   * `reasons.ts` makes publishability a property of the type system rather than
+   * something a reviewer has to remember.
+   *
+   * SO NOTHING MODEL-WRITTEN MAY EVER BE PUT IN THAT SLOT. `publishableThesis`
+   * truncates to REASON_MAX only when the policy is "model", so prose smuggled
+   * into a "strategy" row publishes UNCAPPED and unscanned. A post written in an
+   * agent's own voice is model output and belongs in its own field with its own
+   * gate — never in `reason`.
+   */
+  "class-route": "strategy",
   // NOT here, and each for its own reason:
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself
@@ -242,6 +283,18 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
  */
 export const SHADOW_SOURCES = ["brain-shadow"] as const;
 const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
+
+/**
+ * SOURCES WHOSE POSTS ARE ABOUT TRADES THAT HAPPENED.
+ *
+ * A source in this set publishes only when its decision LANDED. Refused,
+ * dropped, reverted and pending rows stay in the ledger and out of the feed.
+ * The argument is at the gate below; the set is here beside SHADOW_SOURCES
+ * because the two are the same kind of thing — a per-source rule about which
+ * outcomes may be spoken about — and a reader should find them together.
+ */
+export const TRADED_ONLY_SOURCES = ["class-route"] as const;
+const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
@@ -526,6 +579,35 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     reason = classifyDrop(row.dropped_rule);
   }
 
+  /**
+   * THE AGENT'S OWN WORDS, IN THEIR OWN FIELD — and never in `reason`.
+   *
+   * A social post is MODEL PROSE and has to be treated as such: capped, address
+   * scanned, dropped rather than trimmed. `reason` cannot hold it, because the
+   * cap above is applied only when `policy === "model"` and a class post rides a
+   * `strategy` source — so putting it there would publish model output UNCAPPED
+   * and unscanned, and would destroy the thing `reasons.ts` built, which is that
+   * for a strategy source every published word was written by us in advance.
+   *
+   * Two fields, two trust levels, one row. The deterministic sentence stays
+   * exactly what it was; the post is additional and separately refusable, so a
+   * post that fails this gate costs the agent its voice on that trade and
+   * nothing else — the trade is still published, with our words.
+   *
+   * CAPPED AT REASON_MAX, the same ceiling, because both land on the same
+   * surfaces and a post cut mid-word reads as a broken product wherever it
+   * appears.
+   */
+  let post: string | null = null;
+  if (row.post && row.post.trim()) {
+    const body = row.post.trim().slice(0, REASON_MAX);
+    // The address backstop applies to it independently. It is the same rule as
+    // below and it is repeated here rather than deferred, because a post that
+    // names an address must cost the POST and not the whole thesis: the trade
+    // and our own sentence about it are still safe to publish.
+    post = ADDRESSY.test(body) ? null : body;
+  }
+
   // ── shadow ────────────────────────────────────────────────────────────────
   // Resolved before the outcome chain, because every arm of that chain assumes
   // the decision was at least ALLOWED to become a trade, and this one was not.
@@ -566,6 +648,27 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
           ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
           : outcomeOf(row.status, row.reject_rule);
 
+  /**
+   * A CLASS POST IS ABOUT A TRADE THAT HAPPENED, or it is not a post.
+   *
+   * Every other source publishes its refusals, and for the strategist that is
+   * right: "I wanted to buy X because Y, and the wall said no" is the model's
+   * actual thesis with an honest outcome on it. The class route is different in
+   * a way that matters for a feed. Its reason is OUR deterministic sentence, its
+   * entries are re-proposed with a fresh decision row every tick for as long as
+   * the candidate qualifies, and the evidence in that sentence moves a little
+   * each tick — so a persistently refused entry does not collapse under the
+   * feed's GROUP BY into one row with a count. It becomes twenty-seven nearly
+   * identical posts saying "taking 5.00 USDG of X" beside a badge saying it did
+   * not. That is refusal spam in the agent's own voice, and a trading desk does
+   * not post every order the risk desk bounced.
+   *
+   * The decision row is untouched — it is still in the ledger, still auditable,
+   * still what /why reads. It just is not social content. `postableStatus` in
+   * social-post.ts draws the same line for the writer, one layer earlier.
+   */
+  if (TRADED_ONLY.has(row.source ?? "") && outcome !== "landed") return null;
+
   // A post with neither a head nor a reason says nothing at all.
   if (!head && !reason) return null;
 
@@ -604,6 +707,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     outcomeText: text,
     shadow,
     reason,
+    post,
     said: Math.max(1, Number(row.said ?? 1)),
     at: Number(row.last_at ?? 0),
     firstAt: Number(row.first_at ?? row.last_at ?? 0),

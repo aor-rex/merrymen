@@ -7930,3 +7930,95 @@
   font-weight: 550;
   cursor: pointer;
 }
+
+/* ── THE WIRE CONTROL ──────────────────────────────────────────────────────
+ *
+ * WHY THESE RULES ARE HERE AND NOT IN styles/agent.css, WHICH ALREADY HAS THEM.
+ *
+ * agent.css styles `.mm-wire` against the `--mm-*` token set. `app/layout.tsx`
+ * loads exactly four stylesheets — terminal.css, forms.css, polish.css and
+ * root.css — and styles/tokens.css is not one of them, so every `--mm-*` in
+ * that file resolves to nothing inside the terminal. The button would have
+ * mounted and rendered as unstyled inline text with no ring, no budget and no
+ * section edge: the control would have been there, done its job, and looked
+ * broken. Ported rather than cross-imported, because pulling agent.css in would
+ * bring a whole second design system's cascade with it.
+ *
+ * `--wire` is its own hue, deliberately NOT --lime. Lime is this terminal's
+ * action colour — the thing you press. A ring is not an action; it is a fact
+ * about who your agent reads, printed on somebody else's face, and it appears
+ * next to lime controls constantly. Same blue as styles/tokens.css --mm-wire,
+ * so the two surfaces mean the same thing by the same colour.
+ */
+:where(.terminal-host) {
+  --wire: #5cc8ff;
+}
+
+:where(.terminal-host) .mm-wire {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .mm-wire .row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+:where(.terminal-host) .mm-wire .mm-btn {
+  padding: 10px 16px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--tx);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+:where(.terminal-host) .mm-wire .mm-btn.on {
+  border-color: var(--wire);
+  color: var(--wire);
+}
+
+/* AT CAPACITY IS NOT AN ERROR — the note beside it explains, so the control
+   only has to look unavailable rather than wrong. */
+:where(.terminal-host) .mm-wire .mm-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A prompt has a context window, and nobody caps bookmarks — the denominator is
+   the clearest statement in the product that this is wiring, not saving. */
+:where(.terminal-host) .mm-wire .budget {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .mm-wire .mm-note {
+  margin: 0;
+  max-width: 58ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .mm-wire .mm-note.quiet {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* THE RING. This agent feeds your agent's thinking, and it shows up wherever
+   this agent shows up — which is what lets an owner see their own network by
+   scrolling rather than by opening a settings page.
+   Two shadows, not a border: a border would change the element's box and shift
+   every row it sits in by two pixels. The inner ring is the page ground, so the
+   wire colour reads as a detached halo at 16px as well as at 48px. */
+:where(.terminal-host) .face.wired {
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 0 0 4px var(--wire);
+}

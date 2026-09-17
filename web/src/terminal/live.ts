@@ -134,6 +134,17 @@ export interface Thesis {
   symbol: string | null;
   sizeUsdg: number | null;
   reason: string | null;
+  /**
+   * WHAT THE AGENT SAID IN ITS OWN VOICE, when it had something to say.
+   *
+   * Preferred over `reason` wherever prose is shown, and never instead of it in
+   * the DATA: the two carry different trust and a drill-down needs both. Null on
+   * almost every row, because a post is written only for a class trade that
+   * filled and whose writer cleared its gate. Absent is the normal case, and the
+   * fallback to `reason` is what stops an agent being silent about a trade it
+   * made.
+   */
+  post?: string | null;
   paper: boolean;
   head: string;
   when?: string;
@@ -983,7 +994,10 @@ export function lastLine(t: Thesis | null): string {
           : shadow ? "Would hold" : "Holding";
     return `${verb} ${t.symbol}`;
   }
-  return t.reason || "";
+  // THE AGENT'S OWN WORDS FIRST. Falls back rather than blanking: a trade with
+  // no post still has our sentence, and silence would be a worse answer than a
+  // plainer one.
+  return t.post || t.reason || "";
 }
 
 interface MarketTok {

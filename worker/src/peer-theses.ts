@@ -90,18 +90,27 @@ export async function readPeerTheses(shared: Db, accounts: readonly `0x${string}
         `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
                 d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
                 d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
+                  p.body AS post,
                 t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
                 COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
            FROM decisions d
            JOIN agents a ON a.smart_account = d.agent_id
            LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+             -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
+             -- almost no decision has a post: one is written only for a class
+             -- trade that actually filled and whose writer cleared its gate,
+             -- so absent is the overwhelmingly common case and must not drop
+             -- the row. It is a separate column all the way to
+             -- the renderer, because the two carry different trust: the reason
+             -- column is ours and the post column is a model's.
+             LEFT JOIN posts p ON p.decision_id = d.id
           WHERE a.mode IN ('live', 'paper')
             AND d.agent_id NOT LIKE 'rh:%'
             AND d.agent_id IN (${holes})
             AND d.at > ?
             AND d.source IN (${sources})
           GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
-                   d.source, d.reason, d.dropped_rule, t.status, t.reject_rule
+                   d.source, d.reason, d.dropped_rule, t.status, t.reject_rule, p.body
           ORDER BY MAX(d.at) DESC
           LIMIT ?`,
       )

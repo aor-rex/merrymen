@@ -140,7 +140,11 @@ describe("how often it is written", () => {
     // written to prove the agent was thinking rather than idle, published
     // nothing at all. See strategist-publish.test.ts.
     assert.match(call, /source: publicationSourceFor\(strategy\.name\)/);
-    assert.match(call, /reason: idleNow/);
+    // THE PUBLIC REGISTER of the same Why. Still the strategy's own words —
+    // renderWhy(idle, "public") — minus the remedy clause, which is advice for
+    // the owner and was going out on a public feed ("Add funds or lower the
+    // size per trade" was live for weeks). The event beside it keeps idleNow.
+    assert.match(call, /reason: idlePublic/);
     // No action, no symbol, no size — that absence is what makes it a view,
     // and `outcomeOf` is what turns the absence into the word.
     assert.ok(!/\baction:/.test(call), "an idle decision has no action");

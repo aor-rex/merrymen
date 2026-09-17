@@ -32,6 +32,8 @@ const post = (over: Partial<PublicThesis> = {}): PublicThesis => ({
   outcomeText: "no trade came of it",
   shadow: false,
   reason: "momentum is intact",
+
+  post: null,
   said: 1,
   at: 1_700_000_000,
   firstAt: 1_700_000_000,
