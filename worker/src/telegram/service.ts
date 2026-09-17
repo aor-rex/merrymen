@@ -66,6 +66,7 @@ import {
 } from "../soul";
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
 import { describeGap } from "../memory/retrieve";
+import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 
 export interface TelegramServiceDeps {
   /** Live config (reassigned each tick by refreshConfig — pass a getter). */
@@ -756,7 +757,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
-      reply = `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
+      // A command that failed INSIDE a model call (/why narration, say) would
+      // otherwise echo "groq 401 — invalid_api_key: Invalid API Key" at the
+      // owner. Same rule as the interpreter: say which kind of no it was, and
+      // what they can do. Anything that is not a provider line keeps its words.
+      reply = isLlmProviderFailure(m)
+        ? `🚫 that ${cmd.kind} failed — ${esc(describeLlmFailure(m).text)}`
+        : `🚫 that ${cmd.kind} failed: ${esc(m.slice(0, 200))}`;
     }
     if (!slash) await pushHistory(msg.chatId, "assistant", stripThinkingBlock(reply.replace(/<[^>]+>/g, "")), turnMemoryIds);
     // THE LAST-RESORT STRIP FAILS CLOSED.
