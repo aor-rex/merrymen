@@ -58,7 +58,7 @@ export function AgentImageField({
     const local = URL.createObjectURL(file);
     setPreview(local);
     try {
-      const r = await fetch(`/api/agent-image/${kind}`, {
+      const r = await fetch(`/api/agent-image/me/${kind}`, {
         method: "PUT",
         // The file IS the body. No multipart, so no parser and no filename —
         // one fewer piece of attacker-chosen text in the system.
@@ -91,7 +91,7 @@ export function AgentImageField({
     setBusy(true);
     setError(null);
     try {
-      await fetch(`/api/agent-image/${kind}`, { method: "DELETE" });
+      await fetch(`/api/agent-image/me/${kind}`, { method: "DELETE" });
       setRemoved(true);
       setPreview(null);
     } catch {

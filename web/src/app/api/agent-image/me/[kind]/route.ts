@@ -1,6 +1,15 @@
 /**
  * THE OWNER'S OWN PICTURE — upload and remove.
  *
+ * ── WHY THIS LIVES UNDER /me/ ────────────────────────────────────────────
+ *
+ * The public read route is /api/agent-image/<slug>/<kind>. A write route at
+ * /api/agent-image/<kind> would put a second DYNAMIC name at the same path
+ * position, and Next refuses that outright — "You cannot use different slug
+ * names for the same dynamic path" — which does not fail the route, it fails
+ * the whole dev server and the build. A STATIC segment at that position is
+ * unambiguous (static wins over dynamic) and it reads as what it is: my image.
+ *
  * ── NO SLUG IN THE PATH, AND THAT IS THE AUTHORISATION ───────────────────
  *
  * The write routes take only a KIND. Whose image it is comes from the session
