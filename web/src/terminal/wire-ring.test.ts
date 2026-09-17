@@ -117,3 +117,58 @@ describe("the wire ring", () => {
     assert.ok(parts.includes("wired"), `expected the ring, got class="${cls}"`);
   });
 });
+
+/**
+ * THE CONTROL'S FOUR STATES.
+ *
+ * WireButton has no props but `slug` and `name`; everything it renders comes
+ * from context, so its four branches are four context values and nothing else.
+ * They are worth pinning because each one is a different SENTENCE, and the
+ * sentences are the feature — a follow is an input to a decision, never a
+ * trigger for one, and the button says so before the click rather than after.
+ */
+describe("the wire control", () => {
+  async function wireButton(wired: string[], known: boolean, max = 8): Promise<string> {
+    const { WireButton } = await import("@/components/WireButton");
+    return renderToStaticMarkup(
+      createElement(
+        WiredContext.Provider,
+        { value: { wired, max, known, toggle: async () => {} } },
+        createElement(WireButton, { slug: WIRED, name: "Shogun" }),
+      ),
+    );
+  }
+
+  it("asks a signed-out visitor to deploy an agent, and says why", async () => {
+    // `known: false` is "we do not know yet", NOT "you follow nobody" — the
+    // distinction WiredProvider's own comment insists on. It must not render a
+    // toggle that would fail.
+    const html = await wireButton([], false);
+    assert.match(html, /Deploy an agent to wire this in/);
+    assert.ok(!/wire in<\/button>/.test(html), "a signed-out visitor must get no toggle");
+  });
+
+  it("offers to wire an agent that is not yet wired, and shows the budget", async () => {
+    const html = await wireButton([], true);
+    assert.match(html, />wire in</);
+    assert.match(html, /0 \/ 8/);
+    assert.match(html, /Nothing here can make it trade/);
+  });
+
+  it("says so when the agent is already wired", async () => {
+    const html = await wireButton([WIRED], true);
+    assert.match(html, />wired</);
+    assert.match(html, /1 \/ 8/);
+    // THE LOAD-BEARING SENTENCE. It is the product's whole position on
+    // following and it must survive every state, not just the invitation.
+    assert.match(html, /Nothing here can make it trade/);
+  });
+
+  it("refuses at capacity without pretending it is an error", async () => {
+    const full = Array.from({ length: 8 }, (_, i) => `aaaaaaaaaaaaaaa${i}`);
+    const html = await wireButton(full, true);
+    assert.match(html, /disabled/);
+    assert.match(html, /Unwire one\s+to make room|Unwire one to make room/);
+    assert.match(html, /8 \/ 8/);
+  });
+});
