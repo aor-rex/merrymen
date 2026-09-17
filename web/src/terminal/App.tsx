@@ -395,7 +395,7 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
-        <FirstVisit account={account} screen={requestedScreen} replies={turns.length} onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
+        <FirstVisit onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} onRefresh={refreshAccount}/>}
         {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})}/>}
@@ -606,6 +606,11 @@ export function App() {
                 key={t.id}
                 type="button"
                 className={activeTab === t.id ? "tab on" : "tab"}
+                /* The guided first visit spotlights these by name. An
+                   aria-label would have worked and would have tied a visual
+                   affordance to an accessibility string, so that renaming a
+                   label for screen readers silently unaimed the tour. */
+                data-tour={`tab-${t.id}`}
                 aria-label={t.label}
                 aria-current={activeTab === t.id ? "page" : undefined}
                 onClick={() => goTab(t.id)}
