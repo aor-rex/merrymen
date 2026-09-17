@@ -30,12 +30,40 @@ import { PrivyProvider } from "@privy-io/react-auth";
 import { robinhoodChain } from "@merrymen/core";
 import type { ReactNode } from "react";
 import { PRIVY_APP_ID, privyEnabled } from "@/lib/privy-client";
+import { WiredProvider } from "@/components/WiredProvider";
+
+/**
+ * WHY WiredProvider IS HERE AND NOT IN `components/shell/AppShell.tsx`.
+ *
+ * It was written into AppShell, which reads like the app shell and is imported
+ * by NOTHING — `mounted.test.ts`'s own import walk reaches the live tree and
+ * that file is not in it. The shell that actually renders is
+ * `app/(app)/layout.tsx` -> `Providers` -> `App`, so every screen sat OUTSIDE
+ * the provider and read the default context instead, where `known` is
+ * hard-coded false and `toggle` is a no-op.
+ *
+ * Worth stating precisely, because the failure was silent and pointed the wrong
+ * way: a WireButton mounted anywhere would have shown "Deploy an agent to wire
+ * this in" to every visitor forever — including a signed-in owner who already
+ * had one — and the ring would never have appeared on any avatar. Not a crash,
+ * not a blank: a confident wrong answer, in the one direction that reads as
+ * "this feature is not for you".
+ *
+ * OUTSIDE THE PRIVY BRANCH, deliberately. Wiring is not authentication — the
+ * route behind it authenticates with the session cookie `tenantOf` reads, which
+ * predates Privy and works without it. Putting this inside the `privyEnabled()`
+ * arm would make a deployment with no Privy app id silently lose its follow
+ * graph, which is the same shape of bug as the one above.
+ */
+function Wired({ children }: { children: ReactNode }) {
+  return <WiredProvider>{children}</WiredProvider>;
+}
 
 export function Providers({ children }: { children: ReactNode }) {
   // A deployment with no Privy — or a malformed app id — renders the terminal
   // with no provider at all rather than crashing the prerender. The legacy
   // wallet login still works, which is what makes this flag-able.
-  if (!privyEnabled()) return <>{children}</>;
+  if (!privyEnabled()) return <Wired>{children}</Wired>;
   return (
     <PrivyProvider
       appId={PRIVY_APP_ID}
@@ -81,7 +109,7 @@ export function Providers({ children }: { children: ReactNode }) {
         },
       }}
     >
-      {children}
+      <Wired>{children}</Wired>
     </PrivyProvider>
   );
 }

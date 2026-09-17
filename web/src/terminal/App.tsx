@@ -553,6 +553,7 @@ export function App() {
             tokens={live.tokens}
             onBack={() => goTab(tab)}
             onToken={(id) => openScreen({ kind: "token", id })}
+            isMine={mine?.slug === agent.slug}
           />
         )}
         {/* `account!` USED TO BE SAFE BY ACCIDENT. The only way in was
