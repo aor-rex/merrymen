@@ -121,14 +121,21 @@ describe("breadth separates a crowd from a pair of bots", () => {
 describe("the two exits are told apart, and only those two exist", () => {
   it("names the cliff as a door closing, not as a target being hit", () => {
     const e = classEvidenceOf(exit({ cause: "cliff", graduationBps: 8600 }), BOUNDS)!;
-    assert.equal(e.bands.cause, "left before it graduates");
+    assert.match(e.bands.why!, /vault cannot sell it once it graduates/);
     assert.equal(e.raw.cause, "cliff");
   });
 
-  it("names the clock as the clock", () => {
+  it("lets the clock speak through the held band rather than saying it twice", () => {
+    // heldBand already returns "held its full window" for any exit the clock
+    // could have fired, so a separate cause band would duplicate it — two slots
+    // of a small evidence budget spent on one fact. The raw value still
+    // distinguishes them for the drill-down and for any later reader.
     const e = classEvidenceOf(exit({ cause: "clock" }), BOUNDS)!;
-    assert.equal(e.bands.cause, "held its full window");
+    assert.match(e.bands.why!, /my own time limit/);
+    assert.equal(e.bands.held, "held its full window");
     assert.equal(e.raw.cause, "clock");
+    const values = Object.values(e.bands);
+    assert.equal(new Set(values).size, values.length, "no band may be repeated");
   });
 });
 
@@ -167,7 +174,8 @@ describe("the band vocabulary is total", () => {
       }
     }
     seen.add("picked over others");
-    seen.add("left before it graduates");
+    seen.add("sold because the vault cannot sell it once it graduates, not because of the price");
+    seen.add("sold on my own time limit, not on anything the market did");
 
     const declared = everyBand();
     for (const word of seen) {

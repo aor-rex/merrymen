@@ -145,10 +145,65 @@ function chatUrl(creds: LlmCreds): string {
  */
 const REASONING_MODELS = ["gpt-oss", "deepseek-r1", "qwen3-thinking", "nemotron"] as const;
 
+/**
+ * PROVIDERS THAT HAVE REFUSED THE HINT, so we ask them once and then stop.
+ *
+ * Keyed by base URL rather than by model: the refusal is a property of the
+ * PROVIDER's schema, not of the weights — Groq rejects `reasoning_effort:
+ * "none"` for gpt-oss while other hosts of the same model accept it.
+ *
+ * In-process and deliberately not persisted. It costs one 400 per process to
+ * rediscover, which is the right trade against carrying state that could go
+ * stale when a provider fixes its schema.
+ */
+const REASONING_HINT_REFUSED = new Set<string>();
+
+/**
+ * THE COMMENT ABOVE WAS WRONG IN ONE WORD, AND THE WORD COST EVERY CALL.
+ *
+ * "best-effort by construction: a provider that does not know `reasoning_effort`
+ * ignores it" — true, and beside the point. Groq DOES know the field and
+ * VALIDATES it: it accepts `low`, `medium` and `high`, and answers `"none"` with
+ *
+ *     400 — `reasoning_effort` must be one of `low`, `medium`, or `high`
+ *
+ * So for every tenant on a Groq gpt-oss model — which is what this deployment
+ * runs — every worker-side LLM call failed before it was sent. Not degraded: a
+ * hard 400, on the strategist, the scout and anything else that reaches a model.
+ * It failed the same way each time and looked like a model with nothing to say.
+ *
+ * `services/brain/brain/llm.py` already hit this exact wall and already solved
+ * it: drop the field on a 400 that names it, remember the base URL, retry. This
+ * is that solution on the TypeScript side, which never got it. Same behaviour,
+ * because two clients that disagree about how to talk to the same provider is
+ * the drift this codebase keeps paying for.
+ */
 export function quietReasoning(creds: LlmCreds): Record<string, unknown> {
   const model = creds.model.toLowerCase();
   if (!REASONING_MODELS.some((m) => model.includes(m))) return {};
+  if (REASONING_HINT_REFUSED.has(creds.baseUrl)) return {};
   return { reasoning_effort: "none", include_reasoning: false };
+}
+
+/**
+ * Did this response refuse the hint rather than the request?
+ *
+ * NARROW ON PURPOSE. A 400 that does not name the field is a real error and
+ * must stay one — retrying every 400 without the hint would turn a malformed
+ * prompt into two malformed prompts and hide the cause of both.
+ */
+export function refusedReasoningHint(status: number, message: string): boolean {
+  return status === 400 && /reasoning_effort/i.test(message);
+}
+
+/** Remember a provider's refusal so the next call does not repeat it. */
+export function noteReasoningRefusal(baseUrl: string): void {
+  REASONING_HINT_REFUSED.add(baseUrl);
+}
+
+/** Test seam — the set is process-global and would otherwise leak between cases. */
+export function resetReasoningRefusalsForTest(): void {
+  REASONING_HINT_REFUSED.clear();
 }
 
 export async function llmToolCall(
@@ -375,19 +430,31 @@ export async function llmText(
     return t && t.type === "text" ? t.text.trim() : "";
   }
 
-  const body: Record<string, unknown> = {
+  const base: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 400,
     temperature: 0.6,
     messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
-    ...quietReasoning(creds),
   };
-  const r = await fetch(chatUrl(creds), {
-    method: "POST",
-    headers: openaiHeaders(creds),
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(await providerError(creds, r));
+  const send = (hint: Record<string, unknown>) =>
+    fetch(chatUrl(creds), {
+      method: "POST",
+      headers: openaiHeaders(creds),
+      body: JSON.stringify({ ...base, ...hint }),
+    });
+
+  let r = await send(quietReasoning(creds));
+  if (!r.ok) {
+    const why = await providerError(creds, r);
+    // ONE RETRY, AND ONLY FOR THIS. The hint is an optimisation — it asks a
+    // reasoning model not to spend the completion budget thinking — so a
+    // provider that refuses the FIELD has refused the optimisation, not the
+    // work. Anything else is a real error and is thrown as one.
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    r = await send({});
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
   const j = (await r.json()) as {
     choices?: { finish_reason?: string; message?: { content?: string; reasoning_content?: string; reasoning?: string } }[];
     usage?: { completion_tokens_details?: { reasoning_tokens?: number } };

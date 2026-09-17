@@ -229,11 +229,41 @@ export function classEvidenceOf(w: Why | null | undefined, b: BandBounds): Class
   if (w.code === "class-exit") {
     const bands: Record<string, Band> = {
       held: heldBand(w.heldSec, b.maxHoldSec),
-      // THE CAUSE IS EVIDENCE, NOT DECORATION. These are the only two exits the
-      // class route has, and a writer must be able to tell them apart: one is a
-      // clock running out, the other is a door closing.
-      cause: w.cause === "cliff" ? "left before it graduates" : "held its full window",
     };
+    /**
+     * THE CAUSE IS A BAND ONLY WHEN IT ADDS SOMETHING.
+     *
+     * The clock fires at `heldSec >= maxHold`, so `heldBand` has ALREADY
+     * returned "held its full window" — every clock exit would carry that
+     * sentence twice, which the first run of the harness printed back as
+     * "held its full window · held its full window · curve building". Two slots
+     * of a small evidence budget spent saying one thing, and a writer handed a
+     * doubled phrase reasonably concludes it is being emphasised.
+     *
+     * The cliff is different and needs its own words: a position can be sold
+     * having been held five minutes, and the reason is a contract that is about
+     * to stop accepting sells rather than anything about the clock.
+     */
+    /**
+     * WHY IT LEFT, IN WORDS THAT LEAVE NO ROOM FOR A BETTER STORY.
+     *
+     * The first run of this produced "I sensed the upside was capped" for a
+     * clock exit and "before the rally could finish" for a cliff one. Neither is
+     * a fabricated MEASUREMENT — the gate is right to admit them — and both are
+     * fabricated REASONS, which is just as bad in public: the clock is a rule
+     * the owner set and has nothing to do with upside, and the cliff is a
+     * contract that stops accepting sells and has nothing to do with a rally.
+     *
+     * A writer handed only "held its full window" will reach for a market
+     * narrative, because that is what a sentence about selling normally has in
+     * it. So it is given the actual reason instead of being left to infer one.
+     * This is the cheaper half of the no-invention rule: the expensive half
+     * refuses bad output, this half removes the reason to produce it.
+     */
+    bands.why =
+      w.cause === "cliff"
+        ? "sold because the vault cannot sell it once it graduates, not because of the price"
+        : "sold on my own time limit, not on anything the market did";
     if (w.graduationBps !== null) bands.curve = curveBand(w.graduationBps, b.exitAtBps);
     return {
       act: "exit",
@@ -302,6 +332,7 @@ export function everyBand(): ReadonlySet<Band> {
     }
   }
   out.add("picked over others");
-  out.add("left before it graduates");
+  out.add("sold because the vault cannot sell it once it graduates, not because of the price");
+  out.add("sold on my own time limit, not on anything the market did");
   return out;
 }

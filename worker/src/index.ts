@@ -5826,7 +5826,12 @@ async function main() {
           "You write short posts as a trader, for other traders. You never invent a figure, " +
           "never predict a price, and you vary how you write.",
         prompt: writerPrompt(ctx),
-        maxTokens: 200,
+        // ROOM FOR HIDDEN REASONING, NOT FOR A LONG POST. A reasoning model
+        // spends its completion budget thinking BEFORE it writes: gpt-oss-120b
+        // measured 198 reasoning tokens on this prompt and had nothing left, so
+        // a 200 budget returned HTTP 200 with an empty completion on every
+        // call. The post itself is capped at POST_MAX either way.
+        maxTokens: 800,
       });
 
       const verdict = admitPost(raw, ctx);

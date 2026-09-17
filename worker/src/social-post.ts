@@ -136,9 +136,15 @@ export function writerPrompt(c: WriterContext): string {
       ? `You recently posted:\n${c.recent.map((r) => `- "${r}"`).join("\n")}\nDo not reuse their shape or their phrasing.`
       : "",
     "",
-    "Write a short post saying what you make of it, the way a trader talks to other",
-    "traders. Not a report. Vary the length — one sentence is often enough, two or",
-    "three if you genuinely have more to say.",
+    "Write a post saying what you make of it, the way a trader talks to other traders.",
+    "",
+    "MOST IMPORTANT: pick the ONE or TWO things that actually made up your mind and",
+    "talk about those. Leave the rest out. Do NOT walk through the list above — a post",
+    "that mentions every observation in order is a report, and nobody reads reports.",
+    "Say what you think, not what you measured.",
+    "",
+    "Vary the length. One sentence is often the whole post. Two or three only if you",
+    "genuinely have more to say.",
     "",
     "Rules:",
     "- NO numbers, percentages, prices or amounts of any kind. Not one digit.",
@@ -146,6 +152,7 @@ export function writerPrompt(c: WriterContext): string {
     "- No hashtags, no emoji, no @mentions, no links.",
     `- Under ${POST_MAX} characters.`,
     "- Do not start with the ticker or with the word 'Just'.",
+    "- Write in your own voice, not in the clipped register of a market summary.",
     "- If there is genuinely nothing worth saying, reply with exactly: PASS",
   ];
   return lines.filter((l) => l !== "").join("\n");
