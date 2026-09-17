@@ -110,6 +110,7 @@ import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision } from "./brain-live";
+import { provenanceOf, type Provenance } from "./provenance";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
@@ -376,6 +377,7 @@ import {
   addFeeAccrual,
   addPost,
   addTrade,
+  decisionAgent,
   decisionEvidence,
   hasPost,
   recentPosts,
@@ -5744,7 +5746,7 @@ async function main() {
    */
   function classDecision(
     w: Why | null | undefined,
-  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null } | undefined] {
+  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null; whyCode?: string } | undefined] {
     if (!w || (w.code !== "class-enter" && w.code !== "class-exit")) return [undefined, undefined];
     const e = classEvidenceOf(w, classBandBounds());
     return [
@@ -5755,6 +5757,10 @@ async function main() {
         action: w.code === "class-exit" ? "sell" : "buy",
         symbol: w.symbol,
         evidence: e === null ? null : JSON.stringify(e),
+        // A class EXIT is a hard risk exit — a clock running out or a contract
+        // about to stop accepting sells — and fires whatever the entry scoring
+        // wanted. An entry is the scoring itself, which is deterministic.
+        whyCode: w.code,
       },
     ];
   }
@@ -5879,9 +5885,55 @@ async function main() {
     intent: TradeIntent,
     source: string,
     reason?: string,
-    known?: { action?: string; symbol?: string; evidence?: string | null },
-  ): Promise<void> {
-    if (intent.decisionId || !active) return;
+    known?: { action?: string; symbol?: string; evidence?: string | null; provenance?: Provenance; whyCode?: string },
+  ): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (!active) return { ok: false, why: "no agent armed" };
+
+    /**
+     * A SUPPLIED ID IS VERIFIED AND REUSED — NEVER REPLACED, NEVER TRUSTED.
+     *
+     * THE BUG THIS CLOSES. Brain writes its thesis row under its own
+     * `decision_id` BEFORE anything executes, then hands the order to
+     * `submitChatTrade`, which built a fresh intent carrying no id — so this
+     * function minted a SECOND, unrelated decision and the trade attached to
+     * that one. The thesis row never joined a trade; the trade joined a
+     * duplicate. Every reader then saw two posts with the same thesis, one
+     * saying "no trade came of it" and one saying "landed", and no id could
+     * reconstruct the chain because there were two of them.
+     *
+     * Crossing into execution is not a new decision. So when an id arrives, it
+     * is REUSED — and checked first, because reuse is an authorisation:
+     *
+     *   belongs to this agent  -> reuse it. No second row.
+     *   belongs to another     -> REFUSE THE TRADE. Not "mint a fresh one and
+     *                             carry on": a caller that handed us somebody
+     *                             else's decision is wrong about something, and
+     *                             quietly repairing it would attach real money
+     *                             to a row whose provenance we just disproved.
+     *   names nothing          -> REFUSE. An id with no row behind it cannot be
+     *                             the pre-trade thesis it claims to be.
+     *   unreadable             -> REFUSE. A database that will not answer is
+     *                             not permission; it is an unknown, and the
+     *                             unsafe direction here is to act on it.
+     *
+     * Refusing rather than throwing because the caller is a money path that has
+     * to answer its owner: it turns this into a refusal line, and the tick lives.
+     */
+    if (intent.decisionId) {
+      const owner = await decisionAgent(intent.decisionId);
+      if (owner === undefined) return { ok: false, why: "could not verify the decision this trade belongs to" };
+      if (owner === null) return { ok: false, why: "that decision does not exist" };
+      if (owner.toLowerCase() !== active.agentId.toLowerCase()) {
+        // LOUD. This is the cross-tenant case, and it is the one shape here
+        // that would be an incident rather than a bug.
+        console.error(
+          `[${short(active.agentId)}] REFUSED: decision ${intent.decisionId} belongs to ${short(owner)}`,
+        );
+        return { ok: false, why: "that decision belongs to another agent" };
+      }
+      return { ok: true };
+    }
+
     const id = newDecisionId();
     intent.decisionId = id;
     const d = describeIntent(intent);
@@ -5894,7 +5946,12 @@ async function main() {
       size_usdg: d.sizeUsdg,
       reason,
       evidence_json: known?.evidence ?? null,
+      // RECORDED, NOT INFERRED LATER. `source` cannot answer this on its own:
+      // an even-keel buy and an even-keel stop-floor sell publish under the
+      // same source and are different kinds of decision. See provenance.ts.
+      provenance: known?.provenance ?? provenanceOf(source, known?.whyCode),
     });
+    return { ok: true };
   }
 
   /**
@@ -10011,9 +10068,16 @@ async function main() {
               // owner's name on a decision they did not make, in the one table
               // the public feed reads for attribution — and brain-shadow.ts
               // refuses the mirror image of that for the same reason.
+              // ONE DECISION, CARRIED. `persist` already wrote the pre-trade
+              // thesis under d.decision_id, so the id travels with the order and
+              // ensureDecision reuses it — the trade, the fill and the outcome
+              // all attach to the row that holds the belief. Without this the
+              // executor minted a second decision and the thesis was orphaned.
               const r = await submitChatTrade(o.side, o.symbol, o.usdgAmount, {
                 source: "brain",
                 reason: d.thesis?.slice(0, 500) || `brain decided to ${o.side} ${o.symbol}`,
+                decisionId: d.decision_id,
+                provenance: "brain",
               });
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
@@ -10357,7 +10421,12 @@ async function main() {
       const w = proposedWhy[proposedAt];
       // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
       // advice for the owner and was going out on every capped keel-top.
-      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined);
+      // THE WHY CODE DECIDES THE PROVENANCE. A stop-floor sell and a dca-leg buy
+      // publish under the same source; only the typed Why knows that one of them
+      // is a hard risk exit that fired whatever the strategy wanted.
+      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined, {
+        whyCode: w?.code,
+      });
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
@@ -10572,8 +10641,9 @@ async function main() {
     usdgAmount: number,
     // Threaded through so a curve buy carries the same provenance a pool buy
     // does — memecoins are exactly where a reasoner other than the owner is
-    // most likely to be the one asking.
-    asked: { source: string; reason: string } = {
+    // most likely to be the one asking, and where a pre-trade thesis most
+    // needs its id to survive into the fill.
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     },
@@ -10725,7 +10795,15 @@ async function main() {
       notionalUsdg: isBuy ? sizeRaw : quoted,
     };
 
-    await ensureDecision(intent, asked.source, asked.reason);
+    // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+    // before execution. Stamped on the intent so ensureDecision VERIFIES and
+    // reuses it rather than minting a second row — and so the trade, the fill
+    // and the outcome all land under the id that holds the pre-trade thesis.
+    if (asked.decisionId) intent.decisionId = asked.decisionId;
+    const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+    // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+    // nothing, could not be read, or belongs to another agent. Nothing is sent.
+    if (!stamped.ok) return no(stamped.why);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
@@ -10832,7 +10910,17 @@ async function main() {
     side: "buy" | "sell",
     symbol: string,
     usdgAmount: number,
-    asked: { source: string; reason: string } = {
+    /**
+     * WHERE THIS ORDER CAME FROM — and, when something already decided it, the
+     * decision it belongs to.
+     *
+     * `decisionId` is how a pre-trade thesis survives into execution. Brain
+     * writes its row before it hands the order over; passing the id here means
+     * `ensureDecision` verifies and REUSES it instead of minting a second
+     * decision that the trade then attaches to. Absent for an owner's typed
+     * order, which genuinely is a new decision at this moment.
+     */
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`,
     },
@@ -10877,7 +10965,15 @@ async function main() {
       if (!partial) sold = Number(pos.valueUsdg) / 1e6;
       intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
     }
-    await ensureDecision(intent, asked.source, asked.reason);
+    // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+    // before execution. Stamped on the intent so ensureDecision VERIFIES and
+    // reuses it rather than minting a second row — and so the trade, the fill
+    // and the outcome all land under the id that holds the pre-trade thesis.
+    if (asked.decisionId) intent.decisionId = asked.decisionId;
+    const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+    // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+    // nothing, could not be read, or belongs to another agent. Nothing is sent.
+    if (!stamped.ok) return no(stamped.why);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
     // sent, which is not always the amount asked for — see the clamp above.

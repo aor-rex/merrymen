@@ -222,6 +222,7 @@ const SQLITE_SCHEMA = `
       dropped_rule TEXT,           -- non-null when the proposal was dropped before execution
       signals_json TEXT,           -- the inputs the decision was made on (for later review)
       evidence_json TEXT,          -- the banded fact layer behind a published post (safe to show)
+      provenance TEXT,             -- WHAT KIND OF THING decided; see provenance.ts
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
@@ -672,6 +673,15 @@ const SQLITE_ALTERS: string[] = [
     // signals_json, which is the owner's whole balance sheet and MUST NEVER be
     // published; this column is written to be read by a stranger.
     "ALTER TABLE decisions ADD COLUMN evidence_json TEXT",
+    // WHAT KIND OF THING DECIDED — brain, a deterministic strategy, the owner,
+    // peer-triggered research, or a hard risk exit. Distinct from `source`,
+    // which is the publication key: two rows can share a source and differ here
+    // (an even-keel buy and an even-keel stop-floor sell). Recorded at the
+    // moment of deciding because the alternative is a reader guessing, and
+    // every reader would have to guess the same way forever. NULL on every row
+    // written before this existed, and null renders as unknown rather than as
+    // any particular kind.
+    "ALTER TABLE decisions ADD COLUMN provenance TEXT",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
     // Rows written before the identity existed carry a NULL chain and whatever
@@ -1086,6 +1096,15 @@ export interface DecisionRow {
    * raw figures for a drill-down, and who decided the trade.
    */
   evidence_json?: string | null;
+  /**
+   * WHO DECIDED — one of provenance.ts's five kinds, or absent.
+   *
+   * Absent is honest for rows written before the column existed, and it must
+   * stay absent rather than defaulting: "we do not know what decided this" and
+   * "a deterministic strategy decided this" are different facts, and one of
+   * them is a claim about autonomy.
+   */
+  provenance?: string | null;
 }
 
 /** A fresh decision id. Kept here so every producer stamps the same shape. */
@@ -1097,8 +1116,8 @@ export async function addDecision(row: DecisionRow): Promise<void> {
   try {
     await getDb()
       .prepare(
-        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1115,6 +1134,7 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.signals_json ?? null,
         row.hold_kind ?? null,
         row.evidence_json ?? null,
+        row.provenance ?? null,
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);
@@ -2361,6 +2381,150 @@ export async function addPost(agentId: string, decisionId: string, body: string)
  * Null covers absent, unreadable and not-a-class-decision alike — all three mean
  * "no post", which is a normal outcome.
  */
+/**
+ * WHO OWNS THIS DECISION — the guard behind reusing a supplied id.
+ *
+ * Three answers, and collapsing any two of them is the bug this exists to
+ * prevent:
+ *
+ *   a string  — the agent this decision belongs to.
+ *   null      — no such decision. An id that names nothing.
+ *   undefined — WE COULD NOT READ. A database that will not answer must never
+ *               be taken as "nobody owns it", because the caller's next move on
+ *               that answer is to attach a trade.
+ *
+ * `null` and `undefined` carry the same refusal today, and they are still kept
+ * apart: the operator log says which, and a later reader that wants to retry a
+ * read failure but not a missing row can tell them apart without a new query.
+ */
+export async function decisionAgent(decisionId: string): Promise<string | null | undefined> {
+  try {
+    const r = (await getDb()
+      .prepare("SELECT agent_id FROM decisions WHERE id = ? LIMIT 1")
+      .get(decisionId)) as { agent_id: string } | undefined;
+    return r ? String(r.agent_id) : null;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One decision, and everything that happened because of it. */
+export interface DecisionLifecycle {
+  decision: {
+    id: string;
+    agent_id: string;
+    source: string;
+    provenance: string | null;
+    action: string | null;
+    symbol: string | null;
+    size_usdg: number | null;
+    reason: string | null;
+    dropped_rule: string | null;
+    evidence_json: string | null;
+    at: number;
+  };
+  /** Every trade that attached to it, oldest first. Normally one; never assumed. */
+  trades: {
+    status: string;
+    reject_rule: string | null;
+    user_op_hash: string | null;
+    tx_hash: string | null;
+    amount_usdg: number | null;
+    fill_side: string | null;
+    fill_qty_raw: string | null;
+    fill_cash_usdg: number | null;
+    fill_price_usd: number | null;
+    realized_pnl_usdg: number | null;
+    basis_source: string | null;
+    created_at: number;
+  }[];
+  /** What the agent said about it in its own voice, if anything. */
+  post: { body: string; created_at: number } | null;
+}
+
+/**
+ * THE WHOLE LIFE OF ONE DECISION, from its id.
+ *
+ * decision created -> intent -> submitted -> landed/refused/reverted ->
+ * economic fill -> realised result -> what the agent said. A reader hands this
+ * one id and gets the entire chain; that is the property the id exists for, and
+ * until the id actually survived into execution it was not reconstructable at
+ * all — the thesis row and the trade carried different ids.
+ *
+ * READS, NEVER INFERS. A stage that has not happened is absent rather than
+ * zero: no trade row means the intent has not reached the wall (or was dropped
+ * before it), `realized_pnl_usdg` null means the result is not known yet, and
+ * neither is reported as a number. `trades` is an ARRAY because the schema
+ * permits several rows against one decision — a retry writes a second — and a
+ * reader that assumed one would quietly show the first and hide the rest.
+ *
+ * Returns null when the decision does not exist or cannot be read. The caller
+ * cannot tell those apart here on purpose: a public surface answers 404 to
+ * both, and distinguishing them would leak whether an id exists.
+ */
+export async function lifecycleOf(decisionId: string): Promise<DecisionLifecycle | null> {
+  try {
+    const db = getDb();
+    const d = (await db
+      .prepare(
+        `SELECT id, agent_id, source, provenance, action, symbol, size_usdg,
+                reason, dropped_rule, evidence_json, at
+           FROM decisions WHERE id = ? LIMIT 1`,
+      )
+      .get(decisionId)) as Record<string, unknown> | undefined;
+    if (!d) return null;
+
+    const trades = (await db
+      .prepare(
+        `SELECT status, reject_rule, user_op_hash, tx_hash, amount_usdg,
+                fill_side, fill_qty_raw, fill_cash_usdg, fill_price_usd,
+                realized_pnl_usdg, basis_source, created_at
+           FROM trades WHERE decision_id = ? ORDER BY created_at ASC, id ASC`,
+      )
+      .all(decisionId)) as Record<string, unknown>[];
+
+    const post = (await db
+      .prepare("SELECT body, created_at FROM posts WHERE decision_id = ? LIMIT 1")
+      .get(decisionId)) as { body: string; created_at: number } | undefined;
+
+    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
+
+    return {
+      decision: {
+        id: String(d.id),
+        agent_id: String(d.agent_id),
+        source: String(d.source),
+        provenance: str(d.provenance),
+        action: str(d.action),
+        symbol: str(d.symbol),
+        size_usdg: num(d.size_usdg),
+        reason: str(d.reason),
+        dropped_rule: str(d.dropped_rule),
+        evidence_json: str(d.evidence_json),
+        at: Number(d.at),
+      },
+      trades: trades.map((t) => ({
+        status: String(t.status),
+        reject_rule: str(t.reject_rule),
+        user_op_hash: str(t.user_op_hash),
+        tx_hash: str(t.tx_hash),
+        amount_usdg: num(t.amount_usdg),
+        fill_side: str(t.fill_side),
+        fill_qty_raw: str(t.fill_qty_raw),
+        fill_cash_usdg: num(t.fill_cash_usdg),
+        fill_price_usd: num(t.fill_price_usd),
+        realized_pnl_usdg: num(t.realized_pnl_usdg),
+        basis_source: str(t.basis_source),
+        created_at: Number(t.created_at),
+      })),
+      post: post ? { body: String(post.body), created_at: Number(post.created_at) } : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function decisionEvidence(decisionId: string): Promise<string | null> {
   try {
     const r = (await getDb()
