@@ -50,9 +50,13 @@ describe("what may be published", () => {
   });
 
   it("publishes the model's words, capped", () => {
+    // A run of x has no boundary to cut at, so this is the pure length case.
+    // The boundary behaviour — cut on a word, add an ellipsis — is pinned in
+    // worker/src/feed-errors.test.ts, where the live 220-character failure is.
     const long = "x".repeat(400);
     const t = publishableThesis(ok({ source: "strategist", reason: long }))!;
-    assert.equal(t.reason!.length, 220, "the /why truncation point");
+    assert.ok(t.reason!.length <= 220, "the /why truncation point is a ceiling");
+    assert.ok(t.reason!.endsWith("…"), "and a cut says that it cut");
   });
 
   it("an empty model reason is a post with no reasoning line, not the string 'undefined'", () => {
@@ -317,7 +321,8 @@ describe("shadow decisions say the conditional out loud", () => {
     // "would hold" is not English an agent would speak, and a hold in shadow and
     // a hold in production are the same event: nothing happened, on purpose.
     const t = publishableThesis(shadow({ action: "hold", size_usdg: 0 }))!;
-    assert.equal(t.head, "hold TSLA 0.00 USDG");
+    // No size on a hold: "0.00 USDG" was a Brain-forced delta rendered as a figure.
+    assert.equal(t.head, "hold TSLA");
     assert.equal(t.outcome, "shadow");
     assert.match(t.outcomeText, /by choice/);
   });

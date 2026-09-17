@@ -263,7 +263,7 @@ class BrainGraph:
                 '  "confidence": 0.0-1.0,\n'
                 '  "suggested_delta_usdg": integer micro-USDG, POSITIVE to buy, NEGATIVE to sell, 0 to hold,\n'
                 '  "expected_edge_usdg": integer micro-USDG you expect this trade to MAKE, 0 for a hold,\n'
-                '  "thesis": "the public post, 2-4 sentences, no addresses",\n'
+                '  "thesis": "the public post, 2-4 short sentences and under 200 characters in total, no addresses",\n'
                 '  "evidence": [{"source": "...", "ref": "...", "claim": "..."}],\n'
                 '  "bull_case": "...", "bear_case": "...",\n'
                 '  "risks": ["..."], "invalidation": ["what would prove this wrong"],\n'

@@ -268,3 +268,30 @@ describe("the daily budget binds the buy loop", () => {
     assert.equal(spent, 20_000_000n, "the full per-tick size still goes out");
   });
 });
+
+/**
+ * A PARK THE OWNER WOULD READ AS "0.00 USDG" IS NOT PROPOSED.
+ *
+ * Live on the feed, 2026-09-17: "vault-deposit 0.00 USDG — 0.00 USDG idle above
+ * the 50.00 floor — parking it in the vault until the next buy", with the
+ * wall's refusal badge on it. The excess above the floor was a fraction of a
+ * cent; the guard was `> 0n`, so it became a real intent, the wall turned it
+ * back, and the refusal was published. MIN_PARK_RAW is the smallest amount
+ * usdg() prints as non-zero. It is a rendering floor, not a risk setting.
+ */
+describe("steadyBasketTick — no sub-cent parks", () => {
+  it("proposes nothing for an excess below one cent", () => {
+    // The tick buys its 20 USDG first and parks what is idle AFTER that, so
+    // the fixture carries floor + one buy + the excess: 50 + 20 + 0.005.
+    const intents = sbTick(cfg(), snap({ cashUsdg: 70_005_000n }));
+    assert.ok(intents.some((i) => i.kind === "swap"), "the buy still happens — only the dust park is gone");
+    assert.equal(intents.some((i) => i.kind === "vault-deposit"), false, "a park that renders as 0.00 must not be proposed");
+  });
+
+  it("still parks exactly one cent", () => {
+    const intents = sbTick(cfg(), snap({ cashUsdg: 70_010_000n }));
+    const deposit = intents.find((i) => i.kind === "vault-deposit");
+    assert.ok(deposit, "one cent is the smallest visible park");
+    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 10_000n);
+  });
+});

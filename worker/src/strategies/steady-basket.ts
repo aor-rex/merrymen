@@ -18,6 +18,18 @@ import {
 import type { Snapshot, Tick } from "./types";
 import type { Why } from "./reasons";
 
+/**
+ * The smallest park worth proposing: one cent, raw USDG (6dp).
+ *
+ * A RENDERING FLOOR, NOT A RISK SETTING. usdg() prints to two decimals, so any
+ * amount below this renders as "0.00 USDG" — and a real intent for an amount
+ * the sentence beside it calls zero is how "vault-deposit 0.00 USDG" reached
+ * the public feed with a refusal badge on it. Nothing about WHEN cash above the
+ * idle floor is parked changes; only that a park must be an amount somebody
+ * could see.
+ */
+export const MIN_PARK_RAW = 10_000n;
+
 export type { Snapshot };
 
 export interface BasketLeg {
@@ -252,7 +264,13 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
     const reserve = oneBuy <= roomToday ? oneBuy : 0n;
     const headroom = roomToday > reserve ? roomToday - reserve : 0n;
     const amountUsdg = excess < headroom ? excess : headroom;
-    if (amountUsdg > 0n) {
+    // NOT DUST. This was `> 0n`, and a sub-cent excess produced a real intent
+    // for an amount the sentence beside it renders as "0.00 USDG" — the wall
+    // refused it, and the refusal went out as a public post reading
+    // "vault-deposit 0.00 USDG". The floor is the smallest amount usdg() can
+    // print as non-zero; it is a rendering floor, not a risk setting, and it
+    // changes nothing about when cash above the idle floor gets parked.
+    if (amountUsdg >= MIN_PARK_RAW) {
       intents.push({ kind: "vault-deposit", target: cfg.vault, amountUsdg });
       // `clamped` when the daily budget cut the sweep short. Saying 'parked the
       // idle cash' while parking part of it would leave the sentence and the

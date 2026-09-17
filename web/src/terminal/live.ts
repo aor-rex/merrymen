@@ -393,9 +393,16 @@ function relSec(seconds: number): string {
 }
 
 export function sizeOf(t: Thesis): number | null {
-  if (t.sizeUsdg != null && t.sizeUsdg > 0) return t.sizeUsdg;
+  // A MEASURED ZERO IS NOT A FIGURE TO SHOW, and it is not an absence either.
+  // `sizeUsdg: 0` used to fall through to the head regex, which re-parsed the
+  // "0.00 USDG" out of "hold NVDA 0.00 USDG" and the card printed "$0.00"
+  // beside a real 24h change — a price nobody could account for. When the API
+  // gave a number, that number is the answer; the regex is only for rows from
+  // before sizeUsdg existed, and it never returns 0 as a size worth printing.
+  if (typeof t.sizeUsdg === "number" && Number.isFinite(t.sizeUsdg)) return t.sizeUsdg > 0 ? t.sizeUsdg : null;
   const m = t.head?.match(/(\d+(?:\.\d+)?)\s*USDG/i);
-  return m ? Number(m[1]) : null;
+  const n = m ? Number(m[1]) : null;
+  return n != null && n > 0 ? n : null;
 }
 
 /**

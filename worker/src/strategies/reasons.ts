@@ -338,9 +338,13 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
         `its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`
       );
     case "park":
+      // The figure is the amount being parked. In the clamped case that is
+      // LESS than what is idle above the floor, so the old sentence — "X idle
+      // above the floor, parking what the budget allows" — stated the parked
+      // amount as if it were the idle amount. Said the right way round.
       return w.clamped
-        ? `${usdg(w.usdgRaw)} USDG idle above the ${usdg(w.floorRaw)} floor — ` +
-            `parking what today's budget still allows`
+        ? `parking ${usdg(w.usdgRaw)} USDG of the cash idle above the ${usdg(w.floorRaw)} floor — ` +
+            `what today's budget still allows`
         : `${usdg(w.usdgRaw)} USDG idle above the ${usdg(w.floorRaw)} floor — ` +
             `parking it in the vault until the next buy`;
     case "all-legs-stale":

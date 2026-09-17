@@ -296,6 +296,9 @@ const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
 export const TRADED_ONLY_SOURCES = ["class-route"] as const;
 const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
+/** Actions that move cash between the account and its vault — plumbing, not a thesis. */
+const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withdraw"]);
+
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
  *
@@ -324,6 +327,33 @@ const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
  * the tighter one silently wins and nobody knows which.
  */
 export const REASON_MAX = 220;
+
+/**
+ * CUT AT A BOUNDARY, AND SAY THAT YOU CUT.
+ *
+ * This was `slice(0, REASON_MAX)`. Measured on the live feed: 28 of 40 rows
+ * were EXACTLY 220 characters, ending "...230.01 res" and "...GOOGL 342.79/35"
+ * — every model-written view that ran long, cut mid-word, no ellipsis, on a
+ * page whose whole point is that the agent sounds like somebody. The web had a
+ * boundary-aware cutter (terminal/why.ts shortWhy) and it was dead for these
+ * rows, because it only ever saw the string after this slice had already
+ * happened.
+ *
+ * This is the one gate every reader shares — the feed and the peer files both
+ * come through here — so it is the layer that has to be right; the prompts now
+ * state a budget as well, so the model rarely reaches it. Prefer the last
+ * sentence end if one falls in the back part of the budget, else the last
+ * space, then an ellipsis; the result is always <= REASON_MAX.
+ */
+export function clip(text: string, max: number = REASON_MAX): string {
+  const s = text.trim();
+  if (s.length <= max) return s;
+  const room = s.slice(0, max - 1);
+  const lastStop = Math.max(room.lastIndexOf(". "), room.lastIndexOf("! "), room.lastIndexOf("? "));
+  const cutAt = lastStop >= Math.floor(max * 0.6) ? lastStop + 1 : room.lastIndexOf(" ");
+  const kept = (cutAt > 0 ? room.slice(0, cutAt) : room).trimEnd().replace(/[,;:—–-]+$/, "");
+  return `${kept}…`;
+}
 
 /**
  * Why a proposal never reached the wall, said in our words.
@@ -539,8 +569,11 @@ export function outcomeOf(
  * claim that is only made conditional by CSS is not made conditional.
  */
 function headOf(row: ThesisRow, shadow: boolean): string {
+  // A HOLD HAS NO SIZE. Brain forces delta to 0 on a hold, which arrived here
+  // as size_usdg 0 and rendered "hold NVDA 0.00 USDG" — a figure that means
+  // nothing and reads as a bug. A hold is an answer, not a quantity.
   const size =
-    typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
+    row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
       ? `${row.size_usdg.toFixed(2)} USDG`
       : null;
   // A hold is already the conditional's answer — "would hold" is not English an
@@ -574,7 +607,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     // The model may omit the field, which arrives as "" rather than null. That
     // is expected, not exceptional: the post renders with its head and no
     // reasoning line, exactly as /why degrades.
-    reason = policy === "model" ? row.reason.trim().slice(0, REASON_MAX) : row.reason.trim();
+    reason = policy === "model" ? clip(row.reason) : row.reason.trim();
   } else if (row.dropped_rule) {
     reason = classifyDrop(row.dropped_rule);
   }
@@ -600,7 +633,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   let post: string | null = null;
   if (row.post && row.post.trim()) {
-    const body = row.post.trim().slice(0, REASON_MAX);
+    const body = clip(row.post);
     // The address backstop applies to it independently. It is the same rule as
     // below and it is repeated here rather than deferred, because a post that
     // names an address must cost the POST and not the whole thesis: the trade
@@ -619,6 +652,21 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // neither is disclosed on a public feed — the row is dropped and the
   // disconnection test is the thing that should have caught it.
   if (shadow && (row.status || row.dropped_rule || row.reject_rule)) return null;
+
+  /**
+   * A BRAIN REFUSAL IS THE OWNER'S FACT, NOT A POST.
+   *
+   * "no decision (refused): portfolio-quality-insufficient: core reports
+   * performance unmeasurable: contributions unknown" was live on the public
+   * feed. brain-shadow.ts writes that row with dropped_rule `brain-<kind>`
+   * when the Brain's gate refuses to size a book whose accounting is not
+   * evidenced — and it ALREADY writes the same fact to the owner's event log,
+   * which is where a sentence about their deposits belongs. The post was the
+   * excess: a stranger reads it as the agent being broken, and the owner reads
+   * it twice. A brain-shadow copy is already dropped by the contradiction rule
+   * above; this closes the same door for the live-enrolled source.
+   */
+  if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
   const head = headOf(row, shadow);
 
@@ -668,6 +716,17 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    * social-post.ts draws the same line for the writer, one layer earlier.
    */
   if (TRADED_ONLY.has(row.source ?? "") && outcome !== "landed") return null;
+
+  /**
+   * CASH MANAGEMENT THAT DID NOT HAPPEN IS NOT A POST EITHER.
+   *
+   * "vault-deposit 0.00 USDG — 0.00 USDG idle above the 50.00 floor" was live:
+   * a sub-cent park the wall refused, published with the refusal badge. A vault
+   * move is plumbing, not a view; when it lands the owner may reasonably see it,
+   * and when it does not there is nothing to say. Same shape as the class-route
+   * rule above, keyed on the action because these rows ride strategy sources.
+   */
+  if (CASH_ACTIONS.has(row.action ?? "") && outcome !== "landed") return null;
 
   // A post with neither a head nor a reason says nothing at all.
   if (!head && !reason) return null;
