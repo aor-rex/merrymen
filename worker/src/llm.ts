@@ -230,28 +230,40 @@ export async function llmToolCall(
   // Some reasoning models (gpt-oss-120b, deepseek-r1, qwen3-thinking, nemotron) dump chain-of-thought
   // into `content` or `reasoning_content`. We ignore that side-channel and only use tool_calls.
   // Universal: ask reasoning models not to put CoT into content — separate bank.
-  const body: Record<string, unknown> = {
+  const base: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1024,
     temperature: 0.2,
     messages: [{ role: "system", content: opts.system }, ...opts.messages],
     tools: [{ type: "function", function: { name: opts.tool.name, description: opts.tool.description, parameters: opts.tool.schema } }],
     tool_choice: { type: "function", function: { name: opts.tool.name } },
-    // Best-effort disable reasoning in content for openai-compatible reasoning models.
-    // Providers that don't support it ignore the field; providers that do keep reasoning
-    ...quietReasoning(creds),
   };
   // Servers validate tool arguments and the model is nondeterministic — a
   // malformed emission 400s. One retry usually lands; then we throw honestly.
+  //
+  // THE HINT IS RE-RESOLVED ON EVERY ATTEMPT, and that is the fix. The body
+  // used to be built once, above this loop, with `...quietReasoning(creds)`
+  // baked in — so when Groq answered 400 for `reasoning_effort: "none"` the
+  // one retry re-sent the identical body and 400'd again. `llmText` learned
+  // to drop the hint on that answer; this path, which the Telegram
+  // interpreter uses, never did, and the owner's chat stayed dead on Groq
+  // gpt-oss behind a fix that was only half applied.
   let lastErr = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await fetch(chatUrl(creds), {
       method: "POST",
       headers: openaiHeaders(creds),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...base, ...quietReasoning(creds) }),
     });
     if (!r.ok) {
-      lastErr = `${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`;
+      // providerError, not a raw body slice: it parses the provider's own
+      // code and message, redacts secrets, and produces the shape every
+      // owner-facing surface classifies on. The old string was the exact
+      // `groq 401: {"error":{...}}` a live owner read in their chat.
+      lastErr = await providerError(creds, r);
+      // A provider that refuses the FIELD has refused the optimisation, not
+      // the work: remember it, and the retry below resolves to no hint.
+      if (refusedReasoningHint(r.status, lastErr)) noteReasoningRefusal(creds.baseUrl);
       if (r.status === 400 && attempt === 0) continue;
       throw new Error(lastErr);
     }
@@ -348,8 +360,20 @@ export async function llmAgentTurn(
     tools: opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })),
     ...quietReasoning(creds),
   };
-  const r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  let r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
+  if (!r.ok) {
+    // Same rule as llmText and llmToolCall: a 400 that names the reasoning
+    // hint is the provider refusing an optimisation, so retry once without it
+    // and remember. Any other failure is thrown as providerError's sentence.
+    const why = await providerError(creds, r);
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    const bare = { ...body };
+    delete bare.reasoning_effort;
+    delete bare.include_reasoning;
+    r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(bare) });
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
   const j = (await r.json()) as {
     choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } }[];
   };

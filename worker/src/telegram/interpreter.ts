@@ -22,6 +22,7 @@
  */
 
 import { llmText, llmToolCall, type LlmCreds } from "../llm";
+import { describeLlmFailure } from "../llm-failure";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -554,8 +555,20 @@ export async function interpretWithLlm(
       messages: [...history, { role: "user", content: `STATE:\n${ctx.state}\n\nUSER MESSAGE:\n${text}` }],
     });
   } catch (e) {
+    /**
+     * SAY WHAT KIND OF NO IT WAS. This used to paste `e.message` into the
+     * reply, which for a refused key meant the owner read
+     * `groq 401: {"error":{"message":"Invalid API Key",...}}` — provider JSON
+     * in a chat bubble, under the word "reach", which was false (the provider
+     * answered), and hiding the one thing they could act on: the key in THEIR
+     * Settings overrides the house key even when it is wrong. The raw string
+     * still goes to the operator log, where it belongs.
+     */
+    const raw = e instanceof Error ? e.message : String(e);
+    const failure = describeLlmFailure(raw);
+    console.error(`[telegram] interpreter model call failed (${failure.kind}): ${raw}`);
     return {
-      cmd: { kind: "chat", reply: `couldn't reach my brain right now (${e instanceof Error ? e.message : String(e)}). Try a slash command like /status.` },
+      cmd: { kind: "chat", reply: `${failure.text} Slash commands like /status still work.` },
       remember: "",
     };
   }
