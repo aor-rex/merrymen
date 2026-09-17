@@ -181,7 +181,7 @@ const SUBMIT_TOOL: ToolSpec = {
             sizeUsdg: { type: "number", description: "USDG. Must respect maxPerActionUsdg." },
             reason: {
               type: "string",
-              description: "One sentence for THIS action, citing the figures that decided it.",
+              description: "One sentence for THIS action, under 200 characters, citing the figures that decided it.",
             },
           },
           required: ["action", "symbol", "sizeUsdg"],
@@ -191,7 +191,7 @@ const SUBMIT_TOOL: ToolSpec = {
       thesis: {
         type: "string",
         description:
-          "Your view, two or three sentences, in your own voice. What you think is going on and " +
+          "Your view, two or three short sentences — under 200 characters in total — in your own voice. What you think is going on and " +
           "why. This is published — write it for a reader who was not here. Grounded only in " +
           "what you saw; no invented numbers, no predictions you cannot support.",
       },
