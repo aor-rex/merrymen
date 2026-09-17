@@ -166,3 +166,51 @@ describe("the prose on a class post is written by us", () => {
     assert.notEqual(renderWhy(cases[1]!), renderWhy(cases[2]!));
   });
 });
+
+/**
+ * THE TWO LAYERS AT THE PUBLICATION BOUNDARY.
+ *
+ * The owner's rule: the structured evidence stays underneath for auditability,
+ * and the public post reads like the agent genuinely expressing what it thinks.
+ * That means two fields, not one — and the trust difference between them is why
+ * the post could not simply be written into `reason`.
+ */
+describe("the agent's own words travel beside ours, never instead of them", () => {
+  it("carries a post through without disturbing the deterministic reason", () => {
+    const t = publishableThesis(
+      row({ post: "Buyers are finally sticking around instead of hitting it once and leaving. Small clip." }),
+    )!;
+    assert.match(t.post!, /sticking around/);
+    assert.match(t.reason!, /taking 5.00 USDG/, "our sentence must survive alongside it");
+  });
+
+  it("is null when the agent said nothing, which is the normal case", () => {
+    assert.equal(publishableThesis(row())!.post, null);
+    assert.equal(publishableThesis(row({ post: "   " }))!.post, null);
+  });
+
+  /**
+   * THE TRUST DIFFERENCE, asserted rather than described.
+   *
+   * `class-route` is a "strategy" source, and publishableThesis applies
+   * REASON_MAX only when the policy is "model". So model prose written into the
+   * `reason` slot would publish UNCAPPED — which is exactly why the post has its
+   * own field and its own cap, and this is the assertion that fails if somebody
+   * later "simplifies" the two into one.
+   */
+  it("caps the model's prose even though the source is trusted for ours", () => {
+    const long = "x".repeat(400);
+    const t = publishableThesis(row({ post: long, reason: long }))!;
+    assert.ok(t.post!.length <= 220, `a post must be capped, got ${t.post!.length}`);
+    assert.equal(t.reason!.length, 400, "our own sentence is not a model's and is not capped here");
+  });
+
+  it("drops the POST and keeps the thesis when the post names an address", () => {
+    // The blast radius matters. A bad post must cost the agent its voice on
+    // that trade — not the trade's publication, which is ours and is safe.
+    const t = publishableThesis(row({ post: "Following 0xdeadbeefcafe in on this one." }));
+    assert.ok(t !== null, "the thesis itself must still publish");
+    assert.equal(t.post, null, "but not the post");
+    assert.match(t.reason!, /taking 5.00 USDG/);
+  });
+});

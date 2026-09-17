@@ -103,7 +103,9 @@ import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps,
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import type { Why } from "./strategies/reasons";
-import { classEvidenceOf, type BandBounds } from "./class-evidence";
+import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
+import { admitPost, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
+import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
@@ -143,7 +145,7 @@ import {
 } from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { startupSlotMs } from "./stagger";
-import { resolveLlm } from "./llm";
+import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 import {
@@ -372,7 +374,11 @@ import {
   addEquity,
   addEvent,
   addFeeAccrual,
+  addPost,
   addTrade,
+  decisionEvidence,
+  hasPost,
+  recentPosts,
   basisSymbols,
   classPositionCurves,
   classPositions,
@@ -5751,6 +5757,93 @@ async function main() {
     ];
   }
   /**
+   * WRITE THE AGENT'S OWN VIEW OF A TRADE THAT ACTUALLY HAPPENED.
+   *
+   * Every exit here is a normal outcome and none of them is an error: no
+   * evidence (not a class trade), no credentials (this owner runs no model), the
+   * model passing, the gate refusing. The trade is still published — its
+   * deterministic sentence is on the decision row either way. What is absent is
+   * only the agent's voice, and a social layer that must always produce
+   * something is one that will eventually produce anything.
+   *
+   * NOTHING HERE MAY THROW INTO THE TRADING PATH. It is invoked with `void` from
+   * the fill hook, so the whole body is wrapped: a model outage, a malformed
+   * completion or a storage failure costs a post and never a trade.
+   */
+  async function maybePost(decisionId: string, status: string): Promise<void> {
+    try {
+      // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
+      // decision the agent made and a view worth reading. `publishableThesis`
+      // carries the paper flag, so nobody is misled about the money.
+      if (status !== "landed" && status !== "paper") return;
+      if (!active) return;
+
+      // ALREADY SAID IS NOT A REASON TO SAY IT AGAIN, and a read failure is not
+      // permission either — `hasPost` returns null for that, and null is not
+      // false. An agent repeating itself about one trade reads as a bot.
+      const already = await hasPost(decisionId);
+      if (already !== false) return;
+
+      const rawEvidence = await decisionEvidence(decisionId);
+      if (!rawEvidence) return;
+      let evidence: ClassEvidence;
+      try {
+        evidence = JSON.parse(rawEvidence) as ClassEvidence;
+      } catch {
+        return;
+      }
+      if (!evidence?.bands || Object.keys(evidence.bands).length === 0) return;
+
+      const creds = resolveLlm(cfg);
+      if (!creds) return;
+
+      const ctx = {
+        // The owner-chosen name, the same one the desk persona uses. Falls back
+        // rather than inventing one: an unnamed agent still has a view.
+        name: cfg.agentName?.trim() || "this desk",
+        evidence,
+        traits: traitsOf(
+          {
+            maxHoldSec: cfg.classMaxHoldSec,
+            exitAtGraduationPct: cfg.classExitAtGraduationPct,
+            perEntryUsdg: cfg.classPerEntryUsdg,
+            maxImpactBps: cfg.maxImpactBps,
+            minDepthUsdg: cfg.classMinDepthUsdg,
+          },
+          {
+            maxHoldSec: SETTINGS_DEFAULTS.classMaxHoldSec ?? 21600,
+            exitAtGraduationPct: SETTINGS_DEFAULTS.classExitAtGraduationPct ?? 85,
+            perEntryUsdg: SETTINGS_DEFAULTS.classPerEntryUsdg ?? 5,
+            maxImpactBps: SETTINGS_DEFAULTS.maxImpactBps ?? 300,
+            minDepthUsdg: SETTINGS_DEFAULTS.classMinDepthUsdg ?? 100,
+          },
+        ),
+        recent: await recentPosts(active.agentId, VOICE_WINDOW),
+      };
+
+      const raw = await llmText(creds, {
+        system:
+          "You write short posts as a trader, for other traders. You never invent a figure, " +
+          "never predict a price, and you vary how you write.",
+        prompt: writerPrompt(ctx),
+        maxTokens: 200,
+      });
+
+      const verdict = admitPost(raw, ctx);
+      if (!verdict.ok || !verdict.body) {
+        // THE REFUSAL IS OPERATOR-FACING ONLY. It names a model's behaviour, and
+        // a reader of the public feed can do nothing with it — the feed simply
+        // carries the deterministic sentence instead.
+        console.log(`[social] no post for ${decisionId} — ${verdict.refusal}`);
+        return;
+      }
+      await addPost(active.agentId, decisionId, verdict.body);
+    } catch (e) {
+      console.error("[social] post failed:", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
    * `known` is WHAT THE PRODUCER KNOWS AND `describeIntent` CANNOT DERIVE.
    *
    * Two things on the class route, and both were wrong before it existed:
@@ -6111,6 +6204,23 @@ async function main() {
       // keeps the initializer's narrowing and resolves the reads to `never`.
       lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
       const wrote = await addTrade({ ...row, decision_id });
+      /**
+       * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
+       *
+       * GATED ON A FILL, NOT ON A DECISION, and this is the whole reason the
+       * call sits here rather than beside `ensureDecision`. A decision row
+       * exists for every intent including ones the wall turns back, and class
+       * entries are re-proposed with a fresh intent every tick — so a writer
+       * hung off the decision would mint a new post, in the agent's own voice,
+       * about a position it never took, once per tick, forever, each one costing
+       * a model call. `narrateTrade` learned this already and gates the same way.
+       *
+       * Deliberately not awaited into the trading path's critical section beyond
+       * what it needs: it writes its own row and cannot fail a trade. `wrote`
+       * matters because a post about a fill whose ledger row did not land would
+       * be the agent talking about a trade the ledger cannot account for.
+       */
+      if (wrote && decision_id) void maybePost(decision_id, row.status);
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.

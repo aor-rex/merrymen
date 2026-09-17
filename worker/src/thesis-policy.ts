@@ -86,6 +86,15 @@ export interface ThesisRow {
    * maps account -> slug over the rows it already has.
    */
   slug?: string | null;
+  /**
+   * THE AGENT'S OWN POST about this decision, joined from the posts table.
+   *
+   * Optional because most decisions have none and never will: it is written
+   * only for a class trade that actually FILLED, and only when the writer had
+   * something to say and cleared its gate. Absent is the common case and is not
+   * a fault.
+   */
+  post?: string | null;
 }
 
 export interface PublicThesis {
@@ -145,6 +154,15 @@ export interface PublicThesis {
    */
   shadow: boolean;
   reason: string | null;
+  /**
+   * What the agent said in its own voice, or null.
+   *
+   * SEPARATE FROM "reason", not a replacement for it. "reason" is our sentence
+   * and is always safe; this is the model's, and carries model trust. A surface
+   * shows this one when it is there and falls back to , so an agent
+   * with nothing to say is never silent about a trade it made.
+   */
+  post: string | null;
   /** How many times this exact thesis was said in the window. */
   said: number;
   /** Epoch seconds. Formatted by the page, so this module stays pure. */
@@ -549,6 +567,35 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     reason = classifyDrop(row.dropped_rule);
   }
 
+  /**
+   * THE AGENT'S OWN WORDS, IN THEIR OWN FIELD — and never in `reason`.
+   *
+   * A social post is MODEL PROSE and has to be treated as such: capped, address
+   * scanned, dropped rather than trimmed. `reason` cannot hold it, because the
+   * cap above is applied only when `policy === "model"` and a class post rides a
+   * `strategy` source — so putting it there would publish model output UNCAPPED
+   * and unscanned, and would destroy the thing `reasons.ts` built, which is that
+   * for a strategy source every published word was written by us in advance.
+   *
+   * Two fields, two trust levels, one row. The deterministic sentence stays
+   * exactly what it was; the post is additional and separately refusable, so a
+   * post that fails this gate costs the agent its voice on that trade and
+   * nothing else — the trade is still published, with our words.
+   *
+   * CAPPED AT REASON_MAX, the same ceiling, because both land on the same
+   * surfaces and a post cut mid-word reads as a broken product wherever it
+   * appears.
+   */
+  let post: string | null = null;
+  if (row.post && row.post.trim()) {
+    const body = row.post.trim().slice(0, REASON_MAX);
+    // The address backstop applies to it independently. It is the same rule as
+    // below and it is repeated here rather than deferred, because a post that
+    // names an address must cost the POST and not the whole thesis: the trade
+    // and our own sentence about it are still safe to publish.
+    post = ADDRESSY.test(body) ? null : body;
+  }
+
   // ── shadow ────────────────────────────────────────────────────────────────
   // Resolved before the outcome chain, because every arm of that chain assumes
   // the decision was at least ALLOWED to become a trade, and this one was not.
@@ -627,6 +674,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     outcomeText: text,
     shadow,
     reason,
+    post,
     said: Math.max(1, Number(row.said ?? 1)),
     at: Number(row.last_at ?? 0),
     firstAt: Number(row.first_at ?? row.last_at ?? 0),

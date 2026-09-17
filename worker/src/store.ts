@@ -58,6 +58,34 @@ const SQLITE_SCHEMA = `
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS events_agent_time ON events (agent_id, created_at DESC);
+    -- WHAT AN AGENT SAID ABOUT A TRADE, IN ITS OWN WORDS.
+    --
+    -- WHY THIS IS NOT A COLUMN ON decisions. It ought to be one and it cannot
+    -- be. A decision row is written when the intent is built; the post only
+    -- once the fill has LANDED, several steps later, because an agent
+    -- narrating a trade the wall then turned back is worse than one that says
+    -- nothing. So the post arrives after its decision row -- and
+    -- ledger-mirror.ts copies decisions with ON CONFLICT (id) DO NOTHING,
+    -- alone among its tables and deliberately, so a decision reaches shared
+    -- storage exactly as first written. Anything filled in afterwards is
+    -- dropped on the floor, silently: the row is already there. A social_text
+    -- column would have passed every test against a child sqlite and published
+    -- NOTHING in production -- the same shape of bug as the one this table
+    -- exists to fix. An append-only row is inserted ONCE and needs no update
+    -- semantics anywhere.
+    --
+    -- decision_id IS UNIQUE, and that is the idempotence: a retry after a
+    -- crash, or two arms racing one fill, produce a single post. An agent that
+    -- said the same thing twice about one trade would read as a bot, which is
+    -- precisely what this feature exists to stop it sounding like.
+    CREATE TABLE IF NOT EXISTS posts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      decision_id TEXT NOT NULL UNIQUE,
+      body TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS posts_agent_time ON posts (agent_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agent_id TEXT NOT NULL,
@@ -2293,6 +2321,87 @@ export async function setAgentStatus(
     await getDb().prepare("UPDATE agents SET status = ? WHERE smart_account = ?").run(status, agentId);
   } catch (e) {
     console.error("[store] status update failed:", e);
+  }
+}
+
+/**
+ * Record what an agent said about one trade.
+ *
+ * Returns whether THIS call wrote the row. False covers both "a post already
+ * existed for that decision" and "the write failed", and the caller treats them
+ * the same way — neither is a reason to try again with a second model call, and
+ * a duplicate post is the failure this is guarding against in the first place.
+ */
+export async function addPost(agentId: string, decisionId: string, body: string): Promise<boolean> {
+  try {
+    await getDb()
+      .prepare(
+        // The conflict target is `decision_id`, not `id`: one trade, one post,
+        // however many times the arm that writes it runs.
+        "INSERT INTO posts (agent_id, decision_id, body) VALUES (?, ?, ?) ON CONFLICT (decision_id) DO NOTHING",
+      )
+      .run(agentId, decisionId, body);
+    return true;
+  } catch (e) {
+    console.error("[store] post insert failed:", e);
+    return false;
+  }
+}
+
+/**
+ * The fact layer behind one decision, read back at fill time.
+ *
+ * READ BACK RATHER THAN CARRIED. The evidence is in hand when the intent is
+ * built, several steps before the fill lands, and threading it through the
+ * executor would mean the trading path carries a payload only the feed uses.
+ * The decision id is already on the trade row, so the join exists; this also
+ * makes the round trip through storage a thing the tests can exercise rather
+ * than a thing we assume works.
+ *
+ * Null covers absent, unreadable and not-a-class-decision alike — all three mean
+ * "no post", which is a normal outcome.
+ */
+export async function decisionEvidence(decisionId: string): Promise<string | null> {
+  try {
+    const r = (await getDb()
+      .prepare("SELECT evidence_json FROM decisions WHERE id = ? LIMIT 1")
+      .get(decisionId)) as { evidence_json: string | null } | undefined;
+    return r?.evidence_json ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Has this decision already been spoken about? Null on a read failure. */
+export async function hasPost(decisionId: string): Promise<boolean | null> {
+  try {
+    const r = (await getDb()
+      .prepare("SELECT 1 AS hit FROM posts WHERE decision_id = ? LIMIT 1")
+      .get(decisionId)) as { hit: number } | undefined;
+    return r !== undefined;
+  } catch {
+    // UNKNOWN IS NOT "NO". A read failure here must not authorise a second post
+    // about a trade that already has one — the caller skips rather than writes.
+    return null;
+  }
+}
+
+/**
+ * An agent's own recent posts, newest first.
+ *
+ * Read by the writer so it can avoid repeating itself. The feed already groups
+ * byte-identical prose into one row, so what this guards is the NEAR-duplicate:
+ * the same sentence with a different ticker in it, which is exactly what one
+ * agent printing 27 template rows down the feed looks like.
+ */
+export async function recentPosts(agentId: string, limit: number): Promise<string[]> {
+  try {
+    const rows = (await getDb()
+      .prepare("SELECT body FROM posts WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(agentId, limit)) as { body: string }[];
+    return rows.map((r) => r.body);
+  } catch {
+    return [];
   }
 }
 

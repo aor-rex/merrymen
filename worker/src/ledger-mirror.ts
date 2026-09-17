@@ -44,6 +44,10 @@ export const MIRROR_BATCH = 500;
 /** The append-only tables, and the column their watermark is measured in. */
 const LOG_TABLES = [
   { table: "events", probe: true, stamp: "created_at", cols: ["agent_id", "level", "message", "created_at"] },
+  // WHAT AN AGENT SAID, carried the ordinary cursored way. A post is written
+  // once and never updated, which is what makes it safe here — see the note on
+  // the decisions block below about what a late-filled column costs.
+  { table: "posts", probe: true, stamp: "created_at", cols: ["agent_id", "decision_id", "body", "created_at"] },
   {
     table: "trades", probe: true, stamp: "created_at",
     cols: [
