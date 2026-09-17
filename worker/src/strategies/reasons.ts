@@ -311,9 +311,26 @@ export type Why =
  * Deliberately short: reasons.test.ts caps a rendered sentence at 220 chars,
  * and the figure already appears earlier in every sentence that uses this.
  */
-const capClause = (capped?: boolean) =>
-  capped ? " — cut to what your signed key allows; re-sign to raise it" : "";
-export function renderWhy(w: Why): string {
+/**
+ * WHO IS READING.
+ *
+ * The same `Why` goes to two places with two readers. The owner's event log and
+ * Telegram get the OWNER register, which may end in a remedy — "re-sign to raise
+ * it", "add funds or lower the size per trade" — because the owner is the one
+ * person who can act on it. The decision row becomes a PUBLIC post, and the
+ * same sentence there is an instruction addressed to a stranger about somebody
+ * else's account: the live feed carried "Add funds or lower the size per trade"
+ * and "Change the mode in Settings" for weeks, which is the exact texture of a
+ * worker log leaking onto a trading desk.
+ *
+ * `"owner"` is the default so every existing call site is byte-identical. The
+ * public register is opt-in at the two places a sentence becomes a post.
+ */
+export type WhyAudience = "owner" | "public";
+
+const capClause = (capped: boolean | undefined, audience: WhyAudience) =>
+  !capped ? "" : audience === "owner" ? " — cut to what your signed key allows; re-sign to raise it" : " — cut to what the signed key allows";
+export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
   switch (w.code) {
     case "dca-leg":
       return (
@@ -345,15 +362,19 @@ export function renderWhy(w: Why): string {
       return (
         `nothing bought — today's buying budget is spent. That is the daily cap in your ` +
         `signature doing its job, not a fault: I buy ${usdg(w.capRaw)} USDG a tick, so a small ` +
-        `cap is gone quickly. Lower the size per tick in settings to spread it across the day, ` +
-        `or raise the cap at /grant — that one needs a re-sign. Selling is never blocked by this`
+        `cap is gone quickly. ` +
+        (audience === "owner"
+          ? `Lower the size per tick in settings to spread it across the day, ` +
+            `or raise the cap at /grant — that one needs a re-sign. `
+          : ``) +
+        `Selling is never blocked by this`
       );
     case "under-one-buy":
       return (
         `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}` +
         (w.vaultRaw > 0n
           ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
-          : `, and the vault is empty. Add funds or lower the size per trade`)
+          : `, and the vault is empty` + (audience === "owner" ? `. Add funds or lower the size per trade` : ``))
       );
     case "stop-floor":
       return (
@@ -407,15 +428,15 @@ export function renderWhy(w: Why): string {
       // No P&L claim: the strategy proposes, and never learns what it filled at.
       return `${w.symbol}'s feed is live again — the market reopened, so the whole position goes back to cash`;
     case "keel-seed":
-      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}${capClause(w.capped)}`;
+      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}${capClause(w.capped, audience)}`;
     case "keel-trim":
       return `${w.symbol} is ${usdg(w.overRaw)} USDG over its equal weight — trimming it back toward the line`;
     case "keel-top":
-      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash${capClause(w.capped)}`;
+      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash${capClause(w.capped, audience)}`;
     case "dip":
       return (
         `${w.symbol} is ${pct(w.dipBps)}% off its rolling high, the deepest of the ${w.priced} I priced — ` +
-        `${usdg(w.usdgRaw)} USDG in${capClause(w.capped)}`
+        `${usdg(w.usdgRaw)} USDG in${capClause(w.capped, audience)}`
       );
     case "trench-enter":
       return (

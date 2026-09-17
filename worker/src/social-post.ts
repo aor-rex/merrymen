@@ -158,6 +158,26 @@ export function writerPrompt(c: WriterContext): string {
   return lines.filter((l) => l !== "").join("\n");
 }
 
+/**
+ * MAY THIS TRADE BE SPOKEN ABOUT AT ALL?
+ *
+ * The one gate that runs BEFORE any model is called, and the reason it is a
+ * named function rather than a condition inside the fill hook: a decision row
+ * exists for every intent, including every one the wall turns back, and class
+ * entries are re-proposed with a fresh intent every tick. A writer keyed on the
+ * decision would post — in the agent's own voice — about a position it never
+ * took, once per tick, forever, each one a model call.
+ *
+ * "landed" and "paper" are the two statuses that mean money actually moved (or
+ * was simulated to). Everything else — rejected by the wall, reverted on-chain,
+ * submitted and not yet confirmed, or no trade row at all — is not a trade the
+ * agent made, and an agent that narrates trades it did not make is the thing
+ * this whole layer exists to not be.
+ */
+export function postableStatus(status: string | null | undefined): boolean {
+  return status === "landed" || status === "paper";
+}
+
 /** Why a post was refused, for the operator log. Never shown to a reader. */
 export type PostRefusal =
   | "passed"

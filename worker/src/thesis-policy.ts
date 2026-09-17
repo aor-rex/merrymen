@@ -285,6 +285,18 @@ export const SHADOW_SOURCES = ["brain-shadow"] as const;
 const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
 
 /**
+ * SOURCES WHOSE POSTS ARE ABOUT TRADES THAT HAPPENED.
+ *
+ * A source in this set publishes only when its decision LANDED. Refused,
+ * dropped, reverted and pending rows stay in the ledger and out of the feed.
+ * The argument is at the gate below; the set is here beside SHADOW_SOURCES
+ * because the two are the same kind of thing — a per-source rule about which
+ * outcomes may be spoken about — and a reader should find them together.
+ */
+export const TRADED_ONLY_SOURCES = ["class-route"] as const;
+const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
+
+/**
  * Every source a reader may put in a `WHERE source IN (…)`.
  *
  * Exported so the two SQL callers derive their list from the policy instead of
@@ -635,6 +647,27 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
         : row.dropped_rule && !row.status
           ? ({ outcome: "dropped", text: "dropped before it reached the wall" } as const)
           : outcomeOf(row.status, row.reject_rule);
+
+  /**
+   * A CLASS POST IS ABOUT A TRADE THAT HAPPENED, or it is not a post.
+   *
+   * Every other source publishes its refusals, and for the strategist that is
+   * right: "I wanted to buy X because Y, and the wall said no" is the model's
+   * actual thesis with an honest outcome on it. The class route is different in
+   * a way that matters for a feed. Its reason is OUR deterministic sentence, its
+   * entries are re-proposed with a fresh decision row every tick for as long as
+   * the candidate qualifies, and the evidence in that sentence moves a little
+   * each tick — so a persistently refused entry does not collapse under the
+   * feed's GROUP BY into one row with a count. It becomes twenty-seven nearly
+   * identical posts saying "taking 5.00 USDG of X" beside a badge saying it did
+   * not. That is refusal spam in the agent's own voice, and a trading desk does
+   * not post every order the risk desk bounced.
+   *
+   * The decision row is untouched — it is still in the ledger, still auditable,
+   * still what /why reads. It just is not social content. `postableStatus` in
+   * social-post.ts draws the same line for the writer, one layer earlier.
+   */
+  if (TRADED_ONLY.has(row.source ?? "") && outcome !== "landed") return null;
 
   // A post with neither a head nor a reason says nothing at all.
   if (!head && !reason) return null;

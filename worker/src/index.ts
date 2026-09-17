@@ -104,7 +104,7 @@ import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
-import { admitPost, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
+import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
@@ -5748,7 +5748,9 @@ async function main() {
     if (!w || (w.code !== "class-enter" && w.code !== "class-exit")) return [undefined, undefined];
     const e = classEvidenceOf(w, classBandBounds());
     return [
-      renderWhy(w),
+      // THE PUBLIC REGISTER: this string becomes a post. The owner's copy of
+      // the same Why, remedies included, goes through addEvent elsewhere.
+      renderWhy(w, "public"),
       {
         action: w.code === "class-exit" ? "sell" : "buy",
         symbol: w.symbol,
@@ -5774,8 +5776,10 @@ async function main() {
     try {
       // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
       // decision the agent made and a view worth reading. `publishableThesis`
-      // carries the paper flag, so nobody is misled about the money.
-      if (status !== "landed" && status !== "paper") return;
+      // carries the paper flag, so nobody is misled about the money. The
+      // predicate lives in social-post.ts so a test can pin it directly rather
+      // than reading this closure as text.
+      if (!postableStatus(status)) return;
       if (!active) return;
 
       // ALREADY SAID IS NOT A REASON TO SAY IT AGAIN, and a read failure is not
@@ -10286,10 +10290,19 @@ async function main() {
         .length === 0 &&
       legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
         ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
-          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade. ` +
-          `Change the mode in Settings, or add something it allows to your basket.`
+          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade`
         : null;
-    const idleNow = idle ? renderWhy(idle) : modeEmptied;
+    /**
+     * TWO REGISTERS FROM ONE FACT. The owner's event log gets the remedy —
+     * they are the one person who can change the mode. The decision row is a
+     * public post, and "Change the mode in Settings" on a public feed is an
+     * instruction to a stranger about somebody else's account; it was live for
+     * weeks and is the exact texture of a worker log leaking onto a desk.
+     * `renderWhy` draws the same line for its own remedy-bearing arms.
+     */
+    const modeEmptiedRemedy = modeEmptied === null ? null : `${modeEmptied}. Change the mode in Settings, or add something it allows to your basket.`;
+    const idleNow = idle ? renderWhy(idle) : modeEmptiedRemedy;
+    const idlePublic = idle ? renderWhy(idle, "public") : modeEmptied;
     if (idleNow !== lastIdleReason) {
       lastIdleReason = idleNow;
       if (idleNow) {
@@ -10326,7 +10339,9 @@ async function main() {
           id: newDecisionId(),
           agent_id: agentId,
           source: publicationSourceFor(strategy.name),
-          reason: idleNow,
+          // Non-null whenever idleNow is — both derive from the same Why or the
+          // same modeEmptied — but the type cannot see across the two ternaries.
+          reason: idlePublic ?? undefined,
         });
       }
     }
@@ -10340,7 +10355,9 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
-      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w) : undefined);
+      // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
+      // advice for the owner and was going out on every capped keel-top.
+      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined);
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
