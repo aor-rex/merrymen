@@ -953,10 +953,29 @@ export async function chainHolders(addr: string): Promise<ChainHolder[]> {
   return rows;
 }
 
+/**
+ * WHERE AN AGENT'S FACE COMES FROM — our origin, always.
+ *
+ * This returned `https://robohash.org/<slug>.png` and every `Face` on every
+ * terminal screen hotlinked it. On a public feed that sends every reader's IP
+ * to a third party, once per avatar per page — which is the exact objection
+ * `api/agent-face` was written to answer, and only the unmounted `AgentAvatar`
+ * ever used that proxy.
+ *
+ * Now it points at the agent's own uploaded picture. When there is none the
+ * route answers 404 and the component's `onError` falls through to the seeded
+ * gradient and initials it already draws — no network, no third party, and an
+ * absent image that stays absent rather than becoming a cached placeholder.
+ */
 export function faceSrc(slug: string | null): string | null {
   if (!slug) return null;
-  const seed = slug;
-  return `https://robohash.org/${encodeURIComponent(seed)}.png?set=set1&size=160x160`;
+  return `/api/agent-image/${encodeURIComponent(slug)}/avatar`;
+}
+
+/** The banner, same rule: our origin, 404 when unset, the header renders plain. */
+export function bannerSrc(slug: string | null): string | null {
+  if (!slug) return null;
+  return `/api/agent-image/${encodeURIComponent(slug)}/banner`;
 }
 
 export function lede(text: string | null | undefined): string {

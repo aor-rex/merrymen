@@ -16,6 +16,7 @@ import { strategyName } from "../strategy";
 import { Coin, Face } from "../ui";
 import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
+import { bannerSrc } from "../live";
 import { WireButton } from "@/components/WireButton";
 
 export function Profile({
@@ -49,6 +50,16 @@ export function Profile({
   isMine?: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
+  /**
+   * MOST AGENTS HAVE NO BANNER, and that is not a failure to report.
+   *
+   * The image route answers 404 when nothing was uploaded, so the header
+   * renders the plain bar it always had. Hiding on error rather than probing
+   * first keeps this to zero extra requests for the common case: the <img>
+   * either paints or removes itself.
+   */
+  const [bannerOk, setBannerOk] = useState(true);
+  const banner = bannerSrc(agent.slug);
   const posts = theses
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
@@ -77,6 +88,11 @@ export function Profile({
    */
   return (
     <div className="public-agent-page">
+      {bannerOk && banner && (
+        // eslint-disable-next-line @next/next/no-img-element -- our own origin,
+        // already bounded server-side; next/image would add a loader for nothing.
+        <img className="public-agent-banner" src={banner} alt="" onError={() => setBannerOk(false)} />
+      )}
       <header className="public-agent-id">
         <button
           type="button"
