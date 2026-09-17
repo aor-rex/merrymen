@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
@@ -44,7 +45,7 @@ function Field(props: {
   );
 }
 
-export default function SettingsPage({onFund}:{onFund:()=>void}) {
+export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: string | null}) {
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -725,6 +726,18 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 onChange={set("agentName")}
               />
             </Field>
+            <AgentImageField
+              kind="avatar"
+              slug={slug}
+              label="Profile picture"
+              hint="PNG, JPEG or WebP. Cropped to a square and re-encoded; nothing else from the file is kept."
+            />
+            <AgentImageField
+              kind="banner"
+              slug={slug}
+              label="Banner"
+              hint="PNG, JPEG or WebP. Cropped wide for the top of your agent&rsquo;s profile."
+            />
             <Field
               label="Strategy"
             >
