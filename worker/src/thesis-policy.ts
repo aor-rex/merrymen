@@ -209,6 +209,29 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
+  /**
+   * THE CLASS ROUTE — the one rail that traded and said nothing.
+   *
+   * Every class-vault entry and exit files under this source, and it was absent
+   * from this map, so `publishableThesis` dropped all of it: two agents
+   * completed full autonomous buy-and-sell round trips of a launch and neither
+   * feed, nor any peer file, nor `read_peers` ever mentioned it. The most
+   * interesting thing this product does was the one thing it never talked about.
+   *
+   * "strategy" TRUST, and that is a claim about authorship, not about
+   * confidence. A class decision's `reason` is `renderWhy` output — our words,
+   * written in advance, from a typed `Why` a deterministic producer emitted. It
+   * is the same trust `strategy:even-keel` has and for exactly the same reason;
+   * `reasons.ts` makes publishability a property of the type system rather than
+   * something a reviewer has to remember.
+   *
+   * SO NOTHING MODEL-WRITTEN MAY EVER BE PUT IN THAT SLOT. `publishableThesis`
+   * truncates to REASON_MAX only when the policy is "model", so prose smuggled
+   * into a "strategy" row publishes UNCAPPED and unscanned. A post written in an
+   * agent's own voice is model output and belongs in its own field with its own
+   * gate — never in `reason`.
+   */
+  "class-route": "strategy",
   // NOT here, and each for its own reason:
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself

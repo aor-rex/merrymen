@@ -251,7 +251,17 @@ describe("the exit and the recovery path meet at graduation", () => {
     // position that most needs to close. But a floor, always: an exit with no
     // floor into a curve nobody can read is how a position leaves for nothing.
     assert.match(EXIT, /curveMinOut\(quoted, cfg\.slippageBps\)/);
-    assert.match(EXIT, /if \(floor === null \|\| floor <= 0n\) continue;/);
+    // THE GUARD, NOT ITS OLD ONE-LINER. It used to be a bare `continue`, which
+    // also meant a position whose curve would not yield a floor was dropped in
+    // silence every tick, forever — indistinguishable from one that had simply
+    // not aged. It now warns the owner before continuing, so the assertion is
+    // on the refusal rather than on the statement that used to express it.
+    assert.match(EXIT, /if \(floor === null \|\| floor <= 0n\) \{/, "a sell with no floor must be refused");
+    assert.match(
+      EXIT,
+      /if \(floor === null \|\| floor <= 0n\) \{[\s\S]{0,400}?continue;/,
+      "and refusing must mean not selling",
+    );
     assert.ok(!/maxImpactBps/.test(EXIT), "and no impact ceiling that could trap it");
   });
 });

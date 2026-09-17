@@ -102,7 +102,7 @@ describe("the routes that are crypto by construction are gated, and say so", () 
   const index = read("index.ts");
 
   it("THE CLASS ROUTE RETURNS NOTHING under stocks only", () => {
-    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return \[\];/);
+    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return NO_CLASS;/);
   });
 
   it("AND THE TRENCHER SAYS SO RATHER THAN GOING QUIET", () => {

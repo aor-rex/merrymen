@@ -235,6 +235,69 @@ export type Why =
       symbol: string;
       cause: "unpriceable" | "drain" | "stop" | "take" | "aged";
       pct?: number;
+    }
+  /**
+   * TAKING A LAUNCH ON THE CLASS ROUTE.
+   *
+   * Every field here was measured in the same pass that chose this curve, and
+   * each is carried rather than re-read: a sentence that re-derives its own
+   * evidence a second later is a sentence about a different market.
+   *
+   * THE NULLS ARE THE POINT. `trades` and `traders` come from a ~15-minute
+   * window of curve events, and index.ts closes the empty-vs-unavailable gap
+   * there explicitly — `classActivity === null ? null : (a ? a.buys + a.sells : 0)`.
+   * A tape we could not read is NOT a quiet tape, and the difference decides
+   * whether "buyers are sticking around" may be said at all.
+   */
+  | {
+      code: "class-enter";
+      symbol: string;
+      usdgRaw: bigint;
+      /** Trades on this curve in the activity window. null = tape unreadable. */
+      trades: number | null;
+      /** Distinct trading addresses in the same window. null = tape unreadable. */
+      traders: number | null;
+      /** Real quote depth with the virtual seed removed, raw USDG 6dp. */
+      depthRaw: bigint;
+      /** One-way price impact of THIS buy, bps. */
+      impactBps: number;
+      /** Round-trip cost at scoring size, bps. null when it could not be priced. */
+      costBps: number | null;
+      /** Progress toward graduation, bps of the threshold. */
+      graduationBps: number;
+      /** How many priced rivals this curve was chosen over. */
+      field: number;
+    }
+  /**
+   * LEAVING ONE.
+   *
+   * `cause` is a CODE and the set is CLOSED AT TWO, because two is how many
+   * reasons the class exit actually has. It is deliberately price-free
+   * (index.ts states it, class-exit.test.ts pins it), so there is no
+   * thesis-invalidated exit; stop-floors and take-profits read the smart
+   * account's balances and the class book is custodied by the vault, so no hard
+   * risk exit can see it; and Brain's orders route to the adapter, never the
+   * vault, so it cannot sell one either.
+   *
+   * Naming a third cause here would be naming an exit that did not happen.
+   *
+   *   clock — held longer than classMaxHoldSec
+   *   cliff — close enough to graduation that the vault would soon be unable to
+   *           sell at all, since PonsClassVault.sell reverts CurveGraduated
+   *
+   * `graduationBps` is NULLABLE and must stay so. The gate coalesces an
+   * unreadable depth fraction to zero, which is the safe direction for deciding
+   * (an unreadable curve never trips the cliff) and a lie for reporting. On a
+   * `cliff` exit it is never null by construction — the cliff is how it fired.
+   */
+  | {
+      code: "class-exit";
+      symbol: string;
+      cause: "clock" | "cliff";
+      heldSec: number;
+      graduationBps: number | null;
+      /** USDG the sell is quoted to return, raw 6dp. */
+      proceedsRaw: bigint;
     };
 
 /**
@@ -369,6 +432,47 @@ export function renderWhy(w: Why): string {
       if (w.cause === "aged") return `leaving ${w.symbol} — held past the window I give a launch`;
       return `leaving ${w.symbol} — it cannot be priced any more, so I am going while there is still a route out`;
     }
+    /**
+     * THE CLASS ROUTE'S TWO SENTENCES, AND WHY THEY CARRY SO FEW FIGURES.
+     *
+     * Every other arm in this file prints its numbers, because every other arm
+     * is the whole of what gets published. These two are not: the class route
+     * has a FACT LAYER underneath (`decisions.evidence_json`), which keeps all
+     * of it — depth, impact, cost, the field it beat — for the drill-down and
+     * for the social writer.
+     *
+     * So the job here changes. This sentence is what a reader sees when there
+     * is no post in the agent's own voice, and a feed of
+     * "15m activity 32, depth 410.22 USDG, graduation 41.3%" is an observability
+     * dashboard wearing a feed's clothes. It names the one fact that decided
+     * the trade and stops. The rest is a click away and has not been lost.
+     */
+    case "class-enter": {
+      // AN UNREADABLE TAPE SAYS NOTHING ABOUT BUYERS. `trades === null` is not
+      // a quiet curve; it is a curve we could not hear. The clause is dropped
+      // rather than softened, because "few buyers" would be a claim we cannot
+      // make and "some buyers" would be one we invented.
+      const busy =
+        w.trades === null
+          ? null
+          : w.traders !== null && w.traders > 1
+            ? `${w.traders} different buyers have been through it`
+            : `${w.trades} trades have gone through it`;
+      const beat = w.field > 1 ? `, and it was the best of ${w.field} I priced` : "";
+      return busy === null
+        ? `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol} — early on the curve${beat}`
+        : `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol} — ${busy}${beat}`;
+    }
+    case "class-exit":
+      // The cliff is the one worth explaining, because the reason is a contract
+      // revert rather than a view about the price: once the curve graduates,
+      // the vault cannot sell at all. An owner reading "sold at 85%" with no
+      // explanation would reasonably think we took a profit target.
+      return w.cause === "cliff"
+        ? `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG — it is close enough to graduating that the ` +
+            `vault would soon not be able to sell it at all`
+        : `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG — ${Math.round(w.heldSec / 3600)}h is as long ` +
+            `as I hold one of these`;
     default: {
       const exhaustive: never = w;
       return exhaustive;

@@ -193,6 +193,7 @@ const SQLITE_SCHEMA = `
       reason TEXT,                 -- the model's own words (never fed back into policy)
       dropped_rule TEXT,           -- non-null when the proposal was dropped before execution
       signals_json TEXT,           -- the inputs the decision was made on (for later review)
+      evidence_json TEXT,          -- the banded fact layer behind a published post (safe to show)
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
@@ -638,6 +639,11 @@ const SQLITE_ALTERS: string[] = [
     // this is carried. Null on every row written before the Brain reported it,
     // and null is rendered as unknown rather than as either kind.
     "ALTER TABLE decisions ADD COLUMN hold_kind TEXT",
+    // THE FACT LAYER BEHIND A POST — the measurements a class decision was made
+    // on, banded into words and kept beside the raw figures. Separate from
+    // signals_json, which is the owner's whole balance sheet and MUST NEVER be
+    // published; this column is written to be read by a stranger.
+    "ALTER TABLE decisions ADD COLUMN evidence_json TEXT",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
     // Rows written before the identity existed carry a NULL chain and whatever
@@ -1039,6 +1045,19 @@ export interface DecisionRow {
    * as model holds would report a healthy fleet while it was being gated.
    */
   hold_kind?: string;
+  /**
+   * THE FACT LAYER, and the one column here that is written to be PUBLISHED.
+   *
+   * signals_json sits two fields up and is the opposite: the owner's cash,
+   * vault and every holding's value, which thesis-policy.ts keeps out of the
+   * published shape by not selecting it at all. The names are similar and the
+   * rules are opposite, so the distinction is stated here rather than left to
+   * whoever adds the next reader.
+   *
+   * A ClassEvidence as JSON: qualitative bands a social writer may draw on, the
+   * raw figures for a drill-down, and who decided the trade.
+   */
+  evidence_json?: string | null;
 }
 
 /** A fresh decision id. Kept here so every producer stamps the same shape. */
@@ -1050,8 +1069,8 @@ export async function addDecision(row: DecisionRow): Promise<void> {
   try {
     await getDb()
       .prepare(
-        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1067,6 +1086,7 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.dropped_rule ?? null,
         row.signals_json ?? null,
         row.hold_kind ?? null,
+        row.evidence_json ?? null,
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);
