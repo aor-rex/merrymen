@@ -3,7 +3,7 @@ import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
 export interface ProfileTrade {
   id: string;
-  action: "buy" | "sell";
+  action: "buy" | "sell" | "swap";
   symbol: string | null;
   at: number;
   paper: boolean;
@@ -32,8 +32,7 @@ export async function readProfileTrades(db: Db, account: string, epoch: number, 
       const recordedSide = row.fill_side === "buy" || row.fill_side === "sell" ? row.fill_side : row.action;
       // Older fills predate decision links and fill_side. Resolve registered
       // stock tokens from the executed pair, without publishing the addresses.
-      const side = recordedSide === "buy" || recordedSide === "sell" ? recordedSide : bought ? "buy" : sold ? "sell" : null;
-      if (side !== "buy" && side !== "sell") continue;
+      const side = recordedSide === "buy" || recordedSide === "sell" ? recordedSide : bought ? "buy" : sold ? "sell" : "swap";
       const candidate = side === "buy" ? bought?.symbol ?? row.symbol : sold?.symbol ?? row.symbol;
       const symbol = typeof candidate === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(candidate) && !/^0x/i.test(candidate) ? candidate : null;
       const size = publicBook && row.size_usdg != null ? Number(row.size_usdg) : null;

@@ -36,6 +36,8 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
     const legacy = (await readProfileTrades(db, "a", 1, false)).trades.find(t => t.id === "1");
     assert.equal(legacy?.action, "buy");
     assert.equal(legacy?.symbol, STOCK_TOKENS[0].symbol);
+    await db.exec("UPDATE trades SET buy_token = NULL WHERE id = 1");
+    assert.equal((await readProfileTrades(db, "a", 1, false)).trades.find(t => t.id === "1")?.action, "swap");
   } finally { raw.close(); }
 });
 

@@ -141,7 +141,7 @@ export function Profile({
               face. */}
           <div className="public-trade-count">
             <strong>{agent.landed}</strong>
-            <span>Completed trades</span>
+            <span>Completed operations</span>
             {!!agent.filledPaper && (
               <small className="public-paper-count">
                 {agent.filledPaper} more filled on paper — simulated, not real money
@@ -196,14 +196,16 @@ export function Profile({
         {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : agent.recentTrades.length === 0 ? <Empty compact title="No completed buys or sells recorded in this trading period."/> : <>
           <div className="public-activity">
             {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
-              <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : "↘"}</span>
-              <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : "Sold"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
+              <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
+              <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
+                {trade.symbol == null && <small>Token label unavailable in this historical record.</small>}
                 <small>{new Date(trade.at * 1000).toLocaleString()} · {trade.paper ? "Paper fill — simulated" : "Completed"}</small>
               </div>
             </article>)}
           </div>
           {agent.recentTrades.length > 6 && <button type="button" className="public-more" aria-expanded={showTrades} onClick={() => setShowTrades(value => !value)}>{showTrades ? "Show fewer trades" : `Show latest ${agent.recentTrades.length} trades`}</button>}
           {agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
+          <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>
         </>}
       </section>
       <section className="public-section">
