@@ -36,6 +36,7 @@ import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { Db } from "./db";
+import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
 
 /** Rows per table per pass. Bounded so one busy tenant cannot starve the rest. */
@@ -737,6 +738,11 @@ export async function mirrorTenant(args: {
           );
         }
       });
+      // Period IDs remain separate: mirroring a stale child cannot reset a new budget.
+      // A rolling deploy can still be mirroring a child from before this schema.
+      const hasPeriods = await child.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'risk_periods'").get();
+      const periods = hasPeriods ? await child.prepare("SELECT * FROM risk_periods").all() as RiskPeriod[] : [];
+      for (const period of periods) await mergeRiskPeriod(shared, period);
       copied.agents = agents.length;
 
       const positions = (await child
