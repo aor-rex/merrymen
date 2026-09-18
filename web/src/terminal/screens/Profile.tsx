@@ -126,7 +126,7 @@ export function Profile({
       <section className="public-performance" aria-label="Agent performance">
         <div className="public-performance-numbers">
           <div>
-            <span className="account-label">Reported return</span>
+            <span className="account-label">Net return on contributed capital</span>
             <strong
               className={`public-return ${agent.pnlBps == null ? "" : agent.pnlBps < 0 ? "down" : "up"}`}
             >
@@ -177,6 +177,7 @@ export function Profile({
             aria-label={`Performance history. Reported return ${pctBps(agent.pnlBps)}.`}
           >
             <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
+            <p className="public-empty">Chart: time-weighted return over the displayed history, adjusted for deposits and withdrawals. Its period and calculation differ from the net return above.</p>
           </div>
         ) : (
           <p className="public-empty">
@@ -198,14 +199,21 @@ export function Profile({
             {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
               <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
               <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
-                {trade.symbol == null && <small>Token label unavailable in this historical record.</small>}
+                {trade.symbol == null && <small style={{ display: "block" }}>Token label unavailable in this historical record.</small>}
                 <small>{new Date(trade.at * 1000).toLocaleString()} · {trade.paper ? "Paper fill — simulated" : "Completed"}</small>
+                <p className={trade.realizedPnlBps != null ? trade.realizedPnlBps < 0 ? "down" : "up" : "public-empty"}>
+                  {trade.paper ? "Simulated P&L" : "Realized P&L"}: {trade.action === "buy" ? "Not realized on a buy" : trade.realizedPnlBps != null || trade.realizedPnlUsdg != null ? <>
+                    {trade.realizedPnlBps != null && pctBps(trade.realizedPnlBps)}
+                    {trade.realizedPnlUsdg != null && <>{trade.realizedPnlBps != null ? " · " : ""}{trade.realizedPnlUsdg >= 0 ? "+" : "−"}{money(Math.abs(trade.realizedPnlUsdg))}</>}
+                  </> : "Unavailable — recorded cost basis or fill data missing"}
+                </p>
               </div>
             </article>)}
           </div>
           {agent.recentTrades.length > 6 && <button type="button" className="public-more" aria-expanded={showTrades} onClick={() => setShowTrades(value => !value)}>{showTrades ? "Show fewer trades" : `Show latest ${agent.recentTrades.length} trades`}</button>}
           {agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
           <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>
+          <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas. Paper P&L is simulated and is separate from live returns. Buys realize no profit until sold; open-position returns appear under Positions when shared.</p>
         </>}
       </section>
       <section className="public-section">

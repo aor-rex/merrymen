@@ -21,6 +21,7 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
       (6,'d','other',1,'swap','buy','landed',6,50),
       (7,'d','a',2,'swap','buy','landed',7,50);`);
     await db.exec("ALTER TABLE trades ADD COLUMN buy_token TEXT; ALTER TABLE trades ADD COLUMN sell_token TEXT;");
+    await db.exec("ALTER TABLE trades ADD COLUMN realized_pnl_usdg REAL; ALTER TABLE trades ADD COLUMN fill_cash_usdg REAL; ALTER TABLE trades ADD COLUMN basis_source TEXT;");
     const privateBook = await readProfileTrades(db, "a", 1, false);
     assert.equal(privateBook.read, true);
     assert.deepEqual(privateBook.trades.map(t => t.id), ["3", "2", "1"]);
@@ -38,6 +39,29 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
     assert.equal(legacy?.symbol, STOCK_TOKENS[0].symbol);
     await db.exec("UPDATE trades SET buy_token = NULL WHERE id = 1");
     assert.equal((await readProfileTrades(db, "a", 1, false)).trades.find(t => t.id === "1")?.action, "swap");
+  } finally { raw.close(); }
+});
+
+test("paper and live sales publish evidenced P&L without exposing private amounts", async () => {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  try {
+    await db.exec(`CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT);
+      CREATE TABLE trades(id INTEGER, decision_id TEXT, agent_id TEXT, epoch INTEGER, kind TEXT, fill_side TEXT, status TEXT, created_at INTEGER, amount_usdg REAL, buy_token TEXT, sell_token TEXT, realized_pnl_usdg REAL, fill_cash_usdg REAL, basis_source TEXT);
+      INSERT INTO trades VALUES
+        (1,NULL,'a',1,'swap','sell','paper',1,12,NULL,NULL,2,12,'paper'),
+        (2,NULL,'a',1,'swap','sell','landed',2,8,NULL,NULL,-2,8,'receipt'),
+        (3,NULL,'a',1,'swap','sell','paper',3,10,NULL,NULL,0,10,'paper'),
+        (4,NULL,'a',1,'swap','sell','paper',4,10,NULL,NULL,NULL,10,'paper'),
+        (5,NULL,'a',1,'swap','sell','landed',5,10,NULL,NULL,2,12,'quote'),
+        (6,NULL,'a',1,'swap','buy','paper',6,10,NULL,NULL,2,12,'paper');`);
+    const privateRows = (await readProfileTrades(db, 'a', 1, false)).trades;
+    assert.deepEqual(privateRows.map(t => t.realizedPnlBps), [null, null, null, 0, -2000, 2000]);
+    assert.ok(privateRows.every(t => t.realizedPnlUsdg === null && t.sizeUsdg === null));
+    const publicRows = (await readProfileTrades(db, 'a', 1, true)).trades;
+    assert.deepEqual(publicRows.map(t => t.realizedPnlUsdg), [null, null, null, 0, -2, 2]);
+    await db.exec('UPDATE trades SET fill_cash_usdg = NULL WHERE id = 1');
+    assert.equal((await readProfileTrades(db, 'a', 1, true)).trades.find(t => t.id === '1')?.realizedPnlBps, null);
   } finally { raw.close(); }
 });
 

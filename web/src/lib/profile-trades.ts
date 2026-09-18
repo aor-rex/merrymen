@@ -8,6 +8,8 @@ export interface ProfileTrade {
   at: number;
   paper: boolean;
   sizeUsdg: number | null;
+  realizedPnlUsdg: number | null;
+  realizedPnlBps: number | null;
 }
 
 /** Actual fills, independent of whether an agent published a social post.
@@ -18,7 +20,8 @@ export async function readProfileTrades(db: Db, account: string, epoch: number, 
   try {
     const rows = await db.prepare(`
       SELECT t.id, t.fill_side, d.action, d.symbol, t.buy_token, t.sell_token, t.created_at, t.status,
-             CASE WHEN ? = 1 THEN t.amount_usdg ELSE NULL END AS size_usdg
+             CASE WHEN ? = 1 THEN t.amount_usdg ELSE NULL END AS size_usdg,
+             t.realized_pnl_usdg, t.fill_cash_usdg, t.basis_source
       FROM trades t
       LEFT JOIN decisions d ON d.id = t.decision_id AND LOWER(d.agent_id) = LOWER(t.agent_id)
       WHERE t.agent_id = ? AND t.epoch = ? AND t.status IN ('landed', 'paper')
@@ -36,7 +39,16 @@ export async function readProfileTrades(db: Db, account: string, epoch: number, 
       const candidate = side === "buy" ? bought?.symbol ?? row.symbol : sold?.symbol ?? row.symbol;
       const symbol = typeof candidate === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(candidate) && !/^0x/i.test(candidate) ? candidate : null;
       const size = publicBook && row.size_usdg != null ? Number(row.size_usdg) : null;
-      trades.push({ id: String(row.id), action: side, symbol, at: Number(row.created_at), paper: row.status === "paper", sizeUsdg: size != null && Number.isFinite(size) ? size : null });
+      // Cash minus realized profit is the cost of the quantity sold, including
+      // partial closes. Never use the proposed order amount as executed cost.
+      const evidenced = row.status === "paper" ? row.basis_source === "paper" : row.basis_source === "receipt";
+      const pnl = side === "sell" && evidenced && row.realized_pnl_usdg != null ? Number(row.realized_pnl_usdg) : NaN;
+      const cash = row.fill_cash_usdg != null ? Number(row.fill_cash_usdg) : NaN;
+      const cost = cash - pnl;
+      const bps = Number.isFinite(pnl) && Number.isFinite(cash) && cash >= 0 && cost > 0 ? Math.round(pnl / cost * 10_000) : null;
+      trades.push({ id: String(row.id), action: side, symbol, at: Number(row.created_at), paper: row.status === "paper", sizeUsdg: size != null && Number.isFinite(size) ? size : null,
+        realizedPnlUsdg: publicBook && Number.isFinite(pnl) ? pnl : null,
+        realizedPnlBps: bps != null && Number.isFinite(bps) ? bps : null });
     }
     return { trades, read: true };
   } catch (error) {
