@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
 import { readProfileTrades } from "./profile-trades";
+import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
 test("profile history reads fills beyond the social window, keeps repeats, and respects book privacy", async () => {
   const raw = new DatabaseSync(":memory:");
@@ -19,6 +20,7 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
       (5,'d','a',1,'transfer','sell','landed',5,50),
       (6,'d','other',1,'swap','buy','landed',6,50),
       (7,'d','a',2,'swap','buy','landed',7,50);`);
+    await db.exec("ALTER TABLE trades ADD COLUMN buy_token TEXT; ALTER TABLE trades ADD COLUMN sell_token TEXT;");
     const privateBook = await readProfileTrades(db, "a", 1, false);
     assert.equal(privateBook.read, true);
     assert.deepEqual(privateBook.trades.map(t => t.id), ["3", "2", "1"]);
@@ -30,6 +32,10 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
     assert.equal(published.trades[1].sizeUsdg, 12);
     await db.exec("UPDATE decisions SET symbol = '0x0123456789abcdef0123456789abcdef01234567'");
     assert.equal((await readProfileTrades(db, "a", 1, true)).trades[1].symbol, null);
+    await db.prepare("UPDATE trades SET decision_id = NULL, fill_side = NULL, buy_token = ? WHERE id = 1").run(STOCK_TOKENS[0].address);
+    const legacy = (await readProfileTrades(db, "a", 1, false)).trades.find(t => t.id === "1");
+    assert.equal(legacy?.action, "buy");
+    assert.equal(legacy?.symbol, STOCK_TOKENS[0].symbol);
   } finally { raw.close(); }
 });
 
