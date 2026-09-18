@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
-import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import "./brand.css";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
 import { ScrollFx } from "@/components/ScrollFx";
 
-// A refined, warm humanist grotesque — the closest open-source match to the
-// polished agency-grade grotesques these sites use. One family, many weights.
-const hanken = Hanken_Grotesk({
+// Match the hosted application’s primary typeface.
+const sans = DM_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
   weight: ["400", "500", "600", "700", "800"],
@@ -46,7 +46,7 @@ export const metadata: Metadata = {
     site: "@MerrymenAI",
     creator: "@MerrymenAI",
   },
-  icons: { icon: "/favicon.svg" },
+  icons: { icon: "/favicon.svg?v=2" },
   // Site-verification tokens (public by design — they prove ownership of the
   // domain to third-party platforms). Rendered as <meta name=… content=… />.
   other: {
@@ -56,23 +56,12 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${hanken.variable} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body>
-        {/* Arm the reveal layer before first paint so content never flashes in
-            un-animated; a delayed backstop un-hides everything if JS stalled. */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              "try{var d=document.documentElement;if(!matchMedia('(prefers-reduced-motion: reduce)').matches){d.classList.add('fx-ready');setTimeout(function(){if(!document.querySelector('[data-reveal].is-in'))d.classList.add('fx-done')},4000)}}catch(e){}",
-          }}
-        />
         <div className="page">
-          <div className="ambient" />
-          <div className="halftone" />
-          <div className="grain" />
           <ScrollFx />
           <Nav />
-          <main>{children}</main>
+          <div id="main-content" tabIndex={-1}>{children}</div>
           <Footer />
         </div>
       </body>
