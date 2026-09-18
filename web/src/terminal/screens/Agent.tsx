@@ -923,6 +923,7 @@ export function Agent({
           }}
         >
           <textarea
+            data-tour="chat-input"
             ref={input}
             rows={1}
             onKeyDown={(e) => {
