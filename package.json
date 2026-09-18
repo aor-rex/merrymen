@@ -12,7 +12,7 @@
     "url": "https://github.com/millw14/merrymen/issues"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": "^22.13.0 || >=23.4.0"
   },
   "bin": {
     "merrymen": "cli/bin.mjs"

@@ -18,6 +18,7 @@ import {
   type MerrymenSettings,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
+import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -391,7 +392,7 @@ export function mergeSettings(
     // larger here. 500 bps of turnover would eat an account in a fortnight.
     tradeFeeBps: num(file.tradeFeeBps, env.MERRYMEN_TRADE_FEE_BPS, d.tradeFeeBps ?? 50, 0, 500),
     tradeFeeAddress: str(file.tradeFeeAddress, env.MERRYMEN_TRADE_FEE_ADDRESS),
-    tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, 3_600),
+    tickSeconds: num(file.tickSeconds, env.MERRYMEN_TICK_SECONDS, d.tickSeconds, 15, MAX_DECISION_INTERVAL_SEC),
     basketSymbols,
     customTokens,
     memecoinMinFdvUsd: num(file.memecoinMinFdvUsd, env.MERRYMEN_MEMECOIN_MIN_FDV_USD, d.memecoinMinFdvUsd ?? 0, 0, 1_000_000_000_000),

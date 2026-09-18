@@ -49,6 +49,14 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { merrymenHome } from "@merrymen/home";
+import { TOUR_VERSION } from "./tour-version";
+
+// v2 retains existing records. Later revisions have their own namespace in
+// both backends, so an old dismissal cannot suppress a rewritten tour.
+function ownerKey(tenant: string, version: number): string {
+  if (!Number.isSafeInteger(version) || version < 2) throw new Error("Invalid tour version");
+  return `${tenant.toLowerCase()}${version === 2 ? "" : `.v${version}`}`;
+}
 
 export interface TourStore {
   /** Has this owner finished or skipped the tour? */
@@ -68,8 +76,9 @@ export interface TourStore {
 
 export class FileTourStore implements TourStore {
   private dir = path.join(merrymenHome(), "tour");
+  constructor(private version = TOUR_VERSION) {}
   private file(tenant: string) {
-    return path.join(this.dir, `${tenant.toLowerCase()}.json`);
+    return path.join(this.dir, `${ownerKey(tenant, this.version)}.json`);
   }
   async done(tenant: `0x${string}`): Promise<boolean> {
     try {
@@ -108,10 +117,11 @@ interface PgClientLike {
  */
 export class PgTourStore implements TourStore {
   private ready: Promise<PgClientLike> | null = null;
-  constructor(private url: string) {}
+  constructor(private url: string, private version = TOUR_VERSION, private connect?: () => Promise<PgClientLike>) {}
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
       this.ready = (async () => {
+        if (this.connect) return this.connect();
         // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
         const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
           Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
@@ -127,13 +137,13 @@ export class PgTourStore implements TourStore {
            )`,
         );
         return c;
-      })();
+      })().catch(error => { this.ready = null; throw error; });
     }
     return this.ready;
   }
   async done(tenant: `0x${string}`): Promise<boolean> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT 1 FROM tour_seen WHERE tenant = $1`, [tenant.toLowerCase()]);
+    const { rows } = await c.query(`SELECT 1 FROM tour_seen WHERE tenant = $1`, [ownerKey(tenant, this.version)]);
     return rows.length > 0;
   }
   async markDone(tenant: `0x${string}`): Promise<void> {
@@ -142,12 +152,12 @@ export class PgTourStore implements TourStore {
     // means something, and a re-press should not rewrite its timestamp.
     await c.query(
       `INSERT INTO tour_seen (tenant, done_at) VALUES ($1, $2) ON CONFLICT (tenant) DO NOTHING`,
-      [tenant.toLowerCase(), Date.now()],
+      [ownerKey(tenant, this.version), Date.now()],
     );
   }
   async clear(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
-    await c.query(`DELETE FROM tour_seen WHERE tenant = $1`, [tenant.toLowerCase()]);
+    await c.query(`DELETE FROM tour_seen WHERE tenant = $1`, [ownerKey(tenant, this.version)]);
   }
 }
 

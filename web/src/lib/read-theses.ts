@@ -119,6 +119,8 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
       "d.agent_id NOT LIKE 'rh:%'",
       "d.at > ?",
       `d.source IN (${SOURCES.map(() => "?").join(", ")})`,
+      "(d.hold_kind IS NULL OR d.hold_kind <> 'GATE_FORCED_HOLD')",
+      "(d.dropped_rule IS NULL OR d.dropped_rule NOT LIKE 'brain-%')",
     ];
     const args: unknown[] = [since, ...SOURCES];
     if (only) {
@@ -138,6 +140,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
           `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
                   d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
                   d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
+                  d.hold_kind AS hold_kind,
                   p.body AS post,
                   t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
                   COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
@@ -163,7 +166,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
             -- heartbeat has not said anything.
             WHERE ${where.join(" AND ")}
             GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
-                     d.source, d.reason, d.dropped_rule, t.status, t.reject_rule, p.body
+                     d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body
             ORDER BY MAX(d.at) DESC
             LIMIT ?`,
         )

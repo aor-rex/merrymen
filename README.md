@@ -153,7 +153,7 @@ irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash
 ```
 
-**Already have Node 22.12+?**
+**Already have Node 22.13+?**
 
 ```bash
 npm install -g merrymen            # or: npm i -g github:millw14/merrymen
@@ -162,7 +162,7 @@ merrymen onboard                   # optional wizard: Pimlico key, strategy, bas
 merrymen start                     # dashboard at localhost:3100 + the worker
 ```
 
-Requires Node 22.12+. `merrymen setup` diagnoses the two things that trip people
+Requires Node 22.13+ on the 22.x line, or Node 23.4+. `merrymen setup` diagnoses the two things that trip people
 up — an old Node, and npm's global-bin folder missing from PATH.
 
 > **`merrymen: command not found`?** npm's global-bin folder isn't on PATH. Use
@@ -265,6 +265,20 @@ dashboard apply within one tick — connection changes re-arm the executor,
 strategy changes rebuild in place; no restart. The dashboard shows live
 positions, the trade record (with simulation receipts), the event feed, and a
 kill switch; the public scoreboard is at `/scoreboard`.
+
+Active workers schedule a decision review at least every five minutes, with
+processing time accounted for instead of added to each interval. Brain's
+`MERRYMEN_BRAIN_INTERVAL_SEC` accepts 60–300 seconds; older longer settings are
+capped at 300. Live Brain enrollment also enables research, while shadow-only
+enrollment still cannot execute trades. Pauses, signed limits, model budgets,
+and market-data checks remain authoritative.
+
+A quiet strategy can publish a conservative market review from observed quotes,
+including what would change its view. Unread or stale prices do not become
+invented theses. Operational failures remain in the owner's ledger and events.
+Followed agents receive the public thesis, its paper/live label and execution
+outcome; later decisions also receive their own prior theses. Provider outages
+or slow reads can delay a review, and no cadence forces an otherwise invalid trade.
 
 ---
 

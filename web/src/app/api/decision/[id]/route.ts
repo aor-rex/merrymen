@@ -26,7 +26,7 @@
  * collapses them on purpose and this route keeps the collapse.
  */
 import { NextResponse } from "next/server";
-import { lifecycleOf } from "@merrymen/store";
+import { readPublicDecisionLifecycle } from "../../../../lib/read-decision-lifecycle";
 
 export const runtime = "nodejs";
 /** A ledger read: cacheable briefly, never per-caller. */
@@ -45,7 +45,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   if (!ID_RE.test(id)) return NextResponse.json({ error: "not found" }, { status: 404 });
 
-  const life = await lifecycleOf(id);
+  const life = await readPublicDecisionLifecycle(id);
   if (!life) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   return NextResponse.json(life, {

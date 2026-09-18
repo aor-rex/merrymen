@@ -166,7 +166,7 @@ describe("Brain can tell a winner from a loser", () => {
     // const in the same function scope, so referencing it from a block that
     // runs earlier compiles cleanly and throws at runtime.
     const read = INDEX.indexOf("const basisBySymbol = new Map<string, bigint | null>()");
-    const brain = INDEX.indexOf("if (shadowBrainEnabledFor(agentId)");
+    const brain = INDEX.indexOf("const outcome = await runShadow(");
     assert.ok(read > 0 && brain > 0, "both must exist");
     assert.ok(read < brain, "the basis must be built before its first consumer");
   });

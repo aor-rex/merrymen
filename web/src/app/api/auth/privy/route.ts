@@ -92,7 +92,7 @@ export async function POST(req: Request) {
   // `body.address` is never trusted. It is not even read: the address is the
   // one the signature recovers to, so a request naming somebody else's wallet
   // proves nothing and gets nowhere.
-  const gate = consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, origin);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   let wallet: `0x${string}`;

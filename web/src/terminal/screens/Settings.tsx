@@ -1725,8 +1725,8 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
               <span className="mm-unit">bps</span>
             </Field>
-            <Field label="Market check interval">
-              <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
+            <Field label="Market check interval" hint="An active book is reviewed at least every five minutes, subject to available reads and budget.">
+              <input type="number" min={15} max={300} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
               <span className="mm-unit">sec</span>
             </Field>
             <Field label="Buy amount per check" hint="Amount spread across the Steady Basket.">

@@ -59,11 +59,8 @@ describe("what may be published", () => {
     assert.ok(t.reason!.endsWith("…"), "and a cut says that it cut");
   });
 
-  it("an empty model reason is a post with no reasoning line, not the string 'undefined'", () => {
-    // The model omits the field routinely; it arrives as "" rather than null.
-    const t = publishableThesis(ok({ source: "strategist", reason: "" }))!;
-    assert.equal(t.reason, null);
-    assert.equal(t.head, "buy NVDA 16.66 USDG");
+  it("an empty model reason without a post has no thesis to publish", () => {
+    assert.equal(publishableThesis(ok({ source: "strategist", reason: "" })), null);
   });
 });
 
@@ -194,10 +191,8 @@ describe("refusals are classified, never quoted", () => {
     // dropped_rule is `#N <symbol>: <clause>` and <symbol> is model-supplied,
     // validated only as a string — no length cap, no charset.
     const nasty = "#0 <script>alert(1)</script>: nothing held to sell";
-    const t = publishableThesis(ok({ source: "strategist", reason: null, dropped_rule: nasty, status: null }))!;
-    assert.doesNotMatch(t.reason!, /script|alert/);
-    assert.equal(t.reason, "there was nothing held to sell");
-    assert.equal(t.outcome, "dropped");
+    assert.equal(publishableThesis(ok({ source: "strategist", reason: null, dropped_rule: nasty, status: null })), null);
+    assert.equal(classifyDrop(nasty), "there was nothing held to sell");
   });
 
   it("does not echo the FIGURE in a cash refusal", () => {

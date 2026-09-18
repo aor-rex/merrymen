@@ -23,8 +23,8 @@
  *   sharp would happily rasterise it and then we would be deciding, per
  *   feature, whether the rasteriser is a sandbox. It is not our sandbox.
  *
- *   ANIMATION — `animated: false` reads the first frame only. A banner is a
- *   still; a multi-hundred-frame webp is a decode bomb wearing a picture.
+ *   ANIMATION — metadata with multiple pages is refused before re-encoding.
+ *   `animated: false` also prevents decoding every frame while inspecting it.
  *
  *   DECOMPRESSION BOMBS — `limitInputPixels` refuses a file whose HEADER
  *   claims more pixels than we will ever draw, before any of it is decoded.
@@ -105,6 +105,7 @@ export async function normaliseImage(bytes: Uint8Array, kind: "avatar" | "banner
     const input = sharp(bytes, { limitInputPixels: MAX_INPUT_PIXELS, animated: false });
     const meta = await input.metadata();
     if (!meta.format || !DECODABLE.has(meta.format)) return { ok: false, refusal: "unsupported-format" };
+    if ((meta.pages ?? 1) > 1) return { ok: false, refusal: "unsupported-format" };
 
     const resized =
       kind === "avatar"

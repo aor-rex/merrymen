@@ -16,6 +16,8 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
+export type { DecisionLifecycle } from "./decision-lifecycle";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
@@ -1430,8 +1432,7 @@ async function appendJournalRow(db: Db, agentId: string, epoch: number, kind: Jo
 /**
  * Run a domain write and its journal entry as ONE transaction.
  *
- * The worker is the single writer, so this is about crash-atomicity rather than
- * concurrency: a process that dies between the two writes must leave neither,
+ * A process that dies between the two writes must leave neither,
  * not a ledger whose chain has a hole in it or a journal claiming a trade the
  * trades table never got.
  */
@@ -1443,8 +1444,8 @@ export async function journaled(
   write: (db: Db) => Promise<void>,
 ): Promise<void> {
   // One transaction, pinned to one connection (tx()), so the domain write and
-  // its journal entry commit together or not at all — the Postgres backend needs
-  // the single-connection guarantee that sqlite got for free.
+  // its journal entry commit together or not at all. The SQLite driver also
+  // keeps unrelated asynchronous operations outside this transaction.
   await getDb().tx(async (tx) => {
     await write(tx);
     await appendJournalRow(tx, agentId, epoch, kind, payload);
@@ -1462,49 +1463,6 @@ export async function readJournal(agentId: string, epoch: number): Promise<Journ
       .all(agentId, epoch) as unknown as JournalEntry[];
   } catch {
     return [];
-  }
-}
-
-/**
- * What the heartbeat last said this agent is doing — the BACKSTOP for the paper
- * boundary, not its primary source.
- *
- * Null means the column has not been written yet, which is a genuinely different
- * fact from "live" and is carried as such: `tradingModeOf` turns it into
- * `unknown`, and an unknown mode admits the flow. That is deliberate. Refusing
- * on unknown would silently drop a LIVE agent's opening balance during the
- * window before its first heartbeat — trading one accounting bug for another —
- * so the narrow window is closed at the call site instead, where the answer is
- * known synchronously and never absent.
- */
-async function modeOf(agentId: string): Promise<string | null> {
-  try {
-    const row = (await getDb().prepare("SELECT mode FROM agents WHERE smart_account = ?").get(agentId)) as
-      | { mode: string | null }
-      | undefined;
-    return row?.mode ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Which chain this agent's grant is on, for a flow that did not carry it.
- *
- * Read from `agents` rather than from config so it is the chain the GRANT was
- * signed for, which is the chain any transaction touching this account is on.
- * Null when the agent row is not there yet: a null chain_id is honest and merely
- * leaves the identity index inert for that row, whereas guessing a chain would
- * make two different chains' transactions collide under one identity.
- */
-async function chainIdOf(agentId: string): Promise<number | null> {
-  try {
-    const row = (await getDb().prepare("SELECT chain_id FROM agents WHERE smart_account = ?").get(agentId)) as
-      | { chain_id: number | null }
-      | undefined;
-    return row?.chain_id ?? null;
-  } catch {
-    return null;
   }
 }
 
@@ -1627,28 +1585,33 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
  * permanently unable to evidence its contributions, with no recovery possible.
  */
 export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
-  const next = (await getAgentEpoch(agentId)) + 1;
-  await getDb().prepare("UPDATE agents SET epoch = ? WHERE smart_account = ?").run(next, agentId);
-  // AFTER the UPDATE, deliberately: addFlow stamps the row with the agent's
-  // CURRENT epoch, so this lands in the new one. Written the other way round it
-  // would file the opening balance in the epoch being closed and change nothing.
-  if (openingBalanceUsdg !== undefined && openingBalanceUsdg > 0) {
-    await addFlow({
-      agentId,
-      direction: "in",
-      amountUsdg: openingBalanceUsdg,
-      // NOT 'inferred'. This is the closing equity of the epoch just closed,
-      // which is a figure already in the journal — a deterministic bridge, not a
-      // deduction from a balance nobody can point at. Sharing a source value with
-      // real inference condemned every agent that had ever crossed a boundary to
-      // permanent contributionsKnown=false, with no recovery that could exist:
-      // no deposit scan can retroactively give a bookkeeping entry a transaction
-      // hash it never had. A carry is checkable against the prior epoch's own
-      // closing mark instead — see reconcileEpochCarry in accounting-scope.ts.
-      source: "epoch-carry",
-    });
-  }
-  return next;
+  return getDb().tx(async (db) => {
+    // Increment under the transaction's row lock rather than reading and then
+    // assigning: concurrent PostgreSQL callers must not open the same epoch.
+    const account = await db
+      .prepare(
+        `UPDATE agents SET epoch = epoch + 1 WHERE smart_account = ?
+         RETURNING epoch, chain_id, mode`,
+      )
+      .get(agentId) as FlowAccount | undefined;
+    if (!account) throw new Error(`cannot open an epoch for unknown agent ${agentId}`);
+
+    if (openingBalanceUsdg !== undefined && openingBalanceUsdg > 0) {
+      const flow: FlowRow = {
+        agentId,
+        direction: "in",
+        amountUsdg: openingBalanceUsdg,
+        source: "epoch-carry",
+      };
+      // A paper reset advances its reporting epoch without converting simulated
+      // equity into real capital. A live carry, including its journal entry,
+      // must commit with the epoch or throw and roll the entire boundary back.
+      if (admitCapitalFlow({ mode: tradingModeOf(account.mode), source: flow.source }).admit) {
+        await insertFlowWithJournal(db, flow, account.epoch, account.chain_id);
+      }
+    }
+    return account.epoch;
+  });
 }
 
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
@@ -1686,6 +1649,46 @@ export interface FlowRow {
   chainId?: number;
 }
 
+interface FlowAccount {
+  epoch: number;
+  chain_id: number | null;
+  mode: string | null;
+}
+
+/** Insert into an existing transaction; a duplicate is successful but adds no journal fact. */
+async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<void> {
+  const amount = Math.abs(flow.amountUsdg);
+  const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
+  const inserted = await db
+    .prepare(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+    )
+    .run(
+      flow.agentId,
+      flow.direction,
+      amount,
+      txHash,
+      flow.blockNumber ?? null,
+      flow.logIndex ?? null,
+      flow.source,
+      epoch,
+      chainId,
+    );
+  // Both drivers report affected rows. An ignored INSERT must not append an
+  // extra contribution to the audit book while leaving the flows table intact.
+  if (inserted.changes === 0) return;
+  await appendJournalRow(db, flow.agentId, epoch, "flow", {
+    amountUsdg: amount,
+    blockNumber: flow.blockNumber ?? null,
+    direction: flow.direction,
+    logIndex: flow.logIndex ?? null,
+    source: flow.source,
+    txHash,
+  });
+}
+
 /**
  * Record money crossing the account boundary, and mirror it into the journal.
  *
@@ -1705,62 +1708,35 @@ export interface FlowRow {
  * bug by forgetting.
  */
 export async function addFlow(flow: FlowRow): Promise<boolean> {
-  const mode = flow.mode ?? tradingModeOf(await modeOf(flow.agentId));
-  const admission = admitCapitalFlow({ mode, source: flow.source, txHash: flow.txHash });
-  if (!admission.admit) {
-    // Loud, and on the agent's own event log rather than only stderr: a refused
-    // flow means a figure the owner can see did NOT move, and the reason has to
-    // be somewhere they can find it.
-    console.error(`[flows] refused ${flow.source} ${flow.direction} ${flow.amountUsdg} — ${admission.why}`);
-    await addEvent(flow.agentId, "warn", `capital flow not recorded — ${admission.why}`).catch(() => {});
-    // FALSE, because the caller must not move the high-water mark for money the
-    // ledger has no record of. A refusal is a decision, not an error, but the
-    // pairing rule is the same either way.
-    return false;
-  }
   try {
-    const epoch = await epochOf(flow.agentId);
-    const amount = Math.abs(flow.amountUsdg);
-    // LOWERCASE, ALWAYS. A hash is a number, but it reaches here as a string and
-    // an RPC may return it in either case — and a case difference defeats both
-    // the unique index and the repair's read-back, so the same log written by
-    // the scanner and by the backfill would sit in the table twice, both stamped
-    // 'chain-log'. Normalising at the single write point is the only place the
-    // two writers can be made to agree.
-    const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
-    const chainId = flow.chainId ?? (await chainIdOf(flow.agentId));
-    await journaled(
-      flow.agentId,
-      epoch,
-      "flow",
-      {
-        amountUsdg: amount,
-        blockNumber: flow.blockNumber ?? null,
-        direction: flow.direction,
-        logIndex: flow.logIndex ?? null,
-        source: flow.source,
-        txHash,
-      },
-      async (db: Db) => {
-        await db
-          .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT DO NOTHING`,
-          )
-          .run(
-            flow.agentId,
-            flow.direction,
-            amount,
-            txHash,
-            flow.blockNumber ?? null,
-            flow.logIndex ?? null,
-            flow.source,
-            epoch,
-            chainId,
-          );
-      },
-    );
+    const admission = await getDb().tx(async (db) => {
+      // A no-op UPDATE locks this agent through the flow write on PostgreSQL;
+      // it cannot race an epoch rollover after reading the old epoch. SQLite
+      // accepts the same SQL and serializes the transaction at its connection.
+      const account = await db
+        .prepare(
+          `UPDATE agents SET epoch = epoch WHERE smart_account = ?
+           RETURNING epoch, chain_id, mode`,
+        )
+        .get(flow.agentId) as FlowAccount | undefined;
+      // Before the first heartbeat, an absent mode is unknown, not paper. The
+      // caller can supply the known mode; absent agent/chain retain the existing
+      // epoch-1/null-chain behavior instead of inventing a chain identity.
+      const mode = flow.mode ?? tradingModeOf(account?.mode);
+      const verdict = admitCapitalFlow({ mode, source: flow.source, txHash: flow.txHash });
+      if (verdict.admit) {
+        await insertFlowWithJournal(db, flow, account?.epoch ?? 1, flow.chainId ?? account?.chain_id ?? null);
+      }
+      return verdict;
+    });
+    if (!admission.admit) {
+      console.error(`[flows] refused ${flow.source} ${flow.direction} ${flow.amountUsdg} — ${admission.why}`);
+      // Outside the completed transaction: an ordinary store write must not
+      // wait on the transaction that is awaiting it.
+      await addEvent(flow.agentId, "warn", `capital flow not recorded — ${admission.why}`).catch(() => {});
+      return false;
+    }
+    // Successful duplicate retries remain true for the deposit scanner.
     return true;
   } catch (e) {
     console.error("[store] flow insert failed:", e);
@@ -2408,123 +2384,14 @@ export async function decisionAgent(decisionId: string): Promise<string | null |
   }
 }
 
-/** One decision, and everything that happened because of it. */
-export interface DecisionLifecycle {
-  decision: {
-    id: string;
-    agent_id: string;
-    source: string;
-    provenance: string | null;
-    action: string | null;
-    symbol: string | null;
-    size_usdg: number | null;
-    reason: string | null;
-    dropped_rule: string | null;
-    evidence_json: string | null;
-    at: number;
-  };
-  /** Every trade that attached to it, oldest first. Normally one; never assumed. */
-  trades: {
-    status: string;
-    reject_rule: string | null;
-    user_op_hash: string | null;
-    tx_hash: string | null;
-    amount_usdg: number | null;
-    fill_side: string | null;
-    fill_qty_raw: string | null;
-    fill_cash_usdg: number | null;
-    fill_price_usd: number | null;
-    realized_pnl_usdg: number | null;
-    basis_source: string | null;
-    created_at: number;
-  }[];
-  /** What the agent said about it in its own voice, if anything. */
-  post: { body: string; created_at: number } | null;
-}
-
-/**
- * THE WHOLE LIFE OF ONE DECISION, from its id.
- *
- * decision created -> intent -> submitted -> landed/refused/reverted ->
- * economic fill -> realised result -> what the agent said. A reader hands this
- * one id and gets the entire chain; that is the property the id exists for, and
- * until the id actually survived into execution it was not reconstructable at
- * all — the thesis row and the trade carried different ids.
- *
- * READS, NEVER INFERS. A stage that has not happened is absent rather than
- * zero: no trade row means the intent has not reached the wall (or was dropped
- * before it), `realized_pnl_usdg` null means the result is not known yet, and
- * neither is reported as a number. `trades` is an ARRAY because the schema
- * permits several rows against one decision — a retry writes a second — and a
- * reader that assumed one would quietly show the first and hide the rest.
- *
- * Returns null when the decision does not exist or cannot be read. The caller
- * cannot tell those apart here on purpose: a public surface answers 404 to
- * both, and distinguishing them would leak whether an id exists.
- */
+/** Owner-side lifecycle reader. Public callers must apply the publication policy. */
 export async function lifecycleOf(decisionId: string): Promise<DecisionLifecycle | null> {
   try {
-    const db = getDb();
-    const d = (await db
-      .prepare(
-        `SELECT id, agent_id, source, provenance, action, symbol, size_usdg,
-                reason, dropped_rule, evidence_json, at
-           FROM decisions WHERE id = ? LIMIT 1`,
-      )
-      .get(decisionId)) as Record<string, unknown> | undefined;
-    if (!d) return null;
-
-    const trades = (await db
-      .prepare(
-        `SELECT status, reject_rule, user_op_hash, tx_hash, amount_usdg,
-                fill_side, fill_qty_raw, fill_cash_usdg, fill_price_usd,
-                realized_pnl_usdg, basis_source, created_at
-           FROM trades WHERE decision_id = ? ORDER BY created_at ASC, id ASC`,
-      )
-      .all(decisionId)) as Record<string, unknown>[];
-
-    const post = (await db
-      .prepare("SELECT body, created_at FROM posts WHERE decision_id = ? LIMIT 1")
-      .get(decisionId)) as { body: string; created_at: number } | undefined;
-
-    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
-    const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
-
-    return {
-      decision: {
-        id: String(d.id),
-        agent_id: String(d.agent_id),
-        source: String(d.source),
-        provenance: str(d.provenance),
-        action: str(d.action),
-        symbol: str(d.symbol),
-        size_usdg: num(d.size_usdg),
-        reason: str(d.reason),
-        dropped_rule: str(d.dropped_rule),
-        evidence_json: str(d.evidence_json),
-        at: Number(d.at),
-      },
-      trades: trades.map((t) => ({
-        status: String(t.status),
-        reject_rule: str(t.reject_rule),
-        user_op_hash: str(t.user_op_hash),
-        tx_hash: str(t.tx_hash),
-        amount_usdg: num(t.amount_usdg),
-        fill_side: str(t.fill_side),
-        fill_qty_raw: str(t.fill_qty_raw),
-        fill_cash_usdg: num(t.fill_cash_usdg),
-        fill_price_usd: num(t.fill_price_usd),
-        realized_pnl_usdg: num(t.realized_pnl_usdg),
-        basis_source: str(t.basis_source),
-        created_at: Number(t.created_at),
-      })),
-      post: post ? { body: String(post.body), created_at: Number(post.created_at) } : null,
-    };
+    return await readDecisionLifecycle(getDb(), decisionId);
   } catch {
     return null;
   }
 }
-
 export async function decisionEvidence(decisionId: string): Promise<string | null> {
   try {
     const r = (await getDb()

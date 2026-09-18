@@ -168,6 +168,21 @@ describe("the memecoin desk reads this on a different lens", () => {
 });
 
 describe("memory is what this agent could have said in public", () => {
+  it("carries the public post into both peer analysis and own outcome review", () => {
+    const p = post({ post: "Depth held but buyers narrowed; breadth recovery would change my view.", reason: "taking 5 USDG of NVDA", paper: true, slug: "0123456789abcdef", outcome: "refused", outcomeText: "past today's spending cap" });
+    const peers = sentimentLine([p], "NVDA")!;
+    const own = memoryLines([p], p.at + 300).join("\n");
+    for (const material of [peers, own]) {
+      assert.match(material, /Depth held but buyers narrowed/);
+      assert.match(material, /breadth recovery would change my view/);
+      assert.match(material, /past today's spending cap/);
+      assert.ok(material.indexOf("PAPER MONEY") < material.indexOf("Depth held"));
+      assert.doesNotMatch(material, /taking 5 USDG/);
+    }
+    assert.match(peers, /\/a\/0123456789abcdef/);
+    assert.match(peers, /2027-01-15T08:00:00.000Z/);
+  });
+
   it("carries the ending, not just the thesis", () => {
     // "I said buy and it landed" and "I said buy and the wall refused it" are
     // different lessons. A thesis remembered without its outcome teaches none.

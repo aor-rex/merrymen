@@ -37,6 +37,7 @@
 import { NextResponse } from "next/server";
 import { tenantOf } from "@/lib/auth";
 import { getTourStore } from "@/lib/tour-store";
+import { TOUR_VERSION } from "@/lib/tour-version";
 
 export const dynamic = "force-dynamic";
 
@@ -51,32 +52,37 @@ export interface TourResponse {
    * thing that knows, and it should win.
    */
   signedIn: boolean;
+  tenant?: string;
+  version?: number;
 }
 
 export async function GET(req: Request) {
   const tenant = tenantOf(req);
   if (!tenant) return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
+  const params = new URL(req.url).searchParams;
+  if ((params.has("tenant") && params.get("tenant")?.toLowerCase() !== tenant.toLowerCase()) || (params.has("version") && params.get("version") !== String(TOUR_VERSION))) {
+    return NextResponse.json({ error: "Tour session changed" }, { status: 409 });
+  }
   try {
-    return NextResponse.json({ done: await getTourStore().done(tenant), signedIn: true } satisfies TourResponse);
+    return NextResponse.json({ done: await getTourStore().done(tenant), signedIn: true, tenant: tenant.toLowerCase(), version: TOUR_VERSION } satisfies TourResponse);
   } catch {
-    // A STORE THAT WILL NOT ANSWER IS NOT A "NO". Reporting `done:false` here
-    // would reopen the tour for someone who dismissed it the moment the
-    // database hiccuped, which is precisely the complaint this route was built
-    // to end. `signedIn:false` is the honest shape: we could not ask.
-    return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
+    // An unavailable store is not a fresh tour; the client keeps its local state.
+    return NextResponse.json({ error: "Tour state is temporarily unavailable" }, { status: 503 });
   }
 }
 
 export async function POST(req: Request) {
   const tenant = tenantOf(req);
   if (!tenant) return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
+  const body = await req.json().catch(() => null) as { tenant?: string; version?: number } | null;
+  if (body?.tenant !== tenant.toLowerCase() || body?.version !== TOUR_VERSION) {
+    return NextResponse.json({ error: "Tour session or version changed" }, { status: 409 });
+  }
   try {
     await getTourStore().markDone(tenant);
-    return NextResponse.json({ done: true, signedIn: true } satisfies TourResponse);
+    return NextResponse.json({ done: true, signedIn: true, tenant: tenant.toLowerCase(), version: TOUR_VERSION } satisfies TourResponse);
   } catch {
-    // The client has already written its own copy before calling this, so a
-    // failure here costs a re-show on a DIFFERENT device and nothing on this
-    // one. Saying so plainly beats a 500 the component would have to swallow.
-    return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
+    // Keep the client's write pending so a later reload/reconnect can retry.
+    return NextResponse.json({ error: "Tour dismissal could not be saved" }, { status: 503 });
   }
 }

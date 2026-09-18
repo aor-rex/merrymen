@@ -13,38 +13,24 @@
  *
  * ── WHAT IS EXERCISED HERE, AND WHAT IS NOT ──────────────────────────────
  *
- * The identity rules are pure or storage-level, so they are driven directly
- * against a real database: `verifyDecisionOwner` is the exact predicate
- * `ensureDecision` applies to a supplied id, and `lifecycleOf` is the reader a
- * public surface uses. `ensureDecision` itself is a closure inside the tick's
- * `main()` and cannot be imported; the lifecycle assertions below drive the
- * ROWS it writes, which is what a reader actually sees, and `index.ts` is
- * additionally checked for the call shape at the bottom.
+ * These cases import the production ownership predicate and lifecycle reader.
+ * The web decision-lifecycle integration tests also execute the actual Brain
+ * writer, trade writer and public route. The closure inside index.ts is still
+ * checked for its call shape below; that check is not an execution test.
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { before, beforeEach, describe, it } from "node:test";
 import { wrapSqlite } from "./db";
+import { readDecisionLifecycle } from "./decision-lifecycle";
+import { verifyDecisionOwner } from "./decision-identity";
 import { PROVENANCE_KINDS, isProvenance, provenanceOf } from "./provenance";
 
 const AGENT = "0xagent0000000000000000000000000000000001";
 const OTHER = "0xagent0000000000000000000000000000000002";
 
-/**
- * The exact rule `ensureDecision` applies to an id it was handed.
- *
- * Mirrored here rather than imported because the real one is a closure over the
- * tick's `active`; the four answers and their consequences are the property,
- * and `index-shape` below pins that the real site still asks all four.
- */
 type OwnerAnswer = string | null | undefined;
-function verifyDecisionOwner(owner: OwnerAnswer, me: string): { ok: true } | { ok: false; why: string } {
-  if (owner === undefined) return { ok: false, why: "could not verify the decision this trade belongs to" };
-  if (owner === null) return { ok: false, why: "that decision does not exist" };
-  if (owner.toLowerCase() !== me.toLowerCase()) return { ok: false, why: "that decision belongs to another agent" };
-  return { ok: true };
-}
 
 describe("a supplied decision id is verified, never trusted and never replaced", () => {
   it("reuses one this agent owns", () => {
@@ -149,16 +135,7 @@ describe("the whole life of one decision, from its id", () => {
     "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, decision_id TEXT UNIQUE, body TEXT, created_at INTEGER);",
   ].join("\n");
 
-  /** The reader under test, pointed at this fixture rather than the real store. */
-  async function lifecycle(id: string) {
-    const d = (await db.prepare("SELECT * FROM decisions WHERE id = ? LIMIT 1").get(id)) as Record<string, unknown> | undefined;
-    if (!d) return null;
-    const trades = (await db
-      .prepare("SELECT * FROM trades WHERE decision_id = ? ORDER BY created_at ASC, id ASC")
-      .all(id)) as Record<string, unknown>[];
-    const post = (await db.prepare("SELECT body FROM posts WHERE decision_id = ? LIMIT 1").get(id)) as { body: string } | undefined;
-    return { decision: d, trades, post: post ?? null };
-  }
+  const lifecycle = (id: string) => readDecisionLifecycle(db, id);
 
   const decision = (id: string, over: Record<string, unknown> = {}) =>
     db
@@ -167,9 +144,9 @@ describe("the whole life of one decision, from its id", () => {
       )
       .run(id, AGENT, over.source ?? "brain", "MOON", "buy", 5, "Buyers are sticking around.", over.provenance ?? "brain", 100);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db = wrapSqlite(new DatabaseSync(":memory:"));
-    (db as unknown as { exec: (s: string) => void }).exec(SCHEMA);
+    await db.exec(SCHEMA);
   });
 
   it("A LANDED BRAIN TRADE: one decision row, and every stage under it", async () => {
@@ -217,7 +194,7 @@ describe("the whole life of one decision, from its id", () => {
     assert.equal(l.trades[0]!.reject_rule, "drawdown-breaker");
     // NOT A TRADE THAT HAPPENED. Every fill column stays null — a refusal must
     // never be reconstructable as a fill, and a reader keys on exactly these.
-    for (const k of ["fill_side", "fill_qty_raw", "fill_cash_usdg", "fill_price_usd", "realized_pnl_usdg", "tx_hash"]) {
+    for (const k of ["fill_side", "fill_qty_raw", "fill_cash_usdg", "fill_price_usd", "realized_pnl_usdg", "tx_hash"] as const) {
       assert.equal(l.trades[0]![k], null, `${k} must be absent on a refusal`);
     }
   });
@@ -284,6 +261,11 @@ describe("the whole life of one decision, from its id", () => {
   it("an id that names nothing reconstructs nothing", async () => {
     assert.equal(await lifecycle("dec_nosuchrow000"), null);
   });
+
+  it("a database read failure returns no lifecycle", async () => {
+    await db.exec("DROP TABLE decisions");
+    assert.equal(await lifecycle("dec_unreadable000"), null);
+  });
 });
 
 /**
@@ -315,15 +297,9 @@ describe("the tick wires the identity through", () => {
     assert.match(INDEX, /if \(!stamped\.ok\) return no\(stamped\.why\);/);
   });
 
-  it("ensureDecision asks all four questions about a supplied id", () => {
-    for (const probe of [
-      /owner === undefined/,
-      /owner === null/,
-      /owner\.toLowerCase\(\) !== active\.agentId\.toLowerCase\(\)/,
-      /return \{ ok: true \};/,
-    ]) {
-      assert.match(INDEX, probe, String(probe));
-    }
+  it("ensureDecision uses the ownership predicate exercised above", () => {
+    assert.match(INDEX, /verifyDecisionOwner\(owner, active\.agentId\)/);
+    assert.match(INDEX, /if \(!verified\.ok\)/);
   });
 
   it("and asks them BECAUSE an id was supplied — the guard is reachable", () => {
@@ -343,5 +319,10 @@ describe("the tick wires the identity through", () => {
 
   it("records provenance on every decision it mints", () => {
     assert.match(INDEX, /provenance: known\?\.provenance \?\? provenanceOf\(source, known\?\.whyCode\)/);
+  });
+
+  it("every execution caller consumes the decision verdict", () => {
+    assert.doesNotMatch(INDEX, /^\s*await ensureDecision\(/m);
+    assert.match(INDEX, /verifyDecisionOwner\(await decisionAgent\(id\), active\.agentId\)/);
   });
 });

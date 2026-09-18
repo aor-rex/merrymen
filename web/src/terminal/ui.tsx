@@ -1,6 +1,6 @@
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { faceSrc } from "./live";
+import { useAgentImageSrc } from "./agent-image-state";
 import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
@@ -37,7 +37,7 @@ export function Face({
   pin?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = faceSrc(slug ?? null);
+  const src = useAgentImageSrc(slug ?? null, "avatar");
   useEffect(()=>setFailed(false),[src]);
   /**
    * THE WIRE RING, AND WHY IT IS READ HERE RATHER THAN PASSED IN.

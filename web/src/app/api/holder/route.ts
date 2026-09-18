@@ -121,7 +121,7 @@ export async function POST(req: Request) {
    * failed verification must not leave a live nonce behind for a second
    * attempt with a different address.
    */
-  const gate = consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, origin);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 400 });
 
   /**

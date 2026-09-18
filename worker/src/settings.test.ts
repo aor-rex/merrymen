@@ -4,6 +4,11 @@ import { connectionKey, mergeSettings, strategyKey, telegramKey } from "./settin
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 
 describe("mergeSettings — file > env > default", () => {
+  it("does not let an old slow tick setting silence decisions for more than five minutes", () => {
+    assert.equal(mergeSettings({ tickSeconds: 300 }, {}).tickSeconds, 300);
+    assert.ok(mergeSettings({ tickSeconds: 3600 }, {}).tickSeconds <= 300);
+    assert.ok(mergeSettings({}, { MERRYMEN_TICK_SECONDS: "3600" }).tickSeconds <= 300);
+  });
   it("defaults hold with nothing set", () => {
     const c = mergeSettings({}, {});
     assert.equal(c.strategy, "steady-basket");

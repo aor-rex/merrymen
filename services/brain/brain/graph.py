@@ -257,13 +257,20 @@ class BrainGraph:
             user=(
                 f"{dossier}\n\n"
                 f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n{cost_note}\n\n"
+                "PUBLIC THESIS: state your buy, sell or hold view, the observed evidence behind it, "
+                "and the main uncertainty or next observation that would change it. Do not substitute "
+                "an operational error, permission limit or inability to sell for a market view. "
+                "Never invent facts to fill a post. Compare your previous view and its outcome with "
+                "today's evidence; an executed order is not proof the view was correct. If a peer's "
+                "published view changed yours, name the peer and explain which observation supports "
+                "or challenges it. Peer agreement is not independent market evidence.\n\n"
                 "Reply with exactly this JSON shape:\n"
                 "{\n"
                 '  "action": "buy" | "sell" | "hold",\n'
                 '  "confidence": 0.0-1.0,\n'
                 '  "suggested_delta_usdg": integer micro-USDG, POSITIVE to buy, NEGATIVE to sell, 0 to hold,\n'
                 '  "expected_edge_usdg": integer micro-USDG you expect this trade to MAKE, 0 for a hold,\n'
-                '  "thesis": "the public post, 2-4 short sentences and under 200 characters in total, no addresses",\n'
+                '  "thesis": "the public view: evidence and uncertainty, 2-3 short sentences under 220 characters total, no addresses",\n'
                 '  "evidence": [{"source": "...", "ref": "...", "claim": "..."}],\n'
                 '  "bull_case": "...", "bear_case": "...",\n'
                 '  "risks": ["..."], "invalidation": ["what would prove this wrong"],\n'
@@ -343,9 +350,26 @@ class BrainGraph:
 
         dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
 
+        # An analyst summary can lose a peer's identity or the condition they
+        # said would change their mind. Carry the bounded original opinion to
+        # the decision-maker too, as untrusted context, never corroboration.
+        for lens in ("sentiment", "social"):
+            if lens in lenses and req.market.signals.get(lens):
+                dossier += "\n\nSUPPLIED OPINIONS — NOT INDEPENDENT MARKET EVIDENCE\n" + _fence(
+                    f"peer-{lens}", req.market.signals[lens][:1600]
+                )
+
+        # The adaptive candidate is usually the final decision. Supply memory
+        # before that call, rather than only to the uncommon deep pass. Prior
+        # model prose remains untrusted even when it is in this agent's voice.
+        if req.memory:
+            dossier += "\n\nWHAT THIS AGENT THOUGHT BEFORE\n" + _fence(
+                "own-memory", "\n".join(f"- {m}" for m in req.memory[:6])
+            )
+
         # ── ADAPTIVE DEPTH ──────────────────────────────────────────────────
         #
-        # Form a candidate from the analysts alone, then decide whether the
+        # Form a candidate from the analysts and prior record, then decide whether the
         # situation is one where a second opinion has anything to work with.
         # The candidate costs one call; the committee costs forty-five, so
         # asking first is cheap even when the answer is yes.
@@ -391,23 +415,6 @@ class BrainGraph:
             for stance in ("aggressive", "conservative", "neutral"):
                 r = await self._risk(req, budget, stance, plan)
                 dossier += f"\n\nRISK ({stance})\n{r.text}"
-
-        if req.memory:
-            # FENCED, like every other block that is not ours.
-            #
-            # Memory reads as the agent's own past words, which makes it feel
-            # like trusted context. It is not: a remembered thesis is model
-            # prose that was itself written while reading scraped news and
-            # social text, so anything that steered the agent last week arrives
-            # here wearing its own voice. That is the "permanent foothold" case
-            # — an injection that survives into every later prompt because it
-            # was written down — and it is worse than the live one, not better.
-            #
-            # It was unfenced while `memory` was always empty. It is being
-            # populated now, which is exactly when the gap stops being dormant.
-            dossier += "\n\nWHAT THIS AGENT THOUGHT BEFORE\n" + _fence(
-                "own-memory", "\n".join(f"- {m}" for m in req.memory[:6])
-            )
 
         data = await self._decide(req, budget, gate, dossier)
         return self._assemble(

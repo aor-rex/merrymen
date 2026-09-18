@@ -8,9 +8,8 @@
  * goes through this `Db` seam:
  *
  *   - SqliteDb (the default, and all self-hosted) wraps node:sqlite. Its
- *     operations are synchronous under the hood, so wrapping them as async
- *     changes NOTHING about behaviour — the same file, the same WAL, the same
- *     crash-atomic transactions. This is what keeps self-hosted byte-for-byte.
+ *     operations are synchronous under the hood. Access to the connection is
+ *     queued so an awaited transaction cannot absorb another caller's writes.
  *   - PgDb (added in the next stage, selected by DATABASE_URL) will run the same
  *     SQL against Postgres with placeholder + dialect translation.
  *
@@ -35,50 +34,71 @@ export interface Stmt {
 export interface Db {
   prepare(sql: string): Stmt;
   exec(sql: string): Promise<void>;
-  /** Run `fn` inside a single transaction. The db passed in IS the transaction. */
+  /** Use the supplied db for every operation in `fn`; it is scoped to this transaction. */
   tx<T>(fn: (db: Db) => Promise<T>): Promise<T>;
 }
 
 // ── sqlite backend ─────────────────────────────────────────────────────────
 
 class SqliteDb implements Db {
-  constructor(private raw: DatabaseSync) {}
+  private pending: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private raw: DatabaseSync,
+    private scope?: { active: boolean },
+  ) {}
+
+  private access<T>(operation: () => T | Promise<T>): Promise<T> {
+    if (this.scope) {
+      if (!this.scope.active) return Promise.reject(new Error("transaction is no longer active"));
+      try {
+        return Promise.resolve(operation());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    const run = this.pending.then(operation);
+    // A failed statement or rollback must not poison the next caller's work.
+    this.pending = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   prepare(sql: string): Stmt {
-    const raw = this.raw;
     return {
-      async run(...params) {
-        return raw.prepare(sql).run(...(params as never[])) as RunResult;
-      },
-      async get(...params) {
-        return raw.prepare(sql).get(...(params as never[]));
-      },
-      async all(...params) {
-        return raw.prepare(sql).all(...(params as never[]));
-      },
+      run: (...params) => this.access(() => this.raw.prepare(sql).run(...(params as never[])) as RunResult),
+      get: (...params) => this.access(() => this.raw.prepare(sql).get(...(params as never[]))),
+      all: (...params) => this.access(() => this.raw.prepare(sql).all(...(params as never[]))),
     };
   }
-  async exec(sql: string): Promise<void> {
-    this.raw.exec(sql);
+  exec(sql: string): Promise<void> {
+    return this.access(() => this.raw.exec(sql));
   }
-  async tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
-    // node:sqlite is synchronous, so a single connection is the whole story:
-    // BEGIN, run the body (which awaits, but each op completes synchronously),
-    // then COMMIT — or ROLLBACK and rethrow. Same guarantee as before.
-    this.raw.exec("BEGIN");
-    try {
-      const out = await fn(this);
-      this.raw.exec("COMMIT");
-      return out;
-    } catch (e) {
+  tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+    if (this.scope) return Promise.reject(new Error("nested transactions are not supported"));
+    return this.access(async () => {
+      // Hold the queue through COMMIT/ROLLBACK. Only this scoped handle bypasses
+      // it, so unrelated calls wait while the callback yields to the event loop.
+      this.raw.exec("BEGIN");
+      const scope = { active: true };
       try {
-        this.raw.exec("ROLLBACK");
-      } catch {
-        /* the transaction may already be gone */
+        const out = await fn(new SqliteDb(this.raw, scope));
+        this.raw.exec("COMMIT");
+        return out;
+      } catch (error) {
+        try {
+          this.raw.exec("ROLLBACK");
+        } catch {
+          /* the transaction may already be gone */
+        }
+        throw error;
+      } finally {
+        scope.active = false;
       }
-      throw e;
-    }
+    });
   }
 }
+
+const sqliteWrappers = new WeakMap<DatabaseSync, Db>();
 
 /**
  * Wrap an already-open node:sqlite connection as the async Db. store.ts opens the
@@ -88,7 +108,13 @@ class SqliteDb implements Db {
  * (DATABASE_URL) is added in the next stage as a sibling factory.
  */
 export function wrapSqlite(raw: DatabaseSync): Db {
-  return new SqliteDb(raw);
+  // Multiple wrappers around one connection must share the same queue.
+  let db = sqliteWrappers.get(raw);
+  if (!db) {
+    db = new SqliteDb(raw);
+    sqliteWrappers.set(raw, db);
+  }
+  return db;
 }
 
 // ── sqlite → postgres translation ────────────────────────────────────────────

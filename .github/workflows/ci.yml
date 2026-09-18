@@ -33,17 +33,21 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22 # package.json engines: >=22.12
+          node-version: 22 # latest 22.x includes unflagged node:sqlite
           cache: npm
 
-      # `npm ci` runs the `prepare` hook, which is `node cli/build.mjs` — the full
-      # Next production build. So this step covers install AND build; a build
-      # break surfaces here rather than in a step of its own.
-      - name: Install (also builds via the prepare hook)
+      # The prepare hook deliberately tolerates build failures for end users.
+      # CI must run the production build as its own required command.
+      - name: Install
         run: npm ci
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
 
       - name: Typecheck
         run: npm run typecheck # tsc --noEmit -p worker && -p web
+
+      - name: Production build
+        run: npm run build
 
       - name: Test
         run: npm test # tsx --test worker/src/**/*.test.ts

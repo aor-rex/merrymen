@@ -70,6 +70,8 @@ export interface ThesisRow {
   size_usdg?: number | null;
   reason?: string | null;
   dropped_rule?: string | null;
+  /** A risk gate changing an action to hold is not the agent's market view. */
+  hold_kind?: string | null;
   /** From the trade this decision caused, when there was one. */
   status?: string | null;
   reject_rule?: string | null;
@@ -226,6 +228,8 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // address-scanned at two layers, and an owner watching a feed is owed the
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
+  // Deterministic review of observed public quotes, without execution authority.
+  "market-review": "strategy",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   /**
    * THE CLASS ROUTE — the one rail that traded and said nothing.
@@ -583,6 +587,11 @@ function headOf(row: ThesisRow, shadow: boolean): string {
   return [verb, row.symbol, size].filter(Boolean).join(" ");
 }
 
+/** Known operational templates, not a classifier of market sentiment. */
+function operationalNotice(text: string): boolean {
+  return /^(?:no decision\s*\(|(?:error|failed|refused|unavailable)\s*:|(?:strategist|brain|model|provider|driver|rpc) (?:call )?(?:failed|error|unavailable)\b|nothing bought\s*[—–-]|nothing in your basket\b|(?:there (?:was|is) )?nothing held to sell\b|(?:i |we )?(?:cannot|can't|unable to) (?:sell|trade|submit)\b|couldn't submit\b)/i.test(text.trim());
+}
+
 /**
  * A row, turned into a post — or null, meaning it may not be published.
  *
@@ -600,16 +609,12 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;
   if (!policy) return null;
+  if (row.hold_kind === "GATE_FORCED_HOLD") return null;
 
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
   if (row.reason && row.reason.trim()) {
-    // The model may omit the field, which arrives as "" rather than null. That
-    // is expected, not exceptional: the post renders with its head and no
-    // reasoning line, exactly as /why degrades.
     reason = policy === "model" ? clip(row.reason) : row.reason.trim();
-  } else if (row.dropped_rule) {
-    reason = classifyDrop(row.dropped_rule);
   }
 
   /**
@@ -638,8 +643,13 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     // below and it is repeated here rather than deferred, because a post that
     // names an address must cost the POST and not the whole thesis: the trade
     // and our own sentence about it are still safe to publish.
-    post = ADDRESSY.test(body) ? null : body;
+    post = ADDRESSY.test(body) || operationalNotice(body) ? null : body;
   }
+  // A dropped order's classified error is useful in the owner's ledger, but
+  // cannot stand in for an investment view. Keep substantive reasoning even
+  // when execution failed; its honest outcome is attached below.
+  if (reason && operationalNotice(reason)) reason = null;
+  if (!reason && !post) return null;
 
   // ── shadow ────────────────────────────────────────────────────────────────
   // Resolved before the outcome chain, because every arm of that chain assumes
@@ -727,9 +737,6 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    * rule above, keyed on the action because these rows ride strategy sources.
    */
   if (CASH_ACTIONS.has(row.action ?? "") && outcome !== "landed") return null;
-
-  // A post with neither a head nor a reason says nothing at all.
-  if (!head && !reason) return null;
 
   const handle = (row.x_handle ?? "").trim() || null;
 
