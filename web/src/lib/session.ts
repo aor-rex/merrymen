@@ -223,8 +223,8 @@ export type OwnerSigner =
       did: string;
     };
 
-async function mintGrant(
-  ownerSigner: OwnerSigner,
+async function prepareGrantCore(
+  ownerSigner: OwnerSigner | { account: LocalAccount; binding: "external-owner" },
   caps: GrantCaps,
   onStatus: (status: string) => void,
   chainId: number,
@@ -288,7 +288,7 @@ async function mintGrant(
    * inserting an optional address in the middle of this list cost last time.
    */
   ponsClassVaultFactory?: `0x${string}`,
-): Promise<MintedGrant> {
+): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -727,6 +727,27 @@ async function mintGrant(
       : { demoOwnerPrivateKey: ownerSigner.privateKey }),
   };
 
+  return grant;
+}
+
+/** Preserve the dashboard's binding, archive, storage and handoff behavior. */
+async function mintGrant(
+  ownerSigner: OwnerSigner,
+  caps: GrantCaps,
+  onStatus: (status: string) => void,
+  chainId: number,
+  extraTokens: readonly CustomToken[] = [],
+  v4AdapterAddress?: `0x${string}`,
+  ponsAdapterAddress?: `0x${string}`,
+  hostedAs?: Address,
+  expectAccount?: Address,
+  ponsClassVaultFactory?: `0x${string}`,
+): Promise<MintedGrant> {
+  const grant = await prepareGrantCore(
+    ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
+    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory,
+  );
+
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
   // tenant and the server cannot authorize on it — two signatures over one
@@ -734,8 +755,8 @@ async function mintGrant(
   if (hostedAs) {
     onStatus("linking this wallet to your account…");
     const binding = await signBinding({
-      owner,
-      smartAccount: account.address,
+      owner: grant.owner,
+      smartAccount: grant.smartAccount,
       chainId,
       ownerSigner,
       tenant: hostedAs,
@@ -1099,6 +1120,32 @@ export interface MintOptions {
    * on mintGrant.
    */
   ponsClassVaultFactory?: `0x${string}`;
+}
+
+/**
+ * Prepare a permission grant entirely under an external/embedded wallet signer.
+ * Reads the chain and requests the owner's signing approval, but does not read
+ * or write browser storage, fetch app authentication, or submit to a worker.
+ * The caller owns delivery and must obtain the separate partner authorization.
+ */
+export type PrepareAgentOptions = Omit<MintOptions, "hostedAs">;
+
+export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOptions): Promise<StoredGrant> {
+  if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
+    throw new Error("An explicit wallet signer is required to prepare a Merryman.");
+  }
+  return prepareGrantCore(
+    { account: owner, binding: "external-owner" },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    undefined,
+    o.expectAccount,
+    o.ponsClassVaultFactory,
+  );
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {

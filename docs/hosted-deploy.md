@@ -153,9 +153,11 @@ healthcheck it can't answer.
 ## 5b. The AI gateway (its own Railway project)
 
 `merrymen-gateway` is **not** one of the services above and does not live in the
-same Railway project. It is the holder-gated LLM proxy at
-`merrymen-gateway-production.up.railway.app` that `packages/core/src/token.ts`,
-`site/lib/gateway.ts` and the `merrymen` provider in `cli/bin.mjs` all point at.
+same Railway project. It serves the holder-gated LLM proxy and partner API at
+`https://ai.merrymen.dev`, with valid TLS confirmed on 2026-09-18. The alternate
+`merrymen-gateway-production.up.railway.app` hostname remains usable. Keep the
+client origin references in `packages/core/src/token.ts`, `site/lib/gateway.ts`
+and the `merrymen` provider in `cli/bin.mjs` consistent when changing their host.
 It builds from `gateway/`, which is a standalone package inside this repo: one
 dependency (`viem`), no imports outside `gateway/lib`.
 
@@ -175,17 +177,52 @@ takes the Dockerfile at the root of the *source* directory, which is correct
 both for a repo build rooted at `/gateway` and for a `railway up` run from
 `gateway/`. An explicit relative path is a coin-flip between the two.
 
-**The volume is the one irreplaceable thing.** `/data/ios-beta.jsonl` is the iOS
-beta waiting list (`gateway/lib/signups.mjs`). Nothing else on the service
-writes to disk — nonces, rate limits and the balance cache are in-process and
-expire in minutes by design. Losing it is silent: `readAll()` swallows ENOENT,
-the endpoint keeps answering 200, and the count restarts at 1. So **re-point the
-existing service, never create a new one**, and check `GET /ios-beta` before and
-after any change to the service's source.
+**Preserve the volume.** `/data/ios-beta.jsonl` is the iOS beta waiting list
+(`gateway/lib/signups.mjs`), and `/data/partners.jsonl` is the append-only partner
+key registry, including revocations. Nonces, rate limits and the balance cache
+are in-process unless shared KV is configured. Losing the waiting-list file
+silently resets the count; losing the partner registry loses issued keys and
+its durable revocation overrides. Re-point the existing service and retain
+`MERRYMEN_DATA_DIR=/data`; check `GET /ios-beta` and a known partner key's `/meta`
+before and after any change to the service's source.
 
 Fallback if a repo build is ever wrong: `railway service source disconnect
 --service merrymen-gateway`, then `cd gateway && railway up`. Rollback through
 the dashboard also works but expires with the plan's image-retention window.
+
+## 5c. Partner agent API
+
+The partner API is served by the **gateway** at
+`https://ai.merrymen.dev/partner/v1`; it forwards authorized agent requests to
+the **web** service at `https://app.merrymen.dev`. The web service stores owner
+grants and partner connections in the shared database; the orchestrator runs
+the normal tenant worker. Deploy the gateway and web changes together. An
+updated gateway alone cannot provide enrollment or chat.
+
+| Service | Variable | Requirement |
+| --- | --- | --- |
+| gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. |
+| gateway | `MERRYMEN_PARTNER_APP_ORIGIN` | `https://app.merrymen.dev` (the default); HTTPS required outside localhost development. |
+| web | `MERRYMEN_PUBLIC_ORIGIN` | `https://app.merrymen.dev`, also used for optional hosted onboarding links. |
+
+Keep the usual shared `DATABASE_URL`/`MERRYMEN_STORE_DEK` and orchestrator worker
+configuration from the sections above. Web needs an LLM credential for generated
+chat replies; without one, partner chat returns a factual status fallback. The
+bridge secret is never a `NEXT_PUBLIC_*` variable and is not needed by partners.
+The web build includes the browser SDK at `/sdk/merrymen-browser.js`; this static
+module permits browser imports, while authenticated partner calls stay on each
+partner's backend.
+
+Issue partner keys using the gateway CLI and a stable `--app-id`; retain that
+app ID when rotating keys. See [the partner integration guide](../gateway/PARTNER-API.md)
+for issuance, owner consent, embedded setup and API examples. The partner key is
+not a substitute for the owner's signed grant.
+
+Verify `GET /partner/v1/health`, then authenticated `/meta`, then an explicitly
+authorized test connection through creation, challenge, activation, worker
+heartbeat and chat. Health and metadata alone do not test the bridge or worker.
+Confirm the reported mode and funding blocker before claiming an agent is
+trading. Disconnecting app access leaves the owner's worker and grant in place.
 
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.

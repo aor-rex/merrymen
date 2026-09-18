@@ -89,7 +89,7 @@ describe("the agent can see its own basket", () => {
     // "An ABSENT basketSymbols is not an empty basket". The prompt has to carry
     // it, because null here means the settings read failed — the defaults are
     // already substituted one line earlier when they exist.
-    const chat = read("../app/api/chat/route.ts");
+    const chat = read("./agent-chat.ts");
     assert.match(chat, /Never say it is empty unless that array is present and empty/);
     assert.match(chat, /do NOT report it as empty/);
   });
@@ -98,7 +98,7 @@ describe("the agent can see its own basket", () => {
     // The prompt sends `buy` for something already in the basket and `snipe`
     // for anything off it — a decision it could not previously make from the
     // payload it was given.
-    const chat = read("../app/api/chat/route.ts");
+    const chat = read("./agent-chat.ts");
     assert.match(chat, /it settles whether a coin they name gets \\`buy\\` \(already in it\) or \\`snipe\\` \(not\)/);
   });
 });

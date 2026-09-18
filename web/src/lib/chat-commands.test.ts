@@ -111,7 +111,7 @@ describe("what the model actually says, and what survives it", () => {
     // Both halves, because either alone is one regex from failing open. The
     // route defangs any marker in the state, the history and the message before
     // the model can see one to copy.
-    const route = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const route = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(route, /const deCmd = \(s: string\) => s\.replace\(\/<<\\s\*CMD\/gi/);
     for (const fed of ["deCmd(state)", "deCmd(history)", "deCmd(message)"]) {
       assert.ok(route.includes(fed), `${fed} reaches the model without being defanged`);
@@ -458,7 +458,7 @@ describe("the model is told the argument names, not left to guess them", () => {
   });
 
   it("and the route uses the spec rather than the bare id list", () => {
-    const route = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const route = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(route, /EXACT argument names each one takes: \$\{COMMAND_SPEC\}/);
     assert.ok(!/COMMAND_IDS/.test(route), "the bare id list is what left the model guessing");
   });

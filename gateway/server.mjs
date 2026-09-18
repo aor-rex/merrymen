@@ -21,6 +21,7 @@ import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
 import { createPartners } from "./lib/partners.mjs";
 import { createPartnerApi } from "./lib/partner-api.mjs";
+import { createPartnerBridge } from "./lib/partner-bridge.mjs";
 
 // ── config (env) ─────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 8787);
@@ -146,7 +147,7 @@ function respond(res, r) {
     res.writeHead(r.status, { "content-type": r.contentType || "application/json", ...cors });
     return res.end(r.text);
   }
-  res.writeHead(r.status, { "content-type": "application/json", ...cors });
+  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...cors });
   res.end(JSON.stringify(r.json ?? {}));
 }
 
@@ -157,7 +158,10 @@ function respond(res, r) {
 // secrets rather than as the key material itself, so revoking one partner does
 // not invalidate every holder token at the same time.
 const partners = createPartners({ secret: SECRET });
-const partnerApi = createPartnerApi({ partners, store });
+const partnerApi = createPartnerApi({ partners, store,
+  forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
+    origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
+});
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -286,11 +290,17 @@ const server = createServer(async (req, res) => {
     // Partner routes carry their OWN error envelope, so they are matched before
     // the catch-all rather than falling through to the holder-shaped 404.
     if (partnerApi.owns(pathname)) {
+      let body = "";
+      if (req.method === "POST") {
+        try { body = await readBody(req); }
+        catch { return respond(res, { status: 413, json: { error: { code: "bad_request", message: "Request body is too large" } } }); }
+      }
       const r = await partnerApi.handle({
         method: req.method,
         pathname,
         authorization: req.headers.authorization,
         ip,
+        body,
       });
       if (r) return respond(res, r);
     }
