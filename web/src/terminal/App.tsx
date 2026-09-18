@@ -276,17 +276,24 @@ export function App() {
       ? live.agents.find((a) => a.slug === screen.slug)
       : undefined;
   const [profile,setProfile]=useState<import("./live").LiveAgent|null>(null);
+  const [profileTheses,setProfileTheses]=useState<import("./live").Thesis[]>([]);
+  const [profileActivityError,setProfileActivityError]=useState("");
   const [profileError,setProfileError]=useState("");
   const profileSlug=screen.kind==="profile" ? screen.slug : null;
   useEffect(()=>{
-    setProfile(null);setProfileError("");
+    setProfile(null);setProfileTheses([]);setProfileActivityError("");setProfileError("");
     if(!profileSlug)return;
     let alive=true;
-    requestJson<import("@/lib/read-agent").AgentProfile>(`/api/agents/${encodeURIComponent(profileSlug)}`).then(p=>{
+    const refresh = () => requestJson<import("@/lib/read-agent").AgentProfile & { theses: import("./live").Thesis[]; thesesRead: boolean }>(`/api/agents/${encodeURIComponent(profileSlug)}`).then(p=>{
       if(!alive)return;
-      setProfile({slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
+      setProfileError("");
+      setProfileTheses(p.theses ?? []);
+      setProfileActivityError(p.thesesRead === false ? "Recent decisions could not be loaded." : "");
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
     }).catch(e=>{if(alive)setProfileError(e.message);});
-    return()=>{alive=false;};
+    void refresh();
+    const timer = setInterval(refresh, 30_000);
+    return()=>{alive=false;clearInterval(timer);};
   },[profileSlug]);
   useEffect(()=>{if(pathname==="/agent" || pathname==="/chat")setSidebarSection("agents");},[pathname]);
   useEffect(() => {

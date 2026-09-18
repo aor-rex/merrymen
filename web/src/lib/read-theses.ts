@@ -113,7 +113,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
     const only = opts.agentSlug ? (accountsFor.get(opts.agentSlug) ?? []) : null;
     if (only !== null && only.length === 0) return { source: "sqlite", theses: [] };
 
-    const since = Math.floor(Date.now() / 1000) - WINDOW_SEC;
+    const since = Math.floor(Date.now() / 1000) - (opts.agentSlug ? 30 * WINDOW_SEC : WINDOW_SEC);
     const where: string[] = [
       "a.mode IN ('live', 'paper')",
       "d.agent_id NOT LIKE 'rh:%'",

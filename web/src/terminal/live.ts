@@ -108,6 +108,9 @@ export interface LiveAgent {
    * surface that still draws the curve.
    */
   contributionsEvidenced?: boolean;
+  mode?: string;
+  recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
+  activityRead?: boolean;
   publicBook?: boolean;
   holdingsUsd?: number | null;
   landed: number;
@@ -619,6 +622,8 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
     .map((a) => ({
       slug: a.slug!,
       name: a.name,
+      mode: a.mode,
+      filledPaper: a.filledPaper,
       handle: a.handle,
       pnlBps: a.pnlBps,
       unrankedWhy: a.unrankedWhy,
@@ -1037,6 +1042,8 @@ interface MarketTok {
 }
 
 interface BoardRow {
+  mode?: string;
+  filledPaper?: number;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
   name: string;

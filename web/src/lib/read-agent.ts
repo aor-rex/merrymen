@@ -21,6 +21,7 @@
  *
  * No session read. Same property as the other public readers, same reason.
  */
+import { readProfileTrades, type ProfileTrade } from "./profile-trades";
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
@@ -144,6 +145,8 @@ export interface AgentProfile {
   publicBook: boolean;
   /** Whether each read actually answered. A default is not an answer. */
   tradesRead: boolean;
+  recentTrades: ProfileTrade[];
+  activityRead: boolean;
   equityRead: boolean;
   flowsRead: boolean;
   holdingsRead: boolean;
@@ -318,6 +321,7 @@ export const readAgent = cache(async function readAgent(
     // ── what it did, and what it cost ────────────────────────────────────────
     let gasUsdg = 0;
     let unpricedTrades = 0;
+    const activity = await readProfileTrades(db, account, epoch, publicBook);
     let landed = 0;
     let filledPaper = 0;
     let refused = 0;
@@ -527,6 +531,8 @@ export const readAgent = cache(async function readAgent(
       holdings,
       publicBook,
       tradesRead,
+      recentTrades: activity.trades,
+      activityRead: activity.read,
       equityRead,
       flowsRead,
       holdingsRead,

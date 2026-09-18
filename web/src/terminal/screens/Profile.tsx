@@ -26,6 +26,7 @@ export function Profile({
   onBack,
   onToken,
   isMine = false,
+  activityError = "",
 }: {
   agent: LiveAgent;
   theses: Thesis[];
@@ -48,8 +49,10 @@ export function Profile({
    * that is the rule.
    */
   isMine?: boolean;
+  activityError?: string;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const [showTrades, setShowTrades] = useState(false);
   /**
    * MOST AGENTS HAVE NO BANNER, and that is not a failure to report.
    *
@@ -188,6 +191,21 @@ export function Profile({
         </div>
         <p>{agent.thesis || "This agent hasn’t shared its approach yet."}</p>
       </section>
+      <section className="public-section" aria-label="Trade history">
+        <div className="public-section-heading"><h2>Buys & sells</h2><span>Latest fills</span></div>
+        {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : agent.recentTrades.length === 0 ? <Empty compact title="No completed buys or sells recorded in this trading period."/> : <>
+          <div className="public-activity">
+            {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
+              <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : "↘"}</span>
+              <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : "Sold"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
+                <small>{new Date(trade.at * 1000).toLocaleString()} · {trade.paper ? "Paper fill — simulated" : "Completed"}</small>
+              </div>
+            </article>)}
+          </div>
+          {agent.recentTrades.length > 6 && <button type="button" className="public-more" aria-expanded={showTrades} onClick={() => setShowTrades(value => !value)}>{showTrades ? "Show fewer trades" : `Show latest ${agent.recentTrades.length} trades`}</button>}
+          {agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
+        </>}
+      </section>
       <section className="public-section">
         <div className="public-section-heading">
           <h2>Positions</h2>
@@ -246,11 +264,12 @@ export function Profile({
       </section>
       <section className="public-section">
         <div className="public-section-heading">
-          <h2>Recent activity</h2>
+          <h2>Recent decisions</h2>
           <span>{posts.length} updates</span>
         </div>
-        {posts.length === 0 && (
-          <Empty compact title="New trades and decisions will appear here."/>
+        {activityError && <p role="status" className="public-empty">{activityError}</p>}
+        {!activityError && posts.length === 0 && (
+          <Empty compact title="No published decisions in the last 30 days."/>
         )}
         <div className="public-activity">
           {posts.slice(0, showAll ? undefined : 4).map((post, i) => {
@@ -292,7 +311,7 @@ export function Profile({
                   <p>{post.reason ?? post.head}</p>
                   <small>
                     {ageOf(post) ? `${ageOf(post)} ago` : "Time unavailable"}
-                    {post.outcome ? ` · ${post.outcome}` : ""}
+                    {post.outcomeText ? ` · ${post.outcomeText}` : post.outcome ? ` · ${post.outcome}` : ""}
                     {post.paper ? " · Paper" : ""}
                   </small>
                 </div>

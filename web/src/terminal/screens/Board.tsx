@@ -59,7 +59,7 @@ export function Board({
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
       <header className="board-head">
         {preview ? <h2>Leaderboard</h2> : compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
-        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : "View all"}</button>}
+        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : `View all ${rows.length}`}</button>}
         {!preview && rows.length > 0 && (
           <div className="wins">
             {WINDOWS.map((w) => (
@@ -83,7 +83,7 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper and inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
       )}
 
       {rows.length === 0 ? (
@@ -145,6 +145,7 @@ function Rank({
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
             <span className="rank-trades">{tradeLine(a)}</span>
+            {a.mode && a.mode !== "live" && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
           </div>
         </div>
         <div className="rank-nums">
