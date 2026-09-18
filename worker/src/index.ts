@@ -410,6 +410,8 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  getRiskPeriodPeak,
+  restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
   hasEpochOneHistory,
@@ -3346,6 +3348,8 @@ async function main() {
     }
   };
   let highWaterMarkUsdg = 0n;
+  let riskHighWaterMarkUsdg: bigint | null = null;
+  const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? highWaterMarkUsdg);
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash
   // moved and NOTHING was written to the ledger in between, the money came from
@@ -3506,7 +3510,14 @@ async function main() {
    * the safe one, and the store already enforces it.
    */
   async function restoreAnchoredHighWaterMark(agentId: string): Promise<void> {
-    applyAccountingAnchor(agentId, anchorOnce(agentId));
+    const anchor = anchorOnce(agentId);
+    applyAccountingAnchor(agentId, anchor);
+    if (anchor.kind === "valid" && anchor.state.riskPeriod) {
+      await restoreRiskPeriod(anchor.state.riskPeriod);
+      const peak = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = peak === null ? null : usdg(peak);
+      console.log(`[risk period] ${anchor.state.riskPeriod.id}: peak ${peak} USDG; signed drawdown limit unchanged`);
+    }
 
     // THE EPOCH COMES BACK FIRST, because every row this child is about to write
     // is stamped with it.
@@ -6348,7 +6359,7 @@ async function main() {
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
-      highWaterMarkUsdg,
+      highWaterMarkUsdg: paperActive() ? highWaterMarkUsdg : usdg((await getRiskPeriodPeak(agentId)) ?? usdgNum(highWaterMarkUsdg)),
       equityUsdg,
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
@@ -9427,6 +9438,8 @@ async function main() {
       // net. A percentage published without saying which is not a performance
       // figure, and a model comparing gross history against net future returns
       // is comparing two different quantities.
+      const riskPeak = await getRiskPeriodPeak(agentId, curveMarked.length === 0 ? usdgNum(equityUsdg) : null);
+      riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
         contributionsKnown: accounting.contributionsKnown,
@@ -11176,8 +11189,8 @@ async function main() {
       // in one holding is not being throttled by its cap.
       cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
-        highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
-          ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)
+        drawdownPeak() > 0n && lastEquityUsdg > 0n
+          ? Math.max(0, Number(((drawdownPeak() - lastEquityUsdg) * 10_000n) / drawdownPeak()))
           : null,
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       // Pass ZERO through. It used to be mapped to null here AND filtered again
