@@ -119,6 +119,7 @@ function normalize(rec) {
     keyId,
     // Stable across key rotation. Old registry rows retain their original id.
     appId: typeof rec.appId === "string" && /^[a-zA-Z0-9_-]{12,64}$/.test(rec.appId) ? rec.appId : keyId,
+    owner: typeof rec.owner === "string" && /^0x[0-9a-fA-F]{40}$/.test(rec.owner) ? rec.owner.toLowerCase() : null,
     name: typeof rec.name === "string" ? rec.name.slice(0, 64) : keyId,
     hash: typeof rec.hash === "string" ? rec.hash : "",
     scopes,

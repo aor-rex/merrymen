@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Issue, revoke and list partner keys. LOCAL ONLY — run on the box, never HTTP.
+ * Operator CLI to issue, revoke and list partner keys.
+ * The separate developer portal supports wallet-authenticated self-service keys.
  *
  * There is no key-minting endpoint and there should never be one. A route that
  * mints credentials is the single most valuable thing on this host to

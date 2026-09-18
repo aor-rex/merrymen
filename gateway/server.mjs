@@ -22,6 +22,7 @@ import { addSignup, signupCount } from "./lib/signups.mjs";
 import { createPartners } from "./lib/partners.mjs";
 import { createPartnerApi } from "./lib/partner-api.mjs";
 import { createPartnerBridge } from "./lib/partner-bridge.mjs";
+import { createDeveloperApi } from "./lib/developer-api.mjs";
 
 // ── config (env) ─────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 8787);
@@ -162,6 +163,8 @@ const partnerApi = createPartnerApi({ partners, store,
   forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
     origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
 });
+const developerApi = createDeveloperApi({ portalSecret: process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET,
+  gatewaySecret: SECRET, partners, partnerApi, store });
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -179,6 +182,14 @@ const server = createServer(async (req, res) => {
       return res.end();
     }
     if (req.method === "GET" && pathname === "/healthz") return respond(res, gw.health());
+    if (pathname.startsWith("/developer/v1/")) {
+      let body = {};
+      try { if (req.method === "POST") { const raw = await readBody(req); if (Buffer.byteLength(raw) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } }); body = JSON.parse(raw); } }
+      catch { return respond(res, { status: 400, json: { error: { message: "Invalid request" } } }); }
+      return respond(res, await developerApi.handle({ method: req.method, path: pathname.slice("/developer/v1".length),
+        authorization: req.headers.authorization, session: req.headers["x-developer-session"], body,
+        ip: req.headers["x-developer-ip"] || ip }));
+    }
     if (req.method === "GET" && (pathname === "/" || pathname === "/claim")) return respond(res, gw.serveClaimPage(CLAIM_HTML));
     if (req.method === "GET" && pathname === "/nonce") return respond(res, await gw.nonce({ address: url.searchParams.get("address"), ip }));
     // The list every OpenAI-compatible client asks for before it will show a

@@ -27,7 +27,14 @@ bundle or wallet. The API does not enable browser CORS. The public browser SDK i
 separate: it prepares and signs permissions locally, then calls your backend.
 Holder `mmk_` keys for `/v1/chat/completions` cannot authorize partner requests.
 
-Ask the Merrymen operator for an app identity and a key with the required scopes:
+Visit [Merrymen Developers](https://merrymen.dev/api), sign in with a wallet,
+and create a key for your application. Copy the key immediately: it is shown
+only once. The portal includes an SDK download, integration tutorial, and a
+real authenticated key test. Each developer can have five active keys at
+30 requests per minute each. Replacement keys retain the app identity; update
+your backend before revoking the previous key.
+
+Self-service keys include these scopes:
 
 | Scope | Capability |
 | --- | --- |
