@@ -356,9 +356,8 @@ async function onboard() {
       `  Blank answers keep what's saved. Ctrl+C to slip back into the forest anytime.\n`,
   );
 
-  const major = Number(process.versions.node.split(".")[0]);
-  if (major < 22) {
-    bad(`Node ${process.versions.node} — merrymen needs Node 22+ (node:sqlite). Install from nodejs.org and rerun.`);
+  if (!nodeVersionOk()) {
+    bad(`Node ${process.versions.node} — merrymen needs ${NODE_REQUIREMENT} (node:sqlite). Install from nodejs.org and rerun.`);
     process.exit(1);
   }
   if (!existsSync(path.join(ROOT, "node_modules"))) {
@@ -681,7 +680,7 @@ async function doctor() {
 
   nodeVersionOk()
     ? ok(`node ${process.versions.node}`)
-    : bad(`node ${process.versions.node} — need ${NODE_MIN.join(".")}+ for node:sqlite (run: merrymen setup)`);
+    : bad(`node ${process.versions.node} — need ${NODE_REQUIREMENT} for node:sqlite (run: merrymen setup)`);
   const npmV = sh("npm", ["--version"]);
   npmV ? ok(`npm ${npmV}`) : warn("npm not found on PATH — reinstall Node (run: merrymen setup)");
   const binDir = npmGlobalBinDir();
@@ -1355,11 +1354,12 @@ async function recover() {
 
 // ──────────────────────────────────────────────────────── environment setup ──
 
-const NODE_MIN = [22, 12]; // node:sqlite + the modern APIs the worker leans on
+const NODE_REQUIREMENT = "Node 22.13+ on 22.x, or Node 23.4+";
 
 function nodeVersionOk(v = process.versions.node) {
   const [maj, min] = v.split(".").map(Number);
-  return maj > NODE_MIN[0] || (maj === NODE_MIN[0] && min >= NODE_MIN[1]);
+  // SQLite was unflagged separately on both release lines.
+  return maj > 23 || (maj === 23 && min >= 4) || (maj === 22 && min >= 13);
 }
 
 /** Run a command, capture trimmed stdout, never throw. null on any failure. */
@@ -1418,9 +1418,9 @@ async function setup() {
 
   const v = process.versions.node;
   if (nodeVersionOk(v)) {
-    ok(`node ${v} ${dim(`(need ${NODE_MIN.join(".")}+)`)}`);
+    ok(`node ${v} ${dim(`(need ${NODE_REQUIREMENT})`)}`);
   } else {
-    bad(`node ${v} is too old — merrymen needs ${NODE_MIN.join(".")}+ (node:sqlite)`);
+    bad(`node ${v} is unsupported — merrymen needs ${NODE_REQUIREMENT} (node:sqlite)`);
     console.log(`      ${bold("install a newer Node:")} ${dim(nodeInstallHint())}`);
   }
 
@@ -1455,7 +1455,7 @@ async function setup() {
 function warnIfOldNode() {
   if (!nodeVersionOk()) {
     warn(
-      `node ${process.versions.node} is below ${NODE_MIN.join(".")} — the worker needs node:sqlite. Run ${bold("merrymen setup")} for the fix.`,
+      `node ${process.versions.node} is unsupported — the worker needs ${NODE_REQUIREMENT}. Run ${bold("merrymen setup")} for the fix.`,
     );
   }
 }

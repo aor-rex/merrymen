@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { bannerSrc, faceSrc } from "./live";
+import { useEffect, useRef, useState } from "react";
+import { publishAgentImage, useAgentImageSrc } from "./agent-image-state";
 
 /**
  * PICK A PICTURE FOR YOUR AGENT.
@@ -45,12 +45,10 @@ export function AgentImageField({
   const [error, setError] = useState<string | null>(null);
   /** A local object URL while uploading, then the served URL with a version. */
   const [preview, setPreview] = useState<string | null>(null);
-  /** Bumped on every successful write so the <img> refetches past its cache. */
-  const [version, setVersion] = useState<string | null>(null);
-  const [removed, setRemoved] = useState(false);
-
-  const base = kind === "avatar" ? faceSrc(slug) : bannerSrc(slug);
-  const shown = preview ?? (removed ? null : base ? `${base}${version ? `?v=${version}` : ""}` : null);
+  const [failed, setFailed] = useState(false);
+  const base = useAgentImageSrc(slug, kind);
+  useEffect(() => { setFailed(false); setPreview(null); }, [base]);
+  const shown = preview ?? (failed ? null : base);
 
   async function upload(file: File) {
     setBusy(true);
@@ -74,8 +72,8 @@ export function AgentImageField({
         setPreview(null);
         return;
       }
-      setVersion(body.version ?? String(Date.now()));
-      setRemoved(false);
+      if (slug) publishAgentImage(slug, kind, body.version ?? String(Date.now()));
+      setFailed(false);
       setPreview(null);
     } catch {
       setError("that upload did not go through");
@@ -91,8 +89,13 @@ export function AgentImageField({
     setBusy(true);
     setError(null);
     try {
-      await fetch(`/api/agent-image/me/${kind}`, { method: "DELETE" });
-      setRemoved(true);
+      const response = await fetch(`/api/agent-image/me/${kind}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        setError(body.error ?? "that removal did not go through");
+        return;
+      }
+      if (slug) publishAgentImage(slug, kind, null);
       setPreview(null);
     } catch {
       setError("that did not go through");
@@ -117,7 +120,7 @@ export function AgentImageField({
         {shown ? (
           // eslint-disable-next-line @next/next/no-img-element -- served from our
           // own origin at a bounded size; next/image would add a loader for nothing.
-          <img className={`agent-image-preview ${kind}`} src={shown} alt="" onError={() => setRemoved(true)} />
+          <img className={`agent-image-preview ${kind}`} src={shown} alt="" onError={() => setFailed(true)} />
         ) : (
           // NOT AN ERROR STATE. Most agents have no picture, and the feed draws
           // a seeded gradient for them; this says so rather than showing a
@@ -143,7 +146,7 @@ export function AgentImageField({
         </div>
       </div>
       <p className="mm-hint">{hint}</p>
-      {busy && <p className="mm-hint">uploading…</p>}
+      {busy && <p className="mm-hint">updating…</p>}
       {error && <p className="mm-hint mm-bad">{error}</p>}
     </div>
   );

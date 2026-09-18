@@ -31,6 +31,7 @@ import {
   DEFAULT_TRIGGERS,
   EMPTY_TRIGGER_STATE,
   shouldWake,
+  nextReviewAt,
   type TriggerInputs,
   type TriggerState,
   type TriggerVerdict,
@@ -38,20 +39,11 @@ import {
 import { addDecision, addEvent, loadTriggerState, newDecisionId, saveTriggerState } from "./store";
 
 /**
- * How long after a COLD start the first run may happen.
- *
- * A child's sqlite is wiped by every redeploy, so a cold start is common and
- * says nothing about whether Brain ran recently. Two choices were available and
- * both are wrong on their own: treat cold as "never ran" and every deploy fires
- * every reason for every agent; treat it as "just ran" and a fresh agent waits
- * four hours to think for the first time.
- *
- * So a cold start seeds the cooldowns as though Brain ran
- * `scheduledIntervalSec - COLD_START_DELAY_SEC` ago: the first run comes a
- * couple of minutes in, and a redeploy costs AT MOST one run per enabled agent
- * rather than one per reason per agent.
+ * The worker already staggers startup by tenant. Review on its first tick;
+ * adding another cold-start delay could push the first decision past five
+ * minutes. Durable trigger state still prevents a normal restart double-run.
  */
-const COLD_START_DELAY_SEC = 120;
+const COLD_START_DELAY_SEC = 0;
 
 export interface ShadowInputs {
   agentId: string;
@@ -71,6 +63,8 @@ export interface ShadowInputs {
    */
   decisionSource?: string;
   now: number;
+  /** Observed preparation budget shared with the outer tick scheduler. */
+  reviewPreparationMs?: number;
   epoch: number;
   /** Micro-USDG, straight off the tick. */
   cashUsdg: number;
@@ -107,9 +101,9 @@ export interface ShadowInputs {
   newsKey?: string | null;
 }
 
-export type ShadowOutcome =
+export type ShadowOutcome = { nextReviewAt: number | null } & (
   | { ran: false; why: string; trigger: TriggerVerdict }
-  | { ran: true; trigger: TriggerVerdict; snapshot: PortfolioSnapshot; result: BrainResult };
+  | { ran: true; trigger: TriggerVerdict; snapshot: PortfolioSnapshot; result: BrainResult });
 
 /**
  * A snapshot id that IS the state it describes.
@@ -188,7 +182,7 @@ export async function runShadow(
     // ABSENT MEANS ABSENT. Not "fall back to the local strategist" — a feed that
     // attributed a thesis to Brain when a different reasoner wrote it would be
     // lying about provenance, and provenance is the product.
-    return { ran: false, why: "brainUrl/brainToken not configured", trigger: idle };
+    return { ran: false, why: "brainUrl/brainToken not configured", trigger: idle, nextReviewAt: null };
   }
 
   const snapshot = buildShadowSnapshot(i);
@@ -207,6 +201,7 @@ export async function runShadow(
 
   const triggerInput: TriggerInputs = {
     now: i.now,
+    reviewPreparationMs: i.reviewPreparationMs,
     priceUsd: i.market.priceUsd === null ? null : Number(i.market.priceUsd),
     equityUsdg: snapshot.equityUsdg,
     newsKey: i.newsKey ?? null,
@@ -218,7 +213,7 @@ export async function runShadow(
     // Persist anyway when this is the first sighting, so a cold start's seeded
     // cooldowns survive the next restart rather than being re-seeded forever.
     if (!stored) await saveTriggerState(i.agentId, state);
-    return { ran: false, why: trigger.detail, trigger };
+    return { ran: false, why: trigger.detail, trigger, nextReviewAt: nextReviewAt(state, i.now) };
   }
 
   // THE STATE IS SAVED BEFORE THE CALL, not after.
@@ -227,7 +222,8 @@ export async function runShadow(
   // unset, and the next tick would ask again — paying twice for one situation.
   // Saving first means a crash costs one wasted run at most, and the failure
   // direction is "thought once and lost it" rather than "thinks forever".
-  await saveTriggerState(i.agentId, afterFiring(state, trigger.reason!, triggerInput));
+  const firedState = afterFiring(state, trigger.reason!, triggerInput);
+  await saveTriggerState(i.agentId, firedState);
 
   const runId = `brain_${i.agentId.slice(2, 10)}_${i.now}`;
   const triggerId = `${trigger.reason}_${i.now}`;
@@ -300,8 +296,8 @@ export async function runShadow(
     tier: "research",
   });
 
-  await persist(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
-  return { ran: true, trigger, snapshot, result };
+  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
+  return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now) };
 }
 
 /** Parse a stored blob, or say it is unusable. A partial state is not a state. */
@@ -340,7 +336,7 @@ function coldStart(now: number): TriggerState {
  * social thesis is read from it rather than generated separately. One decision,
  * two readings; that is the product invariant.
  */
-async function persist(
+export async function persistBrainDecision(
   agentId: string,
   /**
    * What to file this run under. `brain-shadow` unless the caller has enrolled
@@ -370,6 +366,7 @@ async function persist(
       id: newDecisionId(),
       agent_id: agentId,
       source,
+      provenance: "brain",
       strategy: "brain",
       // undefined, not null: DecisionRow leaves these out entirely for a run
       // that produced no decision, which is a different row shape from one that
@@ -442,12 +439,13 @@ async function persist(
     // execution connected, this became "brain" for the agents the owner
     // enrolled, and it is still one place.
     source,
+    provenance: "brain",
     strategy: "brain",
     provider: d.models[0]?.provider,
     model: d.models[0]?.model,
     symbol: d.symbol,
     action: d.action,
-    size_usdg: d.suggested_delta_usdg / 1e6,
+    size_usdg: d.action === "hold" ? 0 : Math.abs(d.suggested_delta_usdg) / 1e6,
     // The model's own words — the thesis, which the feed publishes verbatim.
     reason: d.thesis,
     // NOT DROPPED. A shadow decision was not rejected by anything — it simply
@@ -507,11 +505,9 @@ async function persist(
       latency_seconds: result.seconds,
       quality: snapshot.quality,
       pnl_publishable: snapshot.pnl.publishable,
-      // EXPLICIT, so a reader of the tape never has to infer it. Until
-      // execution is connected this is always zero, and a future non-zero is a
-      // change someone made on purpose.
-      executor_calls: 0,
-      execution_connected: false,
+      // This is the pre-trade source, not evidence that anything executed.
+      // Actual attempts and fills are recorded by trades.decision_id.
+      execution_connected: source === "brain",
     }),
   }).catch((e) => log(`[brain] decision write failed: ${e instanceof Error ? e.message : String(e)}`));
 }

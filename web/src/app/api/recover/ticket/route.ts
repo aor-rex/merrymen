@@ -74,7 +74,7 @@ export async function POST(req: Request) {
   // BURN THE NONCE FIRST. The signature alone binds origin (it is in the text)
   // but nothing else — without a single-use, expiring nonce, anyone who ever saw
   // that signature could mint tickets for the account forever.
-  const gate = consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, origin);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   // Reconstruct the exact text that was signed. Nothing the caller sends is

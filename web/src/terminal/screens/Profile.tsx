@@ -1,6 +1,6 @@
 import { PerformanceChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Empty, NameBlock } from "../ui";
 import { ArrowLeft } from "lucide-react";
 import {
@@ -16,7 +16,7 @@ import { strategyName } from "../strategy";
 import { Coin, Face } from "../ui";
 import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
-import { bannerSrc } from "../live";
+import { useAgentImageSrc } from "../agent-image-state";
 import { WireButton } from "@/components/WireButton";
 
 export function Profile({
@@ -59,7 +59,8 @@ export function Profile({
    * either paints or removes itself.
    */
   const [bannerOk, setBannerOk] = useState(true);
-  const banner = bannerSrc(agent.slug);
+  const banner = useAgentImageSrc(agent.slug, "banner");
+  useEffect(() => setBannerOk(true), [banner]);
   const posts = theses
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
@@ -285,7 +286,7 @@ export function Profile({
                       )}
                     </strong>
                     <span>
-                      {post.sizeUsdg != null ? money(post.sizeUsdg) : ""}
+                      {(post.action === "buy" || post.action === "sell") && post.sizeUsdg != null && post.sizeUsdg > 0 ? money(post.sizeUsdg) : ""}
                     </span>
                   </div>
                   <p>{post.reason ?? post.head}</p>

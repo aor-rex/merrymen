@@ -38,6 +38,44 @@ after(async () => {
 });
 
 describe("who has already been shown around", () => {
+  it("new tour versions do not inherit old dismissals in either store", async () => {
+    const old = new FileTourStore(2), next = new FileTourStore(3);
+    const tenant = "0x1111111111111111111111111111111111111111" as const;
+    await old.markDone(tenant);
+    assert.equal(await next.done(tenant), false);
+    await next.markDone(tenant);
+    assert.equal(await old.done(tenant), true);
+    assert.equal(await next.done(tenant), true);
+
+    // Exercise both real Pg store methods through the connection seam. No
+    // hosted database or account is contacted by this test.
+    const { PgTourStore } = await import("./tour-store");
+    const records = new Set<string>();
+    const connect = async () => ({ query: async (sql: string, params?: unknown[]) => {
+      const key = String(params?.[0]);
+      if (sql.startsWith("INSERT")) records.add(key);
+      return { rows: sql.startsWith("SELECT") && records.has(key) ? [{}] : [] };
+    } });
+    const pgOld = new PgTourStore("unused", 2, connect), pgNext = new PgTourStore("unused", 3, connect);
+    await pgOld.markDone(tenant);
+    assert.equal(await pgNext.done(tenant), false);
+    await pgNext.markDone(tenant);
+    assert.equal(await pgOld.done(tenant), true);
+    assert.equal(await pgNext.done(tenant), true);
+    assert.deepEqual([...records], [tenant, `${tenant}.v3`]);
+  });
+
+  it("allows retry after the initial hosted store connection failed", async () => {
+    const { PgTourStore } = await import("./tour-store");
+    let attempts = 0;
+    const s = new PgTourStore("unused", 2, async () => {
+      if (++attempts === 1) throw new Error("temporarily offline");
+      return { query: async () => ({ rows: [] }) };
+    });
+    await assert.rejects(s.done(A), /temporarily offline/);
+    assert.equal(await s.done(A), false);
+    assert.equal(attempts, 2);
+  });
   it("nobody has, until they have", async () => {
     const s = new FileTourStore();
     assert.equal(await s.done(A), false);

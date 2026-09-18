@@ -1,32 +1,12 @@
-/**
- * AN AGENT THAT DECIDES NOT TO TRADE WAS TALKING TO A TABLE NOBODY READS.
- *
- * A tick that proposes nothing writes its reason to `events` and nothing else,
- * and only `decisions` can become a post. So an agent that looked at the market
- * and concluded "not today, and here is why" produced an empty feed — while its
- * owner watched a screen that said nothing and reported "no trading is being
- * done" and "the agents need to be social, talk a lot".
- *
- * That is not a cadence problem, and raising the tick rate cannot fix it:
- * `read-theses` groups by twelve columns including `reason` and `size_usdg`,
- * both byte-identical tick after tick for a deterministic strategy, so a faster
- * tick only raises `said` on a post that already exists. The missing posts were
- * never being written.
- *
- * A decision with no action is a `view` — a shape this product already carries
- * end to end: thesis-policy classifies it, `outcome: "view"` exists for exactly
- * "a decision the agent made, not a trade that failed to happen", and the feed
- * grew a `view` arm that renders it from the publisher's own words.
- *
- * THIS FILE PROVES THE ROW SURVIVES THE GATE. Writing it is worthless if
- * `publishableThesis` drops it, and the gate fails closed by design — so the
- * question is answered here rather than assumed.
- */
+/** Operational idle notices stay in the owner's record; observed market views
+ * reach the feed. Both may describe a tick with no trade, but only one offers
+ * reasoning a peer can compare with its own evidence. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { publishableThesis, PUBLISHABLE_SOURCES } from "./thesis-policy";
+import { marketReview } from "./market-review";
 
 const codeOf = (src: string) =>
   src
@@ -60,38 +40,42 @@ const idleRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-describe("the idle row reaches the feed", () => {
-  it("THE GATE ADMITS IT — writing it would be worthless otherwise", () => {
-    const post = publishableThesis(idleRow());
-    assert.ok(post, "a deterministic strategy's idle reason must be publishable");
-    assert.equal(post.reason?.startsWith("nothing bought"), true, "the words survive intact");
+const reviewRow = () => idleRow({
+  source: "market-review",
+  ...marketReview({ symbol: "NVDA", priceUsd: 100, stale: false, at: 1_788_800_000 })!,
+});
+
+describe("a public view needs market reasoning, not an idle notice", () => {
+  it("keeps the idle notice out of the feed without changing the owner's record", () => {
+    const row = idleRow();
+    const before = { ...row };
+    assert.equal(publishableThesis(row), null);
+    assert.deepEqual(row, before);
+    assert.match(row.reason, /all 3 legs' price feeds are stale/);
   });
 
-  it("and it lands as a VIEW, not as a trade that failed", () => {
-    // "view" is a DECISION THE AGENT MADE. Every other outcome would render it
-    // as something that went wrong, on the one tick where nothing did.
-    const post = publishableThesis(idleRow())!;
+  it("publishes a grounded quiet-market review as a view with an explicit follow-up", () => {
+    const post = publishableThesis(reviewRow())!;
+    assert.ok(post);
     assert.equal(post.outcome, "view");
-    assert.equal(post.action, null);
-    assert.equal(post.symbol, null);
+    assert.equal(post.action, "hold");
+    assert.equal(post.symbol, "NVDA");
     assert.equal(post.shadow, false, "a real agent really decided this");
+    assert.match(post.reason!, /\$100\.00/);
+    assert.match(post.reason!, /next review/);
   });
 
-  it("its source is one the policy already classifies", () => {
-    // A source nobody has classified publishes NOTHING — not a redacted
-    // version, nothing — and that is how a feed goes silent for a week with no
-    // error. This reuses the deterministic strategy's own source rather than
-    // inventing one.
-    assert.ok(
-      (PUBLISHABLE_SOURCES as readonly string[]).includes("strategy:steady-basket"),
-      "strategy:steady-basket must be a classified source",
-    );
+  it("classifies both strategy reasoning and deterministic market reviews", () => {
+    for (const source of ["strategy:steady-basket", "market-review"]) {
+      assert.ok((PUBLISHABLE_SOURCES as readonly string[]).includes(source), `${source} must be classified`);
+    }
   });
 
-  it("EVERY DETERMINISTIC STRATEGY'S IDLE REASON IS COVERED, not just the basket's", () => {
+  it("applies the content boundary to every deterministic strategy", () => {
     for (const name of ["steady-basket", "weekend-gap", "even-keel", "dip-hunter", "trencher"]) {
-      const post = publishableThesis(idleRow({ source: `strategy:${name}` }));
-      assert.ok(post, `strategy:${name} idle reasons must publish`);
+      assert.equal(publishableThesis(idleRow({ source: `strategy:${name}` })), null, `${name}: operational notice must stay private`);
+      const post = publishableThesis(idleRow({ source: `strategy:${name}`, reason: "Depth remains thin; I am holding until liquidity recovers." }));
+      assert.ok(post, `${name}: an actual market view still publishes`);
       assert.equal(post.outcome, "view");
     }
   });
@@ -99,14 +83,15 @@ describe("the idle row reaches the feed", () => {
   it("but an UNCLASSIFIED source still publishes nothing", () => {
     // The gate is a whitelist and fails closed. This change must not have
     // widened it.
-    assert.equal(publishableThesis(idleRow({ source: "strategy:something-new" })), null);
-    assert.equal(publishableThesis(idleRow({ source: "chat" })), null);
+    assert.equal(publishableThesis({ ...reviewRow(), source: "strategy:something-new" }), null);
+    assert.equal(publishableThesis({ ...reviewRow(), source: "chat" }), null);
   });
 
   it("and an unslugged agent still gets a post, just an unlinked one", () => {
     // A missing link is a smaller loss than a missing thesis — thesis-policy
     // says so — and it is also what makes the post unlikeable, which is right.
-    const post = publishableThesis(idleRow({ slug: null }));
+    assert.equal(publishableThesis(idleRow({ slug: null })), null);
+    const post = publishableThesis({ ...reviewRow(), slug: null });
     assert.ok(post);
     assert.equal(post.slug, null);
   });

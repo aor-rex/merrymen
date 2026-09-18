@@ -3,45 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Compass } from "lucide-react";
 import type { Screen } from "./live";
-import "./first-visit.css";
+import { TOUR_VERSION } from "@/lib/tour-version";
 
-/**
- * THE GUIDED FIRST VISIT, as a spotlight tour.
- *
- * It was an inline panel that sat above the page and offered a different set of
- * branching buttons at every stop — "Explore first", "Meet my agent", "Find a
- * token". That shape asks the reader to make a decision seven times before they
- * know what any of the words mean, and the panel pushed the app down the page,
- * so the thing being described moved while it was described.
- *
- * This is the ordinary product-tour shape instead: one card, a step counter, a
- * dot per stop, Back and Next, and one way out that is always in the same place.
- * The page dims and the thing the stop is about stays lit.
- *
- * ── WHAT "SHOWN ONCE" ACTUALLY REQUIRES ─────────────────────────────────────
- *
- * Two stores, because neither one is enough on its own.
- *
- * `localStorage` is the layer that is always there. It works signed-out, it
- * works offline, and it answers synchronously — which is what stops the tour
- * flashing onto the screen of somebody who dismissed it last week while a fetch
- * is still in flight.
- *
- * The server store is what makes the dismissal a fact about a PERSON rather than
- * about a browser. Skipping on a laptop and being interrupted again on a phone
- * reads as the product forgetting them.
- *
- * EITHER SAYING "DONE" IS DONE. Not both, and not the more recent one. The
- * promise a skip makes is "do not interrupt me again", and the only way to keep
- * it under two stores that can disagree is to let either veto. The cost of that
- * rule is that an owner who wants it back must ask for it, which the relaunch
- * control below is for; the cost of the other rule is breaking the promise.
- *
- * THE KEY IS VERSIONED, and this is v2 while the panel was v1. A tour that
- * changed is a tour nobody has seen, so everyone is shown this one exactly once
- * — including people who dismissed the old one. Bumping it again is how a future
- * rewrite reaches everybody without a migration.
- */
+/** Seven stops, available before sign-in. Anonymous dismissal can be claimed
+ * by one account; explicit replay is separate from permanent dismissal. */
 
 type Stop = {
   title: string;
@@ -111,17 +76,17 @@ const STOPS: Stop[] = [
   },
 ];
 
-const KEY = "merrymen.tour.v2";
-type Saved = { done: boolean; step: number };
+const KEY = `merrymen.tour.v${TOUR_VERSION}`;
+type Saved = { done: boolean; step: number; pending?: boolean; replay?: boolean; claimed?: string };
 
-function readLocal(): Saved | null {
+function readLocal(key: string): Saved | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const v = JSON.parse(raw) as Partial<Saved>;
     if (typeof v.done !== "boolean") return null;
     const step = Number.isInteger(v.step) && v.step! >= 0 && v.step! < STOPS.length ? v.step! : 0;
-    return { done: v.done, step };
+    return { done: v.done, step, pending: v.pending === true, replay: v.replay === true, claimed: typeof v.claimed === "string" ? v.claimed : undefined };
   } catch {
     // Storage can be unavailable (private windows, blocked cookies). The tour
     // still works; it simply cannot remember, which is the safe direction.
@@ -129,9 +94,9 @@ function readLocal(): Saved | null {
   }
 }
 
-function writeLocal(v: Saved): void {
+function writeLocal(key: string, v: Saved): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(v));
+    localStorage.setItem(key, JSON.stringify(v));
   } catch {
     /* see readLocal */
   }
@@ -140,29 +105,68 @@ function writeLocal(v: Saved): void {
 /** Where the card sits, in viewport coordinates. */
 type Spot = { top: number; left: number; width: number; height: number } | null;
 
-/**
- * NO ACCOUNT GATE, deliberately.
- *
- * The panel this replaced rendered nothing until an account had loaded, because
- * it keyed its storage per account. The result was that the one person a first
- * visit is for — somebody who has never signed in and has no agent — was the
- * one person who never saw it.
- *
- * The dismissal is keyed per browser locally and per tenant on the server, so
- * there is nothing an account is needed for here.
- */
 export function FirstVisit({
+  tenant = null,
+  ...props
+}: {
+  tenant?: string | null;
+  onScreen: (screen: Screen) => void;
+  onQuestion: () => void;
+}) {
+  const owner = tenant?.toLowerCase() ?? null;
+  return <AccountTour key={owner ?? "anonymous"} tenant={owner} {...props} />;
+}
+
+function AccountTour({
+  tenant,
   onScreen,
   onQuestion,
 }: {
+  tenant: string | null;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
 }) {
   const [ready, setReady] = useState(false);
-  const [done, setDone] = useState(true);
-  const [step, setStep] = useState(0);
+  const key = tenant ? `${KEY}:${tenant}` : KEY;
+  const [saved, setSaved] = useState<Saved>({ done: true, step: 0 });
+  const [syncFailed, setSyncFailed] = useState(false);
   const [spot, setSpot] = useState<Spot>(null);
   const askedRef = useRef(false);
+  const state = useRef(saved);
+  const alive = useRef(true);
+  const posting = useRef(false);
+  const callbacks = useRef({ onScreen, onQuestion });
+  callbacks.current = { onScreen, onQuestion };
+  const done = saved.done && !saved.replay;
+  const step = saved.step;
+  const save = useCallback((next: Saved) => {
+    state.current = next;
+    writeLocal(key, next);
+    setSaved(next);
+  }, [key]);
+
+  // A failed write stays pending across reloads. Retry on mount, reconnect, or
+  // an explicit click, never a timer loop.
+  const sync = useCallback(async () => {
+    if (!tenant || !state.current.pending || posting.current) return;
+    posting.current = true;
+    try {
+      const response = await fetch("/api/tour", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: TOUR_VERSION, tenant }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.signedIn || !result.done || result.tenant !== tenant || result.version !== TOUR_VERSION) throw new Error("Tour not saved");
+      if (alive.current) {
+        save({ ...state.current, pending: false });
+        setSyncFailed(false);
+      }
+    } catch {
+      if (alive.current) setSyncFailed(true);
+    } finally {
+      posting.current = false;
+    }
+  }, [tenant, save]);
 
   // ── WHAT DOES THIS BROWSER ALREADY KNOW ───────────────────────────────────
   //
@@ -171,11 +175,27 @@ export function FirstVisit({
   // and this effect — the failure the old panel had, and the one the owner
   // asked to stop.
   useEffect(() => {
-    const local = readLocal();
-    setDone(local?.done ?? false);
-    setStep(local?.step ?? 0);
+    alive.current = true;
+    let local = readLocal(key);
+    if (tenant) {
+      const anonymous = readLocal(KEY);
+      // One anonymous dismissal may be claimed by one account, not every
+      // subsequent person signing in on a shared browser.
+      if (anonymous?.done && !anonymous.claimed) {
+        local = { ...(local ?? anonymous), done: true, pending: true, claimed: undefined };
+        writeLocal(KEY, { ...anonymous, claimed: tenant });
+      }
+    }
+    save(local ?? { done: false, step: 0 });
     setReady(true);
-  }, []);
+    void sync();
+    const retry = () => { void sync(); };
+    window.addEventListener("online", retry);
+    return () => {
+      alive.current = false;
+      window.removeEventListener("online", retry);
+    };
+  }, [key, tenant, save, sync]);
 
   // ── AND WHAT DOES THE SERVER KNOW ─────────────────────────────────────────
   //
@@ -183,48 +203,47 @@ export function FirstVisit({
   // means "no opinion", and a store that will not answer says the same. Neither
   // may reopen a tour somebody already closed.
   useEffect(() => {
-    if (!ready || done) return;
-    let alive = true;
-    fetch("/api/tour", { cache: "no-store" })
+    if (!tenant) return;
+    let current = true;
+    fetch(`/api/tour?version=${TOUR_VERSION}&tenant=${encodeURIComponent(tenant)}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((s: { done?: boolean; signedIn?: boolean } | null) => {
-        if (!alive || !s?.signedIn || !s.done) return;
-        setDone(true);
-        // Write it locally too, so the next load is instant and offline-safe.
-        writeLocal({ done: true, step });
+      .then((s: { done?: boolean; signedIn?: boolean; tenant?: string; version?: number } | null) => {
+        if (!current || !s?.signedIn || !s.done || s.tenant !== tenant || s.version !== TOUR_VERSION) return;
+        // Preserve replay: a late server dismissal must not close a tour the
+        // viewer explicitly reopened.
+        save({ ...state.current, done: true, pending: false });
+        setSyncFailed(false);
       })
       .catch(() => {});
     return () => {
-      alive = false;
+      current = false;
     };
-  }, [ready, done, step]);
+  }, [tenant, save]);
 
   const finish = useCallback(() => {
-    setDone(true);
-    writeLocal({ done: true, step });
-    // Local first, server second, and the server's answer is not awaited by the
-    // UI: the card is already gone. A failure costs a re-show on a different
-    // device, never on this one.
-    fetch("/api/tour", { method: "POST" }).catch(() => {});
-  }, [step]);
+    save({ ...state.current, done: true, replay: false, pending: !!tenant });
+    // Close immediately; acknowledgement is tracked separately for retry.
+    void sync();
+  }, [tenant, save, sync]);
 
-  const goto = useCallback(
-    (next: number) => {
-      const clamped = Math.max(0, Math.min(next, STOPS.length - 1));
-      setStep(clamped);
-      writeLocal({ done: false, step: clamped });
-      const stop = STOPS[clamped]!;
-      if (stop.screen) onScreen(stop.screen);
+  const goto = (next: number) => {
+    save({ ...state.current, step: Math.max(0, Math.min(next, STOPS.length - 1)) });
+  };
+
+  // Resuming a stop after reload must navigate too. Callback changes from App
+  // renders must not repeatedly navigate or overwrite the reader's draft.
+  useEffect(() => {
+      if (!ready || done) return;
+      const stop = STOPS[step]!;
+      if (stop.screen) callbacks.current.onScreen(stop.screen);
       // The chat draft is prepared ONCE, when the conversation stop is first
       // reached, so stepping back and forth does not overwrite something the
       // reader has since typed.
-      if (clamped === 3 && !askedRef.current) {
+      if (step === 3 && !askedRef.current) {
         askedRef.current = true;
-        onQuestion();
+        callbacks.current.onQuestion();
       }
-    },
-    [onScreen, onQuestion],
-  );
+  }, [ready, done, step]);
 
   // ── MEASURE THE THING BEING POINTED AT ────────────────────────────────────
   //
@@ -287,14 +306,14 @@ export function FirstVisit({
         <button
           type="button"
           onClick={() => {
-            setDone(false);
-            setStep(0);
-            writeLocal({ done: false, step: 0 });
+            askedRef.current = false;
+            save({ ...state.current, replay: true, step: 0 });
           }}
         >
           <Compass size={14} />
           Show me around
         </button>
+        {syncFailed && <span role="status">Saved on this browser. <button type="button" onClick={() => void sync()}>Retry account sync</button></span>}
       </div>
     );
   }

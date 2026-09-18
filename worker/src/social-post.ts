@@ -149,6 +149,8 @@ export function writerPrompt(c: WriterContext): string {
     "Rules:",
     "- NO numbers, percentages, prices or amounts of any kind. Not one digit.",
     "- Say nothing you were not told above. No prediction, no price target.",
+    "- Explain the observed basis for the trade and the uncertainty in that view. If useful, say what change in those same observations would make you reconsider; never claim that change has happened.",
+    "- A completed order is not evidence the view was right. No operational error or inability-to-sell report in place of a thesis.",
     "- No hashtags, no emoji, no @mentions, no links.",
     `- Under ${POST_MAX} characters.`,
     "- Do not start with the ticker or with the word 'Just'.",

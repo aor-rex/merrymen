@@ -55,7 +55,7 @@ describe("the shadow path cannot reach execution", () => {
     const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(
       raw,
-      /if \(shadowBrainEnabledFor\(agentId\) && cfg\.brainUrl && cfg\.brainToken/,
+      /if \(\(shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken/,
       "three guards: the agent is named AND the house configured a Brain",
     );
   });
@@ -98,9 +98,9 @@ describe("execution is connected in exactly one gated place", () => {
   it("ONE CALL SITE, AND IT IS GATED ON ITS OWN ALLOWLIST", () => {
     const raw = tick();
     assert.equal(
-      (raw.match(/brainLiveEnabledFor\(agentId\)/g) ?? []).length,
-      2,
-      "the guard on acting, and the one deciding what to file the thinking as — no third",
+      (raw.match(/if \(outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
+      1,
+      "one execution guard, with live enrollment and the pause switch both enforced",
     );
     assert.match(raw, /outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\)/);
   });

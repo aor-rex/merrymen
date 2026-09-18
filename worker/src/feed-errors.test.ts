@@ -149,3 +149,40 @@ describe("a hold has no size", () => {
     assert.equal(publishableThesis(row({ source: "strategist", action: "sell", symbol: "NVDA", size_usdg: 3.6, reason: "x", status: "landed" }))!.head, "sell NVDA 3.60 USDG");
   });
 });
+
+describe("an operational notice is not a market thesis", () => {
+  it("drops typed gate holds even when the manager supplied fluent prose", () => {
+    assert.equal(publishableThesis(row({ source: "brain", action: "hold", hold_kind: "GATE_FORCED_HOLD", reason: "Price recovered but volume is uncertain." })), null);
+    assert.ok(publishableThesis(row({ source: "brain", action: "hold", hold_kind: "MODEL_HOLD", reason: "Price recovered but volume is uncertain." })));
+  });
+
+  it("does not turn an error-only or missing reason into a public view", () => {
+    for (const reason of ["", "nothing held to sell", "I cannot sell NVDA because no position exists.", "nothing bought — today's buying budget is spent.", "nothing bought — I looked at 3 names and held all of them. A decision, not a quiet tick", "nothing in your basket is a stock, and your asset mode is Stocks only — so there is nothing to trade", "provider failed: timeout", "no decision (error): unavailable"]) {
+      assert.equal(publishableThesis(row({ reason, action: "hold" })), null, reason);
+    }
+    assert.equal(publishableThesis(row({ reason: null, dropped_rule: "#0 NVDA: nothing held to sell" })), null);
+  });
+
+  it("retains actual views and their failed execution outcomes without rewriting owner records", () => {
+    for (const status of ["rejected", "reverted"]) {
+      const original = row({ action: "sell", symbol: "NVDA", reason: "Depth has thinned since my last review; I would reduce exposure, but recovery would invalidate that view.", status, reject_rule: "nothing-held" });
+      const snapshot = { ...original };
+      const published = publishableThesis(original)!;
+      assert.ok(published);
+      assert.equal(published.reason, original.reason);
+      assert.equal(published.outcome, status === "rejected" ? "refused" : "reverted");
+      assert.deepEqual(original, snapshot);
+    }
+    assert.ok(publishableThesis(row({ reason: "I cannot justify selling while depth and price hold; weakening either would change my view." })));
+  });
+
+  it("uses an admitted post when no reason exists, but rejects operational post prose", () => {
+    const actual = "Buyers broadened while depth held. A narrower buyer base would weaken my view.";
+    assert.equal(publishableThesis(row({ reason: null, post: actual }))?.post, actual);
+    assert.equal(publishableThesis(row({ reason: null, post: "Error: cannot sell" })), null);
+  });
+
+  it("admits deterministic market reviews with a real hold view", () => {
+    assert.ok(publishableThesis(row({ source: "market-review", action: "hold", symbol: "NVDA", reason: "The fresh quote is unchanged. Hold pending another quote; a sustained move would change this view." })));
+  });
+});

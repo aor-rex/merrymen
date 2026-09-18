@@ -147,17 +147,20 @@ describe("4. a historical class row publishes only what it has", () => {
    */
   const historical = classRow({ symbol: null, reason: null, post: null, action: "sell", size_usdg: 3.6 });
 
-  it("is visible — the trade happened and the feed must say so", () => {
-    const t = publishableThesis(historical);
-    assert.ok(t !== null, "a landed historical class trade must publish");
+  it("stays in the owner's ledger when no thesis was recorded", () => {
+    assert.equal(publishableThesis(historical), null, "a fill alone is not a public thesis");
+    assert.equal(publishableThesis({ ...historical, mode: "paper", status: "paper" }), null);
   });
 
-  it("carries the head it can prove and nothing it cannot", () => {
-    const t = publishableThesis(historical)!;
-    assert.equal(t.head, "sell 3.60 USDG", "the head is the action and the size — no ticker was recorded, so none is shown");
-    assert.equal(t.symbol, null);
-    assert.equal(t.reason, null, "no reason was recorded, so none is invented");
-    assert.equal(t.post, null, "no post was written, so none is invented");
-    assert.equal(t.outcome, "landed");
+  it("never backfills the historical record, while admitting a separately recorded substantive post", () => {
+    const before = { ...historical };
+    assert.equal(publishableThesis(historical), null);
+    assert.deepEqual(historical, before, "publication must not invent a ticker, reason or post in the owner record");
+    const body = "Buyer breadth narrowed while depth held; broader buying would improve my view.";
+    const withPost = publishableThesis(classRow({ reason: null, post: body }))!;
+    assert.ok(withPost);
+    assert.equal(withPost.reason, null);
+    assert.equal(withPost.post, body);
+    assert.equal(withPost.outcome, "landed");
   });
 });

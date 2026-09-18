@@ -62,6 +62,13 @@ describe("an accepted image is re-encoded, not passed through", () => {
 });
 
 describe("what is refused, and with which answer", () => {
+  it("refuses an animated WebP instead of silently keeping its first frame", async () => {
+    const bytes = await sharp(Buffer.from([255, 0, 0, 0, 255, 0]), {
+      raw: { width: 1, height: 2, channels: 3, pageHeight: 1 },
+    }).webp({ loop: 0, delay: [100, 100] }).toBuffer();
+    assert.equal((await sharp(bytes).metadata()).pages, 2);
+    assert.deepEqual(await normaliseImage(bytes, "avatar"), { ok: false, refusal: "unsupported-format" });
+  });
   it("refuses an SVG — it is a document, not a picture", async () => {
     const svg = Buffer.from(
       `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script></svg>`,

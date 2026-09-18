@@ -35,6 +35,7 @@
       "@merrymen/identity-store": ["../worker/src/identity-store.ts"],
       "@merrymen/follow-store": ["../worker/src/follow-store.ts"],
       "@merrymen/image-store": ["../worker/src/image-store.ts"],
+      "@merrymen/store": ["../worker/src/store.ts"],
       "@merrymen/llm": ["../worker/src/llm.ts"],
       "@merrymen/settings": ["../worker/src/settings.ts"],
       "@merrymen/home": ["../worker/src/home.ts"],

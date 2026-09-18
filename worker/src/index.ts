@@ -80,7 +80,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, publicationSourceFor, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -109,9 +109,14 @@ import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
-import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision } from "./brain-live";
+import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
+import { provenanceOf, type Provenance } from "./provenance";
+import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
+import { scheduledInterval } from "./brain-trigger";
+import { MarketReviewClock } from "./market-review";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -376,6 +381,7 @@ import {
   addFeeAccrual,
   addPost,
   addTrade,
+  decisionAgent,
   decisionEvidence,
   hasPost,
   recentPosts,
@@ -2602,8 +2608,13 @@ async function main() {
           : {}),
         // Persist every strategist decision (survivor + drop) against the CURRENT
         // agent — the strategist stamps each survivor's intent with the id it wrote.
-        onDecision: (d) => {
-          if (active) return addDecision({ ...d, agent_id: active.agentId });
+        onDecision: async (d) => {
+          if (!active) return;
+          const agentId = active.agentId;
+          await addDecision({ ...d, agent_id: agentId, provenance: provenanceOf(d.source) });
+          if (verifyDecisionOwner(await decisionAgent(d.id), agentId).ok && publishableThesis({ ...d, name: cfg.agentName || "Merryman" })) {
+            reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
+          }
         },
       },
       onNote: strategyNote,
@@ -3615,6 +3626,16 @@ async function main() {
   // every tick forever. Resets when the book is valuable again.
   let notedUnpriced = false;
   let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
+  let nextBrainReviewAt: number | null = null;
+  let nextMarketReviewAt: number | null = null;
+  let quietReview: (() => Promise<void>) | null = null;
+  let reviewPreparationMs = 0;
+  const marketReviewClocks = new Map<string, MarketReviewClock>();
+  function reviewClock(agentId: string): MarketReviewClock {
+    let clock = marketReviewClocks.get(agentId);
+    if (!clock) { clock = new MarketReviewClock(); marketReviewClocks.set(agentId, clock); }
+    return clock;
+  }
   // What the tick could NOT price this cycle (lowercased addresses), and the
   // total cost already sitting in such positions. Written from the real price
   // map each tick and read by the scout ceiling — deliberately NOT reachable
@@ -4676,7 +4697,8 @@ async function main() {
       };
     }
     const probe = selfTestIntent(cfg);
-    await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
+    const stamped = await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
+    if (!stamped.ok) return { ok: false, line: stamped.why };
     // equityKnown: false, not equity 0 — the probe knows nothing about the book
     // and must not claim a zero.
     // ITS OWN OUTCOME. Reading the global after the await could hand this the
@@ -5744,7 +5766,7 @@ async function main() {
    */
   function classDecision(
     w: Why | null | undefined,
-  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null } | undefined] {
+  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null; whyCode?: string } | undefined] {
     if (!w || (w.code !== "class-enter" && w.code !== "class-exit")) return [undefined, undefined];
     const e = classEvidenceOf(w, classBandBounds());
     return [
@@ -5755,6 +5777,10 @@ async function main() {
         action: w.code === "class-exit" ? "sell" : "buy",
         symbol: w.symbol,
         evidence: e === null ? null : JSON.stringify(e),
+        // A class EXIT is a hard risk exit — a clock running out or a contract
+        // about to stop accepting sells — and fires whatever the entry scoring
+        // wanted. An entry is the scoring itself, which is deterministic.
+        whyCode: w.code,
       },
     ];
   }
@@ -5879,9 +5905,54 @@ async function main() {
     intent: TradeIntent,
     source: string,
     reason?: string,
-    known?: { action?: string; symbol?: string; evidence?: string | null },
-  ): Promise<void> {
-    if (intent.decisionId || !active) return;
+    known?: { action?: string; symbol?: string; evidence?: string | null; provenance?: Provenance; whyCode?: string },
+  ): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (!active) return { ok: false, why: "no agent armed" };
+
+    /**
+     * A SUPPLIED ID IS VERIFIED AND REUSED — NEVER REPLACED, NEVER TRUSTED.
+     *
+     * THE BUG THIS CLOSES. Brain writes its thesis row under its own
+     * `decision_id` BEFORE anything executes, then hands the order to
+     * `submitChatTrade`, which built a fresh intent carrying no id — so this
+     * function minted a SECOND, unrelated decision and the trade attached to
+     * that one. The thesis row never joined a trade; the trade joined a
+     * duplicate. Every reader then saw two posts with the same thesis, one
+     * saying "no trade came of it" and one saying "landed", and no id could
+     * reconstruct the chain because there were two of them.
+     *
+     * Crossing into execution is not a new decision. So when an id arrives, it
+     * is REUSED — and checked first, because reuse is an authorisation:
+     *
+     *   belongs to this agent  -> reuse it. No second row.
+     *   belongs to another     -> REFUSE THE TRADE. Not "mint a fresh one and
+     *                             carry on": a caller that handed us somebody
+     *                             else's decision is wrong about something, and
+     *                             quietly repairing it would attach real money
+     *                             to a row whose provenance we just disproved.
+     *   names nothing          -> REFUSE. An id with no row behind it cannot be
+     *                             the pre-trade thesis it claims to be.
+     *   unreadable             -> REFUSE. A database that will not answer is
+     *                             not permission; it is an unknown, and the
+     *                             unsafe direction here is to act on it.
+     *
+     * Refusing rather than throwing because the caller is a money path that has
+     * to answer its owner: it turns this into a refusal line, and the tick lives.
+     */
+    if (intent.decisionId) {
+      const owner = await decisionAgent(intent.decisionId);
+      const verified = verifyDecisionOwner(owner, active.agentId);
+      if (!verified.ok) {
+        // LOUD. This is the cross-tenant case, and it is the one shape here
+        // that would be an incident rather than a bug.
+        console.error(
+          `[${short(active.agentId)}] REFUSED: decision ${intent.decisionId}: ${verified.why}`,
+        );
+        return verified;
+      }
+      return { ok: true };
+    }
+
     const id = newDecisionId();
     intent.decisionId = id;
     const d = describeIntent(intent);
@@ -5894,7 +5965,18 @@ async function main() {
       size_usdg: d.sizeUsdg,
       reason,
       evidence_json: known?.evidence ?? null,
+      // RECORDED, NOT INFERRED LATER. `source` cannot answer this on its own:
+      // an even-keel buy and an even-keel stop-floor sell publish under the
+      // same source and are different kinds of decision. See provenance.ts.
+      provenance: known?.provenance ?? provenanceOf(source, known?.whyCode),
     });
+    // addDecision is best-effort for observational producers. Execution needs
+    // evidence that its new decision really reached the ledger before acting.
+    const recorded = verifyDecisionOwner(await decisionAgent(id), active.agentId);
+    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: known?.action ?? d.action, symbol: known?.symbol ?? d.symbol, reason })) {
+      reviewClock(active.agentId).noteDecision(Math.floor(Date.now() / 1000));
+    }
+    return recorded;
   }
 
   /**
@@ -8456,6 +8538,8 @@ async function main() {
   }
 
   async function tick() {
+    const tickStartedAt = Date.now();
+    let brainOrderAccepted = false;
     // BEAT FIRST, BEFORE ANY NETWORK CALL. See heartbeat() for why this line
     // moved: everything below can fail on somebody else’s rate limit, and none
     // of it changes whether this process is alive.
@@ -8465,6 +8549,7 @@ async function main() {
     const armed = await syncGrant();
 
     const market = await readMarketSafety();
+    const marketObservedAt = Math.floor(Date.now() / 1000);
     // Beat again WITH the height once the chain has answered, so the file still
     // carries block number whenever it is genuinely known.
     heartbeat(market.blockNumber ?? undefined);
@@ -9557,7 +9642,39 @@ async function main() {
       }
     }
 
-    if (shadowBrainEnabledFor(agentId) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+    // Brain execution uses this tick's book, including on the first tick.
+    lastEquityUsdg = equityUsdg;
+    lastEquityKnown = !bookIncomplete;
+    if (!paper) lastGasWei = balances.ethWei;
+
+    // A quiet strategy still forms a public market view. Run this after the
+    // tick so an actual published decision takes precedence over a fallback.
+    // Only fresh public quotes are used; failures stay in the owner's events.
+    quietReview = async () => {
+      if (isPaused() || Date.now() / 1000 - marketObservedAt > 300) return;
+      reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
+      const clock = reviewClock(agentId);
+      const focus = chooseFocus({
+        agentId,
+        positions: positions.filter(p => !p.priceStale).map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
+        universe: watchTokens.map(t => ({ symbol: t.symbol, address: t.address })),
+        prices: market.prices,
+        paused: market.pausedTokens,
+      });
+      if (!focus) return;
+      const quote = { symbol: focus.symbol, priceUsd: Number(focus.price8) / 1e8, stale: focus.priceStale, at: marketObservedAt };
+      const review = clock.prepare(quote, reviewPreparationMs);
+      if (review) {
+        const id = newDecisionId();
+        await addDecision({ id, agent_id: agentId, source: "market-review", provenance: "deterministic-strategy", ...review });
+        // addDecision reports storage failures to logs; don't advance the
+        // clock unless the row actually exists for this agent.
+        if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) clock.recorded(quote);
+      }
+      nextMarketReviewAt = clock.nextAt;
+    };
+
+    if ((shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
@@ -9918,11 +10035,14 @@ async function main() {
             // it would permanently be having its first thought.
             memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
           };
+          reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
+          inputs.reviewPreparationMs = reviewPreparationMs;
           const outcome = await runShadow(
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
           );
+          nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
           // WHICH QUESTION WAS ASKED. "Should I trim what I hold" and "is this
           // worth opening" produce the same words in a decision row and are
@@ -9986,6 +10106,9 @@ async function main() {
           // analysts must not read as a considered view of thin evidence.
           if (outcome.ran && outcome.result.ok) {
             const dd = outcome.result.decision;
+            if (publishableThesis({ name: cfg.agentName || "Merryman", source: inputs.decisionSource, action: dd.action, symbol: dd.symbol, reason: dd.thesis, hold_kind: dd.hold_kind })) {
+              reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
+            }
             const answered = (dd.analyst_views ?? [])
               .filter((v) => v.direction === "buy" || v.direction === "sell" || v.direction === "hold")
               .filter((v) => Number.isFinite(v.evidence_strength))
@@ -9996,13 +10119,14 @@ async function main() {
               at: Math.floor(Date.now() / 1000),
             });
           }
-          if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId)) {
+          if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
             const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
             if (!want.ok) {
-              // Held, or refused before the wall. Logged rather than filed as an
-              // event: a hold is the common case and 360 of them a day is noise.
+              // A hold has no execution outcome. A proposed order refused by
+              // sizing or a gate still belongs in its original decision's history.
+              if (d.action !== "hold") await recordDecisionRefusal(d.decision_id, agentId, want.why);
               console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
             } else {
               const o = want.order;
@@ -10011,10 +10135,18 @@ async function main() {
               // owner's name on a decision they did not make, in the one table
               // the public feed reads for attribution — and brain-shadow.ts
               // refuses the mirror image of that for the same reason.
+              // ONE DECISION, CARRIED. `persist` already wrote the pre-trade
+              // thesis under d.decision_id, so the id travels with the order and
+              // ensureDecision reuses it — the trade, the fill and the outcome
+              // all attach to the row that holds the belief. Without this the
+              // executor minted a second decision and the thesis was orphaned.
               const r = await submitChatTrade(o.side, o.symbol, o.usdgAmount, {
                 source: "brain",
                 reason: d.thesis?.slice(0, 500) || `brain decided to ${o.side} ${o.symbol}`,
+                decisionId: d.decision_id,
+                provenance: "brain",
               });
+              brainOrderAccepted = tradeConsumesSnapshot(r.executionStatus);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
           }
@@ -10256,7 +10388,11 @@ async function main() {
       }
     }
 
-    const { intents: proposed, why: proposedWhy, idle } = takeTick(await strategy.tick(snap));
+    // A submitted Brain order invalidates this tick's pre-trade holdings.
+    // Do not run another discretionary strategy against the old book.
+    const { intents: proposed, why: proposedWhy, idle } = brainOrderAccepted
+      ? { intents: [], why: [], idle: null }
+      : takeTick(await strategy.tick(snap));
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //
@@ -10357,7 +10493,13 @@ async function main() {
       const w = proposedWhy[proposedAt];
       // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
       // advice for the owner and was going out on every capped keel-top.
-      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined);
+      // THE WHY CODE DECIDES THE PROVENANCE. A stop-floor sell and a dca-leg buy
+      // publish under the same source; only the typed Why knows that one of them
+      // is a hard risk exit that fired whatever the strategy wanted.
+      const stamped = await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined, {
+        whyCode: w?.code,
+      });
+      if (!stamped.ok) continue;
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
@@ -10417,12 +10559,14 @@ async function main() {
      */
     const exits = await proposeClassExits();
     for (const [at, intent] of exits.intents.entries()) {
-      await ensureDecision(intent, "class-route", ...classDecision(exits.why[at]));
+      const stamped = await ensureDecision(intent, "class-route", ...classDecision(exits.why[at]));
+      if (!stamped.ok) continue;
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
     const entries = await proposeClassEntries();
     for (const [at, intent] of entries.intents.entries()) {
-      await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
+      const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
+      if (!stamped.ok) continue;
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
   }
@@ -10561,7 +10705,7 @@ async function main() {
    * practice fill is not a success: the money did not move, and the owner needs
    * to know why more than they need a green tick.
    */
-  type OrderReply = { ok: boolean; line: string };
+  type OrderReply = { ok: boolean; line: string; executionStatus?: TradeRow["status"] };
   /** A refusal. Every path that does not reach the wall returns one of these. */
   const no = (line: string): OrderReply => ({ ok: false, line });
 
@@ -10572,8 +10716,9 @@ async function main() {
     usdgAmount: number,
     // Threaded through so a curve buy carries the same provenance a pool buy
     // does — memecoins are exactly where a reasoner other than the owner is
-    // most likely to be the one asking.
-    asked: { source: string; reason: string } = {
+    // most likely to be the one asking, and where a pre-trade thesis most
+    // needs its id to survive into the fill.
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     },
@@ -10725,7 +10870,15 @@ async function main() {
       notionalUsdg: isBuy ? sizeRaw : quoted,
     };
 
-    await ensureDecision(intent, asked.source, asked.reason);
+    // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+    // before execution. Stamped on the intent so ensureDecision VERIFIES and
+    // reuses it rather than minting a second row — and so the trade, the fill
+    // and the outcome all land under the id that holds the pre-trade thesis.
+    if (asked.decisionId) intent.decisionId = asked.decisionId;
+    const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+    // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+    // nothing, could not be read, or belongs to another agent. Nothing is sent.
+    if (!stamped.ok) return no(stamped.why);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
@@ -10734,7 +10887,7 @@ async function main() {
     // the note as "less than you asked for": a full liquidation annotated as
     // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return sayTradeOutcome(outcome, side, symbol, usdgAmount, actual);
+    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status };
   }
 
   /**
@@ -10832,56 +10985,76 @@ async function main() {
     side: "buy" | "sell",
     symbol: string,
     usdgAmount: number,
-    asked: { source: string; reason: string } = {
+    /**
+     * WHERE THIS ORDER CAME FROM — and, when something already decided it, the
+     * decision it belongs to.
+     *
+     * `decisionId` is how a pre-trade thesis survives into execution. Brain
+     * writes its row before it hands the order over; passing the id here means
+     * `ensureDecision` verifies and REUSES it instead of minting a second
+     * decision that the trade then attaches to. Absent for an owner's typed
+     * order, which genuinely is a new decision at this moment.
+     */
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`,
     },
   ): Promise<OrderReply> {
-    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
-    // Before the first tick completes, equity is unknown (0n) and the drawdown
-    // check would judge garbage — hold chat trades until the book is read.
-    if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
-    // Resolve against the watch set, not the shipped registry — otherwise a
-    // memecoin the owner added, covered by their grant and priced from its pool
-    // still came back "unknown symbol" when they asked for it by name.
-    const token = watchTokens.find((t) => t.symbol === symbol)?.address;
-    if (!token) {
-      const known = watchTokens.map((t) => t.symbol).join(", ");
-      return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
-    }
-    // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
-    // graduates, so routing it to the swap router would build an operation
-    // against a pool that does not exist. Asked before anything is sized.
-    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, asked);
+    return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
+      if (!active) return no("no agent armed — sign a grant in the dashboard first.");
+      // Before the first tick completes, equity is unknown (0n) and the drawdown
+      // check would judge garbage — hold chat trades until the book is read.
+      if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
+      // Resolve against the watch set, not the shipped registry — otherwise a
+      // memecoin the owner added, covered by their grant and priced from its pool
+      // still came back "unknown symbol" when they asked for it by name.
+      const token = watchTokens.find((t) => t.symbol === symbol)?.address;
+      if (!token) {
+        const known = watchTokens.map((t) => t.symbol).join(", ");
+        return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
+      }
+      // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
+      // graduates, so routing it to the swap router would build an operation
+      // against a pool that does not exist. Asked before anything is sized.
+      if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, asked);
 
-    const router = swapRouterFor(cfg);
-    let intent: TradeIntent;
-    // The size ACTUALLY sent, when it is not the size asked for. Null means the
-    // two agree and the reply can quote the owner back to themselves.
-    let sold: number | null = null;
-    if (side === "buy") {
-      const raw = usdg(usdgAmount);
-      intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
-    } else {
-      const pos = readPositionRaw(active.agentId, symbol, usdg);
-      if (!pos) return no(`you don't hold any ${symbol}.`);
-      const want = usdg(usdgAmount);
-      const partial = want < pos.valueUsdg;
-      const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
-      const notional = partial ? want : pos.valueUsdg;
-      if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
-      // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
-      // silently and then quote the amount asked for: "submitted sell 500 USDG
-      // NVDA" for a 12 USDG position, a claim the ledger will never support —
-      // the trade row carries 12. Same rule as everywhere else here.
-      if (!partial) sold = Number(pos.valueUsdg) / 1e6;
-      intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
-    }
-    await ensureDecision(intent, asked.source, asked.reason);
-    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
-    // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
-    // sent, which is not always the amount asked for — see the clamp above.
-    return sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount);
+      const router = swapRouterFor(cfg);
+      let intent: TradeIntent;
+      // The size ACTUALLY sent, when it is not the size asked for. Null means the
+      // two agree and the reply can quote the owner back to themselves.
+      let sold: number | null = null;
+      if (side === "buy") {
+        const raw = usdg(usdgAmount);
+        intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
+      } else {
+        const pos = readPositionRaw(active.agentId, symbol, usdg);
+        if (!pos) return no(`you don't hold any ${symbol}.`);
+        const want = usdg(usdgAmount);
+        const partial = want < pos.valueUsdg;
+        const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+        const notional = partial ? want : pos.valueUsdg;
+        if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
+        // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
+        // silently and then quote the amount asked for: "submitted sell 500 USDG
+        // NVDA" for a 12 USDG position, a claim the ledger will never support —
+        // the trade row carries 12. Same rule as everywhere else here.
+        if (!partial) sold = Number(pos.valueUsdg) / 1e6;
+        intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
+      }
+      // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+      // before execution. Stamped on the intent so ensureDecision VERIFIES and
+      // reuses it rather than minting a second row — and so the trade, the fill
+      // and the outcome all land under the id that holds the pre-trade thesis.
+      if (asked.decisionId) intent.decisionId = asked.decisionId;
+      const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+      // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+      // nothing, could not be read, or belongs to another agent. Nothing is sent.
+      if (!stamped.ok) return no(stamped.why);
+      const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+      // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
+      // sent, which is not always the amount asked for — see the clamp above.
+      return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status };
+    });
   }
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
@@ -10899,7 +11072,8 @@ async function main() {
       recipient: to,
       amountUsdg: usdg(usdgAmount),
     };
-    await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
+    const stamped = await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
+    if (!stamped.ok) return `Transfer refused: ${stamped.why}.`;
     await processIntent(intent, lastEquityUsdg, lastEquityKnown);
     return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
   }
@@ -11078,6 +11252,11 @@ async function main() {
    */
   let lastTickError = "";
   const runLoop = () => {
+    const startedAt = Date.now();
+    // An early-returning tick must not retain an overdue deadline and spin.
+    nextBrainReviewAt = null;
+    nextMarketReviewAt = null;
+    quietReview = null;
     tick()
       // CLEARED BY A HEALTHY TICK. The latch was only ever assigned on failure,
       // so a fault that came back after recovering was reported once and never
@@ -11111,9 +11290,14 @@ async function main() {
       })
       // In the finally so a tick that threw still reports what it spent — the
       // ticks that fail are exactly the ones whose RPC cost matters most.
-      .finally(() => {
+      .finally(async () => {
+        try { await quietReview?.(); } catch (e) { console.error("[market-review]", e); }
         reportRpc();
-        setTimeout(runLoop, cfg.tickSeconds * 1000);
+        const deadlines = [nextBrainReviewAt, nextMarketReviewAt].filter((v): v is number => v !== null);
+        const nextReview = deadlines.length ? Math.min(...deadlines) : null;
+        setTimeout(runLoop, nextTickDelayMs({ startedAt, now: Date.now(), tickSeconds: cfg.tickSeconds,
+          nextReviewAt: nextReview, preparationMs: reviewPreparationMs,
+          reviewIntervalSec: nextReview !== null && nextReview === nextBrainReviewAt ? scheduledInterval() : 300 }));
       });
   };
 
@@ -11135,7 +11319,7 @@ async function main() {
   // than they will routinely wait for their second.
   // MERRYMEN_HOME is …/children/<tenant> on a hosted child and a fixed path
   // self-hosted, where a stagger is neither needed nor harmful.
-  const slot = startupSlotMs(merrymenHome(), cfg.tickSeconds * 1000);
+  const slot = startupSlotMs(merrymenHome(), tickIntervalMs(cfg.tickSeconds));
   if (slot > 0) console.log(`[worker] first tick in ${Math.round(slot / 1000)}s — staggered so the fleet does not wake together`);
 
   /**

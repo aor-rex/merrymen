@@ -50,6 +50,8 @@ import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
+import "./first-visit.css";
+import { WiredProvider } from "@/components/WiredProvider";
 import { useDesktopDetail } from "./desktop-detail";
 import { ChatDock } from "./ChatDock";
 
@@ -365,7 +367,7 @@ export function App() {
   const displayMine = mine ?? emptyMine;
 
   return (
-    <div className="terminal-host"><div
+    <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
       className="app"
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
@@ -395,7 +397,7 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
-        <FirstVisit onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
+        <FirstVisit tenant={account?.session.hosted ? account.session.address : null} onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} onRefresh={refreshAccount}/>}
         {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
@@ -649,6 +651,6 @@ export function App() {
           />
         </ChatDock>
       )}
-    </div></div>
+    </div></div></WiredProvider>
   );
 }

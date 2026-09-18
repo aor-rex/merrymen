@@ -164,7 +164,7 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     // no surface in this app renders, so an owner refused for being paused,
     // expired, over their ceiling or in an unwatched symbol saw nothing at all.
     assert.ok(!/\/\^\(🧱\|🤔\|↩️\)\//.test(CODE), "the emoji sniff is gone");
-    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string \};/);
+    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string; executionStatus\?: TradeRow\["status"\] \};/);
     assert.match(CODE, /const no = \(line: string\): OrderReply => \(\{ ok: false, line \}\);/);
     // Both submitters return the verdict, and the dispatch passes it straight
     // through rather than re-deriving one.

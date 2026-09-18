@@ -175,8 +175,10 @@ export function sentimentLine(
     // TSLA 5.00 USDG" — so a peer that only thought about a trade is never
     // reported to Brain as one that made it.
     const what = [p.head, p.outcomeText].filter(Boolean).join(" · ");
-    const why = (p.reason ?? "").trim();
-    return `${p.name}: ${what}${why ? ` — "${why}"` : ""}`;
+    const why = (p.post || p.reason || "").trim();
+    const identity = p.slug ? ` /a/${p.slug}` : "";
+    const when = p.at ? ` at ${new Date(p.at * 1000).toISOString()}` : "";
+    return `${p.paper ? "PAPER MONEY — " : ""}${p.name}: ${what}${identity}${when}${why ? ` — "${why}"` : ""}`;
   });
 
   // LENS_MAX bounds the PEER MATERIAL, which is what other models wrote; the
@@ -212,8 +214,9 @@ export function memoryLines(
     const age = Math.max(0, Math.floor((now - (t.at || now)) / 60));
     const when = age < 90 ? `${age}m ago` : `${Math.floor(age / 60)}h ago`;
     const said = t.said > 1 ? ` (said ${t.said}×)` : "";
+    const words = t.post || t.reason;
     out.push(
-      `${when}${said}: ${t.head || "a view"} · ${t.outcomeText}${t.reason ? ` — "${t.reason}"` : ""}`,
+      `${when}${said}: ${t.paper ? "PAPER MONEY — " : ""}${t.head || "a view"} · ${t.outcomeText}${words ? ` — "${words}"` : ""}`,
     );
     if (out.length >= MEMORY_LINES) break;
   }
