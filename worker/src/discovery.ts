@@ -606,6 +606,8 @@ export interface TrendingFind {
 }
 
 export interface TrendingResult {
+  /** Distinguish failed/unconfigured research from a successful empty shortlist. */
+  researchStatus?: "ok" | "failed" | "unavailable";
   /** Distinct pools seen across every feed, before any filtering. */
   scanned: number;
   /** How many cleared the numeric screen. */
@@ -715,7 +717,15 @@ export async function discoverTrending(deps: TrendingDeps): Promise<TrendingResu
     });
   }
 
-  return { scanned, screened: kept.length, picks, ignored: ranked.ignored };
+  return { scanned, screened: kept.length, picks, ignored: ranked.ignored,
+    researchStatus: deps.scout.name === "null" ? "unavailable" : ranked.failed ? "failed" : "ok" };
+}
+
+export function trendingStatusLine(result: TrendingResult): string {
+  const counts = `${result.scanned} coins, ${result.screened} past the screen`;
+  if (result.researchStatus === "failed") return `${counts}; research failed — candidates remain unassessed; check the configured model credential and provider`;
+  if (result.researchStatus === "unavailable") return `${counts}; research is not configured or enabled — candidates remain unassessed`;
+  return `${counts}, none worth mentioning`;
 }
 
 /**

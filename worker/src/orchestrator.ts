@@ -36,6 +36,7 @@
  * ledger, which the child already has), and runs before the child seeds its
  * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
+import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -861,6 +862,7 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
   }
 }
 
+
 async function writeBootstrapForChild(
   tenant: `0x${string}`,
   /**
@@ -874,6 +876,7 @@ async function writeBootstrapForChild(
 ): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   let accounting: TenantBootstrapState["accounting"];
+  let riskPeriod: TenantBootstrapState["riskPeriod"];
   const url = process.env.DATABASE_URL;
   if (!url) {
     // No shared database configured at all. That is a deployment fact, not a
@@ -882,7 +885,10 @@ async function writeBootstrapForChild(
     accounting = { kind: "unknown", why: "no DATABASE_URL on the orchestrator", observedAt: now };
   } else {
     try {
-      accounting = await deriveBootstrapAccounting(shared ?? (await makePgDb(url)), smartAccount, now);
+      const db = shared ?? (await makePgDb(url));
+      await db.exec(RISK_PERIOD_SCHEMA);
+      riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
+      accounting = await deriveBootstrapAccounting(db, smartAccount, now);
     } catch (e) {
       accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
     }
@@ -898,6 +904,7 @@ async function writeBootstrapForChild(
     tenantId: smartAccount.toLowerCase(),
     generatedAt: now,
     accounting,
+    ...(riskPeriod ? { riskPeriod } : {}),
     // `outstandingOps` is deliberately NOT written. The field is reserved in
     // the schema so adding it later is not a break; populating it here would
     // change which blocks a child scans, which is a different change.

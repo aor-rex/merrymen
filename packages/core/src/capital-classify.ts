@@ -100,7 +100,7 @@ export interface ClassifyInput {
    * a global list could never contain it and `protocols.ts`'s single-constant
    * shape does not carry over.
    *
-   * It extends the PRIMARY rule rather than adding a fallback arm, deliberately.
+   * It extends the PRIMARY rule, which is checked before custody transfers.
    * A class buy moves USDG account -> vault and the token curve -> vault in the
    * same transaction; a class sell moves the token vault -> curve and the
    * proceeds curve -> account. Both are trades, and both are decided by
@@ -109,9 +109,9 @@ export interface ClassifyInput {
    * and a trade is booked as a deposit or a withdrawal, corrupting the
    * denominator of every P&L figure.
    *
-   * NOT `knownAccounts`. That answers "still ours, parked", which is defensible
-   * for the first leg alone and becomes a lie the moment the vault pays the
-   * curve: the money was SPENT, not moved.
+   * Without a paired trade, cash moving between the account and its own vault
+   * is internal. This includes residual cash returned during a class purchase;
+   * that refund is existing capital, not a new owner deposit.
    *
    * Absent means no class route, which is every grant today, and the behaviour
    * is byte-identical to before this field existed.
@@ -134,6 +134,7 @@ export interface ClassificationEvidence {
   /** The rule that fired, so two verdicts can be compared without reading prose. */
   rule:
     | "paired-token-movement"
+    | "custody-transfer"
     | "known-account"
     | "system-address"
     | "venue-without-pair"
@@ -210,6 +211,15 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
         ? `the same transaction moved ${paired.token} INTO ${custodied ? `this account's vault at ${paired.to}` : "the account"} — this USDG bought something, it did not leave`
         : `the same transaction moved ${paired.token} OUT of ${custodied ? `this account's vault at ${paired.from}` : "the account"} — this USDG is sale proceeds, not a deposit`,
       evidence: { ...base, rule: "paired-token-movement" },
+    };
+  }
+
+  // Preserve trade classification above; unpaired own-vault cash stays ours.
+  if (has(input.custodyAddresses, counterparty)) {
+    return {
+      kind: "internal",
+      why: `the counterparty ${counterparty} holds this account's own assets — cash moved within its custody`,
+      evidence: { ...base, rule: "custody-transfer" },
     };
   }
 

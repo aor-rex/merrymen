@@ -14,35 +14,36 @@ export interface MarketReview {
   evidence_json: string;
 }
 
-/**
- * A conservative research view when the trading strategy has no order. Prices
- * are observations, never forecasts. This module cannot propose an order and
- * neither an outage nor a private portfolio balance becomes public prose.
- */
-export function marketReview(quote: ReviewQuote, previous?: ReviewQuote | null): MarketReview | null {
+export interface ReviewPoint { at: number; priceUsd: number }
+
+/** A conditional technical thesis from observed history; a spot quote alone is not research. */
+export function marketReview(quote: ReviewQuote, previous?: ReviewQuote | null, history: readonly ReviewPoint[] = []): MarketReview | null {
   const { symbol, priceUsd, at } = quote;
   if (!/^[A-Z0-9._-]{1,20}$/.test(symbol) || !Number.isFinite(priceUsd) || priceUsd <= 0 || quote.stale || !Number.isFinite(at)) return null;
-  const price = (n: number) => `$${n >= 1 ? n.toFixed(2) : n.toPrecision(3)}`;
-  const comparable = previous && previous.symbol === symbol && !previous.stale &&
-    Number.isFinite(previous.priceUsd) && previous.priceUsd > 0 && previous.at < at &&
-    at - previous.at <= MAX_DECISION_INTERVAL_SEC * 3;
-  let reason: string;
-  if (comparable) {
-    const change = (priceUsd / previous.priceUsd - 1) * 100;
-    if (Math.abs(change) < 0.1) {
-      reason = `${symbol}'s observed quote is unchanged near ${price(priceUsd)}. My view is neutral; I want a sustained move away from this level before changing exposure.`;
-    } else if (change > 0) {
-      reason = `${symbol} rose ${change.toFixed(1)}% to ${price(priceUsd)} since my last review. I'm waiting for another higher quote; falling back below ${price(previous.priceUsd)} would weaken the momentum case.`;
-    } else {
-      reason = `${symbol} fell ${Math.abs(change).toFixed(1)}% to ${price(priceUsd)} since my last review. I'm waiting for it to stabilize; reclaiming ${price(previous.priceUsd)} would be the first sign of recovery.`;
-    }
-  } else {
-    reason = `${symbol} at ${price(priceUsd)} is my reference for the next review. My view is neutral until fresh quotes establish direction; a sustained move above this level would support a bullish case.`;
-  }
-  return {
-    action: "hold", symbol, reason,
-    evidence_json: JSON.stringify({ kind: "market-review", quote, previous: comparable ? previous : null }),
-  };
+  const points = [...new Map(history.filter(p => Number.isFinite(p.at) && Number.isFinite(p.priceUsd) &&
+    p.priceUsd > 0 && p.at <= at && p.at >= at - 86400).map(p => [p.at, p])).values()].sort((a,b) => a.at-b.at);
+  const first = points[0], last = points.at(-1);
+  if (points.length < 3 || !first || !last || last.at-first.at < 900 || at-last.at > 3600) return null;
+  const low = Math.min(...points.map(p => p.priceUsd)), high = Math.max(...points.map(p => p.priceUsd));
+  if (high === low) return null;
+  const mean = points.reduce((sum,p) => sum+p.priceUsd,0)/points.length;
+  const changePct = (priceUsd/first.priceUsd-1)*100;
+  if (!Number.isFinite(mean) || !Number.isFinite(changePct)) return null;
+  const money = (n: number) => '$' + (n >= 1 ? n.toFixed(2) : n.toPrecision(3));
+  const hours = ((at-first.at)/3600).toFixed(1);
+  const direction = priceUsd > mean ? 'upward' : priceUsd < mean ? 'downward' : 'range-bound';
+  const reason = symbol + ' at ' + money(priceUsd) + ' is ' + (changePct >= 0 ? 'up ' : 'down ') +
+    Math.abs(changePct).toFixed(2) + '% over the observed ' + hours + 'h window (' + points.length +
+    ' oracle rounds; range ' + money(low) + '–' + money(high) + '). My technical bias is ' + direction +
+    ' relative to the sampled mean of ' + money(mean) + '. I hold while testing this range over the next hour: ' +
+    'two fresh oracle rounds above ' + money(high) + ' would support a bullish follow-up; two below ' + money(low) +
+    ' would support a bearish follow-up. A move back across the sampled mean invalidates the directional bias. ' +
+    'Oracle marks do not establish executable liquidity; review depth before acting.';
+  return { action: 'hold', symbol, reason, evidence_json: JSON.stringify({
+    kind: 'technical-review', quote, points, previous: previous?.symbol === symbol ? previous : null,
+    observationStart: first.at, observationEnd: last.at, low, high, mean, changePct,
+    horizonSec: 3600, confirmationRounds: 2,
+  }) };
 }
 
 /** State is advanced only after the caller successfully records a review. */
@@ -58,9 +59,13 @@ export class MarketReviewClock {
     this.lastDecisionAt = at;
   }
 
-  prepare(quote: ReviewQuote, preparationMs = 0): MarketReview | null {
-    if (quote.at + reviewLookaheadSec(preparationMs) - this.lastDecisionAt < MAX_DECISION_INTERVAL_SEC) return null;
-    return marketReview(quote, this.lastQuote);
+  due(at: number, preparationMs = 0): boolean {
+    return at + reviewLookaheadSec(preparationMs) - this.lastDecisionAt >= MAX_DECISION_INTERVAL_SEC;
+  }
+
+  prepare(quote: ReviewQuote, preparationMs = 0, history: readonly ReviewPoint[] = [], decisionAt = quote.at): MarketReview | null {
+    if (!this.due(decisionAt, preparationMs)) return null;
+    return marketReview(quote, this.lastQuote, history);
   }
 
   recorded(quote: ReviewQuote): void {

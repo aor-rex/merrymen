@@ -5,6 +5,7 @@
  * Postgres is a schema port when the platform goes multi-user.
  */
 
+import { RISK_PERIOD_SCHEMA, mergeRiskPeriod, markRiskPeriod, adjustRiskCapital, type RiskPeriod } from "./risk-period";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
@@ -33,7 +34,12 @@ let driver: Db | null = null;
  * path runs it through db.ts's translateSchema(). Keeping ONE string, rather than a
  * hand-maintained parallel Postgres DDL, is what stops the two dialects drifting.
  */
+
+export const restoreRiskPeriod = (r: RiskPeriod) => mergeRiskPeriod(getDb(), r);
+export const getRiskPeriodPeak = (account: string, equity: number | null = null) => markRiskPeriod(getDb(), account, equity);
+
 const SQLITE_SCHEMA = `
+    ${RISK_PERIOD_SCHEMA};
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -1330,31 +1336,34 @@ export async function restoreAgentHwmParts(
 
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    const db = getDb();
-    if (deltaUsdg >= 0) {
-      // A DEPOSIT RAISES THE GROSS, exactly as before.
+    await getDb().tx(async (db) => {
+      await adjustRiskCapital(db, agentId, deltaUsdg);
+      if (deltaUsdg >= 0) {
+        // A DEPOSIT RAISES THE GROSS, exactly as before.
+        await db
+          .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
+          .run(deltaUsdg, agentId);
+        return;
+      }
+      // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
+      // effective peak by the same amount while leaving both stored figures
+      // monotonic — so the mirror's upward-only ratchet carries the reduction
+      // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
+      //
+      // Clamped at the gross so the effective peak floors at zero, which is what
+      // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
+      const amount = -deltaUsdg;
       await db
-        .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
-        .run(deltaUsdg, agentId);
-      return;
-    }
-    // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
-    // effective peak by the same amount while leaving both stored figures
-    // monotonic — so the mirror's upward-only ratchet carries the reduction
-    // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
-    //
-    // Clamped at the gross so the effective peak floors at zero, which is what
-    // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
-    const amount = -deltaUsdg;
-    await db
-      .prepare(
-        `UPDATE agents SET hwm_withdrawn_usdg =
-           CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
-         WHERE smart_account = ?`,
-      )
-      .run(amount, amount, agentId);
+        .prepare(
+          `UPDATE agents SET hwm_withdrawn_usdg =
+             CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
+           WHERE smart_account = ?`,
+        )
+        .run(amount, amount, agentId);
+    });
   } catch (e) {
     console.error("[store] hwm adjust failed:", e);
+    throw e;
   }
 }
 

@@ -73,26 +73,10 @@ describe("a stale weekend is reported, not just endured", () => {
     assert.equal(t.idle, undefined, "a tick that bought must not also claim it could not");
   });
 
-  it("SHORT OF CASH IS A DIFFERENT SILENCE, and it gets its own sentence", () => {
-    // This used to assert `idle === undefined`, and it was RIGHT about the
-    // wrong sentence — telling an owner whose account is empty that "the feeds
-    // are stale" sends them to wait for Monday instead of to the deposit
-    // screen. It was wrong to conclude that saying nothing was the answer.
-    //
-    // Nothing at all was the worse outcome: the buy loop never runs, so
-    // skippedStale stays 0, so `shut` is false, so no reason fires — and the
-    // live rail is only blocked by an EXACT zero, so the agent reports
-    // "trading for real — every leg available" beside an empty tape, forever,
-    // on stock defaults. That is the "nothing happens" complaint, and it had no
-    // sentence anywhere in the system.
+  it("reports stale feeds when an affordable smaller basket is still blocked by the market", () => {
     const t = steadyBasketTick(cfg(), snap({ cashUsdg: 1_000_000n, staleFeeds: new Set(["QQQ", "NVDA", "TSLA"]) }));
-    assert.equal(t.idle?.code, "under-one-buy");
-    // The BALANCE, not the feeds — even though the feeds are stale here too.
-    // Whichever is reported is the one the owner will act on.
-    const said = renderWhy(t.idle!);
-    assert.match(said, /1\.00 USDG on hand and one buy costs 25\.00/);
-    assert.match(said, /Add funds or lower the size per trade/);
-    assert.ok(!/stale/.test(said), "the actionable fact is the money, not the weekend");
+    assert.equal(t.idle?.code, "all-legs-stale");
+    assert.equal(t.intents.some(i => i.kind === "swap"), false);
   });
 
   it("and when the vault can cover it, it says the problem clears itself", () => {

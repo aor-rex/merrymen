@@ -99,7 +99,7 @@ import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
-import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import type { Why } from "./strategies/reasons";
@@ -116,6 +116,8 @@ import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs } from "./brain-shadow";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval } from "./brain-trigger";
+import { boundedRead } from "./optional-read-deadline";
+import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock } from "./market-review";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
@@ -182,6 +184,7 @@ import { quarantineOf } from "./quarantine";
 import {
   describeDiscovery,
   describeTrending,
+  trendingStatusLine,
   discoverPools,
   discoverPonsLaunches,
   discoverTrending,
@@ -407,6 +410,8 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  getRiskPeriodPeak,
+  restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
   hasEpochOneHistory,
@@ -418,7 +423,6 @@ import {
   getPaperBook,
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
-  landedFillsWithoutBasis,
   listOpHashes,
   listSubmittedOps,
   initStore,
@@ -755,14 +759,10 @@ async function main() {
    */
   const BRAIN_GRADE_TTL_SEC = 900;
   /**
-   * Symbols the deep acquisition scan has already been run for in this process.
-   *
-   * It walks two million blocks in spans, so it is hundreds of RPC calls. A tick
-   * that found nothing would pay them again every four minutes, for ever, on the
-   * endpoint this fleet already once saturated. Once is a recovery; every tick
-   * is an outage with a good excuse.
+   * Last recovery attempt per symbol. Retry after an hour rather than permanently
+   * giving up after a transient RPC failure or scanning on every trading tick.
    */
-  const deepBasisTried = new Set<string>();
+  const deepBasisTried = new Map<string, number>();
   /**
    * The `onchain` lens, cached per token, with the same lesson applied.
    *
@@ -3348,6 +3348,8 @@ async function main() {
     }
   };
   let highWaterMarkUsdg = 0n;
+  let riskHighWaterMarkUsdg: bigint | null = null;
+  const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? highWaterMarkUsdg);
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash
   // moved and NOTHING was written to the ledger in between, the money came from
@@ -3508,7 +3510,14 @@ async function main() {
    * the safe one, and the store already enforces it.
    */
   async function restoreAnchoredHighWaterMark(agentId: string): Promise<void> {
-    applyAccountingAnchor(agentId, anchorOnce(agentId));
+    const anchor = anchorOnce(agentId);
+    applyAccountingAnchor(agentId, anchor);
+    if (anchor.kind === "valid" && anchor.state.riskPeriod) {
+      await restoreRiskPeriod(anchor.state.riskPeriod);
+      const peak = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = peak === null ? null : usdg(peak);
+      console.log(`[risk period] ${anchor.state.riskPeriod.id}: peak ${peak} USDG; signed drawdown limit unchanged`);
+    }
 
     // THE EPOCH COMES BACK FIRST, because every row this child is about to write
     // is stamped with it.
@@ -4815,7 +4824,9 @@ async function main() {
       }
       if (!res.picks.length) {
         if (res.scanned > 0) {
-          console.log(`[trending] ${res.scanned} coins, ${res.screened} past the screen, none worth mentioning`);
+          const line = trendingStatusLine(res);
+          console.log(`[trending] ${line}`);
+          if (res.researchStatus === "failed") await addEvent(agentId, "warn", line);
         }
         return;
       }
@@ -6348,7 +6359,7 @@ async function main() {
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
-      highWaterMarkUsdg,
+      highWaterMarkUsdg: paperActive() ? highWaterMarkUsdg : usdg((await getRiskPeriodPeak(agentId)) ?? usdgNum(highWaterMarkUsdg)),
       equityUsdg,
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
@@ -9233,7 +9244,8 @@ async function main() {
         const b = await getBasis(agentId, "live", p.symbol).catch(() => null);
         if (!b || b.costUsdg <= 0n) uncovered.push(p.symbol);
       }
-      // BEFORE REPORTING IT, TRY TO FIX IT — from the receipts, once.
+      // Recover from receipts before reporting it. Rate-limit each symbol and
+      // bound the whole pass so accounting repair cannot starve decisions.
       //
       // Forward, a reconciled op books its own basis now. But the ops that
       // already went through the old path are `known` to the sweep and it will
@@ -9246,70 +9258,34 @@ async function main() {
       // nothing at all, and it stops as soon as it has nothing left to fix.
       if (uncovered.length && active?.executor) {
         const rc = makeReconcileChain(client);
-        // The ledger's own rows first, then the token's log. The rows are free —
-        // they are already here — and they carry the transaction directly. The
-        // log scan below is the fallback for the case the rows cannot cover: a
-        // child whose sqlite was rebuilt has no rows at all.
-        const candidates: { txHash: string }[] = [...(await landedFillsWithoutBasis(agentId))];
-        for (const sym of uncovered) {
-          const tok = watchTokens.find((t) => t.symbol === sym)?.address;
-          if (!tok) continue;
-          // ONCE PER SYMBOL, PER PROCESS. This walks two million blocks in
-          // spans, so it is hundreds of RPC calls — and every tick that found
-          // nothing would pay them again, on the shared endpoint this fleet
-          // already once brought to its knees (81 of 103 reads rate-limited,
-          // twelve agents unable to arm). A deep scan is worth doing; worth
-          // doing every four minutes it is not. Recorded whether it succeeded
-          // or not, because a failure that repeats forever costs the same as a
-          // success that repeats forever.
-          if (deepBasisTried.has(sym)) continue;
-          deepBasisTried.add(sym);
-          const found = await findSoleAcquisition({
-            chain: rc,
-            token: tok as `0x${string}`,
-            account: grant.smartAccount,
-            // A WIDER WINDOW THAN THE CAP SWEEP, on purpose. That one is sized
-            // to 26 hours because it exists to stop a mid-op restart loosening
-            // the day's spend, and an older op is outside the cap anyway. This
-            // has a different horizon: a position is held for as long as it is
-            // held, and its entry price does not age out.
-            lookbackBlocks: 2_000_000n,
-            // Wider spans than the op sweep uses, because this filter is
-            // indexed on `to` and one account's inbound transfers are a handful
-            // of logs however many blocks they span. The adaptive halving still
-            // handles a provider that refuses the range.
-            maxSpan: 50_000n,
-            log: (m) => console.log(`[basis] ${m}`),
-          }).catch(() => null);
-          if (found) candidates.push(found);
-          else console.log(`[basis] no single acquisition found for ${sym} — not retrying this process`);
-        }
-        for (const t of candidates) {
-          if (!uncovered.length) break;
-          const legs = await acquiredLegOf(rc, t.txHash as `0x${string}`, grant.smartAccount, CASH.USDG);
-          if (!legs) continue;
-          const sym = symbolOfToken(legs.token);
-          if (!sym || !uncovered.includes(sym)) continue;
-          await bookFill(
-            agentId,
-            "live",
-            {
-              side: legs.side,
-              symbol: sym,
-              qtyRaw: legs.qtyRaw,
-              cashUsdg: legs.cashUsdg,
-              priceUsd: Number(legs.cashUsdg) / 1e6 / (Number(legs.qtyRaw) / 1e18),
-            },
-            "receipt",
-          );
-          uncovered.splice(uncovered.indexOf(sym), 1);
-          await addEvent(
-            agentId,
-            "ok",
-            `recovered ${sym}'s entry price from its receipt (${fmt(legs.cashUsdg)} USDG) — the stop-loss and ` +
-              `take-profit can act on it again. Its row was written by the chain sweep after a restart, which ` +
-              `used to record what was spent and not what was bought.`,
-          );
+        const recoveryStarted = Date.now();
+        for (const sym of [...uncovered]) {
+          if (Date.now() - recoveryStarted >= 20_000) break;
+          const position = positions.find(p => p.symbol === sym);
+          if (!position) continue;
+          const now = Date.now();
+          if (now - (deepBasisTried.get(sym) ?? -Infinity) < 3_600_000) continue;
+          deepBasisTried.set(sym, now);
+          try {
+            const recovered = await recoverReceiptBasis({
+              chain: rc, token: position.token, account: grant.smartAccount,
+              usdgToken: CASH.USDG, heldRaw: position.rawBalance,
+              lookbackBlocks: 2_000_000n,
+              budgetMs: 20_000 - (Date.now() - recoveryStarted),
+            });
+            if (!recovered) {
+              console.log('[basis] ' + sym + ': incomplete receipt evidence; cost remains unknown, retry in one hour');
+              continue;
+            }
+            // Restore remaining basis, not historical fills/P&L a second time.
+            await setBasis(agentId, "live", sym, recovered.basis);
+            const saved = await getBasis(agentId, "live", sym);
+            if (saved.qtyRaw !== recovered.basis.qtyRaw || saved.costUsdg !== recovered.basis.costUsdg) continue;
+            uncovered.splice(uncovered.indexOf(sym), 1);
+            await addEvent(agentId, "ok", 'Recovered ' + sym + ' cost basis from ' + recovered.transactions.length + ' confirmed receipts matching the entire current holding. Transactions: ' + recovered.transactions.join(', '));
+          } catch {
+            console.log('[basis] ' + sym + ': receipt recovery unavailable; cost remains unknown, retry in one hour');
+          }
         }
       }
 
@@ -9462,6 +9438,8 @@ async function main() {
       // net. A percentage published without saying which is not a performance
       // figure, and a model comparing gross history against net future returns
       // is comparing two different quantities.
+      const riskPeak = await getRiskPeriodPeak(agentId, curveMarked.length === 0 ? usdgNum(equityUsdg) : null);
+      riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
         contributionsKnown: accounting.contributionsKnown,
@@ -9651,9 +9629,11 @@ async function main() {
     // tick so an actual published decision takes precedence over a fallback.
     // Only fresh public quotes are used; failures stay in the owner's events.
     quietReview = async () => {
-      if (isPaused() || Date.now() / 1000 - marketObservedAt > 300) return;
+      if (isPaused()) return;
+      const now = Math.floor(Date.now() / 1000);
       reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
       const clock = reviewClock(agentId);
+      if (!clock.due(now, reviewPreparationMs)) return;
       const focus = chooseFocus({
         agentId,
         positions: positions.filter(p => !p.priceStale).map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
@@ -9661,15 +9641,25 @@ async function main() {
         prices: market.prices,
         paused: market.pausedTokens,
       });
-      if (!focus) return;
-      const quote = { symbol: focus.symbol, priceUsd: Number(focus.price8) / 1e8, stale: focus.priceStale, at: marketObservedAt };
-      const review = clock.prepare(quote, reviewPreparationMs);
-      if (review) {
-        const id = newDecisionId();
-        await addDecision({ id, agent_id: agentId, source: "market-review", provenance: "deterministic-strategy", ...review });
-        // addDecision reports storage failures to logs; don't advance the
-        // clock unless the row actually exists for this agent.
-        if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) clock.recorded(quote);
+      const quote = focus ? { symbol: focus.symbol, priceUsd: Number(focus.price8) / 1e8,
+        stale: focus.priceStale, at: marketObservedAt } : null;
+      const feed = focus ? STOCK_TOKENS.find(t => t.address.toLowerCase() === focus.token.toLowerCase())?.chainlinkFeed ?? null : null;
+      const history = feed && now - marketObservedAt <= 300
+        ? await boundedRead(() => readFeedHistory(feed, mainnetClient()), 10_000) : null;
+      const fresh = Date.now() / 1000 - marketObservedAt <= 300;
+      const review = quote && fresh ? clock.prepare(quote, reviewPreparationMs,
+        history?.read ? history.points.map(p => ({ at: p.at, priceUsd: p.px })) : [], now) : null;
+      const id = newDecisionId();
+      await addDecision({ id, agent_id: agentId,
+        source: review ? "market-review" : "research-unavailable", provenance: "deterministic-strategy",
+        ...(review ?? { action: "hold", symbol: focus?.symbol,
+          reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
+          evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
+      });
+      // Failed persistence leaves this decision due for the next tick.
+      if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
+        if (quote) clock.recorded(quote);
+        clock.noteDecision(now);
       }
       nextMarketReviewAt = clock.nextAt;
     };
@@ -11199,8 +11189,8 @@ async function main() {
       // in one holding is not being throttled by its cap.
       cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
-        highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
-          ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)
+        drawdownPeak() > 0n && lastEquityUsdg > 0n
+          ? Math.max(0, Number(((drawdownPeak() - lastEquityUsdg) * 10_000n) / drawdownPeak()))
           : null,
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       // Pass ZERO through. It used to be mapped to null here AND filtered again
