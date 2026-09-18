@@ -397,7 +397,17 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
-        <FirstVisit tenant={account?.session.hosted ? account.session.address : null} onScreen={openScreen} onQuestion={()=>{setChatDraft("Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
+        <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
+          if (desktop && next.kind === "tab") {
+            // Desktop tabs live in the rail/dock, not the phone's routes.
+            // Navigating home would select Feed again and spotlight Markets
+            // while showing the wrong panel behind it.
+            if (next.tab === "home") setSidebarSection("markets");
+            if (next.tab === "agent") setSidebarSection("agents");
+            if (next.tab === "feed") setSidebarSection("feed");
+            setChatDocked(next.tab === "agent");
+          } else openScreen(next);
+        }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} onRefresh={refreshAccount}/>}
         {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
