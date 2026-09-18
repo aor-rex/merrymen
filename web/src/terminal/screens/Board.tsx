@@ -133,6 +133,7 @@ function Rank({
       <button
         type="button"
         className="rank-hit"
+        disabled={a.profileAvailable === false}
         onClick={() => onProfile(a.slug)}
       >
         <span className="n">{row.ret == null ? "—" : row.rank}</span>

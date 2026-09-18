@@ -108,6 +108,7 @@ export interface LiveAgent {
    * surface that still draws the curve.
    */
   contributionsEvidenced?: boolean;
+  profileAvailable?: boolean;
   mode?: string;
   recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
   activityRead?: boolean;
