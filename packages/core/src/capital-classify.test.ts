@@ -263,6 +263,29 @@ describe("a class vault's legs are the account's own trades", () => {
     assert.equal(v.pairedToken, PEPE);
   });
 
+  it("excludes own-vault refunds during buys from contributed capital", () => {
+    const refund = leg(USDG, VAULT, ME, "9268223");
+    const txLegs = [...buyLegs, refund];
+    const classified = [buyLegs[0]!, refund].map((usdg) => ({
+      amountRaw: usdg.amountRaw,
+      classification: classifyUsdgMovement({ account: ME, usdg, txLegs, usdgToken: USDG, custodyAddresses: [VAULT] }),
+    }));
+    assert.equal(classified[0]!.classification.kind, "trade-out");
+    assert.equal(classified[1]!.classification.kind, "internal");
+    assert.equal(classified[1]!.classification.evidence.rule, "custody-transfer");
+    assert.equal(totalCapital(classified).grossContributionsRaw, "0");
+    assert.equal(totalCapital(classified).grossWithdrawalsRaw, "0");
+  });
+
+  it("treats unpaired cash parking and returns as internal only for this vault", () => {
+    for (const usdg of [leg(USDG, ME, VAULT, "5000000"), leg(USDG, VAULT, ME, "1147072")]) {
+      const input = { account: ME, usdg, txLegs: [usdg], usdgToken: USDG };
+      assert.equal(classifyUsdgMovement({ ...input, custodyAddresses: [VAULT.toUpperCase()] }).kind, "internal");
+      assert.equal(classifyUsdgMovement({ ...input, custodyAddresses: [CURVE] }).kind,
+        usdg.from === ME ? "capital-out" : "capital-in");
+    }
+  });
+
   it("and the WHY says where the token actually went, so it is re-derivable", () => {
     // A classification an auditor cannot re-derive is an assertion, and "into
     // the account" would be false here.
