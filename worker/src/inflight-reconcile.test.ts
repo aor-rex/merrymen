@@ -388,9 +388,9 @@ describe("the same judgement, read from the other end", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(src, /if \(uncovered\.length && active\?\.executor\) \{/);
-    assert.match(src, /if \(!uncovered\.length\) break;/);
-    assert.match(src, /if \(!sym \|\| !uncovered\.includes\(sym\)\) continue;/);
-    assert.match(src, /recovered \$\{sym\}'s entry price from its receipt/);
+    assert.match(src, /for \(const sym of \[\.\.\.uncovered\]\)/);
+    assert.match(src, /saved\.qtyRaw !== recovered\.basis\.qtyRaw/);
+    assert.match(src, /saved\.costUsdg !== recovered\.basis\.costUsdg/);
   });
 });
 
@@ -479,27 +479,14 @@ describe("the last resort for an entry price", () => {
 });
 
 describe("the deep scan is a recovery, not a habit", () => {
-  it("RUNS ONCE PER SYMBOL PER PROCESS, whether or not it found anything", async () => {
-    // Two million blocks in spans is hundreds of RPC calls. Paying them every
-    // four minutes for a position that cannot be recovered is the shape of the
-    // incident this repo already has: 32 children on one public endpoint, 81 of
-    // 103 reads rate-limited, twelve agents unable to arm at all.
+  it("rate-limits retries and restores a verified remaining basis without replaying historical fills", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    assert.match(src, /if \(deepBasisTried\.has\(sym\)\) continue;\s*\n\s*deepBasisTried\.add\(sym\);/);
-    // Added BEFORE the call, so a scan that throws is not retried either.
-    const add = src.indexOf("deepBasisTried.add(sym);");
-    const call = src.indexOf("findSoleAcquisition({");
-    assert.ok(add > 0 && call > add, "the symbol must be marked before the scan, not after");
-  });
-
-  it("and the cheap path is still tried first, every tick", async () => {
-    // The ledger's own rows carry the transaction and cost nothing to read. The
-    // scan is the fallback for the case they cannot cover — a rebuilt child.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    const rows = src.indexOf("landedFillsWithoutBasis(agentId)");
-    const scan = src.indexOf("findSoleAcquisition({");
-    assert.ok(rows > 0 && rows < scan, "rows first, log scan second");
+    const start = src.indexOf("if (uncovered.length && active?.executor)");
+    const block = src.slice(start, src.indexOf("const uncoveredKey", start));
+    assert.match(block, /3_600_000/);
+    assert.ok(block.indexOf("deepBasisTried.set(sym, now)") < block.indexOf("recoverReceiptBasis({"));
+    assert.match(block, /await setBasis/);
+    assert.doesNotMatch(block, /await bookFill/);
   });
 });

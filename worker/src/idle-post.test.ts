@@ -42,7 +42,7 @@ const idleRow = (over: Record<string, unknown> = {}) => ({
 
 const reviewRow = () => idleRow({
   source: "market-review",
-  ...marketReview({ symbol: "NVDA", priceUsd: 100, stale: false, at: 1_788_800_000 })!,
+  ...marketReview({ symbol: "NVDA", priceUsd: 100, stale: false, at: 1_788_800_000 }, null, [{at: 1_788_796_400, priceUsd: 99}, {at: 1_788_798_200, priceUsd: 101}, {at: 1_788_799_900, priceUsd: 100}])!,
 });
 
 describe("a public view needs market reasoning, not an idle notice", () => {
@@ -62,7 +62,7 @@ describe("a public view needs market reasoning, not an idle notice", () => {
     assert.equal(post.symbol, "NVDA");
     assert.equal(post.shadow, false, "a real agent really decided this");
     assert.match(post.reason!, /\$100\.00/);
-    assert.match(post.reason!, /next review/);
+    assert.match(post.reason!, /next hour/);
   });
 
   it("classifies both strategy reasoning and deterministic market reviews", () => {
