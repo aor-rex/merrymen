@@ -619,9 +619,9 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
   }
 
   const agents: LiveAgent[] = (board?.agents ?? [])
-    .filter((a) => a.slug)
-    .map((a) => ({
-      slug: a.slug!,
+    .map((a, index) => ({
+      slug: a.slug ?? `unlinked-${index}`,
+      profileAvailable: !!a.slug,
       name: a.name,
       mode: a.mode,
       filledPaper: a.filledPaper,

@@ -568,7 +568,8 @@ export function App() {
           <Profile
             key={agent.slug}
             agent={agent}
-            theses={live.theses}
+            theses={profile ? profileTheses : live.theses}
+            activityError={profileActivityError}
             tokens={live.tokens}
             onBack={() => goTab(tab)}
             onToken={(id) => openScreen({ kind: "token", id })}
