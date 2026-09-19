@@ -117,7 +117,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, highVolumePools, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { TrenchBrainReview, highVolumePools, trenchBrainPersona, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -682,7 +682,8 @@ async function main() {
     trenchTapePending = true;
     trenchTapeRequestedAt = Date.now();
     void Promise.all([fetchGeckoPools("trending_pools"), fetchGeckoPools("pools")]).then(feeds => {
-      trenchTape = highVolumePools(feeds.flat());
+      // Preserve venue alternatives until custody-specific route selection.
+      trenchTape = highVolumePools(feeds.flat(), true);
       trenchTapeAt = Date.now();
     }).catch(() => {}).finally(() => { trenchTapePending = false; });
   }
@@ -4187,7 +4188,11 @@ async function main() {
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
       // Do not require a historical discovery row: trending records used to
       // carry firstSeen=0, so that age-window query silently excluded them all.
-      for (const p of freshTrenchTape()) {
+      const freshTape = freshTrenchTape();
+      const entryPools = !paperActive() && active && grantTrencher(active.grant)
+        ? highVolumePools(freshTape.filter(p => autoTrench?.qualified.some(q => q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)))
+        : highVolumePools(freshTape);
+      for (const p of entryPools) {
         const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
         const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
         if (autonomous && !autonomousBudget) continue;
@@ -9857,7 +9862,7 @@ async function main() {
         const trenchEligible = fastTrencher ? await trenchCandidates() : [];
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
         const trenchSymbols = new Set(trenchEligible.filter(c => !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).slice(0, 1).map(c => c.symbol));
-        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Add eligible coins and sign their trading permissions; automatic exits remain active.");
+        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
         const focus = chooseFocus({
           agentId,
           positions: positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
@@ -10190,8 +10195,10 @@ async function main() {
               inputs.quality.gasBasis = "net";
               inputs.memory = [...(inputs.memory ?? []), "This is the paper ledger. Capital is its recorded cash-only opening, not the live wallet's deposits. Paper fills include configured slippage."];
             }
-            const tape = freshTrenchTape().find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
-            inputs.persona = "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. Hold if evidence or net edge is insufficient. Existing positions may be sold. Never invent activity or prices.";
+            const freshTape = freshTrenchTape();
+            const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
+            const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+            inputs.persona = trenchBrainPersona(focus.symbol, focus.held);
             if (tape) {
               inputs.market.signals.technical = JSON.stringify({ observedAt: Math.floor(trenchTapeAt / 1000), volume24hUsd: tape.volume24hUsd, volume5mUsd: tape.buckets.m5.volumeUsd, change1hPct: tape.change1hPct, change24hPct: tape.change24hPct });
               inputs.market.signals.social = JSON.stringify({ distinctBuyers24h: tape.buyers24h, buys24h: tape.buys24h, sells24h: tape.sells24h });

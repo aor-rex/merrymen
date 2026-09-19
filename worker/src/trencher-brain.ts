@@ -8,7 +8,7 @@ export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 
 /** Volume ranks opportunities; on-chain depth and wallet policy still gate trades. */
-export function highVolumePools(pools: readonly GeckoPool[]): GeckoPool[] {
+export function highVolumePools(pools: readonly GeckoPool[], perPool = false): GeckoPool[] {
   const byToken = new Map<string, GeckoPool>();
   for (const p of pools) {
     // Quote assets are portfolio cash/bridge assets, never speculative entries.
@@ -18,13 +18,21 @@ export function highVolumePools(pools: readonly GeckoPool[]): GeckoPool[] {
     if (!Number.isFinite(p.volume24hUsd) || (p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN ||
         (p.buyers24h ?? 0) < 20 || (p.buys24h ?? 0) <= 0 || (p.sells24h ?? 0) <= 0 ||
         (p.buckets.m5?.volumeUsd ?? 0) <= 0) continue;
-    const key = p.tokenAddress.toLowerCase();
+    const key = perPool
+      ? `${p.tokenAddress.toLowerCase()}:${p.dex}:${p.poolAddress?.toLowerCase() ?? p.poolId}`
+      : p.tokenAddress.toLowerCase();
     if ((byToken.get(key)?.volume24hUsd ?? -1) < p.volume24hUsd!) byToken.set(key, p);
   }
   return [...byToken.values()].sort((a, b) => b.volume24hUsd! - a.volume24hUsd!);
 }
 
 export type TrenchBrainOrder = { side: "buy" | "sell"; usdgAmount: number; decisionId: string };
+
+export function trenchBrainPersona(symbol: string, held: boolean): string {
+  return "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. Hold if evidence or net edge is insufficient. Never invent activity or prices. " +
+    (held ? `You hold ${symbol}; evaluate holding or selling the existing position.`
+      : `You hold zero ${symbol}. This is an entry review: choose BUY or HOLD. A bearish view means HOLD, not SELL; short selling is not supported.`);
+}
 type Ready = { decision: BrainDecision; input: ShadowInputs; token: string; context: string; started: number };
 
 /** Model calls cannot hold up a stop-loss tick. Results are one-use, short-lived data. */
@@ -54,6 +62,12 @@ export class TrenchBrainReview {
     void run().then(outcome => {
       if (this.context !== context || this.generation !== generation) return;
       if (outcome.ran && outcome.result.ok) {
+        if (outcome.result.decision.action === "sell" &&
+            !input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0)) {
+          this.ready = null;
+          note(`Brain SELL ignored for ${input.market.symbol}: no position is held; no order approved`);
+          return;
+        }
         this.ready = { decision: outcome.result.decision, input, token, context, started };
         note(`Brain reviewed ${input.market.symbol}: ${outcome.result.decision.action}`);
       } else note(outcome.ran ? `Brain unavailable: ${outcome.result.ok ? "" : outcome.result.kind}` : outcome.why);
@@ -74,6 +88,7 @@ export class TrenchBrainReview {
     const price = Number(price8) / 1e8;
     if (!Number.isFinite(before) || before <= 0 || Math.abs(price / before - 1) > .02) return null;
     const verdict = orderFromDecision(r.decision, { maxUsdg });
+    if (verdict.ok && verdict.order.side === "sell" && !held) return null;
     return verdict.ok ? { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id } : null;
   }
 }
