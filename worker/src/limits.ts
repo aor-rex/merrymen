@@ -5,6 +5,7 @@ import {
   STOCK_TOKENS,
   UNISWAP,
   grantHasTransfer,
+  grantTrencher,
   grantHasV4,
   grantV4Adapter,
   grantPonsAdapter,
@@ -55,6 +56,7 @@ export function limitsFromGrant(
       UNISWAP.swapRouter02 as `0x${string}`,
       MORPHO.steakhouseUsdgVault as `0x${string}`,
       CASH.USDG as `0x${string}`,
+      ...(grantTrencher(grant) ? [grantTrencher(grant)!.vault] : []),
       ...(grantHasV4(grant)
         ? [UNISWAP.permit2 as `0x${string}`, UNISWAP.universalRouter as `0x${string}`]
         : []),
@@ -103,6 +105,7 @@ export function limitsFromGrant(
     // this is the set of tokens a curve trade could be buying INTO.
     quoteAssets: [...builtinGrantTargets(grant)],
     knownCurves,
+    ...(grantTrencher(grant) ? {trencherVault:grantTrencher(grant)!.vault,knownTrencherAssets:[]} : {}),
     // THE CLASS FLAG. Same accessor as the target entry above, deliberately —
     // one source, so the address checkPolicy calls a class trade and the address
     // it will permit as a target can never be two different things.

@@ -42,6 +42,9 @@ import { scoutAllows, type ScoutLimits } from "./quarantine";
 const money = (v: bigint) => `${(Number(v) / 1e6).toFixed(2)} USDG`;
 
 export interface AgentLimits {
+  /** Sealed autonomous vault, plus chain-verified candidates/holdings. */
+  trencherVault?: string;
+  knownTrencherAssets?: readonly string[];
   /** USDG (6dp) ceiling for a single trade. */
   perTradeUsdg: bigint;
   /** USDG (6dp) ceiling summed over a rolling 24h window. */
@@ -153,6 +156,7 @@ export type TradeIntent = {
   decisionId?: string;
 } & ({
   kind: "swap";
+  custody?: "trencher";
   target: `0x${string}`;
   sellToken: `0x${string}`;
   buyToken: `0x${string}`;
@@ -460,7 +464,21 @@ export function checkPolicy(
       };
     }
 
-    for (const token of [intent.sellToken, intent.buyToken]) {
+    const autonomous = intent.custody === "trencher";
+    if (autonomous) {
+      const cash = limits.cashToken?.toLowerCase();
+      const selling = lc(intent.buyToken) === cash;
+      const buying = lc(intent.sellToken) === cash;
+      const asset = selling ? intent.sellToken : intent.buyToken;
+      if (!limits.trencherVault || lc(intent.target) !== lc(limits.trencherVault) || selling === buying ||
+          !limits.knownTrencherAssets?.map(lc).includes(lc(asset))) {
+        return {ok:false,rule:"asset-allowlist",detail:"Autonomous trade requires the sealed vault and a chain-verified asset"};
+      }
+      if (buying && (intent.sellAmountRaw > 5_000_000n || intent.notionalUsdg !== intent.sellAmountRaw)) {
+        return {ok:false,rule:"per-trade-cap",detail:"Autonomous entry exceeds its cash bound"};
+      }
+    }
+    for (const token of autonomous ? [] : [intent.sellToken, intent.buyToken]) {
       if (!limits.allowedAssets.map(lc).includes(lc(token))) {
         return { ok: false, rule: "asset-allowlist", detail: `asset ${token} not allowed` };
       }
@@ -479,7 +497,7 @@ export function checkPolicy(
     // the position exists. Refusing the buy is the only moment it's still free.
     //
     // Sells are never blocked by this rule — an exit must always be attemptable.
-    if (limits.sellableAssets) {
+    if (!autonomous && limits.sellableAssets) {
       const sellable = limits.sellableAssets.map(lc);
       if (!sellable.includes(lc(intent.buyToken))) {
         return {

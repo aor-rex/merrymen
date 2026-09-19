@@ -1,4 +1,5 @@
 import { erc20Abi, parseAbi, type Address } from "viem";
+import { trencherPermissions, type TrencherPermission } from "./trencher-vault";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toTimestampPolicy } from "@zerodev/permissions/policies";
@@ -186,7 +187,7 @@ export function allowedSpenders(
  * permissive survives for months because nothing fails. So the default wall
  * trades, and does nothing else.
  */
-export interface WallOptions {
+export interface WallOptions extends TrencherPermission {
   extraTokens?: readonly CustomToken[];
   /**
    * Addresses USDG may be transferred OUT to.
@@ -497,6 +498,7 @@ export function buildCallPermissions(
   ];
 
   return [
+    ...trencherPermissions(opts, smartAccount, usdgUnits(caps.perTradeUsdg)),
     {
       // approve USDG, only to the allowed spenders, only up to one trade's size.
       target: CASH.USDG as Address,
@@ -982,6 +984,8 @@ export function buildWallPolicies(args: {
         // the chain would refuse it.
         ponsClassVaultAddress: args.ponsClassVaultAddress,
         ponsClassVaultFactoryAddress: args.ponsClassVaultFactoryAddress,
+        trencherVaultAddress: args.trencherVaultAddress,
+        trencherFactoryAddress: args.trencherFactoryAddress,
       }) as never,
     }),
   ];

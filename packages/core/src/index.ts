@@ -56,3 +56,4 @@ export * from "./risk-level";
 // WHO ACTUALLY HOLDS THIS COIN — ChainMind's holder, transfer and swap
 // forensics, ported as the pure analysis behind the `onchain` lens.
 export * from "./onchain-forensics";
+export * from "./trencher-vault";

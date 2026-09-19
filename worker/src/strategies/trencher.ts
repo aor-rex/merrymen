@@ -26,6 +26,7 @@ import type { TrenchBrainOrder } from "../trencher-brain";
 
 /** What the tick knows about a token it might enter. All chain-derived. */
 export interface Candidate {
+  custodyVault?: `0x${string}`;
   symbol: string;
   token: `0x${string}`;
   decimals: number;
@@ -43,6 +44,7 @@ export interface Candidate {
 
 /** What we remember about something already held, so exits can be judged. */
 export interface OpenPosition {
+  custodyVault?: `0x${string}`;
   symbol: string;
   token: `0x${string}`;
   entryPrice8: bigint;
@@ -255,17 +257,18 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         );
         const brain = !verdict.exit && quote && !quote.stale ? deps.brainOrder?.(pos.symbol, pos.token, quote.price8, true) : null;
         if (!verdict.exit && brain?.side !== "sell") continue;
-        const available = held?.valueUsdg ?? pos.costUsdg;
+        const raw = pos.custodyVault ? pos.qtyRaw : held?.rawBalance ?? pos.qtyRaw;
+        const available = held && pos.custodyVault && held.rawBalance > 0n ? held.valueUsdg * raw / held.rawBalance : held?.valueUsdg ?? pos.costUsdg;
         const brainNotional = brain ? BigInt(Math.round(brain.usdgAmount * 1e6)) : available;
         const notional = brainNotional < available ? brainNotional : available;
-        const raw = held?.rawBalance ?? pos.qtyRaw;
         const amount = verdict.exit ? raw : available > 0n ? raw * notional / available : 0n;
         if (amount <= 0n) continue;
         deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.exit ? verdict.why : "Brain exit"}`);
         intents.push({
           ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
-          target: deps.swapRouter,
+          target: pos.custodyVault ?? deps.swapRouter,
+          ...(pos.custodyVault ? {custody:"trencher" as const} : {}),
           sellToken: pos.token,
           buyToken: deps.usdgToken,
           // The whole position; partials leave a tail. From the ledger when
@@ -309,7 +312,8 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         intents.push({
           ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
-          target: deps.swapRouter,
+          target: c.custodyVault ?? deps.swapRouter,
+          ...(c.custodyVault ? {custody:"trencher" as const} : {}),
           sellToken: deps.usdgToken,
           buyToken: c.token,
           sellAmountRaw: size,
