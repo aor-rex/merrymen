@@ -3,6 +3,7 @@ import { afterEach, beforeEach, it } from "node:test";
 import React, { act } from "react";
 import { FirstVisit } from "./FirstVisit";
 import { deferred, json, testDom } from "./test-dom";
+import { visibleTourTarget } from "./tour-layout";
 
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
@@ -86,4 +87,48 @@ it("resumes navigation and prepares the example question only once", async () =>
   await ui.render(tour(null, s => screens.push(s), () => { questions++; }));
   assert.deepEqual(screens, [{ kind: "tab", tab: "agent" }]); assert.equal(questions, 1);
   await ui.click("Back"); await ui.click("Next"); assert.equal(questions, 1);
+});
+
+it("tracks late targets and layout shifts without a resize, then clears a removed target", async () => {
+  const frames = new Map<number, FrameRequestCallback>(); let id = 0;
+  globalThis.requestAnimationFrame = callback => { frames.set(++id, callback); return id; };
+  globalThis.cancelAnimationFrame = handle => { frames.delete(handle); };
+  const frame = async () => { await act(async () => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(0); }); };
+  await ui.render(tour()); await ui.click("Next"); await frame();
+  assert.equal(ui.container.querySelector(".tour-spot"), null);
+  const target = document.createElement("button"); target.dataset.tour = "tab-home"; document.body.append(target);
+  let top = 40;
+  target.getBoundingClientRect = () => ({ top, left: 30, width: 80, height: 40, right: 110, bottom: top + 40, x: 30, y: top, toJSON() {} });
+  await frame();
+  assert.equal((ui.container.querySelector(".tour-spot") as HTMLElement).style.top, "34px");
+  top = 180; await frame();
+  assert.equal((ui.container.querySelector(".tour-spot") as HTMLElement).style.top, "174px");
+  target.remove(); await frame();
+  assert.equal(ui.container.querySelector(".tour-spot"), null);
+  await ui.click("Skip tour"); assert.equal(frames.size, 0);
+});
+
+it("ignores offscreen and invisible duplicate targets and clips partially visible ones", () => {
+  const hidden = document.createElement("button"), visible = document.createElement("button");
+  hidden.dataset.tour = visible.dataset.tour = "tab-home"; document.body.append(hidden, visible);
+  const rect = (top: number) => ({ top, left: 10, width: 50, height: 30, right: 60, bottom: top + 30, x: 10, y: top, toJSON() {} });
+  hidden.getBoundingClientRect = () => rect(-100);
+  visible.getBoundingClientRect = () => rect(-10);
+  const viewport = { top: 0, left: 0, width: 390, height: 844 };
+  assert.deepEqual(visibleTourTarget(['[data-tour="tab-home"]'], viewport), { top: 0, left: 10, width: 50, height: 20 });
+  visible.style.visibility = "hidden";
+  assert.equal(visibleTourTarget(['[data-tour="tab-home"]'], viewport), null);
+});
+
+it("contains keyboard focus, closes with Escape and restores previous focus", async () => {
+  const outside = document.createElement("button"); document.body.append(outside); outside.focus();
+  await ui.render(tour());
+  assert.equal(document.activeElement?.getAttribute("role"), "dialog");
+  await act(async () => window.dispatchEvent(new ui.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+  assert.equal(document.activeElement?.textContent, "Skip tour");
+  await act(async () => outside.focus());
+  assert.equal(document.activeElement?.textContent, "Skip tour");
+  await act(async () => window.dispatchEvent(new ui.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  assert.equal(ui.container.querySelector('[role="dialog"]'), null);
+  assert.equal(document.activeElement, outside);
 });

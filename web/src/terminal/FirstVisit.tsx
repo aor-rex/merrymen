@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Compass } from "lucide-react";
 import type { Screen } from "./live";
 import { TOUR_VERSION } from "@/lib/tour-version";
+import { tourCardPosition, visibleTourTarget, type TourRect } from "./tour-layout";
 
 /** Seven stops, available before sign-in. Anonymous dismissal can be claimed
  * by one account; explicit replay is separate from permanent dismissal. */
@@ -47,13 +48,13 @@ const STOPS: Stop[] = [
   {
     title: "Your agent, your boundaries.",
     copy: "A strategy and two limits — per trade, and per day — decide what it may do. Paper mode practises with simulated funds until you say otherwise.",
-    target: ['[data-tour="tab-agent"]', ".sidebar-agent"],
+    target: ['[data-tour="tab-agent"]', '[data-tour="your-agent"]', "#explore-tab-agents"],
     screen: { kind: "tab", tab: "agent" },
   },
   {
     title: "Ask it why.",
     copy: "This is where you ask your agent to explain a decision in its own words. There is a first question waiting in the box — send it whenever you like.",
-    target: ['[data-tour="tab-agent"]', ".sidebar-agent"],
+    target: ['[data-tour="chat-input"]', '[data-tour="tab-agent"]', '[data-tour="your-agent"]', "#explore-tab-agents"],
     screen: { kind: "tab", tab: "agent" },
   },
   {
@@ -103,13 +104,14 @@ function writeLocal(key: string, v: Saved): void {
 }
 
 /** Where the card sits, in viewport coordinates. */
-type Spot = { top: number; left: number; width: number; height: number } | null;
+type Layout = { step: number; spot: TourRect | null; top: number; left: number; width: number; maxHeight: number };
 
 export function FirstVisit({
   tenant = null,
   ...props
 }: {
   tenant?: string | null;
+  layoutKey?: string;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
 }) {
@@ -119,10 +121,12 @@ export function FirstVisit({
 
 function AccountTour({
   tenant,
+  layoutKey,
   onScreen,
   onQuestion,
 }: {
   tenant: string | null;
+  layoutKey?: string;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
 }) {
@@ -130,7 +134,9 @@ function AccountTour({
   const key = tenant ? `${KEY}:${tenant}` : KEY;
   const [saved, setSaved] = useState<Saved>({ done: true, step: 0 });
   const [syncFailed, setSyncFailed] = useState(false);
-  const [spot, setSpot] = useState<Spot>(null);
+  const [layout, setLayout] = useState<Layout | null>(null);
+  const cardRef = useRef<HTMLElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const askedRef = useRef(false);
   const state = useRef(saved);
   const alive = useRef(true);
@@ -243,7 +249,7 @@ function AccountTour({
         askedRef.current = true;
         callbacks.current.onQuestion();
       }
-  }, [ready, done, step]);
+  }, [ready, done, step, layoutKey]);
 
   // ── MEASURE THE THING BEING POINTED AT ────────────────────────────────────
   //
@@ -255,47 +261,57 @@ function AccountTour({
   // with the same contents is built by a re-render.
   const targetKey = target ? target.join("|") : "";
   useEffect(() => {
-    if (!target) {
-      setSpot(null);
-      return;
-    }
+    if (!ready || done) return;
     let raf = 0;
+    let previous = "";
     const measure = () => {
-      for (const sel of target) {
-        const el = document.querySelector(sel);
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        // SIZE, not presence. A hidden nav is still in the DOM and still
-        // matches; a zero-box spotlight would be a bright rectangle stuck in
-        // the corner of the screen.
-        if (r.width > 0 && r.height > 0) {
-          setSpot({ top: r.top, left: r.left, width: r.width, height: r.height });
-          return;
-        }
+      const card = cardRef.current;
+      if (card) {
+        const vv = window.visualViewport;
+        const viewport = { top: vv?.offsetTop ?? 0, left: vv?.offsetLeft ?? 0, width: vv?.width ?? window.innerWidth, height: vv?.height ?? window.innerHeight };
+        const width = Math.min(380, Math.max(0, viewport.width - 24));
+        const maxHeight = Math.max(0, viewport.height - 24);
+        const spot = target ? visibleTourTarget(target, viewport) : null;
+        const position = tourCardPosition(spot, { width, height: Math.min(card.offsetHeight, maxHeight) }, viewport);
+        const next = { step, spot, ...position, width, maxHeight };
+        const signature = JSON.stringify(next);
+        if (signature !== previous) { previous = signature; setLayout(next); }
       }
-      setSpot(null);
+      // Follow late mounts, font/data reflow and CSS animations as well as
+      // scroll/resize. No React update occurs while geometry stays unchanged.
+      raf = requestAnimationFrame(measure);
     };
-    // One frame late on purpose: the stop may have just changed the screen, and
-    // the element it names can mount in that render.
     raf = requestAnimationFrame(measure);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-    };
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetKey, step]);
+  }, [targetKey, step, ready, done]);
 
   // Escape closes it, because a full-screen overlay that traps you is a bug.
   useEffect(() => {
     if (!ready || done) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") finish();
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const root = rootRef.current;
+    const buttons = () => Array.from(root?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+    root?.focus({ preventScroll: true });
+    const keepFocus = (e: FocusEvent) => {
+      if (root && !root.contains(e.target as Node)) buttons()[0]?.focus({ preventScroll: true });
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(); }
+      if (e.key === "Tab") {
+        const controls = buttons();
+        const index = controls.indexOf(document.activeElement as HTMLButtonElement);
+        e.preventDefault();
+        controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length]?.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    document.addEventListener("focusin", keepFocus);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("focusin", keepFocus);
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
   }, [ready, done, finish]);
 
   if (!ready) return null;
@@ -322,16 +338,14 @@ function AccountTour({
   const last = step === STOPS.length - 1;
   // Below the target when there is room, above it otherwise; centred with no
   // target at all. Clamped so the card can never sit off-screen on a phone.
-  const style: React.CSSProperties = spot
-    ? {
-        top: spot.top > 260 ? undefined : spot.top + spot.height + 14,
-        bottom: spot.top > 260 ? `calc(100% - ${spot.top - 14}px)` : undefined,
-        left: Math.max(12, Math.min(spot.left + spot.width / 2 - 190, window.innerWidth - 392)),
-      }
-    : {};
+  const measured = layout?.step === step ? layout : null;
+  const spot = measured?.spot ?? null;
+  const style: React.CSSProperties = measured
+    ? { top: measured.top, left: measured.left, width: measured.width, maxHeight: measured.maxHeight }
+    : { visibility: "hidden" };
 
   return (
-    <div className="tour-root" role="dialog" aria-modal="true" aria-label="A quick look around merrymen">
+    <div ref={rootRef} tabIndex={-1} className="tour-root" role="dialog" aria-modal="true" aria-label="A quick look around merrymen">
       {spot ? (
         <div
           className="tour-spot"
@@ -340,7 +354,7 @@ function AccountTour({
       ) : (
         <div className="tour-scrim" />
       )}
-      <section className={spot ? "tour-card" : "tour-card centred"} style={style}>
+      <section ref={cardRef} className="tour-card" style={style}>
         <header>
           <span className="tour-count">
             {step + 1} / {STOPS.length}

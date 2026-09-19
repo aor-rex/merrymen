@@ -18,8 +18,9 @@
 .terminal-host .tour-root {
   position: fixed;
   inset: 0;
-  z-index: 60; /* above the tab bar (2) and the docked chat */
-  pointer-events: none; /* the card re-enables it; the dimmed page stays inert */
+  z-index: 1000; /* above the chat dock (60) and account menu (100) */
+  pointer-events: auto; /* Block clicks on the dimmed page, including the hole. */
+  touch-action: none;
 }
 
 /*
@@ -34,11 +35,7 @@
   box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.72);
   outline: 2px solid var(--lime);
   outline-offset: 0;
-  transition:
-    top 0.22s var(--ease),
-    left 0.22s var(--ease),
-    width 0.22s var(--ease),
-    height 0.22s var(--ease);
+  pointer-events: none;
 }
 
 /* A stop with nothing to point at dims the whole page instead. */
@@ -56,28 +53,14 @@
   width: 380px;
   max-width: calc(100vw - 24px);
   box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   padding: 18px 20px 16px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: var(--card);
   box-shadow: 0 24px 60px rgb(0 0 0 / 0.55);
-  animation: tour-in 0.18s var(--ease);
-}
-
-.terminal-host .tour-card.centred {
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-}
-
-@keyframes tour-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-}
-.terminal-host .tour-card.centred {
-  animation: none;
 }
 
 .terminal-host .tour-card header {
@@ -238,25 +221,8 @@
 
 /* ── phones ──────────────────────────────────────────────────────────────── */
 
-/*
- * The tab bar is a floating pill at the bottom, so a card placed "below" it
- * would be off-screen. On a narrow viewport the card stops chasing the target
- * and sits above the bar, full width — the spotlight still marks the tab.
- */
+/* Position is measured at every size; mobile styles must not override it. */
 @media (max-width: 650px) {
-  .terminal-host .tour-card {
-    top: auto !important;
-    bottom: 80px !important;
-    left: 12px !important;
-    right: 12px;
-    width: auto;
-    transform: none;
-  }
-  .terminal-host .tour-card.centred {
-    top: auto;
-    left: 12px;
-    transform: none;
-  }
   .terminal-host .tour-card h2 {
     font-size: 17px;
   }

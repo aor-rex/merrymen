@@ -270,7 +270,7 @@ export function DesktopSidebar({
           <h2>Your agents</h2>
           <span>{hasAgent ? "1 agent" : "0 agents"}</span>
         </div>
-        {hasAgent && <button className="sidebar-agent" onClick={() => onTab("agent")}>
+        {hasAgent && <button className="sidebar-agent" data-tour="your-agent" onClick={() => onTab("agent")}>
           <Face name={mine.name} slug={mine.slug} />
           <span>
             <strong>{mine.name}</strong>
