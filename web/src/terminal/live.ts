@@ -83,6 +83,7 @@ export interface LiveAgent {
    */
   ownerVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /**
    * The series a chart may draw — AND WHICH QUANTITY IT IS.
    *
@@ -627,6 +628,7 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
       filledPaper: a.filledPaper,
       handle: a.handle,
       pnlBps: a.pnlBps,
+      paperPnlBps: a.paperPnlBps,
       unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
       // RAW EQUITY from the leaderboard read — never a growth index, and the
@@ -1052,6 +1054,7 @@ interface BoardRow {
   /** Optional so an older server, which does not send it, reads as unproven. */
   handleVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   curve?: number[];
   landed: number;
 }

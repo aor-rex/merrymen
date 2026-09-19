@@ -1,3 +1,4 @@
+import { readPaperReturn } from "./paper-return";
 /**
  * One agent, in public.
  *
@@ -93,6 +94,7 @@ export interface AgentProfile {
   how: HowItTrades | null;
   /** The published return, or null. Exactly one of this and unrankedWhy is set. */
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /** Why there is no return to show. The page says which, rather than assuming. */
   unrankedWhy: UnrankedWhy | null;
   /** Peak-to-trough of the growth index. Null whenever the return is unranked. */
@@ -509,6 +511,7 @@ export const readAgent = cache(async function readAgent(
       beatAt: row.beat_at ? Number(row.beat_at) : null,
       how,
       pnlBps,
+      paperPnlBps: paper ? await readPaperReturn(db, account, epoch) : null,
       unrankedWhy,
       // REFUSED ON THE SAME CONDITION AS THE RETURN. An agent that has never
       // filled has produced no drawdown either, and the figure it showed came

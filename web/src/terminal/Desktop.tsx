@@ -305,19 +305,19 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span aria-label={`Return ${pctBps(a.pnlBps)}, ${tradeLine(a)}`}>
+                <span aria-label={`Return ${pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}, ${tradeLine(a)}`}>
                   <strong
                     className={
-                      a.pnlBps == null
+                      (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null
                         ? ""
-                        : a.pnlBps < 0
+                        : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! < 0
                           ? "down"
-                          : a.pnlBps > 0
+                          : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps(a.pnlBps)}
+                    {pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}
                   </strong>
                 </span>
               </button>

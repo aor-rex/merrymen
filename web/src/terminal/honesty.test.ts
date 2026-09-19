@@ -385,7 +385,7 @@ describe("must-have before a public UI", () => {
     const landed = src.indexOf("Completed operations");
     const paper = src.indexOf("filledPaper");
     assert.ok(landed > 0 && paper > 0, "both counters must be rendered");
-    assert.match(src, /simulated, not real money/, "and the paper one says what it is");
+    assert.match(src, /paper trades/, "and the paper one says what it is");
   });
 
   it("INVARIANT: the price axis cannot render a real price as $0.00", () => {

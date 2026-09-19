@@ -1,3 +1,4 @@
+import { readPaperReturn } from "./paper-return";
 /**
  * WHO IS ACTUALLY ANY GOOD.
  *
@@ -52,6 +53,7 @@ export interface LeaderRow {
   handleVerified: boolean;
   /** Return over capital contributed, in basis points. Null = unknown. */
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
   maxDdBps: number | null;
   mode: string;
@@ -214,6 +216,7 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
           handle: (r.x_handle ?? "").trim() || null,
           handleVerified: Number(r.x_verified ?? 0) !== 0,
           pnlBps,
+          paperPnlBps: r.mode === "paper" ? await readPaperReturn(db, account, epoch) : null,
           maxDdBps: pnlBps == null ? null : maxDdBps,
           mode: r.mode,
           filledPaper,

@@ -289,7 +289,7 @@ export function App() {
       setProfileError("");
       setProfileTheses(p.theses ?? []);
       setProfileActivityError(p.thesesRead === false ? "Recent decisions could not be loaded." : "");
-      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     void refresh();
     const timer = setInterval(refresh, 30_000);
