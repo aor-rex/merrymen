@@ -38,6 +38,7 @@ import { existsSync } from "node:fs";
 import type { Db } from "./db";
 import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
+import { mirrorPaperCheckpoints } from "./paper-checkpoint";
 
 /** Rows per table per pass. Bounded so one busy tenant cannot starve the rest. */
 export const MIRROR_BATCH = 500;
@@ -744,6 +745,7 @@ export async function mirrorTenant(args: {
       const periods = hasPeriods ? await child.prepare("SELECT * FROM risk_periods").all() as RiskPeriod[] : [];
       for (const period of periods) await mergeRiskPeriod(shared, period);
       copied.agents = agents.length;
+      copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
 
       const positions = (await child
         .prepare(

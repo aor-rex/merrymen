@@ -47,6 +47,14 @@ it("never assigns a purchase price to a transferred-in holding", async () => {
   for (const [tx, logs] of f.receipts) f.receipts.set(tx, logs.slice(0,1));
   assert.equal(await recoverReceiptBasis(f.opts), null);
 });
+
+it("recovers closed-position sale P&L only after proving the closing inventory", async () => {
+  const {opts}=fixture([{qty:10n,cash:100n},{qty:10n,cash:80n,sell:true}],0n);
+  assert.equal(await recoverReceiptBasis(opts),null);
+  const result=await recoverReceiptBasis({...opts,allowClosed:true});
+  assert.equal(result?.realized[0]?.pnl,-20n);
+  assert.equal(await recoverReceiptBasis({...opts,heldRaw:1n,allowClosed:true}),null);
+});
 it("deduplicates transfers within a transaction and refuses unknown ordering", async () => {
   const f = fixture([{ qty: 10n, cash: 100n }], 10n);
   f.logs.push({ ...f.logs[0]! });

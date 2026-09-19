@@ -19,7 +19,7 @@ export interface ProfileTrade {
 export async function readProfileTrades(db: Db, account: string, epoch: number, publicBook: boolean) {
   try {
     const rows = await db.prepare(`
-      SELECT t.id, t.fill_side, d.action, d.symbol, t.buy_token, t.sell_token, t.created_at, t.status,
+      SELECT t.id, t.fill_side, d.action, COALESCE(t.fill_symbol,d.symbol) AS symbol, t.buy_token, t.sell_token, t.created_at, t.status,
              CASE WHEN ? = 1 THEN t.amount_usdg ELSE NULL END AS size_usdg,
              t.realized_pnl_usdg, t.fill_cash_usdg, t.basis_source
       FROM trades t

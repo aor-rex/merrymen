@@ -1,3 +1,4 @@
+import { TOUR_VERSION } from "./tour-version";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -146,21 +147,21 @@ describe("who has already been shown around", () => {
     const { mkdir } = await import("node:fs/promises");
     await mkdir(path.join(dir, "tour"), { recursive: true });
     const junk = "0xEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEe" as const;
-    await writeFile(path.join(dir, "tour", `${junk.toLowerCase()}.json`), "{ not json");
+    await writeFile(path.join(dir, "tour", `${junk.toLowerCase()}${TOUR_VERSION === 2 ? "" : `.v${TOUR_VERSION}`}.json`), "{ not json");
     assert.equal(await new FileTourStore().done(junk), false);
   });
 
   it("and neither is a record whose shape is wrong", async () => {
     const { writeFile } = await import("node:fs/promises");
     const odd = "0xFfFfFfFfFfFfFfFfFfFfFfFfFfFfFfFfFfFfFfFf" as const;
-    await writeFile(path.join(dir, "tour", `${odd.toLowerCase()}.json`), JSON.stringify({ doneAt: "yesterday" }));
+    await writeFile(path.join(dir, "tour", `${odd.toLowerCase()}${TOUR_VERSION === 2 ? "" : `.v${TOUR_VERSION}`}.json`), JSON.stringify({ doneAt: "yesterday" }));
     assert.equal(await new FileTourStore().done(odd), false);
   });
 });
 
 async function readDoneAt(tenant: string): Promise<number> {
   const { readFile } = await import("node:fs/promises");
-  const raw = JSON.parse(await readFile(path.join(dir, "tour", `${tenant.toLowerCase()}.json`), "utf8")) as {
+  const raw = JSON.parse(await readFile(path.join(dir, "tour", `${tenant.toLowerCase()}${TOUR_VERSION === 2 ? "" : `.v${TOUR_VERSION}`}.json`), "utf8")) as {
     doneAt: number;
   };
   return raw.doneAt;

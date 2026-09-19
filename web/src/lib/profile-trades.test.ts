@@ -20,7 +20,7 @@ test("profile history reads fills beyond the social window, keeps repeats, and r
       (5,'d','a',1,'transfer','sell','landed',5,50),
       (6,'d','other',1,'swap','buy','landed',6,50),
       (7,'d','a',2,'swap','buy','landed',7,50);`);
-    await db.exec("ALTER TABLE trades ADD COLUMN buy_token TEXT; ALTER TABLE trades ADD COLUMN sell_token TEXT;");
+    await db.exec("ALTER TABLE trades ADD COLUMN fill_symbol TEXT; ALTER TABLE trades ADD COLUMN buy_token TEXT; ALTER TABLE trades ADD COLUMN sell_token TEXT;");
     await db.exec("ALTER TABLE trades ADD COLUMN realized_pnl_usdg REAL; ALTER TABLE trades ADD COLUMN fill_cash_usdg REAL; ALTER TABLE trades ADD COLUMN basis_source TEXT;");
     const privateBook = await readProfileTrades(db, "a", 1, false);
     assert.equal(privateBook.read, true);
@@ -55,6 +55,7 @@ test("paper and live sales publish evidenced P&L without exposing private amount
         (4,NULL,'a',1,'swap','sell','paper',4,10,NULL,NULL,NULL,10,'paper'),
         (5,NULL,'a',1,'swap','sell','landed',5,10,NULL,NULL,2,12,'quote'),
         (6,NULL,'a',1,'swap','buy','paper',6,10,NULL,NULL,2,12,'paper');`);
+    await db.exec("ALTER TABLE trades ADD COLUMN fill_symbol TEXT");
     const privateRows = (await readProfileTrades(db, 'a', 1, false)).trades;
     assert.deepEqual(privateRows.map(t => t.realizedPnlBps), [null, null, null, 0, -2000, 2000]);
     assert.ok(privateRows.every(t => t.realizedPnlUsdg === null && t.sizeUsdg === null));
