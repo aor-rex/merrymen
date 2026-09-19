@@ -220,6 +220,24 @@
 }
 
 /* ── phones ──────────────────────────────────────────────────────────────── */
+.terminal-host .tour-topics {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+.terminal-host .tour-topics button {
+  text-align: left;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.terminal-host .tour-topics button[aria-current="step"],
+.terminal-host .tour-topics button:hover {
+  background: var(--card);
+  color: var(--tx);
+}
 
 /* Position is measured at every size; mobile styles must not override it. */
 @media (max-width: 650px) {
