@@ -436,6 +436,9 @@ export interface StoredGrant {
    * pinned. See grantPonsClassVaultFactory.
    */
   ponsClassVaultFactoryAddress?: string;
+  /** Explicit autonomous pool-token custody permission, sealed at signing. */
+  trencherVaultAddress?: string;
+  trencherFactoryAddress?: string;
   /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *

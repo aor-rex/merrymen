@@ -274,4 +274,16 @@ describe("the unpriceable exit, once it can actually be reached", () => {
     assert.equal(intents.length, 1);
     assert.equal((intents[0] as { sellAmountRaw: bigint }).sellAmountRaw, 3n * 10n ** 18n);
   });
+  it("exits only the vault quantity when the same asset also sits in the account", async () => {
+    const custodyVault="0x00000000000000000000000000000000000000f1" as const;
+    const holdings=new Map([["CATE",{symbol:"CATE",token:HELD,rawBalance:10n*10n**18n,valueUsdg:10_000_000n,decimals:18}]]);
+    const prices=new Map([["CATE",{price8:1n,stale:false,source:"pool" as const}]]);
+    const d=deps({open:async()=>[position({symbol:"CATE",token:HELD,custodyVault,qtyRaw:3n*10n**18n})],unpriceable:()=>new Set<string>()});
+    const [intent]=await run(makeTrencher(d as never),snap({holdings:holdings as never,prices:prices as never}));
+    assert.ok(intent?.kind==="swap");
+    assert.equal(intent.custody,"trencher");
+    assert.equal(intent.target,custodyVault);
+    assert.equal(intent.sellAmountRaw,3n*10n**18n);
+    assert.equal(intent.notionalUsdg,3_000_000n);
+  });
 });

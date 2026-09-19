@@ -1,15 +1,19 @@
 "use client";
 
 import Link from "next/link";
+import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { isWallTooWide } from "@merrymen/core";
 import { useCallback, useEffect, useState } from "react";
-import { createPublicClient, formatEther, http } from "viem";
+import { createPublicClient, erc20Abi, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
   grantHasV4,
+  grantTrencher,
+  TRENCHER_VAULT_ABI,
+  CASH,
   grantPonsAdapter,
   grantPonsClassVault,
   isValidCustomToken,
@@ -415,6 +419,8 @@ export default function GrantPage() {
   const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
   /** The class-vault FACTORY. Each account’s own vault is derived from it at sign time. */
   const [classFactory, setClassFactory] = useState<`0x${string}` | undefined>(undefined);
+  const [autonomousTrencher, setAutonomousTrencher] = useState(false);
+  useEffect(() => { setAutonomousTrencher(!!grantTrencher(grant)); }, [grant]);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -815,6 +821,19 @@ export default function GrantPage() {
     setError(null);
     setRenewing(true);
     try {
+      const priorTrencher = grantTrencher(grant);
+      if (priorTrencher && (!autonomousTrencher || chainId !== grant.chainId || (TRENCHER_FACTORY && TRENCHER_FACTORY.toLowerCase() !== priorTrencher.factory))) {
+        const client = createPublicClient({chain: grant.chainId === MAINNET ? robinhoodChain : robinhoodTestnet, transport: http()});
+        const code = await client.getCode({address:priorTrencher.vault});
+        if (code && code !== "0x") {
+          const [held,cash] = await Promise.all([
+            client.readContract({address:priorTrencher.vault,abi:TRENCHER_VAULT_ABI,functionName:"tokens"}),
+            client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[priorTrencher.vault]}),
+          ]);
+          if (held.length || cash > 0n) throw new Error("Close or recover your Trencher vault positions and cash before removing or changing this permission. Your current key has not been replaced.");
+        }
+      }
+      if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error("The verified Trencher deployment is unavailable; your existing permission has not been replaced.");
       // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
       // button an owner presses right after saving a new token or the adapter
       // address in /settings — and the mount-time fetch predates that save, so
@@ -864,6 +883,7 @@ export default function GrantPage() {
         v4AdapterAddress: freshAdapter,
         ponsAdapterAddress: await verifiedAdapter(freshPons, chainId, setStatus),
         ponsClassVaultFactory: freshClassFactory,
+        trencherFactory: autonomousTrencher && TRENCHER_FACTORY && /^0x[0-9a-fA-F]{40}$/.test(TRENCHER_FACTORY) ? TRENCHER_FACTORY as `0x${string}` : undefined,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
         /**
          * THE ACCOUNT WE ARE RE-SIGNING, stated so the signer can refuse.
@@ -1919,6 +1939,18 @@ export default function GrantPage() {
               {resignBy ? (
                 <>
                   <div className="grant-fields" style={{ marginTop: 12 }}>
+                    <label className="field">
+                      <span className="field-label">Autonomous Trencher permission</span>
+                      <span>
+                        <input type="checkbox" checked={autonomousTrencher} disabled={!TRENCHER_FACTORY}
+                          onChange={e=>setAutonomousTrencher(e.target.checked)} />
+                        Allow my agent to discover and trade new pool tokens without adding each contract.
+                      </span>
+                      <small>
+                        Tokens stay in your trading vault and sale proceeds return to your account. The vault limits buys to $5 each and $25 per 24-hour window; your lower signed limits still apply. A discovered token can lose all its value or become unsellable. This permission does not turn live trading on.
+                        {!TRENCHER_FACTORY && " The new vault deployment is not configured yet; this permission is unavailable."}
+                      </small>
+                    </label>
                     <label className="field">
                       <span className="field-label">most it can spend on one trade</span>
                       <span className="field-input">

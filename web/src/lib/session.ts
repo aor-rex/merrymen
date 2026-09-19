@@ -1,5 +1,8 @@
 "use client";
 
+import { resolveTrencherPermission } from "./trencher-permission";
+import { GRANT_TRENCHER } from "@merrymen/core";
+
 /**
  * The permission wall — creating an agent account and granting it a scoped key.
  *
@@ -288,6 +291,7 @@ async function prepareGrantCore(
    * inserting an optional address in the middle of this list cost last time.
    */
   ponsClassVaultFactory?: `0x${string}`,
+  trencherFactory?: `0x${string}`,
 ): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -538,7 +542,9 @@ async function prepareGrantCore(
     onStatus(`class vault v${probe.version} at ${ponsClassVaultAddress.slice(0, 10)}…`);
   }
 
+  const trenchScope = trencherFactory ? await resolveTrencherPermission(publicClient, trencherFactory, sudoOnlyAccount.address) : {};
   const wallOpts = {
+    ...trenchScope,
     extraTokens: sealedTokens,
     allowUniswapV4,
     v4AdapterAddress,
@@ -683,7 +689,9 @@ async function prepareGrantCore(
     // GRANT_V4_ADAPTER is minted ONLY when the permission was — marker and
     // wall move together, the same lockstep rule as GRANT_V4 above. The sealed
     // address rides with it because the marker alone is a claim, not evidence.
+    ...trenchScope,
     grantFeatures: [
+      ...(trencherFactory ? [GRANT_TRENCHER] : []),
       TRADEABLE_V2,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
@@ -742,10 +750,11 @@ async function mintGrant(
   hostedAs?: Address,
   expectAccount?: Address,
   ponsClassVaultFactory?: `0x${string}`,
+  trencherFactory?: `0x${string}`,
 ): Promise<MintedGrant> {
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
-    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory,
+    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
   );
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
@@ -1120,6 +1129,7 @@ export interface MintOptions {
    * on mintGrant.
    */
   ponsClassVaultFactory?: `0x${string}`;
+  trencherFactory?: `0x${string}`;
 }
 
 /**
@@ -1145,6 +1155,7 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     undefined,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 
@@ -1162,6 +1173,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 
@@ -1199,6 +1211,7 @@ export async function createPrivyOwnedWallet(
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 
@@ -1233,6 +1246,7 @@ export async function restoreAgentWallet(
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 

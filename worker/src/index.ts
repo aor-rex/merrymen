@@ -22,6 +22,9 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
+import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
+import { discoverTrencherUniverse } from "./trencher-discovery";
+import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
@@ -648,6 +651,22 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
+  let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
+  let autoTrenchContext = "";
+  let autoTrenchPending = false;
+  let autoTrenchNext = 0;
+  let autoTrenchBalances = new Map<string,bigint>();
+  function refreshAutoTrench() {
+    if (!active || !grantTrencher(active.grant)) return;
+    const context = `${active.agentId}:${active.grant.grantedAt}`;
+    if (context !== autoTrenchContext) { autoTrenchContext=context; autoTrench=null; autoTrenchNext=0; }
+    if (autoTrenchPending || Date.now()<autoTrenchNext) return;
+    autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
+    const current=active;
+    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape()).then(result=>{
+      if (autoTrenchContext===context) autoTrench=result;
+    }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
+  }
   let trenchTape: GeckoPool[] = [];
   let trenchTapeAt = 0;
   let trenchTapeRequestedAt = 0;
@@ -4155,14 +4174,27 @@ async function main() {
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
     if (cfg.trencherFastEnabled) {
+      let autonomousBudget = true;
+      if (!paperActive() && autoTrench?.custody.deployed && active) {
+        try {
+          const [spent,start] = await Promise.all([
+            active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"spent"}),
+            active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"windowStart"}),
+          ]);
+          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+5_000_000n <= 25_000_000n;
+        } catch { autonomousBudget = false; }
+      }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
       // Do not require a historical discovery row: trending records used to
       // carry firstSeen=0, so that age-window query silently excluded them all.
       for (const p of freshTrenchTape()) {
         const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
-        if (!t || !allowed.has(t.address.toLowerCase()) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
+        if (autonomous && !autonomousBudget) continue;
+        if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
         const quote = lastPrices.get(t.symbol);
         out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
+          ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),
           priceable: !!quote && !quote.stale && quote.price8 > 0n && quote.source === "pool",
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
@@ -4210,8 +4242,17 @@ async function main() {
     const out: OpenPosition[] = [];
     for (const t of watchTokens) {
       const basis = await getBasis(active.agentId, mode, t.symbol);
+      const custodyQty = autoTrenchBalances.get(t.address.toLowerCase());
+      let entry = await getTrenchEntry(active.agentId, mode, t.symbol);
+      if (custodyQty && autoTrench && mode === "live") {
+        const [cost,at] = await Promise.all([
+          active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[t.address]}),
+          active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"entryAt",args:[t.address]}),
+        ]);
+        basis.qtyRaw=custodyQty; basis.costUsdg=cost;
+        if (!entry && at>0n) entry={entrySec:Number(at),liquidityUsd:0};
+      }
       if (basis.qtyRaw <= 0n || basis.costUsdg <= 0n) continue;
-      const entry = await getTrenchEntry(active.agentId, mode, t.symbol);
       if (!entry) continue; // not a trench entry — another strategy's position
       // Fill in a baseline that was stamped unknown, now that depth is
       // readable. Only ever upgrades a zero, and never moves a real one: the
@@ -4235,6 +4276,7 @@ async function main() {
         entrySec: entry.entrySec,
         costUsdg: basis.costUsdg,
         qtyRaw: basis.qtyRaw,
+        ...(mode === "live" && autoTrenchBalances.get(t.address.toLowerCase()) ? {custodyVault:autoTrench!.custody.vault,qtyRaw:autoTrenchBalances.get(t.address.toLowerCase())!} : {}),
       });
     }
     return out;
@@ -5227,6 +5269,7 @@ async function main() {
             ...(grantPonsClassVaultFactory(grant)
               ? { ponsClassVaultFactoryAddress: grantPonsClassVaultFactory(grant)! }
               : {}),
+            ...(grantTrencher(grant) ? {trencherVaultAddress:grantTrencher(grant)!.vault,trencherFactoryAddress:grantTrencher(grant)!.factory} : {}),
           }) as never,
         );
         const env = firstEnableEnvelope(shape);
@@ -6863,7 +6906,7 @@ async function main() {
       let fillIsFromClassEvent = false;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
-      if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
+      if (intent.kind === "swap" && (cfg.swapVenue === "uniswap" || intent.custody === "trencher") && intent.sellToken !== intent.buyToken) {
         // Full leg: QuoterV2 simulation (reverts where the swap would) →
         // slippage-bounded minOut → approve + exactInputSingle in one UserOp.
         const quote = await bestRoute(active.client, {
@@ -6879,11 +6922,11 @@ async function main() {
           // on-chain, burning gas every tick. Same gate as v4 for the same
           // reason — quoting a route this key cannot reach is worse than never
           // having considered it.
-          via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
+          via: intent.custody === "trencher" || grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          v4: intent.custody !== "trencher" && (grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null)),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
@@ -7005,7 +7048,7 @@ async function main() {
                 symbol,
                 qtyRaw,
                 cashUsdg,
-                priceUsd: Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 1e18),
+                priceUsd: Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 10 ** (watchTokens.find(t=>t.address.toLowerCase()===stockToken.toLowerCase())?.decimals ?? 18)),
               };
             }
           } else {
@@ -7017,7 +7060,14 @@ async function main() {
         // approves Permit2, which grants the router a bounded expiring
         // allowance. Building these by hand at the call site is how you approve
         // one router and swap through another.
-        const calls = buildTradeCalls({
+        const custody = intent.custody === "trencher" ? await verifyTrencherCustody(active.client,active.grant) : null;
+        const trenchDeadline = BigInt(Math.floor(Date.now()/1000)+60);
+        const calls = custody ? buildTrencherCalls({
+          grant:active.grant,deployed:custody.deployed,quote,
+          token:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?intent.buyToken:intent.sellToken,
+          side:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?"buy":"sell",
+          amountIn:intent.sellAmountRaw,minOut,deadline:trenchDeadline,
+        }) : buildTradeCalls({
           // The grant-sealed adapter, only when its code answered at arm time.
           // Absent, a v4 quote falls to the legacy Permit2 route — which only a
           // pre-adapter GRANT_V4 grant can execute, and the quote gate above
@@ -7046,7 +7096,12 @@ async function main() {
         // scope note in final-fence.ts. Reimplemented from Vex's final-request
         // guard with its author's permission.
         if (!quote.v4) {
-          const fence = checkV3SwapCalls(calls, {
+          const fence = custody ? checkTrencherCalls(calls, {
+            grant:active.grant,deployed:custody.deployed,
+            token:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?intent.buyToken:intent.sellToken,
+            side:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?"buy":"sell",
+            amountIn:intent.sellAmountRaw,minOut,deadline:trenchDeadline,
+          }) : checkV3SwapCalls(calls, {
             router: UNISWAP.swapRouter02 as `0x${string}`,
             tokenIn: intent.sellToken,
             tokenOut: intent.buyToken,
@@ -7935,7 +7990,7 @@ async function main() {
           ? {
               token: intent.buyToken,
               label: fillPair?.symbol ?? short(intent.buyToken),
-              holder: executor.address,
+              holder: intent.custody === "trencher" ? grantTrencher(active.grant)!.vault : executor.address,
             }
           : intent.kind === "curve-trade" &&
               intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
@@ -7982,6 +8037,7 @@ async function main() {
           usdgToken: CASH.USDG as string,
           stockToken: fillPair.stockToken,
           symbol: fillPair.symbol,
+          decimals: watchTokens.find(t=>t.address.toLowerCase()===fillPair!.stockToken.toLowerCase())?.decimals ?? 18,
         });
         if (measured) {
           // THE VAULT'S OWN EVENT WINS. Quality measurement below still runs;
@@ -8606,6 +8662,19 @@ async function main() {
     await refreshConfig();
     const armed = await syncGrant();
 
+    if (active && grantTrencher(active.grant)) {
+      refreshTrenchTape(); refreshAutoTrench();
+      if (!autoTrench) {
+        trenchNotice(active.agentId,"Reading autonomous Trencher holdings and verifying discovered pools before valuing the portfolio.");
+        return;
+      }
+      const base = watchTokensFor(cfg.basketSymbols,cfg.customTokens,officialCoins());
+      const addresses = new Set(base.map(t=>t.address.toLowerCase()));
+      const symbols = new Set(base.map(t=>t.symbol));
+      watchTokens=[...base,...autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol))];
+      active.limits.knownTrencherAssets=autoTrench.tokens.map(t=>t.address);
+    } else { autoTrench=null; autoTrenchBalances.clear(); }
+
     const market = await readMarketSafety();
     const marketObservedAt = Math.floor(Date.now() / 1000);
     // Beat again WITH the height once the chain has answered, so the file still
@@ -8710,6 +8779,7 @@ async function main() {
     lastPrices = market.prices;
 
     const paper = paperActive();
+    if (paper) autoTrenchBalances.clear();
     let balances: { ethWei: bigint; cashUsdg: bigint; vaultUsdg: bigint };
     let positions: Position[];
     // Symbols the account HOLDS but couldn't be valued this tick (feed/multiplier
@@ -8863,6 +8933,32 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
+      if (autoTrench && grantTrencher(grant)) {
+        const vault = autoTrench.custody.vault;
+        const custodyRead = await readPositions(client,vault,watchTokens,market.prices);
+        const raw = await client.multicall({contracts:watchTokens.map(t=>({address:t.address,abi:erc20Abi,functionName:"balanceOf" as const,args:[vault]}))});
+        autoTrenchBalances = new Map();
+        for (let i=0;i<raw.length;i++) {
+          const row=raw[i]!;
+          if (row.status!=="success") { posRead.readFailed=true; continue; }
+          if (row.result>0n) autoTrenchBalances.set(watchTokens[i]!.address.toLowerCase(),row.result);
+        }
+        for (const p of custodyRead.positions) {
+          const existing=positions.find(v=>v.token.toLowerCase()===p.token.toLowerCase());
+          if (existing) { existing.rawBalance+=p.rawBalance; existing.valueUsdg+=p.valueUsdg; }
+          else {
+            positions.push(p);
+            const saved = await getBasis(agentId,"live",p.symbol);
+            if (saved.qtyRaw === 0n && saved.costUsdg === 0n) {
+              const cost = await client.readContract({address:vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[p.token]});
+              if (cost > 0n) await setBasis(agentId,"live",p.symbol,{qtyRaw:p.rawBalance,costUsdg:cost});
+            }
+          }
+        }
+        missingPrice.push(...custodyRead.missingPrice);
+        unpricedByDesign.push(...custodyRead.unpricedByDesign);
+        posRead.readFailed ||= custodyRead.readFailed;
+      }
       // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
       // is a position that has been fully sold or swept — its basis is genuinely
       // stranded and should close, which is the one case the guard must not
@@ -8944,6 +9040,9 @@ async function main() {
        * on a bookkeeping artefact to be correct.
        */
       classCashUsdg = classRead.balances.get(CASH.USDG.toLowerCase()) ?? 0n;
+      if (autoTrench && grantTrencher(grant)) {
+        classCashUsdg += await client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[autoTrench.custody.vault]});
+      }
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
       // for the same reason `lastCurveLegs` is: a token that stopped answering

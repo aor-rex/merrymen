@@ -117,6 +117,7 @@ export function fillFromDeltas(opts: {
   usdgToken: string;
   stockToken: string;
   symbol: string;
+  decimals?: number;
 }): ReceiptFill | null {
   const usdgDelta = opts.deltas.get(opts.usdgToken.toLowerCase()) ?? 0n;
   const stockDelta = opts.deltas.get(opts.stockToken.toLowerCase()) ?? 0n;
@@ -140,7 +141,9 @@ export function fillFromDeltas(opts: {
   }
 
   // Stock tokens are 18dp, USDG is 6dp — the same convention bookFill uses.
-  const priceUsd = Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 1e18);
+  const decimals = opts.decimals ?? 18;
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) return null;
+  const priceUsd = Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 10 ** decimals);
   return { side, symbol: opts.symbol, qtyRaw, cashUsdg, priceUsd };
 }
 

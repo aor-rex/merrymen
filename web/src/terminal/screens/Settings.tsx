@@ -586,7 +586,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
               New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
             <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
-              Your custom coins are included in the basket; existing positions remain sellable.</p>
+              With Autonomous Trencher permission, it finds verified pool tokens itself; no custom-token list is required. Existing positions remain monitored for exits.</p>
             <button type="button" className="mm-btn" onClick={() => {
               setAssetMode("crypto");
               setOfficialCoins(true);
@@ -602,9 +602,9 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               <span className="mm-hint">Applies when the strategy is Trencher. Off restores its standard exit profile.</span>
             </label>
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
-              No coins are configured yet. Add a discovered pool token under Custom tokens &amp; discovery. Trencher uses swap pools; ungraduated bonding curves use a separate route. Discovery alone does not authorize a purchase.
+              You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
             </p>}
-            <p>Save changes below, then <Link href="/grant">update trading permission</Link> for any newly added coins.
+            <p>Save changes below, then <Link href="/grant">update trading permission</Link> and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
               Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
           </div>
           <div className="mm-grid">
@@ -1093,7 +1093,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             </Field>
           </div>
           <div className="mm-hint">
-            Discovery sends alerts. To trade a discovered token, add it above and update your <Link href="/grant">trading permissions</Link>.
+            Discovery sends alerts. Autonomous Trencher can evaluate verified pool tokens without adding them here once you sign its <Link href="/grant">trading permission</Link>. The individual-token route still requires adding and authorizing each token.
           </div>
 
           {/* ── SCOUT MODE ─────────────────────────────────────────────────
