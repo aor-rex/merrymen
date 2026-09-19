@@ -31,6 +31,7 @@ export function Nav() {
           <Link href="/#telegram" data-text="Telegram"><span>Telegram</span></Link>
           <Link href="/token" data-text="Token"><span>Token</span></Link>
           <Link href="/docs" data-text="Docs"><span>Docs</span></Link>
+          <Link href="/api" data-text="API"><span>API</span></Link>
         </nav>
         <div className="nav-right">
           <a href={X_URL} target="_blank" rel="noreferrer" className="nav-ghost nav-social" aria-label="merrymen on X">

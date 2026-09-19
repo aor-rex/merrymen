@@ -151,7 +151,7 @@ describe("what the nav rewrite could have broken quietly", () => {
     // The prompt hard-codes the menu, and its own comment records the tester
     // who "spent minutes looking" for a screen that was never there. A rewrite
     // that skips this line sends people to a bar that changed underneath them.
-    const prompt = at("../app/api/chat/route.ts");
+    const prompt = at("../lib/agent-chat.ts");
     const line = prompt.slice(prompt.indexOf("NAME SCREENS THE WAY THE MENU DOES"));
     const named = line.slice(0, line.indexOf("\n"));
     for (const label of TABS.map((t) => t.label)) {

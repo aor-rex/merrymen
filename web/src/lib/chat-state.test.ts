@@ -115,7 +115,7 @@ describe("the surfaces that feed it", () => {
 
   it("the prompt tells the model the tape is partial and timestamped", async () => {
     const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const src = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(src, /THE TAPE IS RECENT AND PARTIAL/);
     assert.match(src, /fitChatState\(body\.state\)/, "the blind slice must be gone");
     assert.ok(!src.includes("body.state.slice(0, 6000)"), "no prefix clamp may return");
@@ -156,7 +156,7 @@ describe("the agent is told what it holds", () => {
     const src = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
     assert.match(src, /stopLossBps:num\("strategistStopLossBps"\)/);
     assert.match(src, /takeProfitBps:num\("takeProfitBps"\)/);
-    const prompt = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const prompt = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(prompt, /WHEN YOU WOULD GET OUT/);
     assert.match(prompt, /NULL means that rule is not armed at all/);
   });

@@ -230,7 +230,7 @@ describe("the chat is told what the screen already knows", () => {
   it("and the prompt names every rule the screen advises on", () => {
     // If a new RefuseRule gains screen advice but the prompt does not learn it,
     // the agent falls back to a guess about the one thing it could have known.
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     for (const rule of ADVISED_RULES) {
       // The prompt lives inside a template literal, so its backticks are
       // escaped in the source. Match the rule name and its bullet, not the
@@ -247,7 +247,7 @@ describe("the chat is told what the screen already knows", () => {
     // Null means trading for real OR never beaten. The prompt has to carry that
     // ambiguity, because reading it as health is how an idle agent gets told it
     // is working.
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(chat, /A NULL \\?`liveBlocker\\?` IS TWO ANSWERS/);
   });
 });
@@ -266,7 +266,7 @@ describe("the chat is not instructed to deny the switch it now has", () => {
    * the retired sentence inside the prompt would risk the model repeating it,
    * which is precisely the failure being fixed.
    */
-  const PROMPT = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8")
+  const PROMPT = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .split(/\r?\n/)
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
