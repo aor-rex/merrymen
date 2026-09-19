@@ -107,8 +107,8 @@ test("Brain can sell early without waiting for a mechanical threshold", async ()
   const orders = takeTick(await strategy.tick(snap)).intents;
   assert.equal(orders.length, 1);
   assert.equal(orders[0]!.decisionId, "decision-1");
-  assert.equal(orders[0]!.notionalUsdg, 2_000_000n);
   assert.ok(orders[0]!.kind === "swap");
+  assert.equal(orders[0]!.notionalUsdg, 2_000_000n);
   assert.equal(orders[0]!.sellAmountRaw, 200n*10n**18n);
   assert.equal(takeTick(await strategy.tick(snap)).intents.length, 0, "cannot repeat the same sell approval");
 });

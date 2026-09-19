@@ -4162,7 +4162,7 @@ async function main() {
         const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
         if (!t || !allowed.has(t.address.toLowerCase()) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
         const quote = lastPrices.get(t.symbol);
-        out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals,
+        out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
           priceable: !!quote && !quote.stale && quote.price8 > 0n && quote.source === "pool",
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
