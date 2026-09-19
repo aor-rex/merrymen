@@ -9756,11 +9756,12 @@ async function main() {
           STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
 
         const trenchEligible = fastTrencher ? await trenchCandidates() : [];
-        const trenchSymbols = new Set(trenchEligible.filter(c => shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).slice(0, 1).map(c => c.symbol));
+        const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
+        const trenchSymbols = new Set(trenchEligible.filter(c => !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).slice(0, 1).map(c => c.symbol));
         if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Add eligible coins and sign their trading permissions; automatic exits remain active.");
         const focus = chooseFocus({
           agentId,
-          positions: positions.filter(p => !fastTrencher || watchTokens.some(t => t.kind === "memecoin" && t.address.toLowerCase() === p.token.toLowerCase())).map((p) => ({
+          positions: positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
             symbol: p.symbol,
             token: p.token,
             valueUsdg: Number(p.valueUsdg),
