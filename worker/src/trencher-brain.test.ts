@@ -9,6 +9,7 @@ import { takeTick, type Snapshot } from "./strategies/types";
 import { applyPaperIntent } from "./paper";
 import { applyFill, ZERO_BASIS } from "./basis";
 import { checkPolicy, type AgentLimits } from "./policy";
+import { CASH } from "../../packages/core/src/index";
 
 const TOKEN = "0x0000000000000000000000000000000000000011" as const;
 const USDG = "0x0000000000000000000000000000000000000022" as const;
@@ -27,6 +28,15 @@ test("volume screening rejects missing, thin, inactive and one-sided tape; ranks
   assert.equal(highVolumePools([pool({ volume24hUsd: null }), pool({ volume24hUsd: 99_999 }), pool({ buyers24h: 19 }), pool({ sells24h: 0 }), pool({ buckets: emptyGeckoBuckets() })]).length, 0);
   const ranked = highVolumePools([pool(), pool({ volume24hUsd: 300_000 }), pool({ tokenAddress: ROUTER, volume24hUsd: 400_000 })]);
   assert.deepEqual(ranked.map(p => p.volume24hUsd), [400_000, 300_000]);
+});
+
+test("cash and wrapped native assets cannot enter the memecoin universe even with qualifying volume", () => {
+  const ranked = highVolumePools([
+    pool({ tokenAddress: CASH.USDG, volume24hUsd: 900_000 }),
+    pool({ tokenAddress: CASH.WETH.toLowerCase() as `0x${string}`, volume24hUsd: 800_000 }),
+    pool(),
+  ]);
+  assert.deepEqual(ranked.map(p => p.tokenAddress), [TOKEN]);
 });
 
 test("Brain runs in background, cannot overlap, and approval is one-use", async () => {
