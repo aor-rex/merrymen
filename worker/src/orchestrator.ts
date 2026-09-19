@@ -974,7 +974,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       await applyLedgerSchema(local);
       const shared = await makePgDb(process.env.DATABASE_URL);
       log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
-      await recordPaperRecoveryHealth(shared, smartAccount, false);
+      try { await recordPaperRecoveryHealth(shared, smartAccount, false); }
+      catch { log(`paper restore: ${tenant} — restored, but recovery status could not be published`); }
     } catch (e) {
       log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
       try {
