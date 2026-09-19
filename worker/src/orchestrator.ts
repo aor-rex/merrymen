@@ -37,6 +37,22 @@
  * budget counters — noted at store.ts's fail-closed write and at the arm site.
  */
 import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
+import { DatabaseSync } from "node:sqlite";
+import { wrapSqlite } from "./db";
+import { restorePaperCheckpoint } from "./paper-checkpoint";
+import { repairHistoricalFills } from "./history-fill-repair";
+
+let historyRepairStarted = false;
+function startHistoryRepair(): void {
+  if (historyRepairStarted || !process.env.DATABASE_URL) return;
+  historyRepairStarted = true;
+  void (async () => {
+    const db = await makePgDb(process.env.DATABASE_URL!);
+    await applyLedgerSchema(db);
+    const result = await repairHistoricalFills(db, process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com");
+    log(`historical fills: ${result.repaired} receipt-backed rows recovered; ${result.pnlRecovered} sale P&Ls recovered; ${result.unavailable} unavailable or ambiguous`);
+  })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
+}
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -815,16 +831,16 @@ async function writeSettingsForChild(
 async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return; // self-hosted: the child's own sqlite is the only copy
-  const handle = openChildLedger(childHome(tenant));
-  if (!handle) return;
+  const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
+  const handle = {db:wrapSqlite(raw),close:()=>raw.close()};
   try {
     const { planBasisSeed, basisSeedLine } = await import("./basis-seed");
     const shared = await makePgDb(url);
     const have = (await handle.db
-      .prepare("SELECT COUNT(*) AS n FROM cost_basis")
+      .prepare("SELECT COUNT(*) AS n FROM cost_basis WHERE mode = 'live'")
       .get()) as { n: number } | undefined;
     const rows = (await shared
-      .prepare("SELECT mode, symbol, qty_raw, cost_usdg FROM cost_basis WHERE lower(agent_id) = lower($1)")
+      .prepare("SELECT mode, symbol, qty_raw, cost_usdg FROM cost_basis WHERE lower(agent_id) = lower($1) AND mode = 'live'")
       .all(smartAccount)) as unknown as Record<string, unknown>[];
     // WHAT THE BOOK STILL SAYS IS HELD. The shared cost_basis copy goes stale
     // in one way — the mirror skips its DELETE while the child reads rebuilt —
@@ -951,6 +967,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // closed, so the agent would run with contributions marked unknown for no
   // reason other than a race.
   await writeBootstrapForChild(tenant, smartAccount);
+  if (process.env.DATABASE_URL) {
+    const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
+    try {
+      const local = wrapSqlite(raw);
+      await applyLedgerSchema(local);
+      const shared = await makePgDb(process.env.DATABASE_URL);
+      log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
+    } catch (e) {
+      log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+      // A practice book we cannot restore must not silently restart its cash.
+      if (settings?.paperTradingEnabled === true) return;
+    } finally { raw.close(); }
+  }
   // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
   // out of the child's sqlite. Same placement and same reason as the anchor.
   await seedBasisForChild(tenant, smartAccount);
@@ -4321,6 +4350,7 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
       // costs a vendor request; most passes it costs a file write.

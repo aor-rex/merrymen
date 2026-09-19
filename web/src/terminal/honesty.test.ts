@@ -382,10 +382,10 @@ describe("must-have before a public UI", () => {
     // simulated fills. read-agent.ts keeps the counters apart on purpose —
     // folding them would re-arm the +2643.3% incident — so both must show.
     const src = at("./screens/Profile.tsx");
-    const landed = src.indexOf("Completed trades");
+    const landed = src.indexOf("Completed operations");
     const paper = src.indexOf("filledPaper");
     assert.ok(landed > 0 && paper > 0, "both counters must be rendered");
-    assert.match(src, /simulated, not real money/, "and the paper one says what it is");
+    assert.match(src, /paper trades/, "and the paper one says what it is");
   });
 
   it("INVARIANT: the price axis cannot render a real price as $0.00", () => {

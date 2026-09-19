@@ -348,6 +348,7 @@ const SQLITE_ALTERS: string[] = [
     "ALTER TABLE trades ADD COLUMN decision_id TEXT",
     // Fill economics — what actually moved, so P&L is computable per round-trip.
     "ALTER TABLE trades ADD COLUMN fill_side TEXT",
+    "ALTER TABLE trades ADD COLUMN fill_symbol TEXT",
     "ALTER TABLE trades ADD COLUMN fill_qty_raw TEXT",
     "ALTER TABLE trades ADD COLUMN fill_price_usd REAL",
     "ALTER TABLE trades ADD COLUMN realized_pnl_usdg REAL",

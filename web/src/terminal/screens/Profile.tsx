@@ -26,6 +26,7 @@ export function Profile({
   onBack,
   onToken,
   isMine = false,
+  activityError = "",
 }: {
   agent: LiveAgent;
   theses: Thesis[];
@@ -48,8 +49,10 @@ export function Profile({
    * that is the rule.
    */
   isMine?: boolean;
+  activityError?: string;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const [showTrades, setShowTrades] = useState(false);
   /**
    * MOST AGENTS HAVE NO BANNER, and that is not a failure to report.
    *
@@ -65,6 +68,7 @@ export function Profile({
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const g = agent.glance;
+  const displayPnl = agent.mode === "paper" ? agent.paperPnlBps ?? null : agent.pnlBps;
   const positions =
     g.legs?.map((l) => ({
       symbol: l.symbol,
@@ -123,11 +127,11 @@ export function Profile({
       <section className="public-performance" aria-label="Agent performance">
         <div className="public-performance-numbers">
           <div>
-            <span className="account-label">Reported return</span>
+            <span className="account-label">{agent.mode === "paper" ? "Paper return" : "Net return on contributed capital"}</span>
             <strong
-              className={`public-return ${agent.pnlBps == null ? "" : agent.pnlBps < 0 ? "down" : "up"}`}
+              className={`public-return ${displayPnl == null ? "" : displayPnl < 0 ? "down" : "up"}`}
             >
-              {pctBps(agent.pnlBps)}
+              {pctBps(displayPnl)}
             </strong>
           </div>
           {/* BOTH COUNTERS, because `landed` alone is not "how much this agent
@@ -138,16 +142,17 @@ export function Profile({
               face. */}
           <div className="public-trade-count">
             <strong>{agent.landed}</strong>
-            <span>Completed trades</span>
+            <span>Completed operations</span>
             {!!agent.filledPaper && (
               <small className="public-paper-count">
-                {agent.filledPaper} more filled on paper — simulated, not real money
+                {agent.filledPaper} paper trades
               </small>
             )}
           </div>
         </div>
-        {agent.pnlBps == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
-        {agent.pnlBps != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
+        {displayPnl == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
+        {agent.mode === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of this paper period.</p>}
+        {agent.mode !== "paper" && displayPnl != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
         {/* THE GATE, BEFORE THE DRAW.
             Two things have to be true before a line goes under the words
             "Performance history": it must be the growth index (deposits divided
@@ -157,7 +162,7 @@ export function Profile({
             replaced it without carrying the refusal, so a failed profile fetch
             fell back to the leaderboard's raw `equity_usdg` and drew a book
             springing into existence at full value. */}
-        {agent.curveKind !== "growth" ? (
+        {agent.mode === "paper" ? null : agent.curveKind !== "growth" ? (
           <p className="public-empty">
             Performance history isn’t available yet.
           </p>
@@ -171,9 +176,10 @@ export function Profile({
         ) : agent.curve.length > 1 ? (
           <div
             className="public-chart"
-            aria-label={`Performance history. Reported return ${pctBps(agent.pnlBps)}.`}
+            aria-label={`Performance history. Reported return ${pctBps(displayPnl)}.`}
           >
             <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
+            <p className="public-empty">Chart: time-weighted return over the displayed history, adjusted for deposits and withdrawals. Its period and calculation differ from the net return above.</p>
           </div>
         ) : (
           <p className="public-empty">
@@ -187,6 +193,30 @@ export function Profile({
           <span>{g.known === false ? "Not published" : strategyName(g.id)}</span>
         </div>
         <p>{agent.thesis || "This agent hasn’t shared its approach yet."}</p>
+      </section>
+      <section className="public-section" aria-label="Trade history">
+        <div className="public-section-heading"><h2>Buys & sells</h2><span>Latest fills</span></div>
+        {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : agent.recentTrades.length === 0 ? <Empty compact title="No completed buys or sells recorded in this trading period."/> : <>
+          <div className="public-activity">
+            {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
+              <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
+              <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
+                {trade.symbol == null && <small style={{ display: "block" }}>Token label unavailable in this historical record.</small>}
+                <small>{new Date(trade.at * 1000).toLocaleString()} · {trade.paper ? "Paper trade" : "Completed"}</small>
+                <p className={trade.realizedPnlBps != null ? trade.realizedPnlBps < 0 ? "down" : "up" : "public-empty"}>
+                  Realized P&L: {trade.action === "buy" ? "Not realized on a buy" : trade.realizedPnlBps != null || trade.realizedPnlUsdg != null ? <>
+                    {trade.realizedPnlBps != null && pctBps(trade.realizedPnlBps)}
+                    {trade.realizedPnlUsdg != null && <>{trade.realizedPnlBps != null ? " · " : ""}{trade.realizedPnlUsdg >= 0 ? "+" : "−"}{money(Math.abs(trade.realizedPnlUsdg))}</>}
+                  </> : "Unavailable — recorded cost basis or fill data missing"}
+                </p>
+              </div>
+            </article>)}
+          </div>
+          {agent.recentTrades.length > 6 && <button type="button" className="public-more" aria-expanded={showTrades} onClick={() => setShowTrades(value => !value)}>{showTrades ? "Show fewer trades" : `Show latest ${agent.recentTrades.length} trades`}</button>}
+          {agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
+          <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>
+          <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas. Buys realize no profit until sold; open-position returns appear under Positions when shared.</p>
+        </>}
       </section>
       <section className="public-section">
         <div className="public-section-heading">
@@ -246,11 +276,12 @@ export function Profile({
       </section>
       <section className="public-section">
         <div className="public-section-heading">
-          <h2>Recent activity</h2>
+          <h2>Recent decisions</h2>
           <span>{posts.length} updates</span>
         </div>
-        {posts.length === 0 && (
-          <Empty compact title="New trades and decisions will appear here."/>
+        {activityError && <p role="status" className="public-empty">{activityError}</p>}
+        {!activityError && posts.length === 0 && (
+          <Empty compact title="No published decisions in the last 30 days."/>
         )}
         <div className="public-activity">
           {posts.slice(0, showAll ? undefined : 4).map((post, i) => {
@@ -292,7 +323,7 @@ export function Profile({
                   <p>{post.reason ?? post.head}</p>
                   <small>
                     {ageOf(post) ? `${ageOf(post)} ago` : "Time unavailable"}
-                    {post.outcome ? ` · ${post.outcome}` : ""}
+                    {post.outcomeText ? ` · ${post.outcomeText}` : post.outcome ? ` · ${post.outcome}` : ""}
                     {post.paper ? " · Paper" : ""}
                   </small>
                 </div>

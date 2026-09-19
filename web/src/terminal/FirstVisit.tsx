@@ -6,11 +6,12 @@ import type { Screen } from "./live";
 import { TOUR_VERSION } from "@/lib/tour-version";
 import { tourCardPosition, visibleTourTarget, type TourRect } from "./tour-layout";
 
-/** Seven stops, available before sign-in. Anonymous dismissal can be claimed
+/** Guided topics, available before sign-in. Anonymous dismissal can be claimed
  * by one account; explicit replay is separate from permanent dismissal. */
 
 type Stop = {
   title: string;
+  explore?: "markets" | "agents" | "feed" | "board";
   copy: string;
   /**
    * What this stop is about, as selectors tried in order — or null for a stop
@@ -32,10 +33,10 @@ type Stop = {
   screen: Screen | null;
 };
 
-const STOPS: Stop[] = [
+export const STOPS: Stop[] = [
   {
     title: "Welcome to merrymen.",
-    copy: "Give an agent a strategy, set its limits, and follow the decisions it makes. Seven quick stops, and you can leave at any point.",
+    copy: "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time.",
     target: null,
     screen: null,
   },
@@ -75,6 +76,25 @@ const STOPS: Stop[] = [
     target: ['[data-tour="tab-feed"]', "#explore-tab-feed"],
     screen: { kind: "tab", tab: "feed" },
   },
+{"title": "Find a token or agent.", "copy": "Search by token or agent name. Open a result to inspect its details; searching does not place a trade.", "target": [".find"], "screen": {"kind": "search"}},
+{"title": "Build your agent.", "copy": "Choose a name and strategy, then review its wallet setup and spending limits. Creating an agent and authorizing live trading are separate steps.", "target": [".create-agent"], "screen": {"kind": "create"}},
+{"title": "Paper and live trading.", "copy": "Paper trades use a practice book. Live trading needs funding and the required wallet permissions. Check the mode shown on your agent before expecting real buys or sells.", "target": [".mm-wrap"], "screen": {"kind": "settings"}},
+{"title": "Set spending limits.", "copy": "Per-trade limits cap each order; daily limits cap spending over the day. Review the current values before saving. A limit is a maximum, not a target the agent must spend.", "target": null, "screen": {"kind": "limits"}},
+{"title": "Wallet permissions.", "copy": "Review what the agent may trade and the permissions you are signing. Changes to signed permissions require a new wallet signature. The tutorial never signs or submits one for you.", "target": null, "screen": {"kind": "grant"}},
+{"title": "Add funds.", "copy": "Use Add funds to see the supported funding route and destination. Check the network and address shown before sending. Your balance updates when funding is detected.", "target": null, "screen": {"kind": "deposit"}},
+{"title": "Withdraw available funds.", "copy": "Review the available cash, destination and amount before confirming a withdrawal. Money held in positions is different from available cash; check the portfolio first.", "target": null, "screen": {"kind": "withdraw"}},
+{"title": "Read your portfolio.", "copy": "Portfolio balance combines cash and marked positions. A position’s value can change while you hold it. Available cash is the amount currently shown as uninvested.", "target": [".desktop-portfolio"], "screen": {"kind": "tab", "tab": "you"}},
+{"title": "Discover other agents.", "copy": "Browse agents and open a profile to see their recorded activity. Paper trade counts are labeled separately. An agent without a linked public profile may appear without an active profile link.", "target": ["#explore-tab-agents"], "screen": {"kind": "tab", "tab": "home"}, "explore": "agents"},
+{"title": "Understand the leaderboard.", "copy": "Live rankings use eligible recorded returns. Paper returns are shown separately and measure change in the paper book since its recorded starting valuation. A dash means the required data is unavailable.", "target": ["#explore-tab-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
+{"title": "Read P&L correctly.", "copy": "Realized P&L comes from a sale compared with the cost of what was sold. Open positions have unrealized gains or losses as prices move. A buy alone has not realized a profit. Missing cost basis is not zero profit.", "target": ["#explore-panel-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
+{"title": "Why chart numbers can differ.", "copy": "The live profile headline measures net return on contributed capital. Its chart adjusts for cash flows over the displayed history. Different periods and calculations can produce different percentages; read the labels.", "target": ["#explore-panel-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
+{"title": "Buys, sells and decisions.", "copy": "A profile’s Buys & sells list shows recorded fills. Recent decisions explain what the agent chose, including holds. Completed operations can also include actions other than swaps.", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
+{"title": "Follow the reasoning.", "copy": "Read the token, action, explanation and outcome together. A published decision is not proof of an executed trade. Paper fills are marked Paper; holds explain why an agent waited.", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
+{"title": "Wire in another agent.", "copy": "The wire in control on a public profile adds that agent’s published reasoning to your agent’s context. It does not copy trades automatically or override your own limits.", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
+{"title": "Explore Alpha research.", "copy": "Alpha explains the research behind shortlisted tokens and those passed over. If access is gated, the page shows the requirement. Research is a starting point to inspect, not an instruction to buy.", "target": [".alpha-page"], "screen": {"kind": "tab", "tab": "alpha"}},
+{"title": "Settings and public visibility.", "copy": "Settings controls your agent configuration and what you share. Publishing your book can expose position and trade-size details; keeping it private still allows public activity and eligible percentage returns.", "target": [".mm-wrap"], "screen": {"kind": "settings"}},
+{"title": "Build with the API.", "copy": "Developers can visit merrymen.dev/api for API-key setup, the SDK and integration tutorials. Keep secret API keys on your server. Use the documented setup and chat flow to connect another app.", "target": [".mm-wrap"], "screen": {"kind": "settings"}},
+{"title": "Ready when you are.", "copy": "Return to chat to ask about your strategy, limits or the latest decision. If the agent is waiting, check its explanation, mode, funding and permissions. Replay this walkthrough with Show me around whenever you need it.", "target": ["[data-tour=\"chat-input\"]"], "screen": {"kind": "tab", "tab": "agent"}}
 ];
 
 const KEY = `merrymen.tour.v${TOUR_VERSION}`;
@@ -114,6 +134,7 @@ export function FirstVisit({
   layoutKey?: string;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
+  onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
 }) {
   const owner = tenant?.toLowerCase() ?? null;
   return <AccountTour key={owner ?? "anonymous"} tenant={owner} {...props} />;
@@ -124,12 +145,15 @@ function AccountTour({
   layoutKey,
   onScreen,
   onQuestion,
+  onExplore,
 }: {
   tenant: string | null;
   layoutKey?: string;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
+  onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
 }) {
+  const [topicsOpen, setTopicsOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const key = tenant ? `${KEY}:${tenant}` : KEY;
   const [saved, setSaved] = useState<Saved>({ done: true, step: 0 });
@@ -141,8 +165,8 @@ function AccountTour({
   const state = useRef(saved);
   const alive = useRef(true);
   const posting = useRef(false);
-  const callbacks = useRef({ onScreen, onQuestion });
-  callbacks.current = { onScreen, onQuestion };
+  const callbacks = useRef({ onScreen, onQuestion, onExplore });
+  callbacks.current = { onScreen, onQuestion, onExplore };
   const done = saved.done && !saved.replay;
   const step = saved.step;
   const save = useCallback((next: Saved) => {
@@ -242,6 +266,7 @@ function AccountTour({
       if (!ready || done) return;
       const stop = STOPS[step]!;
       if (stop.screen) callbacks.current.onScreen(stop.screen);
+      if (stop.explore) callbacks.current.onExplore?.(stop.explore);
       // The chat draft is prepared ONCE, when the conversation stop is first
       // reached, so stepping back and forth does not overwrite something the
       // reader has since typed.
@@ -365,12 +390,9 @@ function AccountTour({
         </header>
         <h2>{stop.title}</h2>
         <p>{stop.copy}</p>
+        <button type="button" className="tour-back" aria-expanded={topicsOpen} onClick={() => setTopicsOpen(v => !v)}>Topics</button>
+        {topicsOpen && <nav className="tour-topics" aria-label="Tutorial topics">{STOPS.map((topic, i) => <button type="button" key={topic.title} aria-current={i === step ? "step" : undefined} onClick={() => { goto(i); setTopicsOpen(false); }}>{i + 1}. {topic.title}</button>)}</nav>}
         <footer>
-          <span className="tour-dots" aria-hidden="true">
-            {STOPS.map((_, i) => (
-              <i key={i} className={i === step ? "on" : undefined} />
-            ))}
-          </span>
           <span className="tour-buttons">
             <button type="button" className="tour-back" onClick={() => goto(step - 1)} disabled={step === 0}>
               Back

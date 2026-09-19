@@ -1,3 +1,4 @@
+import { readPaperReturn } from "./paper-return";
 /**
  * WHO IS ACTUALLY ANY GOOD.
  *
@@ -13,11 +14,8 @@
  * needs percentages; a balance sheet is nobody else's business. The same split
  * the daily public report already makes.
  *
- * LIVE AGENTS ONLY. The feed includes paper agents, on purpose — a reasoning is
- * true or false regardless of whose money is behind it, and excluding them once
- * emptied the feed entirely because paperTradingEnabled defaults true. A
- * RANKING is the opposite case: mixing pretend capital into a table of returns
- * is a lie, and the lie favours whoever is pretending.
+ * All ledger agents are listed. Only live agents with evidenced returns are
+ * ranked; paper and idle agents stay visible and explicitly unranked.
  *
  * NULL IS NOT ZERO. An agent with no deposit on record has an UNKNOWN return,
  * not a flat one, and publishing "equity minus nothing" as performance is the
@@ -55,8 +53,11 @@ export interface LeaderRow {
   handleVerified: boolean;
   /** Return over capital contributed, in basis points. Null = unknown. */
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
   maxDdBps: number | null;
+  mode: string;
+  filledPaper: number;
   landed: number;
   refused: number;
   /** Equity points, oldest first, for the sparkline. Normalised, never dollars. */
@@ -72,13 +73,13 @@ export interface LeaderboardRead {
 const CURVE_POINTS = 40;
 
 
-export async function readLeaderboard(): Promise<LeaderboardRead> {
-  return withReadDb(async (db): Promise<LeaderboardRead> => {
+export async function readLeaderboard(readDb = withReadDb, identities = () => getIdentityStore().all()): Promise<LeaderboardRead> {
+  return readDb(async (db): Promise<LeaderboardRead> => {
     if (!db) return { source: "none", agents: [] };
 
     const slugFor = new Map<string, string>();
     try {
-      for (const id of await getIdentityStore().all()) {
+      for (const id of await identities()) {
         for (const a of id.accounts) slugFor.set(a.toLowerCase(), id.slug);
       }
     } catch {
@@ -91,16 +92,16 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
       x_handle: string | null;
       x_verified: number | null;
       epoch: number;
+      mode: string;
     }[] = [];
     try {
       rows = (await db
         .prepare(
           `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
-                  COALESCE(epoch, 1) AS epoch
+                  COALESCE(epoch, 1) AS epoch, COALESCE(mode, 'idle') AS mode
              FROM agents
-            WHERE mode = 'live' AND smart_account NOT LIKE 'rh:%'
-            ORDER BY created_at DESC
-            LIMIT 200`,
+            WHERE smart_account NOT LIKE 'rh:%'
+            ORDER BY created_at DESC`,
         )
         .all()) as typeof rows;
     } catch {
@@ -109,6 +110,9 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
       return { source: "sqlite", agents: [] };
     }
 
+    // One row per public identity after a re-grant; the newest account wins.
+    const seen = new Set<string>();
+    rows = rows.filter(r => { const key = slugFor.get(r.smart_account.toLowerCase()) ?? r.smart_account.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
     const agents = await Promise.all(
       rows.map(async (r): Promise<LeaderRow> => {
         const account = r.smart_account;
@@ -159,19 +163,22 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
         }
 
         let gasUsdg = 0;
+        let filledPaper = 0;
         let landed = 0;
         let refused = 0;
         try {
           const t = (await db
             .prepare(
               `SELECT COALESCE(SUM(CASE WHEN status = 'landed' THEN gas_usdg ELSE 0 END), 0) AS gas,
+                      SUM(CASE WHEN status = 'paper' THEN 1 ELSE 0 END) AS paper_filled,
                       SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
                       SUM(CASE WHEN status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS refused
                  FROM trades WHERE agent_id = ? AND epoch = ?`,
             )
-            .get(account, epoch)) as { gas: number; landed: number | null; refused: number | null } | undefined;
+            .get(account, epoch)) as { paper_filled: number; gas: number; landed: number | null; refused: number | null } | undefined;
           gasUsdg = Number(t?.gas ?? 0);
           landed = Number(t?.landed ?? 0);
+          filledPaper = Number(t?.paper_filled ?? 0);
           refused = Number(t?.refused ?? 0);
         } catch {
           /* older ledger */
@@ -198,7 +205,7 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
         } catch {
           /* the column arrives with a worker migration; unknown until it does */
         }
-        const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
+        const { pnlBps, unrankedWhy } = r.mode === "live" ? rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown }) : { pnlBps: null, unrankedWhy: r.mode === "paper" ? "paper" as const : "inactive" as const };
 
         const maxDdBps = drawdownBps(curve);
 
@@ -209,10 +216,13 @@ export async function readLeaderboard(): Promise<LeaderboardRead> {
           handle: (r.x_handle ?? "").trim() || null,
           handleVerified: Number(r.x_verified ?? 0) !== 0,
           pnlBps,
-          maxDdBps,
+          paperPnlBps: r.mode === "paper" ? await readPaperReturn(db, account, epoch) : null,
+          maxDdBps: pnlBps == null ? null : maxDdBps,
+          mode: r.mode,
+          filledPaper,
           landed,
           refused,
-          curve,
+          curve: pnlBps == null ? [] : curve,
         };
       }),
     );

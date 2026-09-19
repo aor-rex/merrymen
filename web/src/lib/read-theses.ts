@@ -87,10 +87,10 @@ export interface ReadThesesOptions {
   limit?: number;
 }
 
-export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRead> {
+export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all()): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
-  return withReadDb(async (db): Promise<ThesesRead> => {
+  return readDb(async (db): Promise<ThesesRead> => {
     if (!db) return { source: "none", theses: [] };
 
     // The slug map, read once. NOT a SQL join: the identity store is not the
@@ -101,7 +101,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
     const slugFor = new Map<string, string>();
     const accountsFor = new Map<string, string[]>();
     try {
-      for (const id of await getIdentityStore().all()) {
+      for (const id of await identities()) {
         accountsFor.set(id.slug, id.accounts.map((a) => a.toLowerCase()));
         for (const acct of id.accounts) slugFor.set(acct.toLowerCase(), id.slug);
       }
@@ -113,7 +113,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
     const only = opts.agentSlug ? (accountsFor.get(opts.agentSlug) ?? []) : null;
     if (only !== null && only.length === 0) return { source: "sqlite", theses: [] };
 
-    const since = Math.floor(Date.now() / 1000) - WINDOW_SEC;
+    const since = Math.floor(Date.now() / 1000) - (opts.agentSlug ? 30 * WINDOW_SEC : WINDOW_SEC);
     const where: string[] = [
       "a.mode IN ('live', 'paper')",
       "d.agent_id NOT LIKE 'rh:%'",
@@ -124,7 +124,7 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
     ];
     const args: unknown[] = [since, ...SOURCES];
     if (only) {
-      where.push(`d.agent_id IN (${only.map(() => "?").join(", ")})`);
+      where.push(`LOWER(d.agent_id) IN (${only.map(() => "?").join(", ")})`);
       args.push(...only);
     }
     if (opts.symbol) {
@@ -171,10 +171,9 @@ export async function readTheses(opts: ReadThesesOptions = {}): Promise<ThesesRe
             LIMIT ?`,
         )
         .all(...args)) as ThesisRow[];
-    } catch {
-      // A ledger written by an older worker has no `decisions` or no `x_handle`.
-      // An empty page is the honest render of that, never a 500.
-      return { source: "sqlite", theses: [] };
+    } catch (error) {
+      console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
+      return { source: "none", theses: [] };
     }
 
     // THE ID IS DERIVED FROM THE PUBLISHED POST, not from the row, and only

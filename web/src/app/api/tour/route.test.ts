@@ -1,3 +1,4 @@
+import { TOUR_VERSION } from "@/lib/tour-version";
 import assert from "node:assert/strict";
 import { before, after, it } from "node:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -33,19 +34,19 @@ function request(tenant: typeof A | typeof B | null, method = "GET", body?: unkn
 }
 it("signed-out requests return an ordinary response without recording another person's dismissal", async () => {
   assert.deepEqual(await (await GET(request(null))).json(), { done: false, signedIn: false });
-  assert.deepEqual(await (await POST(request(null, "POST", { tenant: A, version: 2 }))).json(), { done: false, signedIn: false });
+  assert.deepEqual(await (await POST(request(null, "POST", { tenant: A, version: TOUR_VERSION }))).json(), { done: false, signedIn: false });
   assert.equal((await (await GET(request(A))).json()).done, false);
 });
 it("persists a signed-in dismissal across fresh store instances and isolates the next account", async () => {
-  const saved = await POST(request(A, "POST", { tenant: A, version: 2 }));
+  const saved = await POST(request(A, "POST", { tenant: A, version: TOUR_VERSION }));
   assert.equal(saved.status, 200);
-  assert.deepEqual(await saved.json(), { done: true, signedIn: true, tenant: A, version: 2 });
+  assert.deepEqual(await saved.json(), { done: true, signedIn: true, tenant: A, version: TOUR_VERSION });
   resetTourStoreForTest();
   assert.equal((await (await GET(request(A))).json()).done, true);
   assert.equal((await (await GET(request(B))).json()).done, false);
 });
 it("rejects stale identity/version writes rather than dismissing a different account's tour", async () => {
-  assert.equal((await POST(request(B, "POST", { tenant: A, version: 2 }))).status, 409);
+  assert.equal((await POST(request(B, "POST", { tenant: A, version: TOUR_VERSION }))).status, 409);
   assert.equal((await POST(request(B, "POST", { tenant: B, version: 1 }))).status, 409);
   assert.equal((await (await GET(request(B))).json()).done, false);
 });
@@ -53,7 +54,7 @@ it("returns a retryable failure when a dismissal cannot be persisted", async () 
   const blocked = path.join(dir, "blocked"); await mkdir(blocked);
   await writeFile(path.join(blocked, "tour"), "not a directory");
   process.env.MERRYMEN_HOME = blocked; resetTourStoreForTest();
-  const response = await POST(request(B, "POST", { tenant: B, version: 2 }));
+  const response = await POST(request(B, "POST", { tenant: B, version: TOUR_VERSION }));
   assert.equal(response.status, 503);
   assert.equal((await response.json()).done, undefined);
 });

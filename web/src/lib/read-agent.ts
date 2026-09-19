@@ -1,3 +1,4 @@
+import { readPaperReturn } from "./paper-return";
 /**
  * One agent, in public.
  *
@@ -21,6 +22,7 @@
  *
  * No session read. Same property as the other public readers, same reason.
  */
+import { readProfileTrades, type ProfileTrade } from "./profile-trades";
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
@@ -92,6 +94,7 @@ export interface AgentProfile {
   how: HowItTrades | null;
   /** The published return, or null. Exactly one of this and unrankedWhy is set. */
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /** Why there is no return to show. The page says which, rather than assuming. */
   unrankedWhy: UnrankedWhy | null;
   /** Peak-to-trough of the growth index. Null whenever the return is unranked. */
@@ -144,6 +147,8 @@ export interface AgentProfile {
   publicBook: boolean;
   /** Whether each read actually answered. A default is not an answer. */
   tradesRead: boolean;
+  recentTrades: ProfileTrade[];
+  activityRead: boolean;
   equityRead: boolean;
   flowsRead: boolean;
   holdingsRead: boolean;
@@ -318,6 +323,7 @@ export const readAgent = cache(async function readAgent(
     // ── what it did, and what it cost ────────────────────────────────────────
     let gasUsdg = 0;
     let unpricedTrades = 0;
+    const activity = await readProfileTrades(db, account, epoch, publicBook);
     let landed = 0;
     let filledPaper = 0;
     let refused = 0;
@@ -505,6 +511,7 @@ export const readAgent = cache(async function readAgent(
       beatAt: row.beat_at ? Number(row.beat_at) : null,
       how,
       pnlBps,
+      paperPnlBps: paper ? await readPaperReturn(db, account, epoch) : null,
       unrankedWhy,
       // REFUSED ON THE SAME CONDITION AS THE RETURN. An agent that has never
       // filled has produced no drawdown either, and the figure it showed came
@@ -527,6 +534,8 @@ export const readAgent = cache(async function readAgent(
       holdings,
       publicBook,
       tradesRead,
+      recentTrades: activity.trades,
+      activityRead: activity.read,
       equityRead,
       flowsRead,
       holdingsRead,

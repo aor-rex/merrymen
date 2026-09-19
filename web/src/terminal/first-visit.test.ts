@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, it } from "node:test";
 import React, { act } from "react";
-import { FirstVisit } from "./FirstVisit";
+import { FirstVisit, STOPS } from "./FirstVisit";
 import { deferred, json, testDom } from "./test-dom";
 import { visibleTourTarget } from "./tour-layout";
 
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
-const KEY = "merrymen.tour.v2";
+const KEY = "merrymen.tour.v3";
 const A = "0xaaaa", B = "0xbbbb";
 let requests: { url: string; method: string; body: Record<string, unknown> | null }[];
 let response: (url: string, init?: RequestInit) => Promise<Response>;
 const tour = (tenant: string | null = null, onScreen = (_: unknown) => {}, onQuestion = () => {}) => React.createElement(FirstVisit, { tenant, onScreen, onQuestion });
-const result = (tenant: string, done: boolean) => ({ tenant, version: 2, signedIn: true, done });
+const result = (tenant: string, done: boolean) => ({ tenant, version: 3, signedIn: true, done });
 
 beforeEach(() => {
   ui = testDom(); requests = [];
@@ -24,11 +24,11 @@ beforeEach(() => {
 });
 afterEach(async () => { await ui.close(); globalThis.fetch = originalFetch; });
 
-it("signed-out visitors can finish seven stops and remain dismissed after reload", async () => {
+it("signed-out visitors can finish all topics and remain dismissed after reload", async () => {
   await ui.render(tour());
-  for (let step = 1; step <= 7; step++) {
-    assert.equal(ui.container.querySelector(".tour-count")?.textContent, `${step} / 7`);
-    await ui.click(step === 7 ? "Finish" : "Next");
+  for (let step = 1; step <= STOPS.length; step++) {
+    assert.equal(ui.container.querySelector(".tour-count")?.textContent, `${step} / ${STOPS.length}`);
+    await ui.click(step === STOPS.length ? "Finish" : "Next");
   }
   assert.equal(ui.container.querySelector('[role="dialog"]'), null);
   await ui.remount(tour());
@@ -51,7 +51,7 @@ it("server dismissal does not close explicit replay, including after reload", as
   await ui.render(tour(A)); await ui.click("Show me around");
   assert.ok(ui.container.querySelector('[role="dialog"]'));
   await ui.click("Next"); await ui.remount(tour(A));
-  assert.equal(ui.container.querySelector(".tour-count")?.textContent, "2 / 7");
+  assert.equal(ui.container.querySelector(".tour-count")?.textContent, `2 / ${STOPS.length}`);
 });
 it("a late response cannot undo replay or affect another account", async () => {
   const late = deferred<Response>(); response = async () => late.promise;
@@ -87,6 +87,19 @@ it("resumes navigation and prepares the example question only once", async () =>
   await ui.render(tour(null, s => screens.push(s), () => { questions++; }));
   assert.deepEqual(screens, [{ kind: "tab", tab: "agent" }]); assert.equal(questions, 1);
   await ui.click("Back"); await ui.click("Next"); assert.equal(questions, 1);
+});
+
+it("lets readers jump to a topic and navigate back without sending the example question", async () => {
+  const screens: unknown[] = []; let questions = 0;
+  await ui.render(tour(null, s => screens.push(s), () => { questions++; }));
+  await ui.click("Topics");
+  const i = STOPS.findIndex(s => s.title === "Add funds.");
+  await ui.click(`${i + 1}. Add funds.`);
+  assert.deepEqual(screens.at(-1), {kind: "deposit"});
+  assert.equal(ui.container.querySelector('.tour-topics'), null);
+  assert.equal(questions, 0);
+  await ui.click("Back");
+  assert.deepEqual(screens.at(-1), {kind: "grant"});
 });
 
 it("tracks late targets and layout shifts without a resize, then clears a removed target", async () => {

@@ -83,6 +83,7 @@ export interface LiveAgent {
    */
   ownerVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /**
    * The series a chart may draw — AND WHICH QUANTITY IT IS.
    *
@@ -108,6 +109,10 @@ export interface LiveAgent {
    * surface that still draws the curve.
    */
   contributionsEvidenced?: boolean;
+  profileAvailable?: boolean;
+  mode?: string;
+  recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
+  activityRead?: boolean;
   publicBook?: boolean;
   holdingsUsd?: number | null;
   landed: number;
@@ -615,12 +620,15 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
   }
 
   const agents: LiveAgent[] = (board?.agents ?? [])
-    .filter((a) => a.slug)
-    .map((a) => ({
-      slug: a.slug!,
+    .map((a, index) => ({
+      slug: a.slug ?? `unlinked-${index}`,
+      profileAvailable: !!a.slug,
       name: a.name,
+      mode: a.mode,
+      filledPaper: a.filledPaper,
       handle: a.handle,
       pnlBps: a.pnlBps,
+      paperPnlBps: a.paperPnlBps,
       unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
       // RAW EQUITY from the leaderboard read — never a growth index, and the
@@ -1037,6 +1045,8 @@ interface MarketTok {
 }
 
 interface BoardRow {
+  mode?: string;
+  filledPaper?: number;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
   name: string;
@@ -1044,6 +1054,7 @@ interface BoardRow {
   /** Optional so an older server, which does not send it, reads as unproven. */
   handleVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   curve?: number[];
   landed: number;
 }
