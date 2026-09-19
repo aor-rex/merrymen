@@ -2,7 +2,7 @@ import type { BrainDecision } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import type { GeckoPool } from "./venues/geckoterminal";
-import { instrumentClassOf } from "../../packages/core/src/index";
+import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
@@ -11,6 +11,9 @@ export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 export function highVolumePools(pools: readonly GeckoPool[]): GeckoPool[] {
   const byToken = new Map<string, GeckoPool>();
   for (const p of pools) {
+    // Quote assets are portfolio cash/bridge assets, never speculative entries.
+    // instrumentClassOf deliberately classifies unknown addresses as memecoins.
+    if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) continue;
     if (instrumentClassOf(p.tokenAddress) !== "memecoin") continue;
     if (!Number.isFinite(p.volume24hUsd) || (p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN ||
         (p.buyers24h ?? 0) < 20 || (p.buys24h ?? 0) <= 0 || (p.sells24h ?? 0) <= 0 ||
