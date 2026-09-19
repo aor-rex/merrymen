@@ -8,6 +8,7 @@ import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "
 import { takeTick, type Snapshot } from "./strategies/types";
 import { applyPaperIntent } from "./paper";
 import { applyFill, ZERO_BASIS } from "./basis";
+import { checkPolicy, type AgentLimits } from "./policy";
 
 const TOKEN = "0x0000000000000000000000000000000000000011" as const;
 const USDG = "0x0000000000000000000000000000000000000022" as const;
@@ -71,6 +72,12 @@ test("Brain-approved memecoin entry and fast exit fill the paper book with reali
   review.launch("paper", input, TOKEN, async () => answer(), () => {}); await setImmediate();
   const intents = takeTick(await strategy.tick(snap)).intents;
   assert.equal(intents.length, 1); assert.equal(intents[0]!.decisionId, "decision-1");
+  const nowSec = Math.floor(Date.now()/1000);
+  const limits: AgentLimits = { perTradeUsdg: 10_000_000n, dailyUsdg: 100_000_000n, maxOpsPerDay: 20, allowedTargets: [ROUTER], allowedAssets: [USDG, TOKEN], maxDrawdownBps: 1000, expiresAt: nowSec + 1000 };
+  const state = { spentTodayUsdg: 0n, opsToday: 0, highWaterMarkUsdg: 1000_000_000n, equityUsdg: 1000_000_000n, nowSec };
+  assert.equal(checkPolicy(intents[0]!, limits, state).ok, true);
+  assert.equal(checkPolicy(intents[0]!, { ...limits, allowedAssets: [USDG] }, state).ok, false, "Brain cannot authorize a new token");
+  assert.equal(checkPolicy(intents[0]!, { ...limits, perTradeUsdg: 1n }, state).ok, false, "Brain cannot expand spending limits");
   const opts = { usdgAddress: USDG, slippageBps: 100, notionalUsdg: 5, symbolOf: () => "MEME", priceUsdOf: () => ({ priceUsd: .01, stale: false }) };
   const bought = applyPaperIntent(intents[0]!, { cashUsdg: 1000, vaultUsdg: 0, hwmUsdg: 1000 }, [], opts);
   assert.ok(bought.ok);
@@ -86,4 +93,22 @@ test("Brain-approved memecoin entry and fast exit fill the paper book with reali
   const closed = applyFill(basis, { side: "sell", qtyRaw: qty, cashUsdg: BigInt(Math.round(sold.fill!.cashUsdg * 1e6)) });
   assert.equal(Math.round((sold.book.cashUsdg - 1000)*1e6), Number(closed.realizedUsdg));
   assert.ok(closed.realizedUsdg > 0n);
+});
+
+test("Brain can sell early without waiting for a mechanical threshold", async () => {
+  const review = new TrenchBrainReview();
+  const heldInput = { ...input, positions: [{ symbol: "MEME", qtyRaw: "500000000000000000000" }] } as ShadowInputs;
+  review.launch("paper", heldInput, TOKEN, async () => answer({ action: "sell", suggested_delta_usdg: -2e6 }), () => {});
+  await setImmediate();
+  const strategy = makeTrencher({ cfg: TRENCHER_FAST, brainRequired: true, brainOrder: (s,t,p,h) => review.take(s,t,p,5,h), swapRouter: ROUTER, usdgToken: USDG,
+    candidates: () => [], liquidityOf: () => 100_000,
+    open: () => [{ symbol: "MEME", token: TOKEN, qtyRaw: 500n*10n**18n, costUsdg: 5_000_000n, entryPrice8: 1_000_000n, entryLiquidityUsd: 100_000, entrySec: Math.floor(Date.now()/1000) }] });
+  const snap = { holdings: new Map([["MEME", { token: TOKEN, rawBalance: 500n*10n**18n, valueUsdg: 5_000_000n, priceStale: false }]]), prices: new Map([["MEME", { price8: 1_000_000n, stale: false }]]), pausedTokens: new Set() } as unknown as Snapshot;
+  const orders = takeTick(await strategy.tick(snap)).intents;
+  assert.equal(orders.length, 1);
+  assert.equal(orders[0]!.decisionId, "decision-1");
+  assert.equal(orders[0]!.notionalUsdg, 2_000_000n);
+  assert.ok(orders[0]!.kind === "swap");
+  assert.equal(orders[0]!.sellAmountRaw, 200n*10n**18n);
+  assert.equal(takeTick(await strategy.tick(snap)).intents.length, 0, "cannot repeat the same sell approval");
 });
