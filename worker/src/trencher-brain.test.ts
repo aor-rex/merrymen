@@ -103,7 +103,7 @@ test("Brain can sell early without waiting for a mechanical threshold", async ()
   const strategy = makeTrencher({ cfg: TRENCHER_FAST, brainRequired: true, brainOrder: (s,t,p,h) => review.take(s,t,p,5,h), swapRouter: ROUTER, usdgToken: USDG,
     candidates: () => [], liquidityOf: () => 100_000,
     open: () => [{ symbol: "MEME", token: TOKEN, qtyRaw: 500n*10n**18n, costUsdg: 5_000_000n, entryPrice8: 1_000_000n, entryLiquidityUsd: 100_000, entrySec: Math.floor(Date.now()/1000) }] });
-  const snap = { holdings: new Map([["MEME", { token: TOKEN, rawBalance: 500n*10n**18n, valueUsdg: 5_000_000n, priceStale: false }]]), prices: new Map([["MEME", { price8: 1_000_000n, stale: false }]]), pausedTokens: new Set() } as unknown as Snapshot;
+  const snap = { sequencerUp: true, holdings: new Map([["MEME", { token: TOKEN, rawBalance: 500n*10n**18n, valueUsdg: 5_000_000n, priceStale: false }]]), prices: new Map([["MEME", { price8: 1_000_000n, stale: false }]]), pausedTokens: new Set() } as unknown as Snapshot;
   const orders = takeTick(await strategy.tick(snap)).intents;
   assert.equal(orders.length, 1);
   assert.equal(orders[0]!.decisionId, "decision-1");
