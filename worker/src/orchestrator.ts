@@ -50,7 +50,7 @@ function startHistoryRepair(): void {
     const db = await makePgDb(process.env.DATABASE_URL!);
     await applyLedgerSchema(db);
     const result = await repairHistoricalFills(db, process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com");
-    log(`historical fills: ${result.repaired} receipt-backed rows recovered; ${result.pnlRecovered} sale P&Ls recovered; ${result.unavailable} unavailable or ambiguous`);
+    log(`historical fills: ${result.repaired} receipt-backed rows recovered; ${result.pnlRecovered} sale P&Ls recovered; ${result.unavailable} unavailable or ambiguous; reasons ${JSON.stringify(result.reasons)}`);
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn, type ChildProcess } from "node:child_process";

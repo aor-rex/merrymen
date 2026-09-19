@@ -63,7 +63,7 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     if (Number(later.n)>0) throw new Error('paper fills are newer than the recoverable valuation');
     const positions = await shared.prepare(`SELECT symbol,token,raw_balance,value_usdg FROM positions WHERE LOWER(agent_id)=LOWER(?)`).all(account) as Record<string,unknown>[];
     const value = positions.reduce((sum,p)=>sum+Number(p.value_usdg),0);
-    if (!Number.isFinite(value) || Math.abs(value-Number(mark.positions_usdg))>0.00001 || Math.abs(Number(mark.cash_usdg)+Number(mark.vault_usdg)+value-Number(mark.equity_usdg))>0.00001) throw new Error('paper valuation does not reconcile');
+    if (!Number.isFinite(value) || Math.abs(value-Number(mark.positions_usdg))>0.00001 || Math.abs(Number(mark.cash_usdg)+Number(mark.vault_usdg)+value-Number(mark.equity_usdg))>0.00001) throw new Error(`paper valuation does not reconcile (positions=${positions.length}, snapshotDelta=${value-Number(mark.positions_usdg)}, equityDelta=${Number(mark.cash_usdg)+Number(mark.vault_usdg)+value-Number(mark.equity_usdg)})`);
     const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>[String(p.symbol),{token:String(p.token),shares:Number(p.raw_balance)/1e18}]));
     const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
     const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};

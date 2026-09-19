@@ -17,6 +17,7 @@ test("receipt repair fills missing history, preserves known P&L and refuses dupl
   const client={getTransactionReceipt:async()=>({status:'success',logs:[log(CASH.USDG,account,router,10000000n),log(STOCK_TOKENS[0]!.address,router,account,2n*10n**18n)]}),readContract:async()=>{throw new Error('no closing balance');}};
   const result=await repairHistoricalFills(db,'unused',client as never);
   assert.equal(result.repaired,1);assert.equal(result.unavailable,2);assert.equal(result.pnlRecovered,0);
+  assert.deepEqual(result.reasons,{'multiple-execution-rows':2});
   const row=await db.prepare('SELECT * FROM trades WHERE id=1').get() as Record<string,unknown>;
   assert.equal(row.fill_side,'buy');assert.equal(row.fill_symbol,STOCK_TOKENS[0]!.symbol);assert.equal(row.fill_cash_usdg,10);assert.equal(row.realized_pnl_usdg,null);
   assert.equal((await db.prepare('SELECT fill_side FROM trades WHERE id=2').get() as {fill_side:null}).fill_side,null);
