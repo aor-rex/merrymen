@@ -2500,6 +2500,7 @@ async function main() {
       usdg6: usdg,
       basketSymbols: c.basketSymbols,
       strategistStopLossBps: c.strategistStopLossBps,
+      trencherFastEnabled: c.trencherFastEnabled,
       takeProfitBps: c.takeProfitBps,
       buyPerTickUsdg: c.buyPerTickUsdg,
       idleFloorUsdg: c.idleFloorUsdg,

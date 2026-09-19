@@ -150,7 +150,7 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
-    assert.equal(count(/type="checkbox"/g), 16, "checkboxes");
+    assert.equal(count(/type="checkbox"/g), 17, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -171,7 +171,7 @@ describe("every control survives the restyle", () => {
     assert.equal(count(/<select/g), 6, "selects");
   });
 
-  it("sends exactly the 21 fields save() guards", () => {
+  it("sends exactly the 23 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -194,7 +194,8 @@ describe("every control survives the restyle", () => {
     // anything at all would send whatever the form happened to hold and could
     // silently narrow what their agent trades — the same class of failure as the
     // consent flag above, one step less dangerous.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 22);
+    // 23 includes the opt-in fast Trencher profile.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 23);
   });
 });
 

@@ -87,6 +87,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
   const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  const [trencherFast, setTrencherFast] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
@@ -320,6 +321,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
     if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (trencherFast !== null) body.trencherFastEnabled = trencherFast;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
@@ -579,21 +581,30 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               live account. */}
           <div className="mm-section">What it trades</div>
           <div className="mm-hint">
-            <b>Fast memecoin setup</b>
-            <p>Check markets every 15 seconds and ask the Strategist for a decision every minute.
-              Buys focus on crypto and include your custom coins in the basket. Discovery is enabled; existing positions remain sellable.</p>
+            <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
+            <p>Your Merryman hunts newly launched memecoins and checks entries and exits every 15 seconds, without waiting for an LLM.
+              The fast profile attempts exits at −10%, +20%, or after 30 minutes. Liquidity loss can trigger an earlier exit.</p>
+            <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
+              Your custom coins are included in the basket; existing positions remain sellable.</p>
             <button type="button" className="mm-btn" onClick={() => {
               setAssetMode("crypto");
               setOfficialCoins(true);
               setDiscoveryEnabled(true);
               setSymbols([...new Set([...activeSymbols, ...activeTokens.map(token => token.symbol)])]);
-              setDraft(previous => ({ ...previous, strategy: "llm-strategist", tickSeconds: "15", llmIntervalMin: "1" }));
-            }}>Prepare fast memecoin setup</button>
+              setTrencherFast(true);
+              setDraft(previous => ({ ...previous, strategy: "trencher", tickSeconds: "15" }));
+            }}>Prepare Trencher mode</button>
+            <label className="mm-field">
+              <span className="mm-input"><input type="checkbox" style={{ width: "auto" }}
+                checked={trencherFast ?? view.values.trencherFastEnabled ?? d.trencherFastEnabled}
+                onChange={event => setTrencherFast(event.target.checked)} />Use fast Trencher exits</span>
+              <span className="mm-hint">Applies when the strategy is Trencher. Off restores its standard exit profile.</span>
+            </label>
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
-              No coins are configured yet. Add a coin under Custom tokens &amp; discovery, or configure the bonding-curve route and its budget there. Discovery alone does not authorize a purchase.
+              No coins are configured yet. Add a discovered pool token under Custom tokens &amp; discovery. Trencher uses swap pools; ungraduated bonding curves use a separate route. Discovery alone does not authorize a purchase.
             </p>}
             <p>Save changes below, then <Link href="/grant">update trading permission</Link> for any newly added coins.
-              Live trading and your spending limits remain under your control. Check intervals are not guaranteed fill times.</p>
+              For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
           </div>
           <div className="mm-grid">
             <label className="mm-field">

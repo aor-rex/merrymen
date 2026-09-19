@@ -416,6 +416,8 @@ export interface MerrymenSettings {
    * the per-trade cap and the wall.
    */
   trencherLiveEnabled?: boolean;
+  /** Opt-in shorter exits for volatile memecoin positions; does not enable live trading. */
+  trencherFastEnabled?: boolean;
   /**
    * Pay this agent's gas from a sponsor, so the owner funds USDG only.
    *
@@ -815,6 +817,7 @@ export const SETTINGS_DEFAULTS = {
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
   trencherLiveEnabled: false,
+  trencherFastEnabled: false,
   // Off by default like every other switch that spends money.
   sponsorGasEnabled: false,
   // Off by default because it changes how contributions are counted, and a

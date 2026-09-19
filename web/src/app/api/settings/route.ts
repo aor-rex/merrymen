@@ -260,6 +260,7 @@ const BOOL_FIELDS = [
   "telegramAgentAutoShell",
   "virtualsEnabled",
   "trencherLiveEnabled",
+  "trencherFastEnabled",
   "scoutEnabled",
   // BUYING A TOKEN NOBODY ENUMERATED. See MerrymenSettings.classSnipeEnabled
   // for what this actually permits. It is a SECOND decision on top of sealing a
