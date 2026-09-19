@@ -150,7 +150,7 @@ export function Profile({
             )}
           </div>
         </div>
-        {displayPnl == null && <p className="public-empty">{agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
+        {displayPnl == null && <p className="public-empty">{agent.mode === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
         {agent.mode === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of this paper period.</p>}
         {agent.mode !== "paper" && displayPnl != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
         {/* THE GATE, BEFORE THE DRAW.
