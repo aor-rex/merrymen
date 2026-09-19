@@ -28,6 +28,11 @@ test("automatic discovery verifies pool provenance and recovers held tokens with
   const result=await discoverTrencherUniverse(client(),grant,[pool]);
   assert.equal(result.qualified.length,1); assert.equal(result.tokens[0]!.address,token);
   assert.equal(result.tokens[0]!.decimals,6); assert.equal(result.tokens[0]!.name,"COIN / USDG");
+  const competing = await discoverTrencherUniverse(client(),grant,[
+    {...pool,dex:"uniswap-v4-robinhood",volume24hUsd:900_000}, pool,
+  ]);
+  assert.equal(competing.qualified.length,1,"unsupported higher-volume pool must not hide the verified V3 route");
+  assert.equal(competing.qualified[0]!.dex,"uniswap-v3-robinhood");
   assert.equal((await discoverTrencherUniverse(client({getPool:owner}),grant,[pool])).tokens.length,0);
   assert.equal((await discoverTrencherUniverse(client({token1:owner}),grant,[pool])).tokens.length,0);
   assert.equal((await discoverTrencherUniverse(client(),grant,[{...pool,dex:"uniswap-v4-robinhood"}])).tokens.length,0);

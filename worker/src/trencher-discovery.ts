@@ -16,7 +16,9 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   // Failure to read existing holdings aborts the entire pass; it never becomes an empty book.
   const held = custody.deployed ? await client.readContract({address:custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"tokens"}) : [];
   const qualified: GeckoPool[] = [];
-  for (const p of highVolumePools(pools).slice(0,20)) {
+  // Filter supported venues before token deduplication: a larger V2/V4 pool
+  // must not erase an otherwise eligible V3 route for the same token.
+  for (const p of highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood")).slice(0,20)) {
     if (p.dex !== "uniswap-v3-robinhood" || !p.poolAddress || !/^0x[0-9a-fA-F]{40}$/.test(p.poolAddress)) continue;
     try {
       const address = p.poolAddress as Address;

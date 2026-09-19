@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, highVolumePools } from "./trencher-brain";
+import { TrenchBrainReview, highVolumePools, trenchBrainPersona } from "./trencher-brain";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "./strategies/trencher";
@@ -37,6 +37,25 @@ test("cash and wrapped native assets cannot enter the memecoin universe even wit
     pool(),
   ]);
   assert.deepEqual(ranked.map(p => p.tokenAddress), [TOKEN]);
+});
+
+test("pool tape retains venue alternatives and deduplicates repeated feed rows", () => {
+  const v3 = pool({ dex: "uniswap-v3-robinhood", poolAddress: TOKEN });
+  const v4 = pool({ dex: "uniswap-v4-robinhood", poolAddress: ROUTER, volume24hUsd: 500_000 });
+  const tape = highVolumePools([v3, v4, v3], true);
+  assert.equal(tape.length, 2);
+  assert.equal(highVolumePools(tape.filter(p => p.dex === "uniswap-v3-robinhood"))[0], v3);
+});
+
+test("unowned SELL decisions cannot become executable orders and explain why", async () => {
+  const review = new TrenchBrainReview();
+  const notes: string[] = [];
+  review.launch("live", input, TOKEN, async () => answer({ action: "sell", suggested_delta_usdg: -5e6 }), n => notes.push(n));
+  await setImmediate();
+  assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5), null);
+  assert.match(notes.join(" "), /no position is held/);
+  assert.match(trenchBrainPersona("MEME", false), /hold zero MEME.*BUY or HOLD/);
+  assert.match(trenchBrainPersona("MEME", true), /hold MEME.*holding or selling/);
 });
 
 test("Brain runs in background, cannot overlap, and approval is one-use", async () => {
