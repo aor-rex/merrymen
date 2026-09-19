@@ -198,12 +198,14 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
     setModelsLoading(true);
     setModelsError(null);
 
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
-        const body: Record<string, string> = { provider: prov.id };
+        const body: Record<string, string | boolean> = { provider: prov.id };
         const kf = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
         const keyInDraft = draft[kf]?.trim();
         if (keyInDraft) body.apiKey = keyInDraft;
+        else if (draft[kf] !== undefined) body.useSavedKey = false;
         if (prov.id === "custom") {
           const bu = draft.llmBaseUrl?.trim() || (view.values.llmBaseUrl as string | undefined) || "";
           if (bu) body.baseUrl = bu;
@@ -212,8 +214,10 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: controller.signal,
         });
         const j = (await res.json()) as { models?: string[]; error?: string; code?: string; keySource?: string };
+        if (controller.signal.aborted) return;
         if (res.ok && j.models) {
           setAvailableModels(j.models);
           setModelsError(null);
@@ -223,14 +227,15 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
           setModelsError(code === "missing_key" ? code : modelsErrorMessage(code, j.keySource ?? null, prov));
         }
       } catch {
+        if (controller.signal.aborted) return;
         setAvailableModels([]);
         setModelsError(modelsErrorMessage("provider_error", null, prov));
       } finally {
-        setModelsLoading(false);
+        if (!controller.signal.aborted) setModelsLoading(false);
       }
     }, 500);
 
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [view, draft.llmProvider, draft.groqApiKey, draft.anthropicApiKey, draft.llmApiKey, draft.llmBaseUrl]);
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -573,6 +578,23 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               assetModeAllows in core for why the other way round would brick a
               live account. */}
           <div className="mm-section">What it trades</div>
+          <div className="mm-hint">
+            <b>Fast memecoin setup</b>
+            <p>Check markets every 15 seconds and ask the Strategist for a decision every minute.
+              Buys focus on crypto and include your custom coins in the basket. Discovery is enabled; existing positions remain sellable.</p>
+            <button type="button" className="mm-btn" onClick={() => {
+              setAssetMode("crypto");
+              setOfficialCoins(true);
+              setDiscoveryEnabled(true);
+              setSymbols([...new Set([...activeSymbols, ...activeTokens.map(token => token.symbol)])]);
+              setDraft(previous => ({ ...previous, strategy: "llm-strategist", tickSeconds: "15", llmIntervalMin: "1" }));
+            }}>Prepare fast memecoin setup</button>
+            {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
+              No coins are configured yet. Add a coin under Custom tokens &amp; discovery, or configure the bonding-curve route and its budget there. Discovery alone does not authorize a purchase.
+            </p>}
+            <p>Save changes below, then <Link href="/grant">update trading permission</Link> for any newly added coins.
+              Live trading and your spending limits remain under your control. Check intervals are not guaranteed fill times.</p>
+          </div>
           <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">asset mode</span>
@@ -644,13 +666,14 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 >
                   <input
                     type="password"
+                    autoComplete="new-password"
                     placeholder={secretPlaceholder(providerKeyView)}
                     value={draft[providerKeyField] ?? ""}
                     onChange={set(providerKeyField)}
                   />
-                  {providerKeyView.set && (
+                  {(providerKeyView.set || !!draft[providerKeyField]) && (
                     <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
-                      clear
+                      {hosted ? "Use shared key" : "Clear key"}
                     </button>
                   )}
                 </Field>
@@ -1201,6 +1224,9 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 placeholder={String(d.classMaxPositions)}
                 onChange={set("classMaxPositions")}
               />
+            </Field>
+            <Field label="maximum holding time (seconds)" hint="For bonding-curve positions: attempt an exit after this duration, even when a market price is unavailable. Quotes, liquidity and signed limits still apply.">
+              <input type="number" min={60} max={2592000} value={v("classMaxHoldSec")} placeholder={String(d.classMaxHoldSec)} onChange={set("classMaxHoldSec")} />
             </Field>
             <Field
               label="minimum curve depth (USDG)"

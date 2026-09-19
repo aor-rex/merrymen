@@ -20,5 +20,9 @@ test("paper return uses its recorded book, isolates epochs and live transitions"
     await db.exec("UPDATE equity SET equity_usdg = 0 WHERE id = 7");
     assert.equal(await readPaperReturn(db, 'a', 1), -10000);
     assert.equal(await readPaperReturn(db, 'missing', 1), null);
+    await db.exec("CREATE TABLE paper_recovery_health(agent_id TEXT,blocked INTEGER); INSERT INTO paper_recovery_health VALUES('a',1)");
+    assert.equal(await readPaperReturn(db, 'a', 2), null, "a failed restore must not publish its stale flat valuation");
+    await db.exec("UPDATE paper_recovery_health SET blocked=0");
+    assert.equal(await readPaperReturn(db, 'a', 2), 0);
   } finally { raw.close(); }
 });

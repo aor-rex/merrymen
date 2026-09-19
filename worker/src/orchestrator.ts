@@ -39,7 +39,7 @@
 import { readRiskPeriod, RISK_PERIOD_SCHEMA } from "./risk-period";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
-import { restorePaperCheckpoint } from "./paper-checkpoint";
+import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { repairHistoricalFills } from "./history-fill-repair";
 
 let historyRepairStarted = false;
@@ -974,8 +974,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       await applyLedgerSchema(local);
       const shared = await makePgDb(process.env.DATABASE_URL);
       log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
+      await recordPaperRecoveryHealth(shared, smartAccount, false);
     } catch (e) {
       log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+      try {
+        await recordPaperRecoveryHealth(await makePgDb(process.env.DATABASE_URL!), smartAccount, true);
+      } catch { log(`paper restore: ${tenant} — recovery status could not be published`); }
       // A practice book we cannot restore must not silently restart its cash.
       if (settings?.paperTradingEnabled === true) return;
     } finally { raw.close(); }

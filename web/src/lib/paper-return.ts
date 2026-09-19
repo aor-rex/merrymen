@@ -6,6 +6,10 @@ import type { Db } from "../../../worker/src/db";
  */
 export async function readPaperReturn(db: Db, account: string, epoch: number): Promise<number | null> {
   try {
+    try {
+      const health = await db.prepare("SELECT blocked FROM paper_recovery_health WHERE agent_id = ?").get(account.toLowerCase()) as {blocked:number}|undefined;
+      if (Number(health?.blocked) === 1) return null;
+    } catch { /* Recovery health is unavailable on older deployments. */ }
     const latest = await db.prepare(`SELECT id, equity_usdg, mode FROM equity
       WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1`).get(account, epoch) as {id:number; equity_usdg:number; mode:string} | undefined;
     if (!latest || latest.mode !== "paper") return null;

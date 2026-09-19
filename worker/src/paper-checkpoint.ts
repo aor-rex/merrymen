@@ -6,6 +6,15 @@ export const PAPER_CHECKPOINT_SCHEMA = `CREATE TABLE IF NOT EXISTS paper_checkpo
   basis_json TEXT NOT NULL, updated_at INTEGER NOT NULL
 );`;
 
+export async function recordPaperRecoveryHealth(db:Db,account:string,blocked:boolean):Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS paper_recovery_health (
+    agent_id TEXT PRIMARY KEY, blocked INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`);
+  await db.prepare(`INSERT INTO paper_recovery_health(agent_id,blocked,updated_at) VALUES(?,?,?)
+    ON CONFLICT(agent_id) DO UPDATE SET blocked=excluded.blocked,updated_at=excluded.updated_at`)
+    .run(account.toLowerCase(),blocked?1:0,Math.floor(Date.now()/1000));
+}
+
 type Checkpoint = {agent_id:string; epoch:number; cash_usdg:number; vault_usdg:number; hwm_usdg:number; shares:string; basis_json:string; updated_at:number};
 type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
 

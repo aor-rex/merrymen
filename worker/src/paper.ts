@@ -56,8 +56,10 @@ export interface PaperFillDetail {
   side: "buy" | "sell";
   symbol: string;
   token: `0x${string}`;
-  /** Whole shares filled (paper carries no multiplier, so 1 share = 1e18 raw). */
+  /** Tradeable shares, for prices and receipts. */
   shares: number;
+  /** Split-invariant quantity used by the inventory and cost-basis ledger. */
+  rawShares: number;
   priceUsd: number;
   /** USDG actually spent (buy) or received (sell), slippage included. */
   cashUsdg: number;
@@ -174,7 +176,7 @@ export function applyPaperIntent(
       receipt: `paper fill: +${uiShares.toFixed(4)} ${symbol} @ $${px.priceUsd.toFixed(2)} (${staleTag})`,
       // Cost basis takes the CASH SPENT (n), not shares×price: the slippage is a
       // real cost of the position and belongs in its basis.
-      fill: { side: "buy", symbol, token: stockToken, shares: uiShares, priceUsd: px.priceUsd, cashUsdg: n },
+      fill: { side: "buy", symbol, token: stockToken, shares: uiShares, rawShares: shares, priceUsd: px.priceUsd, cashUsdg: n },
     };
   }
 
@@ -192,7 +194,7 @@ export function applyPaperIntent(
     positions: pos.filter((p) => p.shares > 1e-9),
     receipt: `paper fill: −${soldUi.toFixed(4)} ${symbol} @ $${px.priceUsd.toFixed(2)} (${staleTag})`,
     // Proceeds are net of slippage — the cash that actually landed.
-    fill: { side: "sell", symbol, token: stockToken, shares: soldUi, priceUsd: px.priceUsd, cashUsdg: round6(proceeds) },
+    fill: { side: "sell", symbol, token: stockToken, shares: soldUi, rawShares: soldUi / mul, priceUsd: px.priceUsd, cashUsdg: round6(proceeds) },
   };
 }
 

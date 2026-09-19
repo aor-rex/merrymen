@@ -155,7 +155,8 @@ describe("every control survives the restyle", () => {
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
-    assert.equal(count(/type="number"/g), 13, "number inputs");
+    // 14 includes the owner-configurable class-position exit timer.
+    assert.equal(count(/type="number"/g), 14, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
     // census exists to allow — a control was ADDED, deliberately — and the

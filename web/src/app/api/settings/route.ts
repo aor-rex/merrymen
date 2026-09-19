@@ -222,6 +222,7 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // follow.
   classPerEntryUsdg: [0, 1_000_000],
   classMaxPositions: [0, 1_000],
+  classMaxHoldSec: [60, 30 * 86_400],
   classMinDepthUsdg: [0, 10_000_000],
 };
 const BOOL_FIELDS = [

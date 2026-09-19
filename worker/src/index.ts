@@ -6634,9 +6634,8 @@ async function main() {
               {
                 side: fill.fill.side,
                 symbol: fill.fill.symbol,
-                // Paper carries no ERC-8056 multiplier (1 share = 1e18 raw), the same
-                // convention the tick uses when it values the paper book.
-                qtyRaw: BigInt(Math.round(fill.fill.shares * 1e18)),
+                // Basis and checkpoints use the same split-invariant inventory units.
+                qtyRaw: BigInt(Math.round(fill.fill.rawShares * 1e18)),
                 cashUsdg: usdg(fill.fill.cashUsdg),
                 priceUsd: fill.fill.priceUsd,
               },
