@@ -14,7 +14,7 @@ import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
 import { weekendGapTick, type WeekendGapConfig } from "./weekend-gap";
 import { evenKeelTick, type EvenKeelConfig } from "./even-keel";
 import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
-import { makeTrencher, TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./trencher";
+import { makeTrencher, TRENCHER_DEFAULTS, TRENCHER_FAST, type Candidate, type OpenPosition } from "./trencher";
 import type { Strategy } from "./types";
 
 /** Free, open strategies — available to everyone. */
@@ -31,6 +31,7 @@ export function isCircleStrategy(name: string): boolean {
 }
 
 export interface StrategyBuildOpts {
+  trencherFastEnabled?: boolean;
   /**
    * Which kinds of thing the owner wants traded. Absent = "all", so a host that
    * does not set it is unchanged.
@@ -304,7 +305,7 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     // nothing. A backtest or fixture gets an honest no-op rather than a crash.
     const t = opts.trench;
     return makeTrencher({
-      cfg: TRENCHER_DEFAULTS,
+      cfg: opts.trencherFastEnabled ? TRENCHER_FAST : TRENCHER_DEFAULTS,
       swapRouter: opts.swapRouter,
       usdgToken: t?.usdgToken ?? (CASH.USDG as `0x${string}`),
       candidates: t?.candidates ?? (() => []),

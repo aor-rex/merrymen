@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
+import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
@@ -219,11 +220,14 @@ export function Agent({
   }, [expanded]);
   if (!mine)
     return (
+      <div>
+      <TrencherAnnouncement />
       <Empty
         kind="chat"
         title="Your agent starts here."
         action={{ label: "Fund an agent", onClick: onDeposit }}
       />
+      </div>
     );
   /**
    * Has this owner chosen a strategy their tier will not run?
@@ -730,6 +734,7 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        <TrencherAnnouncement />
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only
             flexible row on a fixed-height screen: measured at 375px, the

@@ -96,6 +96,14 @@ export const TRENCHER_DEFAULTS: TrencherConfig = {
 
 export type EntryVerdict = { enter: true } | { enter: false; why: string };
 
+/** Faster exits without relaxing entry quality or increasing position size. */
+export const TRENCHER_FAST: TrencherConfig = {
+  ...TRENCHER_DEFAULTS,
+  stopLossBps: 1_000,
+  takeProfitBps: 2_000,
+  maxHoldSec: 30 * 60,
+};
+
 /**
  * Should this be entered? EVERY condition must hold.
  *

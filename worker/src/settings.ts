@@ -102,6 +102,7 @@ export interface ResolvedConfig {
   discoveryIntervalMin: number;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
   trencherLiveEnabled: boolean;
+  trencherFastEnabled: boolean;
   sponsorGasEnabled: boolean;
   sponsorshipPolicyId?: string;
   /** Read flows from USDG Transfer logs rather than inferring them. */
@@ -401,6 +402,7 @@ export function mergeSettings(
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
+    trencherFastEnabled: bool(file.trencherFastEnabled, env.MERRYMEN_TRENCHER_FAST, d.trencherFastEnabled),
     sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
     sponsorshipPolicyId: str(file.sponsorshipPolicyId, env.MERRYMEN_SPONSORSHIP_POLICY_ID),
     depositScanEnabled: bool(file.depositScanEnabled, env.MERRYMEN_DEPOSIT_SCAN, d.depositScanEnabled),
@@ -593,6 +595,7 @@ export function strategyKey(cfg: ResolvedConfig): string {
     cfg.groqModel,
     cfg.llmModel,
     cfg.llmIntervalMin,
+    cfg.trencherFastEnabled,
     cfg.llmMaxActionUsdg,
   ].join("|");
 }

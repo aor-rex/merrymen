@@ -4,6 +4,15 @@ import { connectionKey, mergeSettings, strategyKey, telegramKey } from "./settin
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 
 describe("mergeSettings — file > env > default", () => {
+  it("fast Trencher is opt-in and rebuilds the strategy without enabling live trades", () => {
+    const standard = mergeSettings({}, {});
+    const fast = mergeSettings({ trencherFastEnabled: true }, {});
+    assert.equal(standard.trencherFastEnabled, false);
+    assert.equal(fast.trencherFastEnabled, true);
+    assert.equal(fast.trencherLiveEnabled, false);
+    assert.equal(fast.liveTradingEnabled, standard.liveTradingEnabled);
+    assert.notEqual(strategyKey(standard), strategyKey(fast));
+  });
   it("does not let an old slow tick setting silence decisions for more than five minutes", () => {
     assert.equal(mergeSettings({ tickSeconds: 300 }, {}).tickSeconds, 300);
     assert.ok(mergeSettings({ tickSeconds: 3600 }, {}).tickSeconds <= 300);

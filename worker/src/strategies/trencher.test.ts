@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   TRENCHER_DEFAULTS,
+  TRENCHER_FAST,
   makeTrencher,
   priceMoveBps,
   shouldEnter,
@@ -158,6 +159,27 @@ describe("shouldExit — any one condition is enough", () => {
   it("survives a zero entry depth without dividing by it", () => {
     const v = shouldExit(position({ entryLiquidityUsd: 0 }), { ...flat, liquidityUsd: 1 }, cfg);
     assert.equal(v.exit, false);
+  });
+});
+
+describe("fast Trencher exits", () => {
+  const fresh = () => position({ entrySec: NOW - 60 });
+  const mark = (price: number, nowSec = NOW) => ({ price8: p8(price), liquidityUsd: 120_000, nowSec });
+  it("allows ordinary volatility but exits at the loss and profit thresholds", () => {
+    assert.equal(shouldExit(fresh(), mark(0.00095), TRENCHER_FAST).exit, false);
+    assert.equal(shouldExit(fresh(), mark(0.0009), TRENCHER_FAST).exit, true);
+    assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_FAST).exit, true);
+    assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_DEFAULTS).exit, false);
+  });
+  it("exits after 30 minutes even at a flat price", () => {
+    assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_FAST).exit, true);
+    assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_DEFAULTS).exit, false);
+  });
+  it("keeps entry quality and size unchanged", () => {
+    assert.equal(TRENCHER_FAST.perEntryUsdg, TRENCHER_DEFAULTS.perEntryUsdg);
+    assert.equal(shouldEnter(candidate({ liquidityUsd: 5000 }), TRENCHER_FAST, NOW).enter, false);
+    assert.equal(shouldEnter(candidate({ ageSec: 30 }), TRENCHER_FAST, NOW).enter, false);
+    assert.equal(shouldEnter(candidate(), TRENCHER_FAST, NOW).enter, true);
   });
 });
 
