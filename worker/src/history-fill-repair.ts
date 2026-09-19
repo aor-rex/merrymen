@@ -13,6 +13,8 @@ export async function repairHistoricalFills(db:Db, rpcUrl:string, clientOverride
   const rows=await db.prepare(`SELECT t.id,t.agent_id,t.tx_hash FROM trades t JOIN agents a ON LOWER(a.smart_account)=LOWER(t.agent_id)
     WHERE t.status='landed' AND t.kind='swap' AND t.tx_hash IS NOT NULL AND a.chain_id=4663
     AND (t.fill_side IS NULL OR t.buy_token IS NULL OR t.sell_token IS NULL OR t.fill_cash_usdg IS NULL OR t.fill_symbol IS NULL)
+    AND (SELECT COUNT(*) FROM trades sibling WHERE LOWER(sibling.agent_id)=LOWER(t.agent_id)
+      AND sibling.tx_hash=t.tx_hash AND sibling.status='landed')=1
     ORDER BY CASE WHEN t.fill_side IS NULL THEN 0 ELSE 1 END, t.created_at DESC LIMIT 100`).all() as {id:number;agent_id:string;tx_hash:Hex}[];
   let repaired=0,unavailable=0;
   const reasons:Record<string,number>={};
@@ -21,6 +23,7 @@ export async function repairHistoricalFills(db:Db, rpcUrl:string, clientOverride
   for(const row of rows) {
     let stage='duplicate-check';
     try {
+      // Recheck after candidate selection in case another row was mirrored.
       // Bundled transactions may have more than one operation for an account.
       // Refuse aggregated deltas if there is not exactly one accounting row.
       const count=await db.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id)=LOWER(?) AND tx_hash=? AND status='landed'`).get(row.agent_id,row.tx_hash) as {n:number};
