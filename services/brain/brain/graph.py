@@ -37,7 +37,14 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .analyst import AnalystView, FAILURE_DIRECTIONS, STRUCTURED_SUFFIX, disagreement, parse_view
+from .analyst import (
+    AnalystView,
+    FAILURE_DIRECTIONS,
+    LENS_DIRECTION_SEMANTICS,
+    STRUCTURED_SUFFIX,
+    disagreement,
+    parse_view,
+)
 from .budget import BudgetExceeded, RunBudget, TIERS
 from .escalation import EscalationVerdict, assess as assess_escalation, judge_economics
 from .gate import GateResult, assess
@@ -119,7 +126,13 @@ class BrainGraph:
                     f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
                     "Strategy preferences (never override portfolio gates or measured evidence):\n"
                     f"{_fence('strategy-brief', req.persona[:1600])}\n"
-                    f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
+                    f"As of: {req.market.as_of}\n\n{material}\n"
+                    + STRUCTURED_SUFFIX
+                    # A lens whose evidence has no time dimension cannot answer
+                    # "will it go up". Told what the arms mean for ITS dimension
+                    # it can answer, and can object — which is the point. See
+                    # LENS_DIRECTION_SEMANTICS.
+                    + LENS_DIRECTION_SEMANTICS.get(lens, "")
                 ),
                 json_schema={"type": "object"},
             )
@@ -357,7 +370,36 @@ class BrainGraph:
             reports.append(out)
             views.append(view)
 
-        dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
+        # ── WHAT THE BRACKETS MEAN, SAID ONCE ────────────────────────────────
+        #
+        # Every report is rendered as `[direction conf=0.88] note`, and until
+        # this legend existed nothing told the manager how to read it. Two
+        # things were being misread, both in the direction of not trading:
+        #
+        #   `hold` is an ABSTENTION when it comes from a lens that has no
+        #   directional evidence to offer, not a vote against the trade. The
+        #   codebase already draws this distinction — `counts` in analyst.py is
+        #   "whether this view is a side, rather than a shrug" — but it was used
+        #   only by disagreement() and never told to the model that decides.
+        #
+        #   `confidence` is certainty about the READING, not conviction about
+        #   ACTING (analyst.py documents the split against evidence_strength).
+        #   So a liquidity analyst sure the pool is deep prints
+        #   `[hold conf=0.88]`, which reads as a strong vote against trading —
+        #   the exact inverse of what it meant.
+        #
+        # The legend is prose, not a rule: it changes nothing about what any
+        # lens returns and nothing about what the manager may do. It stops one
+        # specific misreading of a number the manager was already being shown.
+        dossier = (
+            "ANALYST REPORTS\n"
+            "Each report is [that lens's own verdict, within its own dimension] "
+            "conf=[how sure it is OF ITS READING, not how strongly it wants to act].\n"
+            "A `hold` from a lens with nothing directional to offer is an abstention "
+            "from that dimension, not a vote against trading; weigh it as silence. "
+            "A `hold` that names a reservation is a reservation. The note says which.\n\n"
+            + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
+        )
 
         # Preserve measured amounts and time windows when analyst prose omits
         # them. These are the same inputs, not independent corroboration.

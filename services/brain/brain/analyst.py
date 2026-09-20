@@ -207,3 +207,43 @@ nothing usable — that is a useful answer and far better than a guess.
 `evidence_strength` is how much you had to work with; `confidence` is how sure
 you are of your read of it. They are different numbers and a thin-but-clear
 signal should say so."""
+
+#: What the four arms MEAN for a lens whose evidence carries no time dimension.
+#:
+#: ── WHY THIS EXISTS ──────────────────────────────────────────────────────
+#:
+#: The suffix above asks every lens for a direction, and "buy" implicitly means
+#: "I expect the price to go up". A liquidity lens is handed reserve, route
+#: depth, FDV and a maximum entry size — levels, with no price, no change, no
+#: volume and no flow. It cannot form that claim, `no-data` is false when the
+#: depth is plainly readable, and the Trencher persona closes `sell` outright
+#: ("a bearish view means HOLD, not SELL"). `hold` is the only arm left.
+#:
+#: Measured on the fleet, 2026-09-20: the liquidity lens returned `hold` on 173
+#: of 173 observations while technical and social — handed the same suffix, in
+#: the same runs, but with m5/h1/h6/h24 windows — each voted buy about a fifth
+#: of the time. That is not caution and not a malfunction. It is the only
+#: truthful answer to a question the lens cannot be asked.
+#:
+#: ── AND WHY THIS MAKES THE DESK STRICTER, NOT LOOSER ─────────────────────
+#:
+#: The cost was never the missing buys — `direction` gates nothing. It is that
+#: a pool with $8M of depth and a pool about to be drained both printed `hold`,
+#: so the lens had no way to object to either. Giving the arms a meaning it can
+#: evaluate creates a liquidity veto that did not previously exist.
+#:
+#: `no-data` keeps its meaning exactly: depth we could not read. It must never
+#: be used for depth we read and disliked, or an unavailable metric starts
+#: arriving as a bearish one.
+LENS_DIRECTION_SEMANTICS: dict[str, str] = {
+    "liquidity": (
+        "\n\nFor YOUR lens the arms mean this, and nothing about price:\n"
+        '  "buy"     — the depth you can see supports entering AND leaving at this size.\n'
+        '  "sell"    — it does not: too thin, too concentrated, or costly to exit.\n'
+        '  "hold"    — borderline, or adequate but with a reservation worth naming.\n'
+        '  "no-data" — depth could not be read. Never use this for depth you dislike.\n'
+        "Judge the size actually proposed against the depth actually reported. An\n"
+        "entry limit is a portfolio constraint, not a fact about the pool, and a\n"
+        "small entry into a deep pool is a reason to say so plainly."
+    ),
+}
