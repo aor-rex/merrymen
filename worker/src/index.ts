@@ -10296,6 +10296,23 @@ async function main() {
                 const half = (r: { failure?: string; data: unknown[] } | undefined) =>
                   r === undefined ? "no-read" : r.failure ?? r.data.length;
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
+              } else {
+                // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
+                // LINE, and until now those were the same thing to anyone
+                // reading the log. `tape` is undefined when the snapshot has
+                // rolled past its 120s window or the pool no longer matches the
+                // verified one — and then the block above is skipped entirely,
+                // so the Brain is asked about a memecoin WITHOUT the memecoin
+                // signals (`trenchBrainSignals` is behind the same condition)
+                // and without any pool evidence, while the log says nothing at
+                // all. Observed in production: the same token reviewed at
+                // 17:54 with evidence and at 18:01 with none, indistinguishable
+                // from the outside.
+                //
+                // This does not fix the gap — it makes it countable, which is
+                // the prerequisite for deciding whether the window or the pool
+                // match is the thing to change.
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
               }
               return runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
