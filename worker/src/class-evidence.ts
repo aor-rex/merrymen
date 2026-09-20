@@ -54,6 +54,22 @@ export interface ClassEvidence {
   /** The token's symbol, as the discovery pass recorded it. */
   symbol: string;
   /**
+   * THE NAME A HUMAN WOULD RECOGNISE, when one is known and safe to print.
+   *
+   * `symbol` for an autonomous Trencher token is ADDRESS-DERIVED — `T` plus the
+   * last eleven hex of the contract — because a coin's own `symbol()` is text
+   * its deployer chose and can change, and one calling itself NVDA must never
+   * resolve to a stock's price. That property is worth keeping and it makes for
+   * an unreadable feed: "just bought TE21291018B4" tells a reader nothing.
+   *
+   * So the real name rides ALONGSIDE the stable id rather than replacing it.
+   * It is display only: nothing prices, routes, matches or settles against it.
+   * ABSENT when the tape carried no name, because a made-up one is worse than
+   * the id — and sanitised at the point it is read, since it is the one field
+   * here a stranger wrote.
+   */
+  displayName?: string;
+  /**
    * WHAT DECIDED THIS TRADE, for provenance that cannot be faked downstream.
    *
    * "rule" means a deterministic producer chose it — the class route's own

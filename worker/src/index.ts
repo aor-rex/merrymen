@@ -393,6 +393,7 @@ import {
   addTrade,
   decisionAgent,
   decisionEvidence,
+  lifecycleOf,
   hasPost,
   recentPosts,
   basisSymbols,
@@ -5966,6 +5967,27 @@ async function main() {
    * the fill hook, so the whole body is wrapped: a model outage, a malformed
    * completion or a storage failure costs a post and never a trade.
    */
+  /**
+   * The coin's own name, if the tape gave one and it survives sanitising.
+   *
+   * DISPLAY ONLY. `symbol` stays the address-derived id everything prices,
+   * routes and settles against; this is the word a reader recognises. The name
+   * came off a third-party pool label, so it is the one string here somebody
+   * else wrote: the allowlist is deliberately narrow, an empty result is
+   * ABSENT rather than a placeholder, and anything address-shaped is dropped
+   * because a post may never carry one.
+   */
+  function displayNameOf(symbol: string): string | null {
+    const token = watchTokens.find((t) => t.symbol === symbol);
+    const raw = (token?.name ?? "").trim();
+    // A GeckoTerminal pool label is "CASHCAT / WETH 1%" — the coin is the part
+    // before the pair separator, and the rest is the venue, not the name.
+    const head = raw.split("/")[0]!.trim();
+    const clean = head.replace(/[^A-Za-z0-9 ._-]/g, "").trim().slice(0, 24);
+    if (!clean || clean === symbol || /^0x/i.test(clean) || !/[A-Za-z]/.test(clean)) return null;
+    return clean;
+  }
+
   async function maybePost(decisionId: string, status: string): Promise<void> {
     try {
       // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
@@ -5983,12 +6005,50 @@ async function main() {
       if (already !== false) return;
 
       const rawEvidence = await decisionEvidence(decisionId);
-      if (!rawEvidence) return;
-      let evidence: ClassEvidence;
-      try {
-        evidence = JSON.parse(rawEvidence) as ClassEvidence;
-      } catch {
-        return;
+      let evidence: ClassEvidence | null = null;
+      if (rawEvidence) {
+        try {
+          evidence = JSON.parse(rawEvidence) as ClassEvidence;
+        } catch {
+          return;
+        }
+      } else {
+        // ── A BRAIN TRADE HAS NO BANDS, BUT IT HAS A BELIEF ─────────────────
+        //
+        // The class route bands its own measurements before writing them, so
+        // its decisions arrive here with `evidence_json` and post. A Trencher
+        // trade is decided by the Brain, which writes no bands — so every
+        // autonomous memecoin buy and sell fell out at the line above and the
+        // agent never said a word about the trades it actually makes.
+        //
+        // What the Brain DOES record is `reason`: its own thesis, in its own
+        // words, already on the decision row and already published verbatim by
+        // the feed. That is the belief the post should express, and using it
+        // means the writer paraphrases a view the agent genuinely held rather
+        // than one assembled afterwards from the fill.
+        //
+        // NOT A FABRICATED BAND. It is passed through as the single observation
+        // it is, so nothing downstream can mistake model prose for a measured
+        // quantity, and `decidedBy` says plainly that a model decided this.
+        const life = await lifecycleOf(decisionId);
+        const d = life?.decision;
+        const belief = d?.reason?.trim();
+        const act = d?.action === "buy" ? "enter" : d?.action === "sell" ? "exit" : null;
+        if (!belief || !act || !d?.symbol) return;
+        const shown = displayNameOf(d.symbol);
+        evidence = {
+          act,
+          symbol: d.symbol,
+          // Display only, and sanitised at the source — see ClassEvidence.
+          ...(shown ? { displayName: shown } : {}),
+          decidedBy: "brain",
+          bands: { thesis: belief },
+          // EMPTY, NOT INVENTED. `raw` is the drill-down of measured figures and
+          // the Brain recorded none as fields — its numbers live inside the
+          // prose. Synthesising entries here would put a model's sentence where
+          // a measurement belongs.
+          raw: {},
+        };
       }
       if (!evidence?.bands || Object.keys(evidence.bands).length === 0) return;
 

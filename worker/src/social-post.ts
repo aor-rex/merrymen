@@ -125,8 +125,15 @@ export interface WriterContext {
 export function writerPrompt(c: WriterContext): string {
   const bands = Object.values(c.evidence.bands);
   const act = c.evidence.act === "enter" ? "just bought" : "just sold";
+  // THE NAME A READER RECOGNISES, when the tape carried one. The id stays the
+  // ticker the post is checked against (`admitPost` strips exactly this), so
+  // naming the coin changes what a human reads and nothing about what is
+  // verified. Absent name, absent clause — never a placeholder.
+  const named = c.evidence.displayName
+    ? `$${c.evidence.symbol}, the coin that calls itself ${c.evidence.displayName}`
+    : `$${c.evidence.symbol}`;
   const lines = [
-    `You are ${c.name}, a trader. You ${act} $${c.evidence.symbol}.`,
+    `You are ${c.name}, a trader. You ${act} ${named}.`,
     "",
     "This is what you observed, and it is ALL you observed:",
     ...bands.map((b) => `- ${b}`),
