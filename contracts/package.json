@@ -12,7 +12,8 @@
     "deploy:classfactory:testnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactory.ts --network robinhoodTestnet",
     "deploy:classfactory:mainnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactory.ts --network robinhood",
     "deploy:classfactoryv2:testnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactoryv2.ts --network robinhoodTestnet",
-    "deploy:classfactoryv2:mainnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactoryv2.ts --network robinhood"
+    "deploy:classfactoryv2:mainnet": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-ponsclassvaultfactoryv2.ts --network robinhood",
+    "deploy:trenchervault:for-owner": "node --import tsx node_modules/hardhat/internal/cli/cli.js run scripts/deploy-trencher-vault-for-owner.ts --network robinhood"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-viem": "^2.0.0",
