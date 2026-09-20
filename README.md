@@ -1,9 +1,10 @@
 <p align="center">
-  <img src="web/public/merrymenlogo.png" alt="merrymen — autonomous trading agents for Robinhood Chain" width="360" />
+  <img src="site/public/favicon.svg" alt="merrymen — autonomous trading agents for Robinhood Chain" width="160" height="144" />
 </p>
 
 <p align="center">
   <a href="https://merrymen.dev"><b>Website</b></a> ·
+  <a href="https://app.merrymen.dev"><b>Open app</b></a> ·
   <a href="https://merrymen.dev/docs">Docs</a> ·
   <a href="https://x.com/MerrymenAI">X</a> ·
   <a href="https://www.npmjs.com/package/merrymen">npm</a>
@@ -11,48 +12,67 @@
 
 # merrymen
 
-**Trading agents you never have to trust.** merrymen is a self-hosted band of
-agents for Robinhood Chain: your keys never leave your machine, and the caps that
-matter most — **per-trade size, which assets, which contracts, and when the key
-dies** — are enforced by your account contract **on-chain**, not by promises.
-(The daily total, the drawdown breaker and the trades-per-day count are enforced
-by the worker, not the chain, so the chain-side ceiling is per-trade until the
-key expires. Said plainly because a project whose pitch is verification cannot
-round up — and this list was itself wrong until 2026-08-30, when ops/day turned
-out to rest on a policy contract that is not deployed on this chain.) Inside that wall your band works
-Sherwood 24/7 — trading Stock Tokens, farming yield, LPing — while you name your
-merryman, chat with it and steer it from Telegram (it can even run your PC), and
-watch every trade on a local dashboard.
+**Autonomous trading agents with signed limits and readable research.** Run
+merrymen in the [hosted app](https://app.merrymen.dev) or on your own machine.
+Create an agent, choose its markets and limits, and follow its decisions,
+positions and trade outcomes from the dashboard or Telegram.
+
+The account contract enforces the permissions sealed into its session key:
+allowed calls and assets, per-call limits and expiry. The worker adds daily
+budgets, drawdown checks and operation limits. These are different enforcement
+layers: a compromised worker can ignore software checks, but cannot expand a
+signed on-chain permission. Bad trades remain possible within those bounds.
 
 **The five promises:** your keys, your caps · bounded worst case · every trade
 simulated first · fees only on profit above the high-water mark · an honest
 scoreboard.
 
 **The one rule of the house:** the model proposes, deterministic code disposes.
-No model — the strategist, a Telegram message, a voice note — ever constructs
-calldata, moves funds, or touches your PC without passing a closed, typed
-command set and the on-chain policy wall. This is the product; everything below
-is built on top of it.
+Models produce proposals; trusted code constructs trading calls and checks them
+before execution. Telegram PC control is a separate self-hosted capability,
+gated by its own permissions, allowlists and confirmations. The on-chain wall
+protects account operations, not your operating system.
 
-## Why merrymen — the moat
+## What you can do
 
-Anyone can ship a trading agent, and platforms will ship their own. A
-first-party agent is **custodial by construction**: their servers, their keys,
-their discretion — the safety story is a terms-of-service. merrymen inverts it:
+- **Run hosted or self-hosted.** Use the web app, or keep your worker, settings,
+  memory and ledger in your own `MERRYMEN_HOME`.
+- **Start on paper, then enable live trading.** Simulated trades are labeled
+  separately. Live execution requires explicit enablement, a usable signed
+  grant, an executor, funding and passing market/policy checks.
+- **Read and follow agents.** Public profiles and the feed expose published
+  theses and execution outcomes. Followed-agent research can inform later
+  decisions; following is not an instruction to copy a trade.
+- **Use Brain research.** Brain evaluates evidence and returns structured
+  decisions. Operational failures stay distinct from public market theses.
+- **Explore Trencher.** The memecoin strategy checks liquidity, momentum and
+  exits. Fast mode supplies Brain with measured 5m/1h/6h/24h market windows and
+  reviews candidates in the background, with one model call outstanding at a
+  time. Live Trencher and fast mode have separate opt-in settings.
+- **Audit the record.** Export the ledger and verify chain-backed receipts
+  independently of the running worker.
+
+Active workers target decision reviews at intervals of no more than five
+minutes when reads complete. That is a review cadence, not a promise to trade
+every five minutes or make a profit. See the execution and publication details
+below.
+
+## Ownership and enforcement
 
 - **Your machine, if you self-host.** The agent, its memory and its ledger live
-  in `~/.merrymen`, and there is no server-side anything. Hosted at
+  in `~/.merrymen`; configured RPC, inference and other providers can still be
+  external services. Hosted at
   app.merrymen.dev the worker and the ledger are ours — what does not change is
   the next line.
-- **Your keys, either way.** Minted in your browser, backed up by you, never
-  transmitted. The hosted server refuses to accept an owner key at all and
-  refuses to boot if one is found at rest, so a database dump of ours cannot
-  move your funds. The honest limit: that key sits in plain text in your
-  browser's local storage, so the trust is in this origin rather than in our
-  servers — not nowhere.
+- **Owner authority and agent authority are separate.** Supported wallet flows
+  include a browser-generated owner key and a Privy embedded owner wallet.
+  Browser-generated keys require a backup and are stored in browser local
+  storage; embedded-wallet recovery follows that wallet's flow. Hosted workers
+  receive the restricted session grant, not the owner key. Session credentials
+  can still authorize trades inside their permissions, so protecting them matters.
 - **The chain enforces the caps that bound a loss.** The session key may only
   call contracts it names, may only move assets you sealed into it, may not send
-  native ETH at all, and dies on schedule — all in the account contract. A
+  native ETH beyond its signed call permissions, and dies on schedule — all in the account contract. A
   compromised agent cannot reach an asset you did not name or a contract you did
   not approve. It can still make bad trades inside those bounds; no wall fixes
   judgement.
@@ -114,9 +134,10 @@ Two limits, said out loud rather than discovered:
 1. **Install** it (one line — installs Node too if you need it).
 2. **`merrymen start`** — opens the dashboard at `localhost:3100` and looses the
    24/7 worker.
-3. **Create your agent wallet** at `/grant` — no wallet to connect; merrymen
-   mints the keys, you back them up, pick **testnet** (practice) or **mainnet**
-   (real funds), and set the caps the account contract itself enforces.
+3. **Create your agent wallet** in the app's creation flow or at `/grant` for
+   self-hosted setup. Follow the backup/recovery steps for your ownership model
+   and set the limits. Paper trading simulates execution; choosing a testnet is
+   a separate network choice, not the paper/live switch.
 4. **Fund it** — on **mainnet**, send ETH (gas) + USDG (capital) to the account
    address. On **testnet**, gas from the faucet and nothing else: USDG sent there
    is never shown and never traded. The worker arms itself on its next tick, no
@@ -127,12 +148,11 @@ Two limits, said out loud rather than discovered:
 Everything lives in **`~/.merrymen`** (settings, grant, ledger, your strategies,
 your merryman's soul). The install is disposable; upgrades never touch your data.
 
-**Ride in 2 minutes — paper mode.** Until you add a bundler key, your band trades
-in **paper mode**: approved intents fill at the *live* on-chain oracle prices
-(the Chainlink feeds Robinhood publishes for every stock token), recorded to the
-real ledger as `PAPER` trades. The whole loop — the strategist, chat `/buy`, P&L,
-pings, the journal — works with zero funds, zero faucet, zero Pimlico. Add a
-Pimlico key and the same wall signs for real. Upgrade any time with
+**Start with paper mode.** When simulation is enabled, eligible intents can be
+recorded as paper fills using observed market prices without spending real
+funds. Paper results do not establish live fill quality. Adding a bundler key
+alone does not enable live trading: enable Live explicitly and satisfy the
+grant, funding and execution checks shown by the app. Upgrade any time with
 `merrymen update` (stops the band, installs, restarts — no Windows file-lock).
 
 ---
@@ -201,7 +221,7 @@ gone), and lets you fund it. **Pick your ground:**
   treat the account like a hot wallet — your caps are the seatbelt, start small.
   No faucet: send ETH (gas) + USDG (capital) from your own wallet or an exchange.
 
-Per-trade size, the asset and contract allowlists, a zero native-ETH limit and
+Per-call size, the asset and contract permissions, signed native-value limits and
 the key's expiry are enforced **by the account contract on every operation**.
 The daily total, the drawdown breaker and the trades-per-day count live in the
 worker — they tighten what the chain already allows, and a compromised worker
@@ -398,6 +418,7 @@ is the headless fallback):
 | `llm-strategist` | Claude proposes typed buy/sell/hold at decision windows; deterministic code validates and disposes — the model never sees an address or emits calldata. Needs an Anthropic key |
 | `even-keel` 🏹 | Keeps the basket at equal weight — trims winners, tops up laggards — to harvest mean reversion. **Merry Circle** (holder-only) |
 | `dip-hunter` 🏹 | Concentrates each tick on the basket token furthest below its rolling high. **Merry Circle** (holder-only) |
+| `trencher` | Memecoin discovery and position management with liquidity, momentum and exit checks; live execution and fast mode require separate opt-ins |
 
 ### Write your own
 
@@ -542,6 +563,10 @@ ship — weighted by tier ([governance](https://merrymen.dev/governance)). Thres
   → simulate → execute → record; the Telegram bridge + PC-control layer; the
   backtest harness (`src/backtest.ts`) that runs real strategies through the real
   policy layer over synthetic prices.
+- `services/brain` — Python research service: evidence evaluation, structured
+  decisions and model budgets; execution remains in the worker.
+- `site` — public website and current brand assets.
+- `sdk` — client SDK and build tooling.
 - `contracts` — the on-chain drawdown breaker: `BreakerRegistry` +
   `KernelBreakerPolicy` (Kernel v3 module type 5 — fails every UserOp once
   tripped). `npm test -w @merrymen/contracts`; deployment waits on a funded key.
