@@ -19,10 +19,167 @@
  * exactly that reason — the budget is the risk control, not the analysis.
  */
 
+import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
 import type { Snapshot, Strategy, Tick } from "./types";
 import type { Why } from "./reasons";
 import type { TrenchBrainOrder } from "../trencher-brain";
+
+/**
+ * WHY A CANDIDATE COULD NOT BE PRICED WELL ENOUGH TO OPEN A POSITION.
+ *
+ * ── A STABLE KIND, NEVER PROSE ───────────────────────────────────────────
+ *
+ * The obvious way to fix a vague refusal is to carry the pricer's own sentence
+ * through to the owner. It is the wrong one here. Those sentences embed a live
+ * pool balance and a divergence percentage (`venues/pool-price.ts`), so they
+ * change every time anyone trades — and this refusal is emitted per candidate
+ * per tick into `events`, which has no dedupe (`addEvent`, store.ts) and no
+ * pruning. `index.ts` already settled the same question for the sibling warn:
+ * "Key on the refusal KIND, never the prose."
+ *
+ * So the kind travels, the sentence is written here in advance, and the live
+ * figures stay in the rate-limited `[price] refusing to value` warn that
+ * already carries them once per change rather than once per tick.
+ *
+ * ── AND WHY "NOBODY ANSWERED" AND "A QUOTE OF ZERO" ARE SEPARATE MEMBERS ─
+ *
+ * They are different facts, and folding them together is the one mistake this
+ * repo refuses everywhere it counts (see `liquidityUsdg` in
+ * packages/core/src/tokens.ts: absence is a real value, never 0). An owner
+ * told "its quote came back at zero" about a token no pricer ever looked at
+ * would go hunting for a broken pool that does not exist.
+ */
+export type UnpriceableCause =
+  | "no-quote"
+  | "stale-price"
+  | "zero-price"
+  | "curve-priced"
+  | "v4-priced"
+  | "feed-priced"
+  | "unknown-source"
+  | "not-watched";
+
+/** The quote fields this needs. Typed from `PriceQuote` so a new SOURCE breaks the build. */
+type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
+
+/**
+ * The gate and its explanation, from ONE expression.
+ *
+ * `priceable` was four booleans ANDed at the call site while the refusal was a
+ * fixed string in another file, so the two could drift — and they had. That
+ * string blamed "the pool guards" both for a token priced perfectly well off a
+ * v4 pool and for a token no pricer ever found, which is precisely the
+ * confusion `shouldEnter`'s own header says it exists to prevent. Deriving the
+ * boolean FROM the cause makes the drift unrepresentable rather than merely
+ * fixed.
+ *
+ * `requirePoolSource` is the CALLER'S POLICY, not a fact about the quote: a v4
+ * or curve mark is good enough to VALUE a holding and deliberately not good
+ * enough to authorise a new buy — `lastUnpriceable` in index.ts draws the same
+ * line for the scout budget, and the two must agree.
+ *
+ * Returns null when the candidate is priceable.
+ */
+export function unpriceableCause(
+  quote: QuoteEvidence | undefined,
+  requirePoolSource: boolean,
+): UnpriceableCause | null {
+  if (!quote) return "no-quote";
+  if (quote.stale) return "stale-price";
+  if (quote.price8 <= 0n) return "zero-price";
+  if (!requirePoolSource) return null;
+  switch (quote.source) {
+    case "pool":
+      return null;
+    case "curve":
+      return "curve-priced";
+    case "v4":
+      return "v4-priced";
+    case "chainlink":
+    case "broker":
+      return "feed-priced";
+    default: {
+      // A SWITCH RATHER THAN A CATCH-ALL, and this is the reason. An `else` here
+      // would classify a future `PriceQuote.source` as a stock feed and tell an
+      // owner a DEX quote came from one — the original bug's exact shape, in the
+      // one branch no test sweep can reach, because a sweep's alphabet is a copy
+      // of the union rather than the union.
+      //
+      // The `never` makes adding a source a COMPILE error, so somebody has to
+      // decide. The return is what happens if one is ever added without that
+      // decision reaching here: refuse, and say only what is known.
+      const unhandled: never = quote.source;
+      void unhandled;
+      return "unknown-source";
+    }
+  }
+}
+
+/**
+ * The two fields TOGETHER, so a call site cannot set one and forget the other.
+ *
+ * The pair has two illegal states — priceable with a cause, and unpriceable
+ * without one — and both are silent when they happen: the first hides a reason
+ * nothing will ever read, the second makes the owner's note say "nobody
+ * recorded why" about a tick that knew perfectly well. Neither shows up in a
+ * typecheck, so the pair is built in one place and spread at the call sites
+ * rather than assembled field by field.
+ */
+export function priceability(
+  quote: QuoteEvidence | undefined,
+  requirePoolSource: boolean,
+): { priceable: boolean; unpriceable?: UnpriceableCause } {
+  const cause = unpriceableCause(quote, requirePoolSource);
+  return cause === null ? { priceable: true } : { priceable: false, unpriceable: cause };
+}
+
+/**
+ * A token the tick was never asked to price, which is not a pricing failure.
+ *
+ * Its own constant because it is a fact about the WATCH SET rather than about
+ * a quote — `unpriceableCause` is handed a quote and must not be able to guess
+ * it (see the test that pins exactly that).
+ */
+export const NOT_WATCHED = { priceable: false, unpriceable: "not-watched" } as const;
+
+/**
+ * What the owner actually reads. One sentence per cause, all written here.
+ *
+ * Short on purpose: the note these land in is prefixed with
+ * `trencher: passing on <symbol> — `, and Telegram slices an event at 160
+ * characters (`telegram/reads.ts`), so a long sentence loses its own ending —
+ * which for a refusal means losing the half that says what happened.
+ *
+ * Each is a bare fact with no lead-in, because the note already supplies the
+ * subject and one em-dash. "passing on CATE — can't be priced — no venue…"
+ * reads as two sentences fighting; the siblings below ("only $12,000 deep")
+ * set the register.
+ */
+const UNPRICEABLE_WHY: Record<UnpriceableCause, string> = {
+  // "NO USABLE PRICE", not "no venue answered" — the two are different and the
+  // absence cannot tell them apart. A token is missing from the tick's quotes
+  // both when nothing could be found to price it AND when a pool answered and
+  // the answer was refused (too thin, divergent, an extortionate fee). The
+  // live case that prompted all this was the second kind: a pool quoted
+  // $11,926 against a $25,000 floor. Which of the two it was is in the
+  // `[price] refusing to value` warn, which carries the figures once per
+  // change; claiming it here would be guessing.
+  "no-quote": "no venue gave a usable price this tick",
+  "stale-price": "its price stopped updating",
+  "zero-price": "its quote came back at zero",
+  "curve-priced": "priced off its bonding curve, which has no oracle — enough to value it, not to buy it",
+  "v4-priced": "priced off a v4 pool, which has no oracle — enough to value it, not to buy it",
+  "feed-priced": "the only price under this symbol is a stock feed, not this token's own market",
+  // BOTH AXES, because the check is both. The site tests symbol AND address,
+  // and the symbol is the conjunct that fails on the ordinary path: discovery
+  // records a token under its on-chain `symbol()` casing, the owner is told to
+  // add it, and they type it differently — so a sentence naming only the
+  // address is false exactly when the owner could check it and see a token
+  // sitting at that address. Vague would have been safer than precisely wrong.
+  "not-watched": "no watched token matches that symbol and address",
+  "unknown-source": "priced from a source this strategy doesn't know how to judge",
+};
 
 /** What the tick knows about a token it might enter. All chain-derived. */
 export interface Candidate {
@@ -30,8 +187,10 @@ export interface Candidate {
   symbol: string;
   token: `0x${string}`;
   decimals: number;
-  /** Passed the depth + divergence guards this tick. */
+  /** Had pool-grade evidence to OPEN on this tick — see `unpriceableCause`. */
   priceable: boolean;
+  /** Why not, when `priceable` is false. Absent means nobody recorded it. */
+  unpriceable?: UnpriceableCause;
   /** USD depth of the shallowest leg of its route. */
   liquidityUsd: number;
   /** Fully diluted value — supply × price. NOT float; see token-stats.ts. */
@@ -123,7 +282,12 @@ export function shouldEnter(c: Candidate, cfg: TrencherConfig, nowSec: number): 
   if (![c.liquidityUsd, c.fdvUsd, c.ageSec].every(Number.isFinite)) {
     return { enter: false, why: "incomplete market data" };
   }
-  if (!c.priceable) return { enter: false, why: "can't be priced — the pool guards refused it" };
+  // An UNSET cause reads as "nobody recorded why", never as "there is no
+  // reason". The field is optional so that a caller written before it existed
+  // still refuses — it must not be able to claim an explanation it never had.
+  if (!c.priceable) {
+    return { enter: false, why: c.unpriceable ? UNPRICEABLE_WHY[c.unpriceable] : "can't be priced — nobody recorded why" };
+  }
   if (c.liquidityUsd < cfg.minLiquidityUsd) {
     return { enter: false, why: `only $${Math.round(c.liquidityUsd).toLocaleString()} deep` };
   }

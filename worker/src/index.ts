@@ -169,7 +169,7 @@ import {
   type ResolvedConfig,
 } from "./settings";
 import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
-import { TRENCHER_DEFAULTS, TRENCHER_FAST, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
+import { NOT_WATCHED, TRENCHER_DEFAULTS, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
@@ -4214,7 +4214,12 @@ async function main() {
         const quote = lastPrices.get(t.symbol);
         out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
           ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),
-          priceable: !!quote && !quote.stale && quote.price8 > 0n && quote.source === "pool",
+          // Pool-grade evidence REQUIRED to open here, hence `true`: a v4 or
+          // curve mark values a holding and does not authorise a buy, which is
+          // the same line `lastUnpriceable` draws for the scout budget below.
+          // The verdict and its explanation come from one call so they cannot
+          // disagree — they did, and the owner read the disagreement.
+          ...priceability(quote, true),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
       }
@@ -4238,7 +4243,14 @@ async function main() {
         decimals: c.decimals,
         // Priceable means THIS tick could price it, not that discovery once
         // could — a pool that has since thinned must not still read as fine.
-        priceable: !!quote && !quote.stale && quote.price8 > 0n,
+        //
+        // A MISSING `sameToken` IS ITS OWN ANSWER, not a missing quote. Both
+        // arrive here as an undefined `quote`, but one means no pricer
+        // answered and the other means this address was never watched — or
+        // that a coin is wearing a watched token's symbol, which is what the
+        // comment above is about. Telling an owner "no venue answered" about a
+        // token nothing was ever asked to price sends them to the wrong place.
+        ...(sameToken ? priceability(quote, false) : NOT_WATCHED),
         liquidityUsd: lastLiquidityUsd.get(c.address.toLowerCase()) ?? c.liquidityUsd,
         fdvUsd: c.fdvUsd,
         ageSec: Math.max(0, nowSec - c.firstSeen),

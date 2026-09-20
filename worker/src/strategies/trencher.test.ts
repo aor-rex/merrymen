@@ -46,10 +46,11 @@ describe("shouldEnter — every condition must hold", () => {
     assert.equal(shouldEnter(candidate(), cfg, NOW).enter, true);
   });
 
-  it("REFUSES anything the pool guards wouldn't price", () => {
+  it("REFUSES anything it had no price for", () => {
     const v = shouldEnter(candidate({ priceable: false }), cfg, NOW);
     assert.equal(v.enter, false);
-    assert.match(v.enter === false ? v.why : "", /can't be priced/);
+    // No cause recorded, so it must say that rather than name one.
+    assert.match(v.enter === false ? v.why : "", /nobody recorded why/);
   });
 
   it("REFUSES a pool too thin to leave", () => {
