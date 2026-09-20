@@ -171,6 +171,14 @@ describe("fast Trencher exits", () => {
     assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.0012), TRENCHER_DEFAULTS).exit, false);
   });
+
+  it("allows established high-value memecoins in fast mode while rejecting invalid data", () => {
+    assert.equal(shouldEnter(candidate({ fdvUsd: 400_000_000, ageSec: 365 * 86400 }), TRENCHER_FAST, NOW).enter, true);
+    for (const fdvUsd of [NaN, Infinity, -Infinity]) {
+      assert.equal(shouldEnter(candidate({ fdvUsd }), TRENCHER_FAST, NOW).enter, false);
+    }
+    assert.equal(shouldEnter(candidate({ fdvUsd: 400_000_000, liquidityUsd: 5000 }), TRENCHER_FAST, NOW).enter, false);
+  });
   it("exits after 30 minutes even at a flat price", () => {
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_DEFAULTS).exit, false);
@@ -273,6 +281,21 @@ describe("the unpriceable exit, once it can actually be reached", () => {
     // fires, and it sizes from the holding, not the ledger.
     assert.equal(intents.length, 1);
     assert.equal((intents[0] as { sellAmountRaw: bigint }).sellAmountRaw, 3n * 10n ** 18n);
+  });
+
+  it("respects smaller Brain-approved entries without increasing them to five dollars", async () => {
+    for (const amount of [2, 5, 10, 0, NaN, Infinity]) {
+      const d = deps({ open: () => [], candidates: () => [candidate()], brainRequired: true,
+        brainOrder: () => ({ side: "buy", usdgAmount: amount, decisionId: "approved" }) });
+      const orders = await run(makeTrencher(d as never), snap());
+      if (!Number.isFinite(amount) || amount <= 0) assert.equal(orders.length, 0);
+      else {
+        const order = orders[0];
+        assert.ok(order?.kind === "swap");
+        assert.equal(order.notionalUsdg, BigInt(Math.min(amount, 5) * 1e6));
+      }
+      assert.equal((await run(makeTrencher(d as never), snap({ perTradeCapUsdg: 1_000_000n }))).length, 0);
+    }
   });
   it("exits only the vault quantity when the same asset also sits in the account", async () => {
     const custodyVault="0x00000000000000000000000000000000000000f1" as const;
