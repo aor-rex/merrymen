@@ -1,4 +1,5 @@
 import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -3967,6 +3968,23 @@ async function main() {
           // the most important one — two thirds of graduated pools charge over
           // 50% a trade. Record it so the owner is told the token was seen and
           // turned down, rather than left looking unseen.
+          //
+          // INTO `refused`, NOT STRAIGHT INTO `poolRefusals`. Writing the map
+          // directly is what made this reason unreachable: `poolRefusals` is
+          // rebuilt wholesale from `refused` below, and `refused` still held
+          // this token's ORIGINAL v3 row — so a pool measured and turned down
+          // for an 86% fee was reported to the owner as "no Uniswap v3 pool
+          // against USDG or WETH", and the curve pass could then replace even
+          // that with a sentence about a bonding curve it never consulted.
+          //
+          // Replacing the row also fixes the dedupe key, which is built from
+          // `kind`: `v4-extortionate-fee` and `no-pool` are different facts and
+          // must be able to notify separately.
+          upsertRefusal(refused as unknown as RefusalRow[], {
+            symbol: t.symbol,
+            kind: `v4-${r.usable.kind}`,
+            reason: r.usable.reason,
+          });
           poolRefusals.set(t.symbol, r.usable.reason);
           continue;
         }
@@ -4044,11 +4062,19 @@ async function main() {
       // A curve refusal REPLACES the pool's "no-pool" for that token: the pool
       // pricer's reason would say there is no pool, which is true and unhelpful
       // once we know there is a curve and why it was not good enough.
+      //
+      // ONLY "no-pool", though, which is what that sentence always meant and
+      // not what the code did. It replaced whatever was there — including a v4
+      // verdict recorded moments earlier by a pass that DID find a pool and DID
+      // measure it. Overwriting "this pool charges 86% a trade" with "I know
+      // this token but not where it trades" replaces a measurement with its
+      // opposite. A row that already names a venue keeps it.
       for (const r of curveRes.refused) {
-        const i = refused.findIndex((x) => x.symbol === r.symbol);
-        const row = { symbol: r.symbol, kind: `curve-${r.kind}`, reason: r.reason };
-        if (i >= 0) refused[i] = row as (typeof refused)[number];
-        else refused.push(row as (typeof refused)[number]);
+        upsertRefusal(refused as unknown as RefusalRow[], {
+          symbol: r.symbol,
+          kind: `curve-${r.kind}`,
+          reason: r.reason,
+        });
       }
     }
 
