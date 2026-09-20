@@ -1,5 +1,5 @@
 import { erc20Abi, parseAbi, type Address } from "viem";
-import { trencherPermissions, type TrencherPermission } from "./trencher-vault";
+import { trencherAddresses, trencherPermissions, type TrencherPermission } from "./trencher-vault";
 import { PolicyFlags } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toTimestampPolicy } from "@zerodev/permissions/policies";
@@ -129,6 +129,7 @@ export function allowedSpenders(
   v4AdapterAddress?: Address,
   ponsAdapterAddress?: Address,
   ponsClassVaultAddress?: Address,
+  trencherVaultAddress?: Address,
 ): Address[] {
   return [
     // Rialto is OPT-IN, and off by default — see WallOptions.allowRialto. An
@@ -176,6 +177,23 @@ export function allowedSpenders(
     // but that it holds for exactly one owner and has no code path that names
     // anyone else.
     ...(ponsClassVaultAddress ? [ponsClassVaultAddress] : []),
+    // The Trencher vault, on exactly the class vault's terms and for exactly
+    // the same reason: `buy()` pulls cash from the owner with transferFrom, so
+    // it must be nameable inside the capped USDG approve. It gains no approve
+    // permission of its own.
+    //
+    // IT USED TO HAVE ONE, and that is why this entry exists. `trencherPermissions`
+    // carried its own USDG `approve` scoped EQUAL(vault); spread into the array
+    // below, it collided with the router approve on Kernel's (target, selector)
+    // key and every Trencher wall reverted at validation with
+    // `AA23 reverted duplicate permissionHash`. Naming the vault here is the
+    // same authority expressed once instead of twice.
+    //
+    // The caveat the class vault answers applies unchanged: it keeps what it
+    // buys, which is its purpose, and what makes that safe is that it holds for
+    // exactly one owner, sends sale proceeds only to that owner, and has no
+    // code path that names anyone else (contracts/TrencherVault.sol).
+    ...(trencherVaultAddress ? [trencherVaultAddress] : []),
   ];
 }
 
@@ -434,12 +452,22 @@ export function buildCallPermissions(
         "address. Pass ponsClassVaultFactoryAddress alongside ponsClassVaultAddress.",
     );
   }
+  // The Trencher vault joins the spender list rather than carrying its own
+  // USDG approve — see `allowedSpenders` and `trencherPermissions` for why two
+  // approves on one target made the whole wall uninstallable.
+  //
+  // `trencherAddresses` is the same validator `trencherPermissions` uses, so a
+  // half-configured vault throws here exactly as it does there rather than
+  // being silently dropped from the spender list while its call permissions
+  // are built.
+  const trencherVault = trencherAddresses(opts)?.vault;
   const spenders = allowedSpenders(
     opts.allowRialto,
     opts.allowUniswapV4,
     adapter,
     ponsAdapter,
     classVault,
+    trencherVault,
   );
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the

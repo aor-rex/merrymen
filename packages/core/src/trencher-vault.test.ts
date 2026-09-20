@@ -12,13 +12,34 @@ test("autonomous permission is explicit and cannot grant recovery or arbitrary a
   assert.equal(grantTrencher(opts),null);
   assert.ok(grantTrencher({...opts,grantFeatures:[GRANT_TRENCHER]}));
   const permissions=trencherPermissions(opts,self,10_000_000n);
-  assert.deepEqual(permissions.map(p=>p.functionName),["approve","buy","sell","deploy"]);
-  assert.equal(permissions[0]!.target,CASH.USDG);
-  assert.deepEqual(permissions[0]!.args[1],{condition:ParamCondition.LESS_THAN_OR_EQUAL,value:5_000_000n});
-  assert.deepEqual(permissions[3]!.args[0],{condition:ParamCondition.EQUAL,value:self});
+  // NO `approve` OF ITS OWN, and that absence is the point rather than a
+  // narrowing. It used to carry one — USDG approve, EQUAL(vault) — which
+  // collided with the router approve on Kernel's (target, selector) key and
+  // made every Trencher wall revert with `AA23 duplicate permissionHash`. The
+  // vault is named in the router approval's ONE_OF list instead, asserted
+  // below and in wall-duplicate-permission.test.ts.
+  //
+  // "No approve" is now proven by the TYPE — `functionName` narrows to
+  // "buy" | "sell" | "deploy", so a runtime check for "approve" does not
+  // compile. The deepEqual below is what pins the set; that nothing here
+  // targets cash is asserted instead, since that is not type-level.
+  assert.deepEqual(permissions.map(p=>p.functionName),["buy","sell","deploy"]);
+  assert.ok(!permissions.some(p=>p.target===CASH.USDG),"nothing of its own targets cash");
+  assert.equal(permissions[0]!.target,opts.trencherVaultAddress);
+  // The 5 USDG entry ceiling still binds, now on `buy` rather than the approve.
+  assert.deepEqual(permissions[0]!.args[3],{condition:ParamCondition.LESS_THAN_OR_EQUAL,value:5_000_000n});
+  assert.deepEqual(permissions[2]!.args[0],{condition:ParamCondition.EQUAL,value:self});
   const wall=buildCallPermissions({perTradeUsdg:3,dailyUsdg:20,maxOpsPerDay:10,maxDrawdownBps:500,expiryDays:7} as never,self,opts);
   const buy=wall.find(p=>p.functionName==="buy" && p.target===opts.trencherVaultAddress);
   assert.ok(buy); assert.deepEqual(buy.args?.[3],{condition:ParamCondition.LESS_THAN_OR_EQUAL,value:3_000_000n});
+  // The vault must be approvable for cash, or `buy()` cannot pull it and the
+  // rail is dead in a quieter way than before.
+  const approve=wall.find(p=>p.functionName==="approve" && p.target===CASH.USDG);
+  assert.ok(approve,"the wall still carries exactly one USDG approve");
+  assert.ok(
+    (approve.args?.[0]?.value as readonly string[]).includes(opts.trencherVaultAddress),
+    "and the vault is inside it",
+  );
 });
 test("incomplete or malformed custody permissions fail closed",()=>{
   for(const bad of [{trencherVaultAddress:opts.trencherVaultAddress},{...opts,trencherFactoryAddress:"0x"},{...opts,trencherVaultAddress:"0x"+"0".repeat(40)},{...opts,trencherFactoryAddress:opts.trencherVaultAddress}]) {

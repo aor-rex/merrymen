@@ -45,17 +45,46 @@ export function grantTrencher(grant: (TrencherPermission & {grantFeatures?: read
   try { return trencherAddresses(grant); } catch { return null; }
 }
 
-/** Exactly one capped cash approval, buy, sell and idempotent deployment. No recovery or arbitrary approval. */
+/**
+ * Buy, sell and idempotent deployment. No recovery, no arbitrary approval.
+ *
+ * ── WHY THE CASH APPROVAL IS NOT HERE ANY MORE ───────────────────────────
+ *
+ * It used to be this list's first entry: USDG `approve`, EQUAL(vault), capped
+ * at min(cap, 5 USDG). Correct in isolation, and uninstallable in practice.
+ * Kernel's CallPolicy keys every permission by a hash over (target, selector)
+ * and refuses the same key twice — and `buildCallPermissions` spreads this
+ * list into an array that already carries its own USDG `approve` for the
+ * routers. Two entries, one key, so the whole wall reverted at validation:
+ *
+ *   AA23 reverted duplicate permissionHash
+ *
+ * Measured on chain 4663 for agent 0x8e93ba: every entry attempt failed this
+ * way, and re-signing did not help — the owner's new permission id 0x5d8c1f22
+ * failed identically, because the duplicate is inside the wall being
+ * installed rather than left over on chain. No Trencher grant was ever
+ * enableable.
+ *
+ * So the vault is now named in the ROUTER approval's ONE_OF list instead, in
+ * `buildCallPermissions`, which is the one place USDG `approve` may be
+ * described. The authority is the same shape — the vault may be approved to
+ * pull cash and nothing else here may — and `wall-duplicate-permission.test.ts`
+ * pins both halves: no repeated key, and the vault still an approved spender.
+ *
+ * ONE DIFFERENCE, STATED: the merged entry carries the router cap
+ * (`perTradeUsdg`) rather than this function's tighter min(cap, 5 USDG),
+ * because a single entry can only carry one amount condition. TrencherVault
+ * itself caps each buy at 5 USDG and 25 USDG per 24h window on chain, so the
+ * amount that can actually move is unchanged; what moved is where the bound is
+ * enforced. The owner chose this over capping the routers at 5 USDG, which
+ * would have refused every ordinary trade above that.
+ */
 export function trencherPermissions(opts: TrencherPermission, self: Address, cap: bigint) {
   const addresses = trencherAddresses(opts);
   if (!addresses) return [];
   if (cap <= 0n) throw new Error("Trencher needs a positive entry cap");
   const limit = cap < 5_000_000n ? cap : 5_000_000n;
   return [
-    { target: CASH.USDG as Address, valueLimit: 0n, abi: erc20Abi, functionName: "approve", args: [
-      {condition: ParamCondition.EQUAL,value:addresses.vault},
-      {condition: ParamCondition.LESS_THAN_OR_EQUAL,value:limit},
-    ] } as const,
     { target: addresses.vault, valueLimit: 0n, abi: TRENCHER_VAULT_ABI, functionName: "buy", args: [
       null,null,null,{condition:ParamCondition.LESS_THAN_OR_EQUAL,value:limit},null,null,
     ] } as const,
