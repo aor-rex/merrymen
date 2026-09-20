@@ -41,6 +41,23 @@ describe("normalizeWithdrawals — doors sealed into the wall at signing", () =>
     }
   });
 
+  it("rejects bare numbers that would rewrite transfer amounts", () => {
+    // A door named "50" turns "send 50 to cold wallet" into
+    // "send 0x… to cold wallet" — whole-word substitution cannot tell the
+    // amount from the label. Names must contain at least one letter.
+    for (const numeric of ["50", "100", "007"]) {
+      assert.match(
+        normalizeWithdrawals([{ name: numeric, address: A }]).error ?? "",
+        /must contain a letter/,
+        `${numeric} must be rejected`,
+      );
+    }
+    // "50.5" dies even earlier (charset) — still rejected, different message.
+    assert.ok(normalizeWithdrawals([{ name: "50.5", address: A }]).error);
+    // Letters anywhere (even "door50") are fine — they can't match a bare amount.
+    assert.equal(normalizeWithdrawals([{ name: "door50", address: A }]).error, undefined);
+  });
+
   it("rejects bad, duplicate and over-limit entries", () => {
     assert.match(normalizeWithdrawals([{ name: "x1", address: "nope" }]).error ?? "", /not a valid 0x/);
     assert.match(

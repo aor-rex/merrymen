@@ -157,6 +157,17 @@ describe("runWallBattery", () => {
     assert.equal(result.cases[0]?.rule, "transfer-recipient-allowlist");
   });
 
+  it("a newly signed grant with NO doors holds at not-permitted, not the allowlist", () => {
+    // The actual new-grant shape: marker present (lockstep), doors recorded as
+    // []. The policy returns transfer-not-permitted before ever reaching the
+    // allowlist check — the battery must expect exactly that, or it cries
+    // BREACH about the safest possible grant.
+    const g = grant(["transfer", TRADEABLE_V2], undefined, undefined, []);
+    const result = runWallBattery(g, NOW);
+    assert.equal(result.allHeld, true);
+    assert.equal(result.cases[0]?.rule, "transfer-not-permitted");
+  });
+
   it("uses the requested watchlist as allowedAssets without widening sell permissions", () => {    const aapl = STOCK_TOKENS.find((token) => token.symbol === "AAPL")!;
     const legacy = grant(["transfer"]);
     const limits = limitsFromGrant(legacy, [aapl]);

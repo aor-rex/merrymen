@@ -272,6 +272,10 @@ export function normalizeWithdrawals(
     if (name.length < 2 || name.length > 24) return { doors: [], error: `door name "${name}" must be 2–24 characters` };
     if (!/^[a-z0-9][a-z0-9 _-]*$/i.test(name)) return { doors: [], error: `door name "${name}" may only use letters, numbers, spaces, dashes and underscores` };
     if (/^0x/i.test(name)) return { doors: [], error: `door name "${name}" must not look like an address` };
+    // A bare number collides with AMOUNTS, not commands: substitution is
+    // whole-word, so a door named "50" rewrites the "50" in "send 50 to cold
+    // wallet" into an address. Names must contain at least one letter.
+    if (!/[a-z]/i.test(name)) return { doors: [], error: `door name "${name}" must contain a letter — a bare number would rewrite transfer amounts` };
     if (RESERVED_DOOR_NAMES.has(name.toLowerCase())) return { doors: [], error: `door name "${name}" is reserved — pick another label` };
     if (!ADDRESS_RE_STRICT.test(address)) return { doors: [], error: `"${address}" is not a valid 0x address` };
     const addr = address.toLowerCase() as `0x${string}`;
