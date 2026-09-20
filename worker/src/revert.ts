@@ -357,6 +357,28 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
       "needs ETH at the smart account — not a retry.",
   },
   {
+    // ABOVE the generic AA23 entry, because the generic detail is WRONG for this
+    // one and the remedy it offers would send an owner looking in the wrong
+    // place. "duplicate permissionHash" is not the policy turning a trade down:
+    // the operation carries an enable for a permission the validator already
+    // knows, so validation reverts before any policy is consulted. The trade
+    // itself was never judged.
+    //
+    // Measured on 4663, 2026-09-20: agent 0x8e93ba produced 20 of these in 3.5
+    // hours, every one of them after a Brain BUY and an entry the strategy had
+    // already approved — and every one was reported as `gas-unreadable`, a rule
+    // that reads as a transient bundler hiccup and invites the retry that has
+    // been running ever since. Nothing about it is transient.
+    re: /duplicate permissionHash/i,
+    rule: "wall-refused",
+    retryable: false,
+    detail:
+      "the account refused this operation during validation: it carries an enable for a session permission the " +
+      "account already knows, and the same permission cannot be installed twice. This is not the policy turning the " +
+      "trade down — the trade was never reached. Retrying cannot change it, because nothing about the operation or " +
+      "the market decides it. Re-signing the grant mints a fresh session key and clears it.",
+  },
+  {
     // AA23/AA24 are validation failures. On this account the validator IS the
     // wall, so a refusal here is a permission the grant does not carry.
     re: /AA23|AA24|signature error|InvalidSignature|PolicyFailed/i,

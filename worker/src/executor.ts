@@ -30,6 +30,7 @@ import {
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
+import { classifyRevert } from "./revert";
 
 export interface Call {
   to: `0x${string}`;
@@ -696,13 +697,45 @@ export async function createAgentExecutor(opts: {
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,
       );
       if (!bounded.ok) {
+        // ── WHY THE BUNDLER'S ERROR IS CLASSIFIED, NOT JUST QUOTED ────────
+        //
+        // `boundGas` can only ever answer `gas-unreadable` here, because all it
+        // saw was two nulls. But the reason it saw nulls is sitting in
+        // `estimateError`, and it is frequently not about gas at all: when
+        // validation reverts, the bundler declines to estimate and reports the
+        // revert. Filing that as `gas-unreadable` is a misattribution with a
+        // cost — `reject_rule` is what the ledger, the feed vocabulary and the
+        // owner's remedy all key on, and `gas-unreadable` reads as a transient
+        // bundler hiccup worth retrying.
+        //
+        // Measured on 4663, 2026-09-20: 20 consecutive refusals of agent
+        // 0x8e93ba's Trencher entries were `AA23 reverted duplicate
+        // permissionHash` — a permanent, account-level condition needing a
+        // re-signed grant — every one filed as `gas-unreadable` and retried
+        // every few minutes, indefinitely.
+        //
+        // ONLY A NON-RETRYABLE CLASS IS ALLOWED TO RENAME THE REFUSAL. An
+        // unfamiliar message stays `gas-unreadable`, which is the honest answer
+        // when we genuinely do not know why the estimate failed, and a
+        // retryable class stays that way too: those really may be transient, and
+        // relabelling one would suppress a trade that deserves another tick.
+        //
+        // NOTHING ABOUT THE MONEY CHANGES. The operation is refused before
+        // signing either way; only the name on the refusal and the sentence
+        // under it differ.
+        const diagnosed = estimateError ? classifyRevert(estimateError) : null;
+        const renamed = diagnosed && !diagnosed.retryable && diagnosed.rule !== "unclassified" ? diagnosed : null;
         // BEFORE the send, so nothing is spent and no 'submitted' row exists.
         // This is a pre-broadcast rejection in the same shape as a policy one.
         throw new GasRefused(
-          bounded.rule,
+          renamed ? renamed.rule : bounded.rule,
           // The bundler's own words first when we have them — they are the
           // diagnosis; ours is the policy.
-          estimateError ? `${estimateError} — ${bounded.detail}` : bounded.detail,
+          renamed
+            ? `${estimateError} — ${renamed.detail}`
+            : estimateError
+              ? `${estimateError} — ${bounded.detail}`
+              : bounded.detail,
         );
       }
 

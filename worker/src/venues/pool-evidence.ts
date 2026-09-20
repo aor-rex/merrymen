@@ -79,13 +79,81 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
   return job;
 }
 
-export async function readPoolEvidence(poolId: string, token: string): Promise<PoolEvidence> {
+/**
+ * EACH LEG GETS ITS OWN CLOCK.
+ *
+ * ── WHY THE PAIR MUST NOT SHARE ONE DEADLINE ─────────────────────────────
+ *
+ * These two reads were joined with `Promise.all` and the caller raced the
+ * single combined promise against one timer. `Promise.all` settles only when
+ * BOTH legs settle, so a candle set that arrived in a second was thrown away
+ * whenever the trade leg was slow — and the caller, holding only a nullable
+ * object, could not tell which leg had missed or even that one had made it.
+ *
+ * That is not a rare interleaving. The two legs use different cache keys, so
+ * they cannot share a fleet pacing slot (`fleet-feed-cache.ts`, 3s spacing on
+ * one row shared by every tenant): on a completely idle gate the second leg
+ * cannot BEGIN before ~3s, leaving under 2s of a 5s budget for its round trip.
+ * One other request queued ahead and the miss is certain. Measured on the
+ * fleet 2026-09-20: 29% of Trencher Brain reviews were handed no evidence at
+ * all, and because the caller's log drove both halves off the same nullable,
+ * every one of them printed `candles=budget trades=budget` — a line that
+ * cannot distinguish "both legs missed" from "one did".
+ *
+ * So the budget is applied PER LEG, here, where the two are still separate. A
+ * late leg degrades to a `budget` failure and the other leg's real data
+ * survives. `summarizeEvidence` already models exactly this — independent
+ * freshness gates and independent failure fields — so nothing downstream had
+ * to change to accept it.
+ *
+ * ── AND WHAT THIS DELIBERATELY DOES NOT DO ───────────────────────────────
+ *
+ * It issues no additional requests and shortens no timeout, so the provider
+ * quota is untouched. Abandoning a leg does not cancel it: the underlying
+ * fetch runs on and fills the memo, so the request already paid for warms the
+ * next review rather than being wasted. And a leg that misses its budget is
+ * recorded as FAILED, never as empty — `observedAt` stays unset, so nothing
+ * downstream can mistake it for a reading of no activity.
+ */
+export const EVIDENCE_BUDGET_MS = 5000;
+
+/**
+ * The two reads, injectable.
+ *
+ * The race had no seam at all, so the one behaviour that matters here — what
+ * happens when ONE leg is late — could not be tested, and it shipped wrong.
+ * Production passes nothing and gets the real reads.
+ */
+export interface EvidenceLegs {
+  candles: () => Promise<EvidenceRead<PriceBar>>;
+  trades: () => Promise<EvidenceRead<MarketTrade>>;
+}
+
+export async function readPoolEvidence(
+  poolId: string,
+  token: string,
+  budgetMs = EVIDENCE_BUDGET_MS,
+  legs?: EvidenceLegs,
+): Promise<PoolEvidence> {
   if (!/^0x([\da-f]{40}|[\da-f]{64})$/i.test(poolId) || !/^0x[\da-f]{40}$/i.test(token)) throw new Error('Invalid market identity');
   poolId = poolId.toLowerCase(); token = token.toLowerCase();
-  const [candles, trades] = await Promise.all([
-    read(`${poolId}:${token}:5m`, `${poolId}/ohlcv/minute?aggregate=5&limit=24&currency=usd&token=${token}`, b => parsePriceBars(b, token)),
-    read(`${poolId}:${token}:trades`, `${poolId}/trades?token=${token}`, b => parseTrades(b, token)),
-  ]);
+  const within = async <T>(p: Promise<EvidenceRead<T>>): Promise<EvidenceRead<T>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // `failed: true` with no `observedAt` — a budget miss is an absence of
+    // evidence, and must never read as evidence of absence.
+    const missed: EvidenceRead<T> = { failed: true, failure: 'budget', data: [] };
+    try {
+      return await Promise.race([
+        p.catch(() => missed),
+        new Promise<EvidenceRead<T>>(resolve => { timer = setTimeout(() => resolve(missed), budgetMs); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  const candleLeg = legs
+    ? legs.candles()
+    : read(`${poolId}:${token}:5m`, `${poolId}/ohlcv/minute?aggregate=5&limit=24&currency=usd&token=${token}`, b => parsePriceBars(b, token));
+  const tradeLeg = legs ? legs.trades() : read(`${poolId}:${token}:trades`, `${poolId}/trades?token=${token}`, b => parseTrades(b, token));
+  const [candles, trades] = await Promise.all([within(candleLeg), within(tradeLeg)]);
   return { poolId, token, candles, trades };
 }
 
@@ -105,7 +173,19 @@ export function summarizeEvidence(e: PoolEvidence, now = Date.now()) {
   return { source: 'CoinGecko / GeckoTerminal indexed pool data', poolId: e.poolId, token: e.token,
     candleObservedAt: e.candles.observedAt ?? null, tradeObservedAt: e.trades.observedAt ?? null,
     candleFailure: e.candles.failure ?? null, tradeFailure: e.trades.failure ?? null,
-    completedFiveMinuteBars: bars.length, contiguous, start: first?.time ?? null, end: last ? last.time + 300 : null,
+    // NULL, NOT 0, WHEN THE CANDLE READ DID NOT LAND. `bars` is empty both for
+    // a pool that printed nothing and for a feed we never got an answer from,
+    // and `0 completed bars` is a measurement — a model reading it is being
+    // told this market was quiet. The trade side one line down already got this
+    // right (`fresh(e.trades) ? … : null`); the candle side did not, and the
+    // caveat's own promise that "missing or stale evidence is unknown" was
+    // false for the one figure most likely to be missing.
+    //
+    // `contiguous` goes the same way for the same reason: `false` asserts the
+    // bars we read had a gap, which is not what an unread feed tells us.
+    completedFiveMinuteBars: fresh(e.candles) ? bars.length : null,
+    contiguous: fresh(e.candles) ? contiguous : null,
+    start: first?.time ?? null, end: last ? last.time + 300 : null,
     measuredReturnPct: contiguous && current && first && last ? (last.close / first.open - 1) * 100 : null,
     fiveMinuteLogReturnStdDevPct: returns.length >= 2 ? Math.sqrt(returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length) * 100 : null,
     latestFiveMinuteReturnPct: current && last ? (last.close / last.open - 1) * 100 : null,

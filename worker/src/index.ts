@@ -1,4 +1,4 @@
-import { readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -10233,14 +10233,28 @@ async function main() {
             trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
               // Enrichment cannot block the trading tick or mutate a review after its deadline.
               if (tape) {
+                // THE BUDGET IS NOW SPENT PER LEG, INSIDE readPoolEvidence, so
+                // a slow trade read no longer destroys candles that arrived.
+                // The outer race stays as a hard backstop against a leg that
+                // never settles at all, and is given slack so it cannot preempt
+                // the per-leg budgets and re-create the all-or-nothing it
+                // replaced. Reaching it means the read hung past both legs'
+                // clocks, which is a fault rather than a slow feed.
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const evidence = await Promise.race([
-                  readPoolEvidence(tape.poolId, focus.token).catch(() => null),
-                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 5000); }),
+                  readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
                 ]).finally(() => { if (timer) clearTimeout(timer); });
                 const detail = evidence ? JSON.stringify(summarizeEvidence(evidence)) : 'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
                 inputs.market.signals.technical += `\n${detail}`;
-                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${evidence ? evidence.candles.failure ?? evidence.candles.data.length : 'budget'} trades=${evidence ? evidence.trades.failure ?? evidence.trades.data.length : 'budget'}`);
+                // EACH HALF PRINTS ITS OWN OUTCOME. Both halves used to be
+                // driven off one nullable, so `candles=23 trades=budget` was
+                // literally unprintable and every partial miss was logged as a
+                // total one — which is why the fleet looked like it never got
+                // evidence rather than like it kept throwing half of it away.
+                const half = (r: { failure?: string; data: unknown[] } | undefined) =>
+                  r === undefined ? "no-read" : r.failure ?? r.data.length;
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
               }
               return runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
