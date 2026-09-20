@@ -19,6 +19,7 @@ import {
   carriesOwnerKey,
   chainForId,
   derivationUnreachable,
+  duplicateWallPermissions,
   isHostedMode,
   type Derivation,
   type StoredGrant,
@@ -113,6 +114,39 @@ export async function POST(req: Request) {
   const grant = (await req.json()) as StoredGrant;
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
+  }
+
+  // ── A GRANT THAT CAN NEVER BE INSTALLED ──────────────────────────────────
+  //
+  // Checked BEFORE anything else, and for every mode, because it is the one
+  // defect that makes an agent look perfectly healthy while being unable to
+  // execute a single operation. Kernel's CallPolicy refuses a repeated
+  // (callType, target, selector), so such a grant reverts at validation —
+  // `AA23 duplicate permissionHash` — before any policy is consulted, with
+  // nothing in the message naming the wall or the trade.
+  //
+  // THE CASE THIS IS WRITTEN AGAINST is not a malicious payload. The wall is
+  // built in the signing client, so an owner with a tab open from before a
+  // deploy seals the OLD wall; the server stored it happily and the agent
+  // spent hours refusing every trade. Three re-signs were spent before the
+  // client, rather than the chain, was suspected. One check here turns that
+  // into one sentence at signing time.
+  //
+  // REFUSED, NOT REPAIRED: the permissions sit inside the signed payload, so
+  // de-duplicating them would store something the owner never signed — the
+  // same reasoning as the zero-cap refusal below.
+  const duplicates = duplicateWallPermissions(grant.serialized);
+  if (duplicates.length > 0) {
+    return NextResponse.json(
+      {
+        error:
+          "this permission lists the same contract and function twice, and the account contract refuses to " +
+          "install it — the agent would be unable to make any trade at all. It usually means the page was " +
+          "open from before an update: reload and sign again.",
+        duplicates,
+      },
+      { status: 400 },
+    );
   }
 
   if (isHostedMode()) {

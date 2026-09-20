@@ -57,3 +57,4 @@ export * from "./risk-level";
 // forensics, ported as the pure analysis behind the `onchain` lens.
 export * from "./onchain-forensics";
 export * from "./trencher-vault";
+export * from "./grant-installable";
