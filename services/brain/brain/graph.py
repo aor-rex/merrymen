@@ -466,6 +466,26 @@ class BrainGraph:
         # Applied after parsing rather than trusted to the prompt. A model told
         # it may not size a position will still sometimes size one, and the
         # difference between "asked nicely" and "cannot" is the whole point.
+        # ── A MISSING `action` IS NOT A HOLD ────────────────────────────────
+        #
+        # This defaulted to "hold", and a WRONG action is caught — the schema
+        # types it as a literal, pydantic raises, and the caller turns that into
+        # `output-invalid`. A MISSING one was not caught: the default filled it
+        # in, a hold forces delta to 0 so the delta rule is satisfied, and the
+        # only remaining guard is that the thesis is non-empty. The run then
+        # recorded a MODEL_HOLD, carrying whatever confidence the model happened
+        # to report, for a decision the model never made.
+        #
+        # That is the failure this service exists to refuse: a decision
+        # assembled from a half-parsed answer. It matters most on exactly the
+        # path where it is most likely — a model dropping a key under a
+        # low-effort reasoning hint — and it is invisible downstream, because
+        # "hold" is also the correct answer most of the time.
+        #
+        # Raising here can only ever ADD a refusal. It cannot turn a hold into a
+        # buy, and it cannot change any decision the model actually expressed.
+        if "action" not in data:
+            raise KeyError("model answer carried no `action` key")
         action = str(data.get("action", "hold")).lower()
         delta = int(data.get("suggested_delta_usdg") or 0)
         if not gate.may_size:

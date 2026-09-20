@@ -4250,7 +4250,22 @@ async function main() {
         // that a coin is wearing a watched token's symbol, which is what the
         // comment above is about. Telling an owner "no venue answered" about a
         // token nothing was ever asked to price sends them to the wrong place.
-        ...(sameToken ? priceability(quote, false) : NOT_WATCHED),
+        //
+        // POOL-GRADE REQUIRED HERE TOO, and this used to be the one place it
+        // was not. This site builds ENTRY candidates exactly like the fast one
+        // does, but it asked only "could anything put a number on this?" —
+        // which `lastUnpriceable` below spends twenty lines explaining is the
+        // wrong question for spending: a v4 or curve mark cleared no oracle,
+        // because there is no oracle to clear.
+        //
+        // It was reachable and it ended in a real swap. With fast mode off and
+        // a v4-only token in the basket, `priceable` was true, `shouldEnter`
+        // passed, and the intent carries no custody on this path — so the v4
+        // gate in `bestRoute` is open, `buildTradeCalls` builds a v4 swap, and
+        // the v3-only calldata fence is skipped. `buildTrencherCalls`, which
+        // refuses v4 outright, never runs, because custody is never set here.
+        // The scout dollar budget was the only thing left holding it.
+        ...(sameToken ? priceability(quote, true) : NOT_WATCHED),
         liquidityUsd: lastLiquidityUsd.get(c.address.toLowerCase()) ?? c.liquidityUsd,
         fdvUsd: c.fdvUsd,
         ageSec: Math.max(0, nowSec - c.firstSeen),

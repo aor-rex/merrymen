@@ -263,14 +263,16 @@ describe("a cause names what actually happened", () => {
 });
 
 describe("what each site can and cannot say", () => {
-  it("only the pool-grade site can report a non-pool price", () => {
-    // Site B does not require a pool source, so a v4 or curve quote is
-    // priceable there. If it could emit these causes, one of the two sites
-    // would be describing a policy it does not apply.
+  it("requiring a pool source is what refuses a v4 or curve mark", () => {
+    // `requirePoolSource` is the whole policy in one flag. With it, a mark that
+    // no oracle checked cannot authorise a buy; without it, anything that
+    // produced a number does. Both build sites now pass `true` — see the entry
+    // policy test below for why — so `false` survives only as the shape of the
+    // question, and this pins what each answer means.
     for (const source of ["curve", "v4", "chainlink", "broker"] as const) {
       const q = { stale: false, price8: 100_000_000n, source };
-      assert.equal(unpriceableCause(q, false), null, `site B must accept a ${source} quote`);
-      assert.notEqual(unpriceableCause(q, true), null, `site A must refuse a ${source} quote`);
+      assert.equal(unpriceableCause(q, false), null, `valuation accepts a ${source} quote`);
+      assert.notEqual(unpriceableCause(q, true), null, `entry must refuse a ${source} quote`);
     }
   });
 
@@ -348,16 +350,23 @@ describe("both build sites ask for the verdict rather than recomputing it", () =
     assert.deepEqual(literal, [], "`priceable` is being assigned directly again somewhere in index.ts");
   });
 
-  it("requires pool-grade evidence on the site that opens autonomously", () => {
-    // `true` is the policy, and it must match `lastUnpriceable` below it: a v4
-    // or curve mark values a holding and does not authorise a buy.
-    const hits = INDEX.match(/\.\.\.priceability\(quote, true\)/g) ?? [];
-    assert.equal(hits.length, 1, "exactly one pool-grade build site is expected");
+  it("requires pool-grade evidence at EVERY entry build site", () => {
+    // THE ENTRY POLICY, IN ONE ASSERTION. Both sites build candidates that can
+    // become a buy, so both must ask the spending question rather than the
+    // valuation one — `lastUnpriceable` states the rule at length and the
+    // legacy site used to contradict it. A site that asks `false` here would
+    // let a v4 or curve mark, which no oracle checked, authorise a buy.
+    const entry = INDEX.match(/\.\.\.\(?\s*sameToken \? priceability\(quote, (\w+)\)|\.\.\.priceability\(quote, (\w+)\)/g) ?? [];
+    assert.ok(entry.length >= 2, `expected both build sites, found ${entry.length}`);
+    assert.deepEqual(
+      INDEX.match(/priceability\(quote, false\)/g),
+      null,
+      "no entry build site may accept a non-pool mark as entry-grade",
+    );
   });
 
-  it("does not require it on the legacy site, and names an unwatched token", () => {
-    const hits = INDEX.match(/sameToken \? priceability\(quote, false\) : NOT_WATCHED/g) ?? [];
-    assert.equal(hits.length, 1, "exactly one legacy build site is expected");
+  it("still names an unwatched token rather than calling it unpriced", () => {
+    assert.match(INDEX, /sameToken \? priceability\(quote, true\) : NOT_WATCHED/);
   });
 });
 
