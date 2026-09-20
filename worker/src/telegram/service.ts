@@ -26,7 +26,7 @@ import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { answerCallbackQuery, editMessageText, esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
+import { answerCallbackQuery, editMessageText, esc, getFileUrl, getMe, getUpdates, isCallbackSenderAllowed, sendMessage, setMyCommands, publicBotCommands, type TgCallback, type TgInlineKeyboard, type TgMessage } from "./api";
 import { runAgentTask } from "./agent";
 import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
 import { resolveLlm } from "../llm";
@@ -1074,16 +1074,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // which is the one case the strip exists for. A model that answered only in
     // its reasoning channel has not answered; say that.
     const strippedReply = stripThinkingBlock(reply);
-    await sendMessage(
-      { token },
-      msg.chatId,
+    const safeReply =
       strippedReply ||
-        "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
-    );
+      "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.";
     const afterPending = pending.get(pendingKey);
     const parked = !!afterPending && afterPending !== beforePending;
-    if (!slash) pushHistory(msg.chatId, "assistant", reply.replace(/<[^>]+>/g, ""), turnMemoryIds);
-    await sendMessage({ token }, msg.chatId, reply, parked ? CONFIRM_MARKUP : undefined);
+    if (!slash) pushHistory(msg.chatId, "assistant", safeReply.replace(/<[^>]+>/g, ""), turnMemoryIds);
+    // ONE send: the filtered text, with the Confirm/Cancel keyboard attached
+    // when this turn parked a fresh action. (Two sends used to go out here —
+    // the second carried the RAW reply past the reasoning filter above.)
+    await sendMessage({ token }, msg.chatId, safeReply, parked ? CONFIRM_MARKUP : undefined);
   };
 
   /**
@@ -1170,7 +1170,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
     }
 
-    const { messages, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
+    const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
       if (!warnedUnreachable) {
         deps.note("warn", `Telegram: getUpdates — ${reason}`);
@@ -1184,6 +1184,23 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         await handle(msg, cfg);
       } catch (e) {
         deps.note("warn", `Telegram: error handling message — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    for (const cb of callbacks) {
+      // Inline-button taps resolve through handleCallback (same executor
+      // confirm/cancel branch as a typed /confirm). Same authorization as
+      // messages — and unlike messages there is no /link exception: a tap
+      // can only ever resolve an action, never authorize one. Unauthorized
+      // taps are acknowledged (so the button stops spinning) and dropped.
+      try {
+        const allowedCb = isCallbackSenderAllowed(cb, cfg.telegramAllowlist);
+        if (!allowedCb) {
+          await answerCallbackQuery({ token: cfg.telegramBotToken }, cb.queryId, {});
+          continue;
+        }
+        await handleCallback(cb, cfg);
+      } catch (e) {
+        deps.note("warn", `Telegram: error handling callback — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     if (nextOffset !== stateRef.get().offset) {

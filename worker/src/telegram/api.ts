@@ -66,6 +66,17 @@ export interface TgCallback {
   queryId: string;
 }
 
+/**
+ * May this tap be resolved? Same rule as messages (chat OR sender
+ * allowlisted) — minus the /link exception, which makes no sense for taps: a
+ * tap can only ever resolve an action, never authorize one. Pure so the poll
+ * loop's dispatch gate is unit-testable (an untested gate is how the buttons
+ * once shipped wired to nothing).
+ */
+export function isCallbackSenderAllowed(cb: Pick<TgCallback, "chatId" | "fromId">, allowlist: readonly number[]): boolean {
+  return allowlist.includes(cb.chatId) || allowlist.includes(cb.fromId);
+}
+
 function short(token: string): string {
   return token.length > 8 ? `…${token.slice(-6)}` : "…";
 }
@@ -121,24 +132,28 @@ export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null
   return { bot: { id: r.id, username: r.username } };
 }
 
-/** Long-poll for new messages. `offset` is the last handled updateId + 1. */
+/** Long-poll for new messages AND inline-button taps. `offset` is the last handled updateId + 1. */
 export async function getUpdates(
   opts: TelegramOpts,
   offset: number,
   timeoutSec = 25,
-): Promise<{ messages: TgMessage[]; nextOffset: number; reason?: string }> {
+): Promise<{ messages: TgMessage[]; callbacks: TgCallback[]; nextOffset: number; reason?: string }> {
   const { result, reason } = await call(opts, "getUpdates", {
     offset,
     timeout: timeoutSec,
-    allowed_updates: ["message"],
+    // BOTH routes into the bot: typed messages AND Confirm/Cancel taps.
+    // Subscribing "message" only would deliver the keyboards while silently
+    // dropping every tap on them (the buttons would spin forever).
+    allowed_updates: ["message", "callback_query"],
   });
-  if (!Array.isArray(result)) return { messages: [], nextOffset: offset, reason };
+  if (!Array.isArray(result)) return { messages: [], callbacks: [], nextOffset: offset, reason };
 
   const messages: TgMessage[] = [];
+  const callbacks: TgCallback[] = [];
   let nextOffset = offset;
   for (const raw of result) {
     if (!raw || typeof raw !== "object") continue;
-    const u = raw as { update_id?: unknown; message?: unknown };
+    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
     const m = u.message as
       | {
@@ -150,28 +165,57 @@ export async function getUpdates(
           audio?: { file_id?: unknown };
         }
       | undefined;
-    if (!m) continue;
-    const chatId = m.chat?.id;
-    const fromId = m.from?.id;
-    if (typeof chatId !== "number" || typeof fromId !== "number") continue;
-    // Accept text messages OR voice/audio notes (for transcription). Voice notes
-    // may carry no text; text falls back to the caption then empty.
-    const voiceFileId =
-      typeof m.voice?.file_id === "string" ? m.voice.file_id
-      : typeof m.audio?.file_id === "string" ? m.audio.file_id
-      : undefined;
-    const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
-    if (!text && !voiceFileId) continue; // ignore stickers/photos/etc.
-    messages.push({
+    if (m) {
+      const chatId = m.chat?.id;
+      const fromId = m.from?.id;
+      if (typeof chatId === "number" && typeof fromId === "number") {
+        // Accept text messages OR voice/audio notes (for transcription). Voice notes
+        // may carry no text; text falls back to the caption then empty.
+        const voiceFileId =
+          typeof m.voice?.file_id === "string" ? m.voice.file_id
+          : typeof m.audio?.file_id === "string" ? m.audio.file_id
+          : undefined;
+        const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
+        if (text || voiceFileId) {
+          messages.push({
+            updateId: typeof u.update_id === "number" ? u.update_id : 0,
+            chatId,
+            fromId,
+            fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
+            text,
+            voiceFileId,
+          });
+        }
+        // else: stickers/photos/etc. — ignored, like before.
+      }
+    }
+    // Inline-button tap: resolve through the same confirm/cancel path as a
+    // typed /confirm (see handleCallback in service.ts). Taps without a
+    // message context (e.g. from an inline-mode button) carry no chat to
+    // resolve against and are dropped — the button just spins, once.
+    const q = u.callback_query as
+      | {
+          id?: unknown;
+          from?: { id?: unknown };
+          message?: { chat?: { id?: unknown }; message_id?: unknown };
+          data?: unknown;
+        }
+      | undefined;
+    const queryId = q?.id;
+    const qFrom = q?.from?.id;
+    const qChat = q?.message?.chat?.id;
+    const qMsg = q?.message?.message_id;
+    if (typeof queryId !== "string" || typeof qFrom !== "number" || typeof qChat !== "number" || typeof qMsg !== "number") continue;
+    callbacks.push({
       updateId: typeof u.update_id === "number" ? u.update_id : 0,
-      chatId,
-      fromId,
-      fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
-      text,
-      voiceFileId,
+      chatId: qChat,
+      fromId: qFrom,
+      messageId: qMsg,
+      data: typeof q?.data === "string" ? q.data : "",
+      queryId,
     });
   }
-  return { messages, nextOffset };
+  return { messages, callbacks, nextOffset };
 }
 
 /**
