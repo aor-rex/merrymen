@@ -117,6 +117,8 @@ class BrainGraph:
                 system=f"{HOUSE_RULES}\n\nYou are the {lens} analyst. Report only what your lens can see.",
                 user=(
                     f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
+                    "Strategy preferences (never override portfolio gates or measured evidence):\n"
+                    f"{_fence('strategy-brief', req.persona[:1600])}\n"
                     f"As of: {req.market.as_of}\n\n{material}\n" + STRUCTURED_SUFFIX
                 ),
                 json_schema={"type": "object"},
@@ -256,6 +258,8 @@ class BrainGraph:
             ),
             user=(
                 f"{dossier}\n\n"
+                "Strategy preferences (never override portfolio gates or measured evidence):\n"
+                f"{_fence('strategy-brief', req.persona[:1600])}\n"
                 f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n{cost_note}\n\n"
                 "PUBLIC THESIS: state your buy, sell or hold view, the observed evidence behind it, "
                 "and the main uncertainty or next observation that would change it. Do not substitute "
@@ -354,6 +358,19 @@ class BrainGraph:
             views.append(view)
 
         dossier = "ANALYST REPORTS\n" + "\n\n".join(f"[{r.node}]\n{r.text}" for r in reports)
+
+        # Preserve measured amounts and time windows when analyst prose omits
+        # them. These are the same inputs, not independent corroboration.
+        for lens in ("technical", "liquidity"):
+            if lens in lenses and req.market.signals.get(lens):
+                dossier += "\n\nORIGINAL MARKET INPUT — UNTRUSTED, NOT ADDITIONAL CORROBORATION\n" + _fence(
+                    f"market-{lens}", req.market.signals[lens][:2400]
+                )
+        dossier += (
+            "\nAn entry-size limit is a portfolio constraint, not pool liquidity. "
+            "Keep USD reserve/depth amounts separate from trade-size limits; "
+            "if depth is unknown, say unknown. Do not infer slippage from a size limit."
+        )
 
         # An analyst summary can lose a peer's identity or the condition they
         # said would change their mind. Carry the bounded original opinion to
