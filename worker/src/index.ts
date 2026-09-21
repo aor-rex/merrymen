@@ -196,6 +196,7 @@ import {
   recordFire,
   recordSwapId,
   swapIdCompleted,
+  unclaimSwapId,
   type ConvertLatch,
 } from "./convert-latch";
 import { readPoolDepth } from "./venues/depth";
@@ -3962,14 +3963,27 @@ async function main() {
         // guards against a double execute.
       }
     };
-    // Settle: record the id (write-ahead — claimed even on failure paths
-    // below), persist, clear the handoff, emit the outcome. At-most-once by
-    // construction: the id is in the durable row before anything spends.
+    // Settle: the id is already durably claimed (see the pre-spend claim
+    // below) — here we persist the outcome-dependent state (marker/clock) and
+    // clear the handoff. The persist is AWAITED with bounded retries: a silent
+    // drop here is how a settled spend becomes replayable after a restart, so
+    // after retries fail we say so loudly instead of assuming durability.
     const settleManualSwap = async (ok: boolean, line: string) => {
       recordSwapId(convertLatch, manualSwap.id, Date.now());
-      persistLatch();
+      let saved = false;
+      for (let i = 0; i < 5 && !saved; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, 200 * i));
+        saved = await persistLatchNow();
+      }
       clearManualSwap();
       await addEvent(agentId, ok ? "ok" : "warn", line).catch(() => {});
+      if (!saved) {
+        await addEvent(
+          agentId,
+          "warn",
+          `${manualTag} settled but the local record did NOT persist after retries — a restart before the next tick's write could replay this request. Check /trades before submitting again.`,
+        ).catch(() => {});
+      }
     };
     if (swapIdCompleted(convertLatch, manualSwap.id)) {
       clearManualSwap();
@@ -4035,6 +4049,24 @@ async function main() {
       const policy = await convertPolicyCheck(agentId, manualAmount, leg.expect6);
       if (!policy.ok) {
         await settleManualSwap(false, `${manualTag} cancelled — ${policy.line}.`);
+        return;
+      }
+      // WRITE-AHEAD CLAIM, durably, before anything spends. The id must be in
+      // the durable row before broadcast: a crash after submit but before any
+      // later write would otherwise leave the request replayable (double
+      // spend). If the claim itself won't persist, fail CLOSED — unclaim in
+      // memory, keep the handoff, spend nothing. The owner retries with the
+      // same request; a crash before broadcast never moved money, so there is
+      // nothing to reconcile — only a crash AFTER broadcast is ambiguous, and
+      // that state can no longer occur without a durable claim preceding it.
+      recordSwapId(convertLatch, manualSwap.id, Date.now());
+      if (!(await persistLatchNow())) {
+        unclaimSwapId(convertLatch, manualSwap.id);
+        await addEvent(
+          agentId,
+          "warn",
+          `${manualTag} could not record its request — storage unavailable. Nothing was spent; submit again when ready.`,
+        ).catch(() => {});
         return;
       }
       await submitConvertLeg({
@@ -4290,6 +4322,16 @@ async function main() {
   const persistLatch = () => {
     if (!active) return;
     putConvertState(active.agentId, latchToRow(convertLatch)).catch(() => {});
+  };
+  /**
+   * Awaited, fail-loud persist for the spend paths. putConvertState resolves
+   * false (never throws) when the write didn't land — callers treat false as
+   * "not durable" and refuse to act as if it were. Fire-and-forget persistLatch
+   * above stays for the non-critical paths; anything guarding money uses this.
+   */
+  const persistLatchNow = async (): Promise<boolean> => {
+    if (!active) return false;
+    return putConvertState(active.agentId, latchToRow(convertLatch));
   };
   // Read the durable latch at arm. Order matters: the ledger row first (live
   // truth, including self-hosted where no seed ever exists), the orchestrator

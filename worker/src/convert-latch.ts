@@ -149,6 +149,16 @@ export function recordSwapId(latch: ConvertLatch, id: string, nowMs: number): vo
   latch.updatedAtMs = nowMs;
 }
 
+/**
+ * Withdraw a claim made before a spend that never happened — the durable
+ * write failed, so the id must not look honoured to a retry with the same id.
+ * The mirror image of recordSwapId: claiming is write-ahead, unclaiming is
+ * persist-failure-only. Never called after a broadcast.
+ */
+export function unclaimSwapId(latch: ConvertLatch, id: string): void {
+  latch.completedSwapIds = latch.completedSwapIds.filter((x) => x !== id);
+}
+
 export interface ManualSwapRequest {
   wei: bigint;
   id: string;
