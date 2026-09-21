@@ -7,6 +7,16 @@ import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
+/**
+ * A HELD POSITION MAY NOT GO LONGER THAN THIS WITHOUT A REVIEW.
+ *
+ * The floor that lets an entry candidate share the review slots at all. Exits
+ * do not depend on it — they run mechanically off the trading tick — so this
+ * governs how stale the Brain's OPINION of a holding may get, not how long a
+ * losing position can sit.
+ */
+export const HELD_REVIEW_MAX_GAP_MS = 5 * 60_000;
+
 export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
 
 /** Keep each page on its own clock: partial outages must not erase fresh pages
@@ -118,6 +128,16 @@ export class TrenchBrainReview {
   private context = "";
   private generation = 0;
   private reviewed = new Map<string, number>();
+  /**
+   * When each SYMBOL was last actually reviewed, ms epoch.
+   *
+   * Separate from `reviewed` on purpose. That one is a rotation sequence over
+   * ENTRY candidates and is pruned to the eligible set every pass; a held
+   * position is excluded from that set by the caller, so its stamp would be
+   * deleted the moment it was bought — which is the one case this map exists
+   * to answer.
+   */
+  private reviewedAtMs = new Map<string, number>();
   private reviewSequence = 0;
   constructor(private now = Date.now) {}
 
@@ -128,6 +148,7 @@ export class TrenchBrainReview {
     this.ready = null;
     this.nextAt = 0;
     this.reviewed.clear();
+    this.reviewedAtMs.clear();
     this.reviewSequence = 0;
   }
 
@@ -191,6 +212,14 @@ export class TrenchBrainReview {
     this.pending = true;
     this.reviewed.set(token.toLowerCase(), ++this.reviewSequence);
     const started = this.now();
+    // STAMPED WHERE THE REVIEW ACTUALLY HAPPENS, past the pending/interval
+    // guard above — a stamp written from the caller would claim a review on
+    // every tick that merely ASKED for one, and the holding it was meant to
+    // protect would look permanently current.
+    this.reviewedAtMs.set(input.market.symbol, started);
+    // The map is read only for currently-held symbols; anything older than an
+    // hour is past every gap that could be asked about and is just growth.
+    for (const [sym, at] of this.reviewedAtMs) if (started - at > 3_600_000) this.reviewedAtMs.delete(sym);
     const generation = this.generation;
     this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
     void run().then(outcome => {
@@ -222,6 +251,11 @@ export class TrenchBrainReview {
         note(`Brain reviewed ${input.market.symbol}: ${outcome.result.decision.action}`);
       } else note(outcome.ran ? `Brain unavailable: ${outcome.result.ok ? "" : outcome.result.kind}` : outcome.why);
     }).catch(() => note("Brain review failed; no new entry approved")).finally(() => { this.pending = false; });
+  }
+
+  /** When this symbol was last actually reviewed, ms epoch. Absent = never. */
+  reviewedAt(symbol: string): number | undefined {
+    return this.reviewedAtMs.get(symbol);
   }
 
   take(symbol: string, token: string, price8: bigint, maxUsdg: number, held = false): TrenchBrainOrder | null {

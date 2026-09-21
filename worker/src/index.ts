@@ -120,7 +120,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -9992,19 +9992,44 @@ async function main() {
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
+          symbol: p.symbol,
+          token: p.token,
+          valueUsdg: Number(p.valueUsdg),
+          price8: p.price8,
+          priceStale: p.priceStale,
+          priceSource: p.priceSource,
+        }));
         const focus = chooseFocus({
           agentId,
-          positions: positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
-            symbol: p.symbol,
-            token: p.token,
-            valueUsdg: Number(p.valueUsdg),
-            price8: p.price8,
-            priceStale: p.priceStale,
-            priceSource: p.priceSource,
-          })),
+          positions: focusPositions,
           universe: watchTokens.filter(t => !fastTrencher || trenchSymbols.has(t.symbol)).map((t) => ({ symbol: t.symbol, address: t.address })),
           prices: market.prices,
           paused: market.pausedTokens,
+          // ── TRENCHER ONLY ────────────────────────────────────────────────
+          //
+          // Without this an agent holding one memecoin reviews only that coin,
+          // so it can never open a second position and the gap between trades
+          // is the HOLD duration rather than the review interval. Safe here and
+          // nowhere else because this rail's exits are mechanical and run off
+          // the trading tick — see FocusAlternation. Spend is unchanged: the
+          // vault caps 5 USDG per buy and 25 USDG per 24h on chain.
+          ...(fastTrencher
+            ? {
+                alternate: {
+                  lastReviewedAtMs: new Map(
+                    focusPositions.flatMap((p) => {
+                      const at = trenchBrain.reviewedAt(p.symbol);
+                      // Omitted, never defaulted — chooseFocus reads absent as
+                      // overdue, and a default would invert that.
+                      return at === undefined ? [] : [[p.symbol, at] as const];
+                    }),
+                  ),
+                  nowMs: Date.now(),
+                  maxGapMs: HELD_REVIEW_MAX_GAP_MS,
+                },
+              }
+            : {}),
         });
         if (focus) {
           // The orchestrator materialises both of these from shared Postgres,
