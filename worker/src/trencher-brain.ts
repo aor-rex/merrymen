@@ -121,12 +121,58 @@ export class TrenchBrainReview {
     this.reviewSequence = 0;
   }
 
-  /** Oldest review first, with incoming volume order breaking ties. */
-  candidate<T extends { token: string }>(eligible: readonly T[]): T | undefined {
+  /**
+   * WHICH COIN GETS THE NEXT REVIEW: busiest first, but nobody is skipped.
+   *
+   * This was strict least-recently-reviewed, and the cost of that was all in
+   * the waiting. A review runs at most every 30s, so with ten eligible coins a
+   * given one waited about five minutes for its turn NO MATTER HOW IT LOOKED —
+   * the loudest tape on the chain sat behind nine quiet ones because they
+   * happened to be older in the queue. Measured 2026-09-20: entries arrived
+   * 2m50s to 5m43s after the previous trade, essentially one rotation.
+   *
+   * ── WHY NOT SIMPLY RANK BY VOLUME ────────────────────────────────────
+   *
+   * Because that starves. One coin with a permanently fat tape would take
+   * every slot forever and the rest would never be looked at again — and a
+   * position already held is reviewed through this same path, so a quiet coin
+   * the desk OWNS could stop being watched. The fairness is not decoration.
+   *
+   * So the round-robin PASS is kept and the order INSIDE it is changed. A coin
+   * is due when it has not been reviewed in the last `eligible.length` reviews;
+   * among those the busiest goes first. Every coin is still reviewed once per
+   * pass, and a hot one now waits at most one pass instead of a full rotation
+   * behind whoever happened to be older.
+   *
+   * Volume is a RANKING input only. It decides what is looked at sooner, never
+   * what is bought: `shouldEnter` has already run, and the Brain still has to
+   * say buy. Absent volume sorts last rather than first — an unknown tape is
+   * not a busy one.
+   */
+  candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[]): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
     for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
-    return eligible.reduce<T | undefined>((best, c) => !best ||
-      (this.reviewed.get(c.token.toLowerCase()) ?? 0) < (this.reviewed.get(best.token.toLowerCase()) ?? 0) ? c : best, undefined);
+    if (eligible.length === 0) return undefined;
+    const seq = (c: T) => this.reviewed.get(c.token.toLowerCase()) ?? 0;
+    const busy = (c: T) => (typeof c.volume24hUsd === "number" && Number.isFinite(c.volume24hUsd) ? c.volume24hUsd : -1);
+    // Reviewed longer ago than one full pass — or never.
+    const floor = this.reviewSequence - eligible.length;
+    // Never reviewed counts as due whatever the floor says: on a fresh pass
+    // every sequence is 0 and a floor computed from it would exclude the whole
+    // pool, dropping the ranking back to whatever order discovery returned.
+    const due = eligible.filter(c => seq(c) === 0 || seq(c) <= floor);
+    // Everyone has been seen this pass: start the next one with the oldest,
+    // which is exactly the old behaviour and keeps the pass boundary honest.
+    if (due.length === 0) {
+      return eligible.reduce<T | undefined>((best, c) => !best || seq(c) < seq(best) ? c : best, undefined);
+    }
+    return due.reduce<T | undefined>((best, c) => {
+      if (!best) return c;
+      if (busy(c) !== busy(best)) return busy(c) > busy(best) ? c : best;
+      // Same tape, or both unknown: the older one goes first, so the tiebreak
+      // cannot depend on the order discovery happened to return.
+      return seq(c) < seq(best) ? c : best;
+    }, undefined);
   }
 
   launch(context: string, input: ShadowInputs, token: string, run: () => Promise<ShadowOutcome>, note: (s: string) => void) {
