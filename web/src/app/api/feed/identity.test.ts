@@ -24,6 +24,23 @@ import { describe, it } from "node:test";
 const FEED = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
 const SETTINGS = readFileSync(new URL("../settings/route.ts", import.meta.url), "utf8");
 const WORKER = readFileSync(new URL("../../../../../worker/src/index.ts", import.meta.url), "utf8");
+const SOUL = readFileSync(new URL("../../../../../worker/src/soul.ts", import.meta.url), "utf8");
+
+
+/**
+ * Characters that are invisible, or that a source file must never contain.
+ *
+ * BUILT, NOT WRITTEN. A NUL escape typed through one escaping layer too few
+ * becomes a raw NUL byte — the accident worker/src/wiring.test.ts exists to
+ * catch, and which it caught here. The same applies to the joiners and the
+ * bidi override: written literally they are invisible in an editor, so a
+ * reader cannot tell them apart from a typo.
+ */
+const ZWNJ = String.fromCharCode(0x200c); // zero-width non-joiner: Persian, Indic
+const RLO = String.fromCharCode(0x202e); // right-to-left override: a spoofing tool
+const ZWSP = String.fromCharCode(0x200b); // zero-width space: not a joiner
+const NUL = String.fromCharCode(0x0);
+const ACUTE = String.fromCharCode(0x301); // a combining mark, which cannot lead
 
 describe("the feed reads identity from the tenant's own store", () => {
   it("hosted goes to the settings store, never to a file", () => {
@@ -58,16 +75,81 @@ describe("the feed reads identity from the tenant's own store", () => {
   });
 });
 
+/**
+ * The name rule as each file actually ships it, compiled from the source.
+ *
+ * Reading it out rather than restating it here is the point: a copy in the test
+ * would let the two drift and still pass, which is the exact failure the
+ * duplication comment in settings/route.ts warns about.
+ */
+function ruleIn(src: string): RegExp {
+  const m = src.match(/\/\^\[\\p\{L\}[^/\n]*\/u/);
+  assert.ok(m, "the name rule must be present and recognisable");
+  return new RegExp(m[0].slice(1, -2), "u");
+}
+
 describe("the two name normalisers agree", () => {
   it("the API stores the SAME shape the soul does", () => {
-    // The soul does `raw.trim().replace(/\s+/g, " ")`; the API did a bare
-    // `.trim()`. The shared regex admits internal double spaces, so
+    // The soul does `raw.normalize("NFC").trim().replace(/\s+/g, " ")`; the API
+    // did a bare `.trim()`. The shared regex admits internal double spaces, so
     // "Little  John" was stored verbatim and collapsed by the soul — and the
     // reconcile's `cfg.agentName !== getName()` then stayed true forever. That
     // was one wasted write per re-arm before; once the reconcile runs every
     // tick it would be an identity-file rewrite every tick, silently, because
     // setName returns ok and logs nothing.
-    assert.match(SETTINGS, /v\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/);
+    //
+    // ANCHORED ON BOTH FILES, not on one spelling. Pinning the literal made
+    // this fail the moment NFC was added to both — a true statement reported
+    // as a broken one, which is the failure mode that teaches people to edit
+    // the assertion rather than read it.
+    const shape = /\.normalize\("NFC"\)\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/;
+    assert.match(SETTINGS, shape, "the API must normalise before it stores");
+    assert.match(SOUL, shape, "and the soul must do the identical thing");
+  });
+
+  it("BOTH ACCEPT A NAME IN THE OWNER'S OWN ALPHABET", () => {
+    // This was `[A-Za-z0-9]` in both places, so José, Müller, Робин and 小红
+    // were refused — at the END of the create wizard, in the same request that
+    // carried the strategy, the caps and the paper/live choice, so one accent
+    // discarded the whole form. And the message said "letters and numbers",
+    // which is wrong guidance rather than merely unhelpful: é IS a letter, so
+    // a reader who complied failed again.
+    //
+    // RUN, NOT MATCHED. An earlier version of this test compared the source
+    // text and passed while `\p{Join_Control}` was silently missing its
+    // backslash — which parses, and admits `{`, `}` and `_`. Building the
+    // shipped rule and running names through it cannot be fooled that way.
+    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+      for (const name of [
+        "Robin", "José", "Müller", "Łukasz", "Nguyễn", "Робин", "小红", "로빈",
+        "रोबिन", "โรบิน", "রোবিন", "ரோபின்", "رَوبِن", "דוד", "Ελένη",
+        "O'Brien", "St. John", "Jean-Luc", `محمد${ZWNJ}رضا`,
+      ]) {
+        assert.ok(re.test(name), `${who} must accept "${name}"`);
+      }
+    }
+  });
+
+  it("and neither admits a bidi override, which is what the narrow rule really bought", () => {
+    // `[A-Za-z0-9]` excluded format characters as a side effect. The
+    // replacement has to exclude them on purpose: a name is rendered next to
+    // an agent's figures, and U+202E exists to make text display as something
+    // other than what it is. `\p{Join_Control}` is the one exception, because
+    // Persian and several Indic orthographies need ZWNJ inside a single word.
+    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+      for (const [name, why] of [
+        [`Robin${RLO}evil`, "right-to-left override"],
+        [`Robin${ZWSP}x`, "zero-width space"],
+        [`Robin${NUL}`, "null"],
+        [`${ACUTE}Robin`, "leading combining mark"],
+        ["-Robin", "leading punctuation"],
+        [" Robin", "leading space"],
+        ["", "empty"],
+        ["a".repeat(25), "over 24 characters"],
+      ] as const) {
+        assert.ok(!re.test(name), `${who} must refuse a name with a ${why}`);
+      }
+    }
   });
 });
 

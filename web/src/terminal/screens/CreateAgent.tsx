@@ -14,7 +14,7 @@ import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { requestJson, SignIn, type AccountState } from "../HostedControls";
 import { Face } from "../ui";
-import { validAmount } from "../amount";
+import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 
@@ -120,7 +120,26 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
   async function create() {
     if(busy || grant)return;
-    if(!validAmount(trade)||!validAmount(day)||Number(trade)>Number(day)){setError("Enter positive amounts. The per-trade limit cannot exceed the daily limit.");return;}
+    // WAS `validAmount`, which took a dot decimal and nothing else — while the
+    // field above is `inputMode="decimal"`, which renders a COMMA key on a
+    // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
+    // app handed people the separator its only validator refused, then said
+    // "Enter positive amounts", which names neither thing that is wrong. On
+    // the one screen where somebody bounds their own risk, that is a dead end.
+    const perTrade=parseAmount(trade,CAP_FIELD),perDay=parseAmount(day,CAP_FIELD);
+    for(const [label,r] of [["Per trade",perTrade],["Per day",perDay]] as const){
+      if(r.ok)continue;
+      // Each refusal names the actual problem, and the ambiguous one names both
+      // readings rather than picking one: "1.000" is a thousand in Berlin and
+      // one in Boston, and a cap is sealed into a signature that cannot be
+      // edited afterwards.
+      setError(r.reason==="ambiguous"?`${label}: that reads as either ${r.readings.join(" or ")}. Which did you mean?`
+        :r.reason==="out-of-range"?`${label}: enter an amount between ${r.min} and ${r.max}.`
+        :`${label}: enter an amount, for example 10 or 10${(1.1).toLocaleString().includes(",")?",":"."}50.`);
+      return;
+    }
+    if(!perTrade.ok||!perDay.ok)return;
+    if(perTrade.value>perDay.value){setError("The per-trade limit cannot exceed the daily limit.");return;}
     if(!paper&&!ack){setError("Confirm live trading before creating your agent.");return;}
     setBusy(true);setError("");
     try {
@@ -143,7 +162,9 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
        * refuse to buy them on `no-exit`, which is precisely the journey this
        * step exists to remove.
        */
-      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:Number(trade),dailyUsdg:Number(day)},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      // The PARSED values, not `Number(trade)`. The raw string is what the
+      // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
+      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
       // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
       // wallet it signed in with; everything else keeps the browser-generated
       // key. Same Kernel, same wall, same session key either way.

@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { isWallTooWide } from "@merrymen/core";
+import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
+import { parseAmount, type AmountField } from "@/lib/parse-amount";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, erc20Abi, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
@@ -79,15 +80,32 @@ const CAP_FLOOR: Record<keyof GrantCaps, number> = {
   maxOpsPerDay: 1,
 };
 
-/** A typed cap value, floored. An empty or unreadable field falls to the floor. */
-function clampCap(k: keyof GrantCaps, raw: string): number {
-  const n = Number(raw);
-  const floor = CAP_FLOOR[k];
-  if (!Number.isFinite(n)) return floor;
-  // expiryDays is also bounded above by the signer itself; the rest are not.
-  const capped = k === "expiryDays" ? Math.min(n, 90) : n;
-  return Math.max(floor, Math.floor(capped));
-}
+/**
+ * THE SHAPE OF EACH CAP AS A TYPED FIELD: precision, floor, ceiling.
+ *
+ * This replaces `clampCap`, which did `Number(raw)` and fell back to the
+ * floor on anything unreadable. Two things were wrong with that, and both cost
+ * money rather than convenience:
+ *
+ *   `Number("")` is 0, and 0 IS finite — so the `!Number.isFinite` guard never
+ *   fired on an empty field. `Math.max(1, Math.floor(0))` then sealed a cap of
+ *   ONE USDG into a signature that cannot be edited for the life of the grant,
+ *   with no error and nothing on screen to notice.
+ *
+ *   `Math.floor` applied to every cap, so a 10.50 per-trade limit was signed
+ *   as 10 — an edit to a number the owner was in the middle of reading.
+ *
+ * Money keeps its cents; days, trades and percent are whole by construction.
+ * The expiry ceiling is the signer's own, so a value that parses here cannot be
+ * refused later by the thing being signed.
+ */
+const CAP_FIELDS: Record<keyof GrantCaps, AmountField> = {
+  perTradeUsdg: { maxDecimals: 2, min: CAP_FLOOR.perTradeUsdg, max: MAX_USDG_UI },
+  dailyUsdg: { maxDecimals: 2, min: CAP_FLOOR.dailyUsdg, max: MAX_USDG_UI },
+  expiryDays: { maxDecimals: 0, min: CAP_FLOOR.expiryDays, max: 90 },
+  maxDrawdownPct: { maxDecimals: 0, min: CAP_FLOOR.maxDrawdownPct, max: 50 },
+  maxOpsPerDay: { maxDecimals: 0, min: CAP_FLOOR.maxOpsPerDay, max: 10_000 },
+};
 
 /** One-click cap presets — pick a temperament, tweak if you like, ride. */
 const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: GrantCaps }[] = [
@@ -439,6 +457,7 @@ export default function GrantPage() {
     if (stored) {
       setChainId(requestedChain() ?? stored.chainId);
       setCaps(stored.caps);
+      setCapText({});
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
@@ -511,6 +530,7 @@ export default function GrantPage() {
             // re-sign any other way.
             setChainId(requestedChain() ?? s.grant.chainId);
             setCaps(s.grant.caps);
+            setCapText({});
             // NOTHING TO WRITE DOWN *HERE*, which is not the same as backed
             // up. A Privy agent has no owner key in any browser; a legacy one
             // has it in the browser that minted it and not in this one. Either
@@ -647,8 +667,41 @@ export default function GrantPage() {
    * the agent unusable; it cannot widen one, because every bound below is the
    * floor, never the ceiling.
    */
-  const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setCaps((c) => ({ ...c, [k]: clampCap(k, e.target.value) }));
+  /**
+   * WHAT THE OWNER TYPED, HELD AS TEXT UNTIL IT READS AS A NUMBER.
+   *
+   * The inputs below are `type="text"` and not `type="number"`, and that is
+   * the load-bearing part. A number input hands JavaScript an EMPTY STRING for
+   * anything its own locale cannot parse, so a comma keystroke arrived here
+   * indistinguishable from a cleared field — and the old handler turned both
+   * into the floor. The raw text has to survive long enough to be read.
+   *
+   * `caps` only moves on a clean read, so a half-typed value never becomes the
+   * number that would be signed, and the summary underneath keeps showing the
+   * last figure the owner actually chose.
+   */
+  const [capText, setCapText] = useState<Partial<Record<keyof GrantCaps, string>>>({});
+  const [capError, setCapError] = useState("");
+  const capShown = (k: keyof GrantCaps) => capText[k] ?? String(caps[k]);
+  const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    setCapText((t) => ({ ...t, [k]: raw }));
+    const r = parseAmount(raw, CAP_FIELDS[k]);
+    if (r.ok) {
+      setCaps((c) => ({ ...c, [k]: r.value }));
+      setCapError("");
+      return;
+    }
+    setCapError(
+      r.reason === "ambiguous"
+        ? `That reads as either ${r.readings.join(" or ")} — which did you mean?`
+        : r.reason === "out-of-range"
+          ? `Enter a number between ${r.min} and ${r.max}.`
+          : r.reason === "empty"
+            ? "This limit needs a number."
+            : "That is not a number I can read.",
+    );
+  };
 
   // Tokens listed in settings that THIS signature doesn't actually cover.
   // Settings can't reach into an already-signed key, so the gap is real: without
@@ -1007,6 +1060,7 @@ export default function GrantPage() {
     // one. Both go back to the same defaults a first-time owner gets.
     setChainId(MAINNET);
     setCaps(PRESETS[0]!.caps);
+    setCapText({});
   }
 
   /**
@@ -1346,7 +1400,7 @@ export default function GrantPage() {
                   key={p.id}
                   type="button"
                   className={`preset-card ${sameCaps(caps, p.caps) ? "selected" : ""}`}
-                  onClick={() => setCaps(p.caps)}
+                  onClick={() => { setCaps(p.caps); setCapText({}); setCapError(""); }}
                 >
                   <span className="preset-label"><GI d={p.icon} size={14} /> {p.label}</span>
                   <span className="preset-blurb">{p.blurb}</span>
@@ -1363,14 +1417,14 @@ export default function GrantPage() {
               <label className="field">
                 <span className="field-label">most it can spend on one trade</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
+                  <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
               <label className="field">
                 <span className="field-label">most it can spend in a day</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
+                  <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
@@ -1380,14 +1434,14 @@ export default function GrantPage() {
                   <Info>A safety timer. After this many days the agent&apos;s key stops working on its own — so a forgotten agent can&apos;t trade forever.</Info>
                 </span>
                 <span className="field-input">
-                  <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
+                  <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
                   <span className="field-unit">days</span>
                 </span>
               </label>
               <label className="field">
                 <span className="field-label">most trades per day</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
+                  <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
                   <span className="field-unit">trades</span>
                 </span>
               </label>
@@ -1397,11 +1451,16 @@ export default function GrantPage() {
                   <Info>A circuit breaker. If the account drops this far from its best value, the agent stops trading automatically to stem the bleeding.</Info>
                 </span>
                 <span className="field-input">
-                  <input type="number" min={1} max={50} value={caps.maxDrawdownPct} onChange={set("maxDrawdownPct")} />
+                  <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")} onChange={set("maxDrawdownPct")} />
                   <span className="field-unit">%</span>
                 </span>
               </label>
             </div>
+            {capError && (
+              <p className="grant-cap-error" role="alert">
+                {capError}
+              </p>
+            )}
 
             <div className="grant-summary">
               On {isMainnet ? "Robinhood Chain" : "the testnet"}, this agent can trade
@@ -1954,28 +2013,28 @@ export default function GrantPage() {
                     <label className="field">
                       <span className="field-label">most it can spend on one trade</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
+                        <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">most it can spend in a day</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
+                        <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">most trades per day</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
+                        <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
                         <span className="field-unit">trades</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">auto-expire the agent after</span>
                       <span className="field-input">
-                        <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
+                        <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
                         <span className="field-unit">days</span>
                       </span>
                     </label>

@@ -25,7 +25,31 @@ import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrie
 import { fnv1a } from "./memory/tokens";
 
 export const DEFAULT_NAME = "Robin";
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/;
+/**
+ * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET.
+ *
+ * This was `[A-Za-z0-9]`, which refused José, Müller, Łukasz, Робин, 小红,
+ * रोबिन and رَوبِن — and refused them at the END of the create wizard, in the
+ * same request that carried the strategy, the caps and the paper/live choice,
+ * so one accent discarded the whole form. The message said "letters and
+ * numbers", which is worse than unhelpful: é IS a letter, so a reader who
+ * complied failed again.
+ *
+ * `\p{M}` is not decoration. Devanagari, Thai, Bengali, Tamil and vowelled
+ * Arabic carry combining marks that NFC does not compose away, so a rule of
+ * letters-and-numbers alone still refuses रोबिन and โรบิน. U+200C and U+200D
+ * are admitted for the same reason: Persian and several Indic orthographies
+ * need them inside a single word.
+ *
+ * Everything else stays excluded, which keeps out the thing that actually
+ * matters — `\p{Cf}` bidi overrides, whose whole purpose is to make text
+ * display as something other than what it is.
+ *
+ * DUPLICATED, DELIBERATELY, at web/src/app/api/settings/route.ts. The two must
+ * stay byte-identical INCLUDING the normalisation below; see the comment there
+ * for what happens when they drift.
+ */
+const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
 const MAX_OWNER_FACTS = 60;
 const MAX_NOTES = 120;
 const MAX_JOURNAL_CHARS = 40_000;
@@ -142,9 +166,12 @@ export function ageDays(nowSec?: number): number {
 
 /** Validate + apply a new name. Returns the applied name or an error reason. */
 export function setName(raw: string): { ok: true; name: string } | { ok: false; reason: string } {
-  const name = raw.trim().replace(/\s+/g, " ");
+  // NFC first, so "José" typed as e + combining acute and "José" typed as the
+  // precomposed é are the same name, spend the same number of the 24
+  // characters, and compare equal to whatever the web tier stored.
+  const name = raw.normalize("NFC").trim().replace(/\s+/g, " ");
   if (!NAME_RE.test(name)) {
-    return { ok: false, reason: "a name is 1-24 letters/numbers/spaces (', . - allowed), starting with a letter or number" };
+    return { ok: false, reason: "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number" };
   }
   ensureSoul();
   const current = readSafe(identityFile());

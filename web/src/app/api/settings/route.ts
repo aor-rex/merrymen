@@ -27,6 +27,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { parseAmount } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export const dynamic = "force-dynamic";
@@ -161,6 +162,24 @@ export async function GET(req: Request) {
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
+/**
+ * How many decimal places a setting accepts, DERIVED from its name rather than
+ * listed beside it.
+ *
+ * Derived on purpose. This file already records three separate incidents where
+ * a field missing from a list was silently dropped while the PUT answered
+ * `{ok:true}` — `maxImpactBps`, `takeProfitBps` and `ponsAdapterAddress`. A
+ * second list keyed on field name would be a fourth place to forget. A rule
+ * that reads the name cannot be forgotten.
+ *
+ * Money is quoted to cents. Everything else here — basis points, seconds,
+ * minutes, counts, hours, steps — is a whole number by construction, and
+ * saying so is what lets `25.000` be read as twenty-five thousand with no
+ * question asked: the decimal reading needs three places and the field has
+ * none, so only one reading survives.
+ */
+const decimalsFor = (key: string): number => (/Usdg?$/.test(key) ? 2 : 0);
+
 const NUM_FIELDS: Record<string, [number, number]> = {
   // Imported, never a literal. This entry and the worker's own clamp are two
   // enforcement points for one rule, and they read 5_000 and 5_000 while the
@@ -353,10 +372,27 @@ export async function PUT(req: Request) {
     const v = body[k];
     if (v === "" || v === null || v === undefined) {
       setOrClear(k, undefined);
-    } else {
-      const n = typeof v === "number" ? v : Number(v);
-      if (Number.isFinite(n) && n >= min && n <= max) setOrClear(k, n as never);
+    } else if (typeof v === "number") {
+      // Already a number, so it came from a JSON client rather than a typed
+      // field. There is no separator to interpret.
+      if (Number.isFinite(v) && v >= min && v <= max) setOrClear(k, v as never);
       else errors.push(`${key}: must be a number between ${min} and ${max}`);
+    } else {
+      // WAS `Number(v)`, AND THAT IS THE ONE PATH IN THIS APP THAT STORED A
+      // WRONG NUMBER RATHER THAN REFUSING. Ten of the fields feeding this loop
+      // are plain text inputs, so the owner's raw keystrokes arrive here
+      // untouched — and `Number("25.000")` is 25, which sits well inside
+      // minPoolLiquidityUsdg's [0, 100_000_000]. A German, Spanish, Italian,
+      // Dutch, Brazilian or Turkish owner setting the price-manipulation guard
+      // to twenty-five thousand stored twenty-five, in range, no error, while
+      // the screen said "Changes saved".
+      const parsed = parseAmount(String(v), { maxDecimals: decimalsFor(key), min, max });
+      if (parsed.ok) setOrClear(k, parsed.value as never);
+      else if (parsed.reason === "ambiguous") {
+        // Two honest readings. Naming both is the only answer that does not
+        // involve guessing which one the owner meant.
+        errors.push(`${key}: "${String(v)}" reads as either ${parsed.readings.join(" or ")}`);
+      } else errors.push(`${key}: must be a number between ${min} and ${max}`);
     }
   }
 
@@ -409,11 +445,19 @@ export async function PUT(req: Request) {
     // then never agree, which makes `cfg.agentName !== getName()` true forever:
     // harmless while the reconcile only ran on re-arm, an identity-file rewrite
     // every tick once it runs unconditionally. Normalise once, at the door.
-    const norm = typeof v === "string" ? v.trim().replace(/\s+/g, " ") : v;
+    // NFC is part of the shape that must match: a decomposed "José" and a
+    // precomposed one are the same name, and only one of them is 4 characters.
+    const norm = typeof v === "string" ? v.normalize("NFC").trim().replace(/\s+/g, " ") : v;
     if (norm === "" || norm === null || norm === undefined) {
       setOrClear("agentName", undefined);
-    } else if (typeof norm !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(norm)) {
-      errors.push("name: letters and numbers to start, up to 24 characters");
+    } else if (
+      typeof norm !== "string" ||
+      !/^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u.test(norm)
+    ) {
+      // The old rule was ASCII-only and the old message said "letters and
+      // numbers", which sent anyone called José or Робин round a loop they
+      // could not escape by complying. See worker/src/soul.ts NAME_RE.
+      errors.push("name: 1-24 characters, starting with a letter or number");
     } else {
       setOrClear("agentName", norm);
     }
