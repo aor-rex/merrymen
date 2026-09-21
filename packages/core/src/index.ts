@@ -58,3 +58,7 @@ export * from "./risk-level";
 export * from "./onchain-forensics";
 export * from "./trencher-vault";
 export * from "./grant-installable";
+
+// WAS THIS GRANT SIGNED AGAINST AN OLDER WALL? A release date, enforced by a
+// fingerprint test, because `serialized` never leaves the browser that minted it.
+export * from "./wall-release";

@@ -50,6 +50,7 @@ import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
 import { FirstVisit } from "./FirstVisit";
+import { ResignPrompt } from "./ResignPrompt";
 import "./first-visit.css";
 import { WiredProvider } from "@/components/WiredProvider";
 import { useDesktopDetail } from "./desktop-detail";
@@ -404,6 +405,19 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
+        {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
+            after it. Every other re-sign surface answers a question the
+            WORKER asked — expired, uncovered, dead policy — and none of them
+            can see a wall that is merely OLD. Mounted in the shell because
+            it is true on every screen, and handed `exists` straight from the
+            server so it cannot flash for an owner whose account is still
+            loading. It navigates to the one signing control; it never signs. */}
+        <ResignPrompt
+          exists={account ? account.status.exists : null}
+          grantedAt={account?.status.grant?.grantedAt ?? null}
+          tenant={account?.session.hosted ? account.session.address : null}
+          href={resignHref}
+        />
         <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
           if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
             // Desktop tabs live in the rail/dock, not the phone's routes.

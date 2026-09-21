@@ -8272,3 +8272,24 @@ html[lang|="ko"] .terminal-host {
 
 :where(.terminal-host) .activity-buy { color: var(--up); }
 :where(.terminal-host) .activity-sell { color: var(--down); }
+
+/* ── THE OUT-OF-DATE PERMISSION PROMPT ──────────────────────────────────────
+   Reuses .portfolio-dialog's geometry rather than inventing a second modal:
+   it is the terminal's only native <dialog> shape, and a prompt about money
+   should look like the other thing in this product that covers the screen.
+   Only the actions row below is new.
+
+   The strip left behind afterwards borrows .desk-notice, which is the quiet
+   left-border card the worker's own notices use — deliberately NOT .desk-blocked,
+   whose red is reserved for a fault. An old wall is not yet a failure, and a
+   beta owner once concluded the product was broken because a non-fault state
+   wore the red box. */
+:where(.terminal-host) .resign-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+:where(.terminal-host) .resign-strip {
+  margin: 12px 0;
+}
