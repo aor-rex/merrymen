@@ -355,22 +355,23 @@ export interface WallOptions extends TrencherPermission {
    */
   ponsAdapterAddress?: Address;
   /**
-   * Native value the SwapRouter02 NATIVE-INPUT rule may carry, in wei. Default
-   * NATIVE_SWAP_VALUE_LIMIT_WEI (0.5 ETH) so every newly signed wall can run
-   * the ETH→USDG convert; an explicit 0n omits the native rule entirely,
-   * restoring the old no-native wall exactly.
+   * Native value the SwapRouter02 exactInputSingle rule may carry, in wei.
+   * Default NATIVE_SWAP_VALUE_LIMIT_WEI (0.5 ETH) so every newly signed wall
+   * can run the ETH→USDG convert; an explicit 0n restores the old no-native
+   * wall exactly.
    *
-   * WHY A SECOND RULE, not a valueLimit on the general one. The general
-   * exactInputSingle rule pins both token legs ONE_OF the asset set with
-   * valueLimit 0n. Hanging native value on it would let the key attach up to
-   * the ceiling to ANY exactInputSingle it may otherwise make — including ones
-   * where the ETH is not the input at all and simply stays with the router.
-   * The native rule instead pins tokenIn EQUAL WETH: it matches exactly the
-   * call shape that needs msg.value (native ETH in, WETH tokenIn, the router
-   * wraps internally), and nothing else. The ceiling bounds a compromised key
-   * to forced bad-price swaps into the account's own holdings — the recipient
-   * is pinned self and there is no transfer permission, so value cannot leave,
-   * only be swapped badly.
+   * WHY THE CEILING LIVES ON THE GENERAL RULE, not a second WETH-pinned one.
+   * Kernel's CallPolicy refuses a repeated (callType, target, selector) with
+   * AA23 — two exactInputSingle rules on the router, however carefully
+   * disjoint their args, produce a wall that can never be installed (the
+   * f96ddd9 trencher episode proved it on a duplicated approve). So there is
+   * exactly one exactInputSingle rule and the ceiling covers every swap it
+   * admits. The exposure this adds over a 0n rule is bounded and narrow: the
+   * worker sends value only on native converts, and anything else carrying up
+   * to the ceiling burns gas for a call the router did not ask for. A
+   * compromised key cannot move value OUT through this rule — the recipient
+   * is pinned self and there is no transfer permission — only swap badly
+   * within the ceiling.
    */
   nativeSwapValueLimitWei?: bigint;
 }
@@ -676,8 +677,16 @@ export function buildCallPermissions(
       // Cost: one bytes32 per allowed address per rule, so two legs over the
       // default 15-address list is ~960 bytes of extra enable-data, paid once
       // on the first UserOp of each session key.
+      //
+      // VALUE CEILING, ONE RULE. valueLimit caps the native ETH a swap may
+      // carry — the bound that makes the ETH→USDG convert expressible. It
+      // lives here, on the single exactInputSingle rule, because Kernel
+      // refuses a repeated (callType, target, selector): a second WETH-pinned
+      // rule would make the whole wall uninstallable (AA23). The worker sends
+      // value only on native converts; see nativeSwapValueLimitWei above for
+      // the exposure analysis. Explicit 0n restores the old no-value wall.
       target: UNISWAP.swapRouter02 as Address,
-      valueLimit: 0n,
+      valueLimit: nativeSwapValueLimit,
       abi: UNISWAP_SWAP_ROUTER_ABI,
       functionName: "exactInputSingle",
       args: [
@@ -690,30 +699,6 @@ export function buildCallPermissions(
         null,
       ],
     },
-    // NATIVE-INPUT exactInputSingle — the wall's ONLY non-zero valueLimit, and
-    // deliberately a SECOND rule rather than a limit on the general one above.
-    // tokenIn EQUAL WETH matches exactly the call shape that needs msg.value;
-    // a separate rule means the ceiling can never ride along on a swap whose
-    // ETH is not the input. Omitted entirely when the limit is 0n.
-    ...(nativeSwapValueLimit > 0n
-      ? [
-          {
-            target: UNISWAP.swapRouter02 as Address,
-            valueLimit: nativeSwapValueLimit,
-            abi: UNISWAP_SWAP_ROUTER_ABI,
-            functionName: "exactInputSingle",
-            args: [
-              { condition: ParamCondition.EQUAL, value: CASH.WETH as Address },
-              { condition: ParamCondition.ONE_OF, value: adapterAssets },
-              null,
-              self,
-              null,
-              null,
-              null,
-            ],
-          },
-        ]
-      : []),
     // MULTI-HOP (`exactInput`) IS GONE, and it cannot come back in this shape.
     //
     // It used to sit here with `args: [null, null, self]` — the recipient

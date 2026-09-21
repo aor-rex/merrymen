@@ -125,22 +125,24 @@ const bound = (g: UserOpGas, bounds: ReturnType<typeof firstEnableBounds> | type
   boundGas(g, g, bounds, sponsoredOf(g));
 
 describe("the observed estimates, reproduced", () => {
-  it("Shogun's wall is 13,812 stub bytes — the recorded default plus three slots", () => {
-    // Re-measured with the native-input rule present (+1,248 fixed, +32 per
-    // token — see first-enable-gas.test.ts). The SHOGUN gas estimates below
-    // are untouched history; only wall-derived numbers move.
-    assert.equal(DEFAULT_WALL.stubBytes, 12_180, "the recorded 0-token sweep point");
-    assert.equal(SHOGUN_WALL.stubBytes, 13_812);
-    assert.equal(SHOGUN_WALL.stubBytes - DEFAULT_WALL.stubBytes, 3 * 544);
+  it("Shogun's wall is 12,468 stub bytes — the recorded default plus three slots", () => {
+    // One exactInputSingle rule (Kernel AA23 forbids the native-input second
+    // rule — see wall.ts): 512 per slot, no +32 native entry anymore.
+    // The SHOGUN gas estimates below are untouched history; only wall-derived
+    // numbers move.
+    assert.equal(DEFAULT_WALL.stubBytes, 10_932, "the recorded 0-token sweep point");
+    assert.equal(SHOGUN_WALL.stubBytes, 12_468);
+    assert.equal(SHOGUN_WALL.stubBytes - DEFAULT_WALL.stubBytes, 3 * 512);
   });
 
   it("the envelope predicts the WALL, and the wall fits it with room to spare", () => {
     const env = firstEnableEnvelope(SHOGUN_WALL);
-    assert.equal(env.expectedRaw, 9_761_751n);
-    assert.equal(env.expectedBounded, 12_348_615n);
-    // The bigger wall pushes the allowance onto the hard-maximum cap — the
-    // envelope still binds below it everywhere it isn't capped.
-    assert.equal(env.allowedMaxBounded, 14_000_000n);
+    assert.equal(env.expectedRaw, 8819681n);
+    assert.equal(env.expectedBounded, 11156896n);
+    // The smaller merged wall no longer pushes the allowance onto the
+    // hard-maximum cap — the envelope binds below it on its own size. (With
+    // the second rule present it capped at exactly 14,000,000.)
+    assert.equal(env.allowedMaxBounded, 13388275n);
     assert.equal(env.withinHardMax, true, "this wall was always installable");
 
     // The enable half — what the envelope actually predicts — against what it

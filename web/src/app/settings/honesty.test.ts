@@ -154,14 +154,19 @@ describe("every control survives the restyle", () => {
     // the platform — so the choice is theirs, visible, and defaulted on.
     // 17 since the auto-convert toggle (swap settings PR): a boolean that
     // cannot ride the string draft, hence its own state hook.
-    assert.equal(count(/type="checkbox"/g), 17, "checkboxes");
+    // 18 since fast Trencher exits (main, trencher profile): opt-in exit
+    // profile for the Trencher strategy, same boolean-draft discipline.
+    assert.equal(count(/type="checkbox"/g), 18, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
     // 14 includes the owner-configurable class-position exit timer.
+    // 15 since autoConvertReservePct (this PR): main removed this reserve
+    // control and this branch restores it — the convert feature sizes against
+    // it, so the count differs from main's 14 by exactly this input.
     // (the only exit steady-basket has — counted in the census below too).
-    assert.equal(count(/type="number"/g), 14, "number inputs");
+    assert.equal(count(/type="number"/g), 15, "number inputs");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
     // census exists to allow — a control was ADDED, deliberately — and the
@@ -200,7 +205,9 @@ describe("every control survives the restyle", () => {
     // silently narrow what their agent trades — the same class of failure as the
     // consent flag above, one step less dangerous.
     // 23 includes the opt-in fast Trencher profile.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 23);
+    // 24 since trencherFastEnabled (main): the fast-exits toggle above, same
+    // guard shape — unguarded it would silently reset the exit profile.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 24);
   });
 });
 

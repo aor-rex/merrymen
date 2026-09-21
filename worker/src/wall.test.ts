@@ -247,9 +247,13 @@ test("the router is narrowed to ONE entrypoint, and Rialto is absent by default"
   // ONE, not two. `exactInput` (multi-hop) was dropped: its packed `path` hides
   // the output token and cannot be constrained at the pinned policy version,
   // which made it the loosest door once exactInputSingle pinned both legs.
-  assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 2);
+  // And exactly one exactInputSingle: Kernel refuses a repeated
+  // (callType, target, selector) with AA23, so the native ceiling lives on the
+  // general rule rather than a second WETH-pinned one (which would make the
+  // wall uninstallable — the f96ddd9 trencher episode).
+  assert.equal(find(UNISWAP.swapRouter02, "exactInputSingle").length, 1);
   assert.equal(find(UNISWAP.swapRouter02, "exactInput").length, 0);
-  assert.equal(find(UNISWAP.swapRouter02).length, 2, "general + native-input rules, nothing else on that router");
+  assert.equal(find(UNISWAP.swapRouter02).length, 1, "one exactInputSingle rule, nothing else on that router");
   // The UniversalRouter is absent entirely by default — see the v4 test above.
   // When opted in it is narrowed to `execute` and no further, because there is
   // no further: its arguments are opaque bytes.
@@ -287,17 +291,17 @@ test("owner-added tokens are validated and de-duplicated before becoming policy"
 test("the wall carries exactly the expected permission set — no more, no less", () => {
   const list = perms();
   const stockCount = STOCK_TOKENS.filter((t) => (TRADEABLE_SYMBOLS as readonly string[]).includes(t.symbol)).length;
-  // DEFAULT wall: 1 USDG approve + N stock approves + swapRouter02 ×2 (general
-  // exactInputSingle with valueLimit 0n, plus the native-input rule pinned to
-  // tokenIn == WETH with the sealed ceiling)
-  // (exactInputSingle only) + vault deposit + vault withdraw. No USDG transfer,
-  // no Rialto and no v4 — all three are opt-in. The count dropped from
-  // stockCount + 6 when Permit2 and the UniversalRouter stopped being granted
-  // unconditionally, rose to +6 when multi-hop was granted rather than
-  // quoted-and-reverted, and fell to +4 when multi-hop was dropped again —
-  // its packed path could not be constrained, which made it the widest door
-  // left once exactInputSingle pinned both token legs.
-  assert.equal(list.length, stockCount + 5, "an unexpected permission count means something was added or lost");
+  // DEFAULT wall: 1 USDG approve + N stock approves + ONE swapRouter02
+  // exactInputSingle (legs pinned, native ceiling on board) + vault deposit +
+  // vault withdraw. No USDG transfer, no Rialto and no v4 — all three are
+  // opt-in. The count dropped from stockCount + 6 when Permit2 and the
+  // UniversalRouter stopped being granted unconditionally, rose to +6 when
+  // multi-hop was granted rather than quoted-and-reverted, fell to +4 when
+  // multi-hop was dropped again — its packed path could not be constrained,
+  // which made it the widest door left once exactInputSingle pinned both
+  // token legs — and falls one more here, because the native-input second
+  // rule merged into the general one (Kernel AA23 forbids the pair).
+  assert.equal(list.length, stockCount + 4, "an unexpected permission count means something was added or lost");
   // ...and each opt-in adds exactly the entries it should, never more.
   const withXfer = buildCallPermissions(CAPS, SELF, { withdrawalAddresses: [SELF] });
   const withRialto = buildCallPermissions(CAPS, SELF, { allowRialto: true });
@@ -305,19 +309,16 @@ test("the wall carries exactly the expected permission set — no more, no less"
   assert.equal(withXfer.length, list.length + 1);
   assert.equal(withRialto.length, list.length + 1);
   assert.equal(withV4.length, list.length + 2, "v4 is a PAIR — Permit2 approve plus UniversalRouter execute");
-  // Nothing may authorise sending native value — EXCEPT the native-input
-  // router rule, the wall's one deliberate exception. It pins tokenIn EQUAL
-  // WETH (exactly the call shape that needs msg.value) and carries exactly
-  // the sealed ceiling — never the general rule, whose valueLimit stays 0n.
+  // Native value may move ONLY through the single router rule, capped at the
+  // sealed ceiling — every other permission carries valueLimit 0n. (One rule
+  // because Kernel AA23 forbids the pair; see above.)
   for (const p of list) {
-    const isNativeRule =
-      p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase() &&
-      p.valueLimit !== 0n;
-    if (isNativeRule) {
+    const isRouterRule = p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase();
+    if (isRouterRule) {
       assert.equal(
         p.valueLimit,
         NATIVE_SWAP_VALUE_LIMIT_WEI,
-        "the native-input rule carries exactly the sealed ceiling",
+        "the router rule carries exactly the sealed ceiling",
       );
     } else {
       assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
@@ -325,25 +326,23 @@ test("the wall carries exactly the expected permission set — no more, no less"
   }
 });
 
-test("the native-input rule is pinned to WETH and 0n omits it entirely", () => {
+test("the native ceiling lives on the single router rule, and 0n restores the old wall", () => {
   const list = perms() as unknown as Perm[];
   const routerRules = list.filter((p) => p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase());
-  assert.equal(routerRules.length, 2, "general + native-input router rules, nothing else on the router");
-  const [general, native] = routerRules.sort((a, b) => Number(a.valueLimit - b.valueLimit));
-  // General rule: full ONE_OF legs, zero native value.
-  assert.equal(general!.valueLimit, 0n);
-  // Native rule: tokenIn EQUAL WETH, output legs ONE_OF, recipient pinned,
-  // sealed ceiling — the only call shape that may carry msg.value.
-  assert.equal(native!.valueLimit, NATIVE_SWAP_VALUE_LIMIT_WEI);
-  const tokenIn = (native!.args as { condition: ParamCondition; value: unknown }[])[0]!;
-  assert.equal(tokenIn.condition, ParamCondition.EQUAL);
-  assert.equal(String(tokenIn.value).toLowerCase(), CASH.WETH.toLowerCase());
-  // An explicit 0n omits the rule structurally — old wall, exactly.
+  // ONE rule, not two: Kernel refuses a repeated (callType, target, selector)
+  // with AA23, so a second WETH-pinned rule would make the wall uninstallable
+  // (the f96ddd9 trencher episode). The ceiling rides on the general rule.
+  assert.equal(routerRules.length, 1, "exactly one exactInputSingle rule on the router");
+  const [only] = routerRules;
+  assert.equal(only!.valueLimit, NATIVE_SWAP_VALUE_LIMIT_WEI);
+  const legs = (only!.args as { condition: ParamCondition; value: unknown }[]).slice(0, 2);
+  for (const leg of legs) assert.equal(leg.condition, ParamCondition.ONE_OF);
+  // An explicit 0n restores the old no-value wall exactly.
   const without = buildCallPermissions(CAPS, SELF, { nativeSwapValueLimitWei: 0n });
   const routerWithout = (without as unknown as Perm[]).filter(
     (p) => p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase(),
   );
-  assert.equal(routerWithout.length, 1, "0n leaves exactly the general rule");
+  assert.equal(routerWithout.length, 1, "still exactly one rule");
   assert.equal(routerWithout[0]!.valueLimit, 0n);
   // And the policies builder forwards the field instead of dropping it.
   const forwarded = buildWallPolicies({ caps: CAPS, smartAccount: SELF, nativeSwapValueLimitWei: 0n });
