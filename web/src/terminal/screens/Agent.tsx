@@ -219,16 +219,22 @@ export function Agent({
     if (expanded && !dialog?.open) dialog?.showModal();
     if (!expanded && dialog?.open) dialog.close();
   }, [expanded]);
+  // NO RELEASE NOTICE HERE.
+  //
+  // `TrencherAnnouncement` used to render in this branch — an announcement
+  // about a trading mode, stacked directly on top of the empty state whose
+  // whole job is to get this reader to create an agent in the first place.
+  // It also fired a one-shot desktop notification and marked it spent, so a
+  // visitor who never had an agent consumed the notification meant for the
+  // owner they might become. The component now refuses that case itself;
+  // not mounting it here is the other half.
   if (!mine)
     return (
-      <div>
-      <TrencherAnnouncement />
       <Empty
         kind="chat"
         title="Your agent starts here."
         action={{ label: "Fund an agent", onClick: onDeposit }}
       />
-      </div>
     );
   /**
    * Has this owner chosen a strategy their tier will not run?
@@ -735,7 +741,7 @@ export function Agent({
           setAway(isAway);
         }}
       >
-        <TrencherAnnouncement />
+        <TrencherAnnouncement hasAgent={!!mine} />
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only
             flexible row on a fixed-height screen: measured at 375px, the
