@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { AgentStrip } from "./AgentStrip";
 import Link from "next/link";
 import { useWatchlist } from "./watchlist";
 import {
@@ -451,6 +452,23 @@ export function DesktopPortfolio({
             </button>
           </div>
         )}
+        {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
+
+            Home.tsx only renders below 1100px: above it, App swaps the home
+            and feed tabs for the desktop detail pane, so a desktop owner
+            never saw the strip at all and Telegram went back to being a
+            collapsed drawer eight blocks down the settings form.
+
+            THE SAME COMPONENT, NOT A SECOND COPY. It fetches its own two
+            readings and renders one list; a desktop-shaped duplicate would
+            be a second set of words to drift out of step with the phone's,
+            which is exactly how the settings screen ended up printing
+            "no token" for a fetch that had simply failed.
+
+            `hasAgent` is true by construction here: this component takes a
+            non-nullable `LiveMine`, and App renders it only on `desktop &&
+            mine`. The type is the gate. */}
+        <AgentStrip hasAgent />
       </section>
       {selectedToken && (
         <section className="desktop-token-context">
