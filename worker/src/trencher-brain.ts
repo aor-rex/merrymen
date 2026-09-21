@@ -95,7 +95,17 @@ export function trenchBrainPersona(symbol: string, held: boolean): string {
     "The entry cap is a sizing ceiling, not evidence of poor liquidity or absent edge. Assess expected percentage return and dollar costs separately: a small entry can still have positive or negative net edge. Do not reject solely because the cap is small; do not invent an expected return to justify entry. " +
     "Judge the current short-window setup using the measured 5-minute and 1-hour price and flow data, with 6-hour and 24-hour data as context. A negative daily return alone is neither a veto nor a buy signal. An external news catalyst or technical crossover is not mandatory, especially when no such data was supplied. Explain which observed evidence supports the decision and what remains unknown. " +
     "Hold if evidence or net edge is insufficient. Never invent activity or prices. " +
-    (held ? `You hold ${symbol}; evaluate holding or selling the existing position.`
+    // ── BOTH BRANCHES NAME THE ACTION THEY CANNOT TAKE ──────────────────
+    //
+    // The entry branch has always closed its door: a bearish view cannot
+    // become a short, so it says so. The position branch named holding and
+    // selling and left BUY unmentioned, and the model reasonably took it —
+    // Shogun answered BUY twice for a coin it already held (2026-09-21),
+    // and trencher.ts:461 drops a held symbol from the entry loop, so both
+    // were published as buys that no trade came of. An action the venue
+    // path cannot execute must be refused in the prompt, by name and with
+    // its reason, or it gets decided and counted as a failure to execute.
+    (held ? `You hold ${symbol}. This is a position review: choose HOLD or SELL. Adding to an existing position is not supported, so a bullish view means HOLD, not BUY.`
       : `You hold zero ${symbol}. This is an entry review: choose BUY or HOLD. A bearish view means HOLD, not SELL; short selling is not supported.`);
 }
 type Ready = { decision: BrainDecision; input: ShadowInputs; token: string; context: string; started: number };
@@ -190,6 +200,22 @@ export class TrenchBrainReview {
             !input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0)) {
           this.ready = null;
           note(`Brain SELL ignored for ${input.market.symbol}: no position is held; no order approved`);
+          return;
+        }
+        // THE MIRROR OF THE GUARD ABOVE, AND IT WAS MISSING.
+        //
+        // Trencher v1 opens a position and closes it; trencher.ts:461 drops
+        // a held symbol from the entry loop, so it cannot add to one. A BUY
+        // for something already held therefore became a `ready` order, was
+        // taken, and was then discarded by that loop WITHOUT A WORD — which
+        // is how Shogun published two buys on 2026-09-21 that no trade came
+        // of, while cash never moved. The decision stays on the record
+        // exactly as the model made it; what is refused is the ORDER, and
+        // now the refusal is countable like every other one.
+        if (outcome.result.decision.action === "buy" &&
+            input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0)) {
+          this.ready = null;
+          note(`Brain BUY ignored for ${input.market.symbol}: the position is already open and Trencher does not add to one; no order approved`);
           return;
         }
         this.ready = { decision: outcome.result.decision, input, token, context, started };

@@ -147,7 +147,7 @@ test("unowned SELL decisions cannot become executable orders and explain why", a
   assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5), null);
   assert.match(notes.join(" "), /no position is held/);
   assert.match(trenchBrainPersona("MEME", false), /hold zero MEME.*BUY or HOLD/);
-  assert.match(trenchBrainPersona("MEME", true), /hold MEME.*holding or selling/);
+  assert.match(trenchBrainPersona("MEME", true), /hold MEME.*HOLD or SELL/);
 });
 
 test("Brain runs in background, cannot overlap, and approval is one-use", async () => {
