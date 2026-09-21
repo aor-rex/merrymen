@@ -1070,10 +1070,8 @@ export function buildWallPolicies(args: {
         // the chain would refuse it.
         ponsClassVaultAddress: args.ponsClassVaultAddress,
         ponsClassVaultFactoryAddress: args.ponsClassVaultFactoryAddress,
-<<<<<<< HEAD
         trencherVaultAddress: args.trencherVaultAddress,
         trencherFactoryAddress: args.trencherFactoryAddress,
-=======
         // Forwarded, never defaulted here: buildCallPermissions owns the
         // default, and a second default here would let the two disagree
         // silently — the exact "silent drop" shape this forwarding exists to
@@ -1081,7 +1079,6 @@ export function buildWallPolicies(args: {
         ...(args.nativeSwapValueLimitWei !== undefined
           ? { nativeSwapValueLimitWei: args.nativeSwapValueLimitWei }
           : {}),
->>>>>>> 300c35b (feat: split native value into WETH-pinned router rule, mint marker in lockstep)
       }) as never,
     }),
   ];
