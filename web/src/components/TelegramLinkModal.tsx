@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import { useFocusTrap } from "./use-focus-trap";
 
 /**
  * Global first-link onboarding popup. Appears on any dashboard/settings page as
@@ -18,6 +19,7 @@ export function TelegramLinkModal() {
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -39,14 +41,12 @@ export function TelegramLinkModal() {
 
   const open = !!tg && tg.hasToken && tg.connected && tg.ownerId === null && !dismissed;
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDismissed(true);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  // Focus containment: the overlay declares aria-modal, so keyboard focus
+  // must live inside it while open — otherwise Tab reaches obscured dashboard
+  // controls behind the backdrop. Shared hook (same behavior as FirstVisit's
+  // tour card): focus in on open, trap Tab/Shift+Tab across buttons AND links
+  // (the modal has CTA anchors), pull stray focus back, restore on dismissal.
+  useFocusTrap(rootRef, open, () => setDismissed(true));
 
   if (!open || !tg) return null;
 
@@ -80,7 +80,7 @@ export function TelegramLinkModal() {
         if (e.target === e.currentTarget) setDismissed(true);
       }}
     >
-      <div className="tg-modal" role="dialog" aria-modal="true" aria-label="Link your Telegram bot">
+      <div ref={rootRef} tabIndex={-1} className="tg-modal" role="dialog" aria-modal="true" aria-label="Link your Telegram bot">
         <button type="button" className="tg-modal-close" aria-label="Dismiss" onClick={() => setDismissed(true)}>
           ×
         </button>
