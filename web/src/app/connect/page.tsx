@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Providers } from "@/terminal/Providers";
 import { ConnectClient } from "./ConnectClient";
+import { DEFAULT_LOCALE } from "@/lib/locale";
 import "./connect.css";
 
 export const metadata: Metadata = {
@@ -11,5 +12,8 @@ export const metadata: Metadata = {
 };
 
 export default function ConnectPage() {
-  return <Providers><ConnectClient /></Providers>;
+  // DEFAULT_LOCALE, not the cookie. This route is outside the app shell and is
+  // not in the translated set, and reading a cookie here would cost it its
+  // static rendering for nothing.
+  return <Providers locale={DEFAULT_LOCALE}><ConnectClient /></Providers>;
 }

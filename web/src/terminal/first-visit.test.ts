@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { FirstVisit, STOPS } from "./FirstVisit";
 import { deferred, json, testDom } from "./test-dom";
 import { visibleTourTarget } from "./tour-layout";
+import { EN } from "@/lib/messages/en";
 
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
@@ -93,7 +94,10 @@ it("lets readers jump to a topic and navigate back without sending the example q
   const screens: unknown[] = []; let questions = 0;
   await ui.render(tour(null, s => screens.push(s), () => { questions++; }));
   await ui.click("Topics");
-  const i = STOPS.findIndex(s => s.title === "Add funds.");
+  // Found through the catalogue rather than by index: a stop's words moved into
+  // `en.ts` when the tour became translatable, and pinning "stop 13" here would
+  // make reordering the tour break a test about jumping to a topic.
+  const i = STOPS.findIndex(s => EN[s.titleKey] === "Add funds.");
   await ui.click(`${i + 1}. Add funds.`);
   assert.deepEqual(screens.at(-1), {kind: "deposit"});
   assert.equal(ui.container.querySelector('.tour-topics'), null);

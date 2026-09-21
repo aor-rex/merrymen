@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Languages } from "lucide-react";
 
 import { SUPPORTED, currentLocale, setLocale, type LocaleTag } from "@/lib/locale";
+import { useT } from "@/lib/i18n";
 
 /**
  * THE CONTROL THAT HAS TO BE FINDABLE WITHOUT READING THE APP.
@@ -28,6 +29,7 @@ import { SUPPORTED, currentLocale, setLocale, type LocaleTag } from "@/lib/local
  * what it covers is better than one that implies more than it does.
  */
 export function LanguagePicker() {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [tag, setTag] = useState<LocaleTag>("en");
   const box = useRef<HTMLDivElement | null>(null);
@@ -68,10 +70,10 @@ export function LanguagePicker() {
         className="lang-trigger"
         aria-haspopup="listbox"
         aria-expanded={open}
-        // The accessible name is the only English here, and it is for a screen
-        // reader rather than for the eye. The visible affordance is the icon
-        // plus the reader's own language name.
-        aria-label="Choose language"
+        // The accessible name, which a screen reader announces rather than the
+        // eye reading it. Translated like everything else — a blind reader in
+        // Bangkok has the same problem as a sighted one and fewer ways round it.
+        aria-label={t("lang.choose")}
         onClick={() => setOpen((o) => !o)}
       >
         <Languages size={14} aria-hidden />
