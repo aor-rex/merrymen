@@ -177,7 +177,19 @@ export async function runShadow(
   cfg: BrainConfig | null,
   i: ShadowInputs,
   log: (m: string) => void,
-  options: { triggers?: TriggerConfig; tier?: "pulse" | "research" } = {},
+  options: {
+    triggers?: TriggerConfig;
+    tier?: "pulse" | "research";
+    /**
+     * The coin's own name, when the tape gave one.
+     *
+     * Passed IN rather than resolved here, because this module knows a
+     * symbol and the caller knows the watch set. Display only: it reaches
+     * the decision row so a feed can say what was traded, and nothing
+     * prices, routes, matches or settles against it.
+     */
+    displayName?: string | null;
+  } = {},
 ): Promise<ShadowOutcome> {
   const idle: TriggerVerdict = { fire: false, reason: null, detail: "brain not configured", candidates: [] };
   if (!cfg || !cfg.url || !cfg.token) {
@@ -299,7 +311,7 @@ export async function runShadow(
     tier: options.tier ?? "research",
   });
 
-  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
+  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log, options.displayName);
   return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now, options.triggers) };
 }
 
@@ -356,6 +368,14 @@ export async function persistBrainDecision(
   /** The mark the decision was made against — replay cannot work without it. */
   market: { priceUsd: string | null; priceStale: boolean },
   log: (m: string) => void,
+  /**
+   * The coin's own name, when the tape gave one.
+   *
+   * Passed in rather than resolved here: this module knows a symbol, the
+   * caller knows the watch set. Display only, so a feed can say what was
+   * traded instead of printing an address-derived id at a reader.
+   */
+  displayName?: string | null,
 ): Promise<void> {
   if (!result.ok) {
     // A REFUSAL IS A RESULT, and it is recorded. The runs that produced nothing
@@ -444,6 +464,7 @@ export async function persistBrainDecision(
     // enrolled, and it is still one place.
     source,
     provenance: "brain",
+    display_name: displayName ?? null,
     strategy: "brain",
     provider: d.models[0]?.provider,
     model: d.models[0]?.model,

@@ -233,6 +233,7 @@ const SQLITE_SCHEMA = `
       signals_json TEXT,           -- the inputs the decision was made on (for later review)
       evidence_json TEXT,          -- the banded fact layer behind a published post (safe to show)
       provenance TEXT,             -- WHAT KIND OF THING decided; see provenance.ts
+      display_name TEXT,           -- the coin's own name, display only; see ClassEvidence.displayName
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
@@ -693,6 +694,7 @@ const SQLITE_ALTERS: string[] = [
     // written before this existed, and null renders as unknown rather than as
     // any particular kind.
     "ALTER TABLE decisions ADD COLUMN provenance TEXT",
+    "ALTER TABLE decisions ADD COLUMN display_name TEXT",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
     // Rows written before the identity existed carry a NULL chain and whatever
@@ -1116,6 +1118,17 @@ export interface DecisionRow {
    * them is a claim about autonomy.
    */
   provenance?: string | null;
+  /**
+   * THE NAME A READER RECOGNISES, when the tape gave one.
+   *
+   * An autonomous Trencher symbol is address-derived — `T` plus eleven hex — so
+   * a feed rendered from `symbol` alone says "hold T7631DACC21B", which tells a
+   * reader nothing. This rides alongside it: display only, nothing prices,
+   * routes, matches or settles against it, and ABSENT rather than a placeholder
+   * when no name was carried. Sanitised where it is resolved, because it is the
+   * one field here a stranger wrote.
+   */
+  display_name?: string | null;
 }
 
 /** A fresh decision id. Kept here so every producer stamps the same shape. */
@@ -1127,8 +1140,8 @@ export async function addDecision(row: DecisionRow): Promise<void> {
   try {
     await getDb()
       .prepare(
-        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1146,6 +1159,7 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.hold_kind ?? null,
         row.evidence_json ?? null,
         row.provenance ?? null,
+        row.display_name ?? null,
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);

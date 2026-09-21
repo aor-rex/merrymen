@@ -67,6 +67,8 @@ export interface ThesisRow {
   source?: string | null;
   action?: string | null;
   symbol?: string | null;
+  /** The coin's own name, when the tape gave one. Display only; see store.ts. */
+  display_name?: string | null;
   size_usdg?: number | null;
   reason?: string | null;
   dropped_rule?: string | null;
@@ -584,7 +586,21 @@ function headOf(row: ThesisRow, shadow: boolean): string {
   // agent would speak, and there is nothing to disclaim.
   const verb =
     shadow && (row.action === "buy" || row.action === "sell") ? `would ${row.action}` : row.action;
-  return [verb, row.symbol, size].filter(Boolean).join(" ");
+  // THE NAME FIRST, THE ID BESIDE IT. An autonomous Trencher symbol is
+  // address-derived, `T` plus eleven hex of the contract, so a head built
+  // from it alone reads "hold T7631DACC21B" and tells a reader nothing
+  // about what was traded. The id stays because it is what everything
+  // prices, routes and settles against, and because two coins may call
+  // themselves the same thing on the same day.
+  //
+  // Absent name, absent parenthesis: never a placeholder. And never the
+  // name alone, because dropping the id would make the feed the one
+  // surface that cannot be reconciled against the ledger.
+  const named =
+    row.display_name && row.display_name !== row.symbol
+      ? `${row.display_name} (${row.symbol})`
+      : row.symbol;
+  return [verb, named, size].filter(Boolean).join(" ");
 }
 
 /** Known operational templates, not a classifier of market sentiment. */

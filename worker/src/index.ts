@@ -10376,7 +10376,13 @@ async function main() {
               }
               return runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
-              { tier: "pulse", triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } } }); },
+              {
+                tier: "pulse",
+                // The coin's own name, so the feed can say what was traded
+                // instead of printing eleven hex at a reader. Display only.
+                displayName: displayNameOf(focus.symbol),
+                triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
+              }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(

@@ -130,7 +130,7 @@ describe("the whole life of one decision, from its id", () => {
   let db: ReturnType<typeof wrapSqlite>;
 
   const SCHEMA = [
-    "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, evidence_json TEXT, provenance TEXT, at INTEGER NOT NULL DEFAULT 0);",
+    "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, evidence_json TEXT, provenance TEXT, display_name TEXT, at INTEGER NOT NULL DEFAULT 0);",
     "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, fill_cash_usdg REAL, created_at INTEGER);",
     "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, decision_id TEXT UNIQUE, body TEXT, created_at INTEGER);",
   ].join("\n");

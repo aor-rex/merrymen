@@ -139,11 +139,23 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     args.push(Math.max(SCAN, limit));
 
     let rows: ThesisRow[] = [];
-    try {
-      rows = (await db
+    // ── THE NAME IS OPTIONAL TO READ, ON PURPOSE ─────────────────────────
+    //
+    // `decisions.display_name` is created by the WRITER's migration, and the
+    // reader is a different service that deploys at the same moment. For the
+    // minute between the two, selecting a column that does not exist yet
+    // throws — and the catch below turns that into an empty list, which on a
+    // public feed is indistinguishable from a fleet that has never spoken.
+    //
+    // So it is attempted, and dropped if the column is not there yet. A feed
+    // without the coin's name is a worse feed; a blank one is a broken
+    // product, and the blankness would be silent.
+    const run = async (named: boolean): Promise<ThesisRow[]> =>
+      (await db
         .prepare(
           `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
-                  d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
+                  d.action AS action, d.symbol AS symbol, ${named ? "d.display_name AS display_name," : ""}
+                  d.size_usdg AS size_usdg,
                   d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
                   d.hold_kind AS hold_kind,
                   p.body AS post,
@@ -170,15 +182,23 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
             -- mix fake capital in. 'idle' stays out: an agent that has never
             -- heartbeat has not said anything.
             WHERE ${where.join(" AND ")}
-            GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
+            GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
                      d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body
             ORDER BY MAX(d.at) DESC
             LIMIT ?`,
         )
         .all(...args)) as ThesisRow[];
-    } catch (error) {
-      console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
-      return { source: "none", theses: [] };
+    try {
+      rows = await run(true);
+    } catch {
+      // Second and last attempt, without the column. A failure here is a real
+      // read failure and is reported as one.
+      try {
+        rows = await run(false);
+      } catch (error) {
+        console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
+        return { source: "none", theses: [] };
+      }
     }
 
     // THE ID IS DERIVED FROM THE PUBLISHED POST, not from the row, and only
