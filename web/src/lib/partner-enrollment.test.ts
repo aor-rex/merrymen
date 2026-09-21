@@ -73,7 +73,17 @@ async function fixture(overrides: Partial<PartnerEnrollmentDependencies> = {}) {
   };
   return { store, service, deps, grant, owner, ownerKey, connection: created.connection, savedGrants, savedSettings, events, challengeFor, activationFor, advance: (ms: number) => { now += ms; } };
 }
-after(() => { for (const { store, home } of fixtures) { store.close(); rmSync(home, { recursive: true, force: true }); } });
+// Windows clears a WAL database's -shm mapping after close() returns, so a
+// zero-retry rmSync rmdir's into ENOTEMPTY under a loaded full-suite run; see the
+// cleanup note in partner-store.test.ts. Retry, and close everything even if one
+// teardown throws, so a stuck directory cannot strand the rest of this file.
+after(() => {
+  const failures: unknown[] = [];
+  const attempt = (fn: () => void) => { try { fn(); } catch (error) { failures.push(error); } };
+  for (const { store } of fixtures) attempt(() => store.close());
+  for (const { home } of fixtures) attempt(() => rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  if (failures.length) throw failures[0];
+});
 
 test("a real owner signature persists the worker grant and scopes the durable connection", async () => {
   const f = await fixture();

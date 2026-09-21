@@ -22,11 +22,22 @@ function fixture() {
 const input = (externalUserId = "user-1", partnerId = "partner-a"): PartnerCreate => ({
   partnerId, partnerName: "Partner A", externalUserId, name: "Robin", scopes: ["read:agent", "chat:agent"],
 });
+/**
+ * Windows releases a WAL database's -shm mapping ASYNCHRONOUSLY. node:sqlite's
+ * close() returns while SQLite is still clearing PARTNER-CONNECTIONS.SQLITE-SHM.tmp,
+ * so an rmSync at its default maxRetries of 0 reads the directory, unlinks what it
+ * sees, and then rmdir's into ENOTEMPTY. It only loses that race on a loaded
+ * machine, which is why this file passed alone and failed in the full suite.
+ * Retrying is what maxRetries is for. Close every store before removing anything
+ * and keep going past a failure: aborting the loop on the first stuck directory
+ * left every later fixture's database handle open for the life of the process.
+ */
 after(() => {
-  for (const { store, home } of fixtures) {
-    store.close();
-    rmSync(home, { recursive: true, force: true });
-  }
+  const failures: unknown[] = [];
+  const attempt = (fn: () => void) => { try { fn(); } catch (error) { failures.push(error); } };
+  for (const { store } of fixtures) attempt(() => store.close());
+  for (const { home } of fixtures) attempt(() => rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  if (failures.length) throw failures[0];
 });
 
 test("concurrent creates produce one connection and recover the same onboarding token", async () => {
@@ -223,13 +234,19 @@ test("records and history survive store reopen", async () => {
 });
 
 test("hosted deployment fails closed without a shared database", () => {
-  const oldHosted = process.env.MERRYMEN_HOSTED;
-  const oldUrl = process.env.DATABASE_URL;
+  const saved = { MERRYMEN_HOSTED: process.env.MERRYMEN_HOSTED, DATABASE_URL: process.env.DATABASE_URL, MERRYMEN_HOME: process.env.MERRYMEN_HOME };
+  // This is the one test that reaches getPartnerStore(), and the branch it does NOT
+  // take opens a database at merrymenHome(). Point that at a disposable directory so
+  // a regression in the guard can never write into the developer's real ~/.merrymen.
+  const home = mkdtempSync(join(tmpdir(), "merrymen-partner-hosted-"));
+  process.env.MERRYMEN_HOME = home;
   process.env.MERRYMEN_HOSTED = "true";
   delete process.env.DATABASE_URL;
   try { assert.throws(() => getPartnerStore(), /require DATABASE_URL/); }
   finally {
-    if (oldHosted === undefined) delete process.env.MERRYMEN_HOSTED; else process.env.MERRYMEN_HOSTED = oldHosted;
-    if (oldUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = oldUrl;
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

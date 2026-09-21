@@ -16,7 +16,17 @@ const runtime = { exists: true, smart_account: tenant, name: "Robin", slug: "rob
   mode: null, last_observed_mode: null, worker_alive_at: null, heartbeat_fresh: false, live_blocker: null,
   last_observed_live_blocker: null, strategy: "steady-basket", live_trading_enabled: false, paper_trading_enabled: true, ledger_available: false };
 const fixtures: Array<{ home: string; store: FilePartnerStore }> = [];
-after(() => { for (const { home, store } of fixtures) { store.close(); rmSync(home, { recursive: true, force: true }); } });
+// Windows clears a WAL database's -shm mapping after close() returns, so a
+// zero-retry rmSync rmdir's into ENOTEMPTY under a loaded full-suite run; see the
+// cleanup note in partner-store.test.ts. Retry, and close everything even if one
+// teardown throws, so a stuck directory cannot strand the rest of this file.
+after(() => {
+  const failures: unknown[] = [];
+  const attempt = (fn: () => void) => { try { fn(); } catch (error) { failures.push(error); } };
+  for (const { store } of fixtures) attempt(() => store.close());
+  for (const { home } of fixtures) attempt(() => rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  if (failures.length) throw failures[0];
+});
 
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "merrymen-partner-service-"));
