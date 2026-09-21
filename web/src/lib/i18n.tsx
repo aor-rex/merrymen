@@ -79,6 +79,10 @@ const NS = (key: string) => key.slice(0, key.indexOf("."));
 const REQUIRES: Record<string, readonly string[]> = {
   tour: ["mode"],
   create: ["mode"],
+  // Settings carries the SECOND live-trading switch. A translated Settings page
+  // whose trading-mode row still read English would be the same dead end, on
+  // the one screen somebody opens specifically to change that.
+  settings: ["mode"],
 };
 
 const coverage = new Map<string, Set<string>>();
@@ -155,6 +159,46 @@ export function translate(locale: LocaleTag, key: MessageKey, vars?: Vars): stri
   // Belt and braces: coverage already guarantees this, and a bad catalogue
   // should still never put a key name or an empty string on a screen.
   return fill(typeof value === "string" && value !== "" ? value : english, vars);
+}
+
+/**
+ * A message whose VALUES are emphasised, without the translation carrying
+ * markup.
+ *
+ * The wallet's grant summary reads "at most **$10** per trade, **$50** per
+ * day…", and the bold is doing real work: it is the figure somebody is about
+ * to sign. Two ways of keeping it are both worse than this one.
+ *
+ * Putting `<b>` inside the message makes the translator responsible for HTML,
+ * and a mistyped tag on the signing screen is a rendering bug in a sentence
+ * about money. Splitting the sentence into fragments around each figure forces
+ * English word order on every language, which is the thing placeholders exist
+ * to avoid.
+ *
+ * So the translation stays plain text with `{placeholders}`, and whatever is
+ * substituted comes back wrapped. The translator moves the figures wherever
+ * their language wants them and the emphasis follows.
+ */
+export function useRichT(): (key: MessageKey, vars: Vars) => React.ReactNode {
+  const locale = useContext(LocaleContext);
+  return useMemo(
+    () => (key: MessageKey, vars: Vars) => {
+      const template = translate(locale, key);
+      const out: React.ReactNode[] = [];
+      let last = 0;
+      let n = 0;
+      for (const m of template.matchAll(/\{(\w+)\}/g)) {
+        const name = m[1]!;
+        if (!(name in vars)) continue; // left visible, as `fill` does
+        out.push(template.slice(last, m.index));
+        out.push(<b key={`v${n++}`}>{String(vars[name])}</b>);
+        last = m.index! + m[0].length;
+      }
+      out.push(template.slice(last));
+      return out;
+    },
+    [locale],
+  );
 }
 
 /** The message lookup for the current reader. */

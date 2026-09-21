@@ -196,6 +196,49 @@ describe("the catalogues on disk", () => {
   });
 });
 
+describe("a namespace does not ship until its SCREEN is extracted", () => {
+  it("SETTINGS IS TRANSLATED AND DELIBERATELY NOT SHIPPED", () => {
+    // All 149 `settings.*` keys exist in every language. Shipping them would
+    // still be wrong: the extraction caught `label=`, `hint=` and four element
+    // shapes, and an audit of the remainder found 132 more user-facing strings
+    // on the same screen — 1,156 words — including the two that decide whether
+    // an agent spends real money:
+    //
+    //   "ON — real orders, real money, within your signed caps"
+    //   "OFF — Paper mode: practising with simulated money at live prices"
+    //
+    // A Spanish Settings page whose live-trading explanation is English is the
+    // exact failure the namespace rule exists to prevent, on the screen where
+    // that switch lives. The catalogue is complete; the SCREEN is not, and the
+    // rule is about the screen.
+    //
+    // This test comes OFF when the rest is extracted, and not before.
+    for (const [tag, table] of Object.entries(CATALOGUES)) {
+      const shipped = Object.keys(table ?? {}).filter((k) => k.startsWith("settings."));
+      assert.deepEqual(
+        shipped,
+        [],
+        `${tag} ships ${shipped.length} settings keys while the screen is still half English`,
+      );
+    }
+    // And the English keys stay, because the screen already renders from them.
+    assert.ok(
+      (Object.keys(EN) as MessageKey[]).filter((k) => k.startsWith("settings.")).length > 100,
+      "the settings catalogue should still exist in English",
+    );
+  });
+
+  it("so no locale claims Settings is translated", () => {
+    for (const { tag } of SUPPORTED) {
+      if (tag === DEFAULT_LOCALE) continue;
+      assert.ok(
+        !translatedNamespaces(tag).includes("settings"),
+        `${tag} would render a half-translated Settings page`,
+      );
+    }
+  });
+});
+
 describe("the tour has no English left in it", () => {
   const SRC = readFileSync(new URL("../terminal/FirstVisit.tsx", import.meta.url), "utf8");
 

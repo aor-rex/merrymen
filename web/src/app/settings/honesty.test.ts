@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "@/lib/messages/en";
 
 /**
  * WHAT /settings MUST STILL DO AFTER IT IS RESTYLED.
@@ -102,8 +103,23 @@ describe("every control survives the restyle", () => {
    * input. A label may become plainer; a control may not vanish.
    */
   it("keeps all 45 field labels", () => {
-    const missing = FIELDS.filter((f) => !SRC.includes(`label="${f}"`));
+    // MEASURED AGAINST THE CATALOGUE, because that is where the labels live
+    // now. The census is unchanged — these forty-five fields must still be on
+    // the page — but the component names a key and the English sits in en.ts,
+    // so looking for `label="…"` in the JSX would report every field missing
+    // the moment the screen became translatable.
+    // `Set<string>`, not the literal union `Object.values` infers — the point
+    // is to ask whether an arbitrary label is present, which a union of the
+    // exact strings will not let you do.
+    const shipped = new Set<string>(Object.values(EN));
+    const missing = FIELDS.filter((f) => !shipped.has(f));
     assert.deepEqual(missing, [], "these fields disappeared from the page");
+    // And the screen must still RENDER a label for each, rather than merely
+    // having the string sit unused in the catalogue. Counted with a plain
+    // substring, because the thing being looked for is full of regex
+    // metacharacters and an escaping slip here would silently match nothing.
+    const rendered = SRC.split('label={t("settings.label.').length - 1;
+    assert.ok(rendered >= 40, `only ${rendered} field labels are rendered from the catalogue`);
   });
 
   it("AND THE SETTINGS BEHIND THE RENAMED FOUR ARE STILL BOUND TO AN INPUT", () => {
@@ -299,7 +315,12 @@ describe("the hosted refusals stay refused", () => {
     // only thing between an owner and arming it by accident, and it is prose —
     // exactly the shape a restyle deletes without any test noticing.
     assert.match(SRC, /shell/i);
-    assert.match(SRC, /Only enabled groups work; the rest are refused/);
+    // The warning itself moved into the catalogue with the rest of the screen.
+    // Asserting on the WORDS still, just where they are.
+    assert.ok(
+      Object.values(EN).some((v) => /Only enabled groups work; the rest are refused/.test(v)),
+      "the auto-shell warning must survive somewhere in the shipped copy",
+    );
   });
 
   it("keeps the capability chips announcing whether they are armed", () => {
