@@ -11,6 +11,7 @@ import {
   recordFire,
   recordSwapId,
   swapIdCompleted,
+  unclaimSwapId,
 } from "./convert-latch";
 
 describe("convert latch — once per deposit", () => {
@@ -67,6 +68,19 @@ describe("convert latch — once per deposit", () => {
     assert.equal(latch.updatedAtMs, 999);
     recordSwapId(latch, "abc", 1000); // idempotent on the set
     assert.equal(latch.completedSwapIds.length, 1);
+  });
+
+  it("a claim withdrawn before any spend leaves no trace for a retry", () => {
+    // The pre-spend write-ahead claim: if the durable write fails, the id is
+    // unclaimed in memory so retrying with the same request id re-enters the
+    // flow instead of being mistaken for an already-honoured spend.
+    const latch = emptyLatch();
+    recordSwapId(latch, "abc", 999);
+    assert.equal(swapIdCompleted(latch, "abc"), true);
+    unclaimSwapId(latch, "abc");
+    assert.equal(swapIdCompleted(latch, "abc"), false);
+    unclaimSwapId(latch, "abc"); // idempotent — unknown ids are a no-op
+    assert.deepEqual(latch.completedSwapIds, []);
   });
 
   it("row codec round-trips; corrupt rows degrade to empty, never to fired", () => {
