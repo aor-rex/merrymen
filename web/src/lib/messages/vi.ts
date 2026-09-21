@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * vi. 78 of the English catalogue's keys.
+ * vi. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const vi: Partial<Record<MessageKey, string>> = {
   "mode.ack": "Tôi hiểu rằng tác nhân này có thể giao dịch bằng tiền thật.",
   "mode.paperNote": "Giao dịch mô phỏng: lệnh được khớp mô phỏng theo giá thị trường thời gian thực, và không có lệnh thật nào được đặt. Đây chỉ là một tùy chọn cài đặt, không phải một mạng khác — dù chọn chế độ nào, tác nhân của bạn vẫn hoạt động trên Robinhood Chain, và bạn có thể bật giao dịch bằng tiền thật bất cứ lúc nào trong Cài đặt (Settings), mà không cần ký lại.",
   "mode.liveNote": "Giao dịch bằng tiền thật: tác nhân của bạn đặt lệnh thật bằng số tiền bạn đã nạp, trong phạm vi các hạn mức này. Bạn có thể chuyển lại sang giao dịch mô phỏng bất cứ lúc nào trong Cài đặt (Settings).",
+  "strip.aria": "Kết nối của tác nhân",
+  "strip.checking": "đang kiểm tra…",
+  "strip.tg.notSetUp": "chưa thiết lập",
+  "strip.tg.connect": "Kết nối →",
+  "strip.tg.off": "đã lưu token, nhưng đang tắt",
+  "strip.tg.turnOn": "Bật →",
+  "strip.tg.unverified": "đã lưu token, chưa xác minh",
+  "strip.tg.checkIt": "Kiểm tra →",
+  "strip.tg.ready": "sẵn sàng kết nối",
+  "strip.tg.startingUp": "đang khởi động",
+  "strip.tg.open": "Mở Telegram →",
+  "strip.tg.sendThis": "Gửi nội dung này cho bot của bạn:",
+  "strip.tg.codeWarning": "Bất kỳ ai có mã này đều có thể điều khiển tác nhân của bạn — đừng chia sẻ hay chụp màn hình.",
+  "strip.tg.noCodeYet": "Tác nhân sẽ tạo mã liên kết ở lượt chạy kế tiếp. Vui lòng quay lại sau giây lát.",
+  "strip.tg.connectedAs": "đã kết nối với @{bot}",
+  "strip.tg.connected": "đã kết nối",
+  "strip.tg.manage": "Quản lý →",
+  "strip.trencher.off": "không phải chiến lược của bạn",
+  "strip.trencher.whatIsThis": "Đây là gì? →",
+  "strip.trencher.noCrypto": "đang bật, nhưng chế độ tài sản của bạn chỉ có cổ phiếu — không xét được đồng nào",
+  "strip.trencher.changeIt": "Thay đổi →",
+  "strip.trencher.paper": "đang bật, chỉ dùng tiền tập luyện",
+  "strip.trencher.live": "đang bật, giao dịch bằng tiền thật",
+  "strip.trencher.settings": "Cài đặt →",
 };

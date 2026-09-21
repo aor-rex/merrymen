@@ -83,6 +83,11 @@ const REQUIRES: Record<string, readonly string[]> = {
   // whose trading-mode row still read English would be the same dead end, on
   // the one screen somebody opens specifically to change that.
   settings: ["mode"],
+  // The strip says an agent is trading "practice money" or "real money" — the
+  // mode vocabulary, in its own words. Shipping those sentences in a language
+  // whose mode pill still reads English would leave a reader comparing two
+  // descriptions of the same thing and finding only one of them.
+  strip: ["mode"],
 };
 
 const coverage = new Map<string, Set<string>>();

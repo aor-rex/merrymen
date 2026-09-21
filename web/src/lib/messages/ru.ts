@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * ru. 78 of the English catalogue's keys.
+ * ru. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const ru: Partial<Record<MessageKey, string>> = {
   "mode.ack": "Я понимаю, что этот агент может торговать на реальные деньги.",
   "mode.paperNote": "Демо-режим: сделки исполняются на виртуальные деньги по текущим рыночным ценам, реальные заявки не отправляются. Это настройка, а не другая сеть — ваш агент в обоих режимах работает в Robinhood Chain, а включить торговлю на реальные деньги можно в любой момент в настройках, без новой подписи.",
   "mode.liveNote": "Торговля на реальные деньги: агент отправляет реальные заявки и тратит внесённые вами средства — в пределах этих лимитов. Вернуться в демо-режим можно в любой момент в настройках.",
+  "strip.aria": "Подключения агента",
+  "strip.checking": "проверяем…",
+  "strip.tg.notSetUp": "не настроен",
+  "strip.tg.connect": "Подключить →",
+  "strip.tg.off": "токен сохранён, но выключен",
+  "strip.tg.turnOn": "Включить →",
+  "strip.tg.unverified": "токен сохранён, ещё не проверен",
+  "strip.tg.checkIt": "Проверить →",
+  "strip.tg.ready": "готов к подключению",
+  "strip.tg.startingUp": "запускается",
+  "strip.tg.open": "Открыть Telegram →",
+  "strip.tg.sendThis": "Отправьте это своему боту:",
+  "strip.tg.codeWarning": "Любой, у кого есть этот код, может управлять вашим агентом — не делитесь им и не выкладывайте скриншот.",
+  "strip.tg.noCodeYet": "Агент создаст код привязки на следующем проходе. Загляните чуть позже.",
+  "strip.tg.connectedAs": "подключён как @{bot}",
+  "strip.tg.connected": "подключён",
+  "strip.tg.manage": "Управлять →",
+  "strip.trencher.off": "не ваша стратегия",
+  "strip.trencher.whatIsThis": "Что это? →",
+  "strip.trencher.noCrypto": "включён, но режим активов — только акции, поэтому монеты не рассматриваются",
+  "strip.trencher.changeIt": "Изменить →",
+  "strip.trencher.paper": "включён, только тренировочные деньги",
+  "strip.trencher.live": "включён, торгует реальными деньгами",
+  "strip.trencher.settings": "Настройки →",
 };

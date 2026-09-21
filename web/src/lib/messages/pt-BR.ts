@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * pt-BR. 78 of the English catalogue's keys.
+ * pt-BR. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const pt_BR: Partial<Record<MessageKey, string>> = {
   "mode.ack": "Entendo que este agente pode negociar com dinheiro real.",
   "mode.paperNote": "Negociação simulada: execuções simuladas com preços de mercado em tempo real e nenhuma ordem real. Isso é uma configuração, não uma rede diferente — seu agente continua na Robinhood Chain nos dois casos, e você pode ativar a negociação com dinheiro real quando quiser, em Configurações, sem precisar de uma nova assinatura da carteira.",
   "mode.liveNote": "Negociação com dinheiro real: seu agente envia ordens reais com os fundos que você depositar, dentro destes limites. Você pode voltar para o modo simulado quando quiser, em Configurações.",
+  "strip.aria": "Conexões do agente",
+  "strip.checking": "verificando…",
+  "strip.tg.notSetUp": "não configurado",
+  "strip.tg.connect": "Conectar →",
+  "strip.tg.off": "token salvo, mas desativado",
+  "strip.tg.turnOn": "Ativar →",
+  "strip.tg.unverified": "token salvo, ainda não verificado",
+  "strip.tg.checkIt": "Verificar →",
+  "strip.tg.ready": "pronto para conectar",
+  "strip.tg.startingUp": "iniciando",
+  "strip.tg.open": "Abrir o Telegram →",
+  "strip.tg.sendThis": "Envie isto ao seu bot:",
+  "strip.tg.codeWarning": "Qualquer pessoa com este código pode controlar seu agente — não compartilhe nem tire print.",
+  "strip.tg.noCodeYet": "Seu agente vai gerar um código de vínculo na próxima passagem. Volte daqui a pouco.",
+  "strip.tg.connectedAs": "conectado como @{bot}",
+  "strip.tg.connected": "conectado",
+  "strip.tg.manage": "Gerenciar →",
+  "strip.trencher.off": "não é a sua estratégia",
+  "strip.trencher.whatIsThis": "O que é isso? →",
+  "strip.trencher.noCrypto": "ativo, mas seu modo de ativos é apenas ações — nenhuma moeda pode ser considerada",
+  "strip.trencher.changeIt": "Alterar →",
+  "strip.trencher.paper": "ativo, apenas dinheiro de prática",
+  "strip.trencher.live": "ativo, operando com dinheiro real",
+  "strip.trencher.settings": "Configurações →",
 };

@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * es. 78 of the English catalogue's keys.
+ * es. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const es: Partial<Record<MessageKey, string>> = {
   "mode.ack": "Entiendo que este agente puede operar con dinero real.",
   "mode.paperNote": "Operaciones de práctica: ejecuciones simuladas a precios de mercado en tiempo real, sin órdenes reales. Es un ajuste, no una red distinta: tu agente sigue en Robinhood Chain en ambos casos, y puedes activar la opción de operar con dinero real cuando quieras desde Ajustes, sin volver a firmar.",
   "mode.liveNote": "Operar con dinero real: tu agente envía órdenes reales con los fondos que deposites, dentro de estos límites. Puedes volver al modo práctica cuando quieras desde Ajustes.",
+  "strip.aria": "Conexiones del agente",
+  "strip.checking": "comprobando…",
+  "strip.tg.notSetUp": "sin configurar",
+  "strip.tg.connect": "Conectar →",
+  "strip.tg.off": "token guardado, pero desactivado",
+  "strip.tg.turnOn": "Activar →",
+  "strip.tg.unverified": "token guardado, aún sin verificar",
+  "strip.tg.checkIt": "Revisar →",
+  "strip.tg.ready": "listo para conectar",
+  "strip.tg.startingUp": "arrancando",
+  "strip.tg.open": "Abrir Telegram →",
+  "strip.tg.sendThis": "Envía esto a tu bot:",
+  "strip.tg.codeWarning": "Cualquiera que tenga este código puede controlar tu agente: no lo compartas ni le hagas una captura.",
+  "strip.tg.noCodeYet": "Tu agente generará un código de vinculación en su próxima pasada. Vuelve a mirar en un momento.",
+  "strip.tg.connectedAs": "conectado como @{bot}",
+  "strip.tg.connected": "conectado",
+  "strip.tg.manage": "Gestionar →",
+  "strip.trencher.off": "no es tu estrategia",
+  "strip.trencher.whatIsThis": "¿Qué es esto? →",
+  "strip.trencher.noCrypto": "activo, pero tu modo de activos es solo acciones: no se puede considerar ninguna moneda",
+  "strip.trencher.changeIt": "Cambiarlo →",
+  "strip.trencher.paper": "activo, solo en modo práctica",
+  "strip.trencher.live": "activo, operando con dinero real",
+  "strip.trencher.settings": "Ajustes →",
 };

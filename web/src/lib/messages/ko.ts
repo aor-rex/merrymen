@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * ko. 78 of the English catalogue's keys.
+ * ko. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const ko: Partial<Record<MessageKey, string>> = {
   "mode.ack": "이 에이전트가 실제 자금으로 매매할 수 있다는 점을 이해합니다.",
   "mode.paperNote": "모의 매매: 실시간 시장 가격으로 체결을 모의 처리할 뿐, 실제 주문은 내지 않습니다. 이는 다른 네트워크가 아니라 설정입니다. 어느 쪽을 고르든 에이전트는 Robinhood Chain에 그대로 있으며, 설정 화면에서 언제든 새로 서명하지 않고도 실전 매매를 켤 수 있습니다.",
   "mode.liveNote": "실전 매매: 입금하신 자금으로 에이전트가 이 한도 안에서 실제 주문을 냅니다. 설정 화면에서 언제든 모의 매매로 되돌릴 수 있습니다.",
+  "strip.aria": "에이전트 연결 상태",
+  "strip.checking": "확인 중…",
+  "strip.tg.notSetUp": "설정되지 않음",
+  "strip.tg.connect": "연결하기 →",
+  "strip.tg.off": "토큰은 저장됐지만 꺼져 있음",
+  "strip.tg.turnOn": "켜기 →",
+  "strip.tg.unverified": "토큰은 저장됐지만 아직 확인되지 않음",
+  "strip.tg.checkIt": "확인하기 →",
+  "strip.tg.ready": "연결할 준비 완료",
+  "strip.tg.startingUp": "시작하는 중",
+  "strip.tg.open": "Telegram 열기 →",
+  "strip.tg.sendThis": "봇에게 이것을 보내세요:",
+  "strip.tg.codeWarning": "이 코드를 가진 사람은 누구나 에이전트를 조작할 수 있습니다 — 공유하거나 화면을 캡처하지 마세요.",
+  "strip.tg.noCodeYet": "다음 주기에 에이전트가 연결 코드를 발급합니다. 잠시 후 다시 확인해 주세요.",
+  "strip.tg.connectedAs": "@{bot}(으)로 연결됨",
+  "strip.tg.connected": "연결됨",
+  "strip.tg.manage": "관리하기 →",
+  "strip.trencher.off": "현재 전략이 아님",
+  "strip.trencher.whatIsThis": "이게 뭔가요? →",
+  "strip.trencher.noCrypto": "켜져 있지만 자산 모드가 주식 전용이라 코인은 고려되지 않습니다",
+  "strip.trencher.changeIt": "변경하기 →",
+  "strip.trencher.paper": "켜짐, 연습 자금만 사용",
+  "strip.trencher.live": "켜짐, 실제 자금으로 거래",
+  "strip.trencher.settings": "설정 →",
 };

@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * ja. 78 of the English catalogue's keys.
+ * ja. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const ja: Partial<Record<MessageKey, string>> = {
   "mode.ack": "このエージェントが実際のお金で取引できることを理解しました。",
   "mode.paperNote": "デモ取引：リアルタイムの市場価格を使った模擬約定のみで、実際の注文は出しません。これはネットワークの違いではなく、設定です。どちらを選んでもエージェントは Robinhood Chain 上で動きます。実資金取引は、設定からいつでも、署名をやり直すことなく有効にできます。",
   "mode.liveNote": "実資金取引：エージェントは、あなたが入金した資金で、ここで決めた上限の範囲内で実際の注文を出します。設定からいつでもデモ取引に戻せます。",
+  "strip.aria": "エージェントの接続状況",
+  "strip.checking": "確認中…",
+  "strip.tg.notSetUp": "未設定",
+  "strip.tg.connect": "接続する →",
+  "strip.tg.off": "トークンは保存済みですが、オフになっています",
+  "strip.tg.turnOn": "オンにする →",
+  "strip.tg.unverified": "トークンは保存済みですが、まだ確認できていません",
+  "strip.tg.checkIt": "確認する →",
+  "strip.tg.ready": "接続の準備ができました",
+  "strip.tg.startingUp": "起動中",
+  "strip.tg.open": "Telegram を開く →",
+  "strip.tg.sendThis": "これをボットに送ってください：",
+  "strip.tg.codeWarning": "このコードを知っている人は誰でもエージェントを操作できます。共有やスクリーンショットは避けてください。",
+  "strip.tg.noCodeYet": "次の巡回でエージェントが連携コードを発行します。しばらくしてからご確認ください。",
+  "strip.tg.connectedAs": "@{bot} として接続済み",
+  "strip.tg.connected": "接続済み",
+  "strip.tg.manage": "管理する →",
+  "strip.trencher.off": "現在の戦略ではありません",
+  "strip.trencher.whatIsThis": "これは何？ →",
+  "strip.trencher.noCrypto": "オンですが、資産モードが株式のみのため、コインは検討されません",
+  "strip.trencher.changeIt": "変更する →",
+  "strip.trencher.paper": "オン、デモ資金のみ",
+  "strip.trencher.live": "オン、実資金で取引中",
+  "strip.trencher.settings": "設定 →",
 };

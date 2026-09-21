@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * zh-CN. 78 of the English catalogue's keys.
+ * zh-CN. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const zh_CN: Partial<Record<MessageKey, string>> = {
   "mode.ack": "我明白这个智能体可以动用真实资金进行交易。",
   "mode.paperNote": "模拟交易：按实时市场价格模拟成交，不会产生任何真实订单。这只是一项设置，不是切换到另一个网络——无论选哪种，你的智能体都在 Robinhood Chain 上；你随时可以在「设置」里打开实盘交易，无需重新签名。",
   "mode.liveNote": "实盘交易：你的智能体会在这些限额之内，用你充值的资金下达真实订单。你随时可以在「设置」里切回模拟交易。",
+  "strip.aria": "代理连接",
+  "strip.checking": "检查中…",
+  "strip.tg.notSetUp": "尚未设置",
+  "strip.tg.connect": "去连接 →",
+  "strip.tg.off": "已保存令牌，但开关是关闭的",
+  "strip.tg.turnOn": "开启 →",
+  "strip.tg.unverified": "已保存令牌，但尚未验证",
+  "strip.tg.checkIt": "去查看 →",
+  "strip.tg.ready": "可以连接了",
+  "strip.tg.startingUp": "正在启动",
+  "strip.tg.open": "打开 Telegram →",
+  "strip.tg.sendThis": "把这条发给你的机器人：",
+  "strip.tg.codeWarning": "拿到这个代码的人就能控制你的代理——不要分享，也不要截图。",
+  "strip.tg.noCodeYet": "你的代理会在下一轮生成连接代码，请稍后再看。",
+  "strip.tg.connectedAs": "已连接为 @{bot}",
+  "strip.tg.connected": "已连接",
+  "strip.tg.manage": "管理 →",
+  "strip.trencher.off": "不是你当前的策略",
+  "strip.trencher.whatIsThis": "这是什么？ →",
+  "strip.trencher.noCrypto": "已开启，但你的资产模式仅限股票，因此不会考虑任何币种",
+  "strip.trencher.changeIt": "去修改 →",
+  "strip.trencher.paper": "已开启，仅使用模拟资金",
+  "strip.trencher.live": "已开启，使用真实资金交易",
+  "strip.trencher.settings": "设置 →",
 };

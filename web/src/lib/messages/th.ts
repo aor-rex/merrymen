@@ -1,7 +1,7 @@
 import type { MessageKey } from "./en";
 
 /**
- * th. 78 of the English catalogue's keys.
+ * th. 102 of the English catalogue's keys.
  *
  * A namespace missing even one key reads entirely in English — see i18n.tsx.
  * That is what makes a partial file safe to have here.
@@ -85,4 +85,28 @@ export const th: Partial<Record<MessageKey, string>> = {
   "mode.ack": "ฉันเข้าใจว่าเอเจนต์นี้สามารถเทรดด้วยเงินจริงได้",
   "mode.paperNote": "การเทรดจำลอง: จำลองการจับคู่คำสั่งซื้อขายที่ราคาตลาดแบบเรียลไทม์ ไม่ใช้เงินจริงและไม่มีคำสั่งซื้อขายจริง นี่เป็นเพียงการตั้งค่า ไม่ใช่การย้ายไปอีกเครือข่ายหนึ่ง — เอเจนต์ของคุณยังคงอยู่บน Robinhood Chain ไม่ว่าจะเลือกแบบใด และคุณเปิดการเทรดด้วยเงินจริงได้ทุกเมื่อที่หน้าตั้งค่า โดยไม่ต้องเซ็นอนุมัติใหม่",
   "mode.liveNote": "การเทรดด้วยเงินจริง: เอเจนต์ของคุณจะส่งคำสั่งซื้อขายจริงด้วยเงินที่คุณฝากไว้ ภายในวงเงินเหล่านี้ คุณสามารถสลับกลับไปใช้การเทรดจำลองได้ทุกเมื่อที่หน้าตั้งค่า",
+  "strip.aria": "การเชื่อมต่อของเอเจนต์",
+  "strip.checking": "กำลังตรวจสอบ…",
+  "strip.tg.notSetUp": "ยังไม่ได้ตั้งค่า",
+  "strip.tg.connect": "เชื่อมต่อ →",
+  "strip.tg.off": "บันทึกโทเคนแล้ว แต่ปิดอยู่",
+  "strip.tg.turnOn": "เปิดใช้งาน →",
+  "strip.tg.unverified": "บันทึกโทเคนแล้ว แต่ยังไม่ได้ยืนยัน",
+  "strip.tg.checkIt": "ตรวจสอบ →",
+  "strip.tg.ready": "พร้อมเชื่อมต่อ",
+  "strip.tg.startingUp": "กำลังเริ่มทำงาน",
+  "strip.tg.open": "เปิด Telegram →",
+  "strip.tg.sendThis": "ส่งข้อความนี้ให้บอทของคุณ:",
+  "strip.tg.codeWarning": "ใครก็ตามที่มีรหัสนี้สามารถควบคุมเอเจนต์ของคุณได้ — อย่าแชร์หรือถ่ายภาพหน้าจอ",
+  "strip.tg.noCodeYet": "เอเจนต์จะสร้างรหัสเชื่อมต่อในรอบถัดไป กลับมาดูอีกครั้งในอีกสักครู่",
+  "strip.tg.connectedAs": "เชื่อมต่อแล้วในชื่อ @{bot}",
+  "strip.tg.connected": "เชื่อมต่อแล้ว",
+  "strip.tg.manage": "จัดการ →",
+  "strip.trencher.off": "ไม่ใช่กลยุทธ์ของคุณ",
+  "strip.trencher.whatIsThis": "นี่คืออะไร →",
+  "strip.trencher.noCrypto": "เปิดอยู่ แต่โหมดสินทรัพย์ของคุณเป็นหุ้นเท่านั้น จึงไม่มีเหรียญใดถูกพิจารณา",
+  "strip.trencher.changeIt": "เปลี่ยน →",
+  "strip.trencher.paper": "เปิดอยู่ ใช้เงินฝึกซ้อมเท่านั้น",
+  "strip.trencher.live": "เปิดอยู่ ซื้อขายด้วยเงินจริง",
+  "strip.trencher.settings": "ตั้งค่า →",
 };

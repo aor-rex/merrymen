@@ -37,10 +37,25 @@
  * agent has no bot to connect and no strategy to run, and a status card about
  * an agent that does not exist is noise on the one screen that should be
  * telling them to make one — which Home already does, in its own empty state.
+ *
+ * ── THE WORDS ────────────────────────────────────────────────────────────
+ *
+ * Keyed under the `strip.*` namespace and translated in every shipped locale.
+ * Two things stay literal on purpose: `Telegram` and `Trencher` are product
+ * names, and the link command is a LITERAL somebody retypes into a chat —
+ * translating either would be translating an identifier.
+ *
+ * That command is also why the unlinked row reads the way it does. It needs a
+ * `<code>` element (monospace, non-breaking, select-all), and there are only
+ * bad ways to put markup inside a sentence a translator owns: tags in the
+ * message make them responsible for HTML, and splitting the sentence around
+ * the code forces English word order on every language. So the code is its own
+ * element under a lead-in line, and every message here stays plain text.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useT } from "@/lib/i18n";
 import { telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
@@ -49,6 +64,7 @@ interface SettingsShape {
 }
 
 export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
+  const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
 
@@ -72,7 +88,7 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
   if (!hasAgent) return null;
 
   return (
-    <section className="agent-strip" aria-label="Agent connections">
+    <section className="agent-strip" aria-label={t("strip.aria")}>
       <TelegramLine row={telegramRow(tg)} />
       <TrencherLine row={trencherRow(settings)} />
     </section>
@@ -80,25 +96,26 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
 }
 
 function TelegramLine({ row }: { row: TelegramRow }) {
+  const t = useT();
   switch (row.kind) {
     case "unread":
-      return <Row tone="quiet" label="Telegram" value="checking…" />;
+      return <Row tone="quiet" label="Telegram" value={t("strip.checking")} />;
     case "no-token":
       return (
-        <Row tone="quiet" label="Telegram" value="not set up"
-          action={<Link href="/settings#telegram">Connect →</Link>}
+        <Row tone="quiet" label="Telegram" value={t("strip.tg.notSetUp")}
+          action={<Link href="/settings#telegram">{t("strip.tg.connect")}</Link>}
         />
       );
     case "off":
       return (
-        <Row tone="warn" label="Telegram" value="token saved, but switched off"
-          action={<Link href="/settings#telegram">Turn on →</Link>}
+        <Row tone="warn" label="Telegram" value={t("strip.tg.off")}
+          action={<Link href="/settings#telegram">{t("strip.tg.turnOn")}</Link>}
         />
       );
     case "unverified":
       return (
-        <Row tone="warn" label="Telegram" value="token saved, not verified yet"
-          action={<Link href="/settings#telegram">Check it →</Link>}
+        <Row tone="warn" label="Telegram" value={t("strip.tg.unverified")}
+          action={<Link href="/settings#telegram">{t("strip.tg.checkIt")}</Link>}
         />
       );
     case "unlinked":
@@ -107,14 +124,14 @@ function TelegramLine({ row }: { row: TelegramRow }) {
        *
        * In Settings the instruction and the code are in two different closed
        * drawers, and two beta testers stopped right there. Putting them in one
-       * sentence is the single change that unsticks them.
+       * place is the single change that unsticks them.
        *
        * A null code is a WAIT, not an absence: the agent mints one on its next
        * pass after a token is saved, so saying "no code" would be a claim we
        * cannot make about a code that is simply not minted yet.
        */
       return (
-        <Row tone="warn" label="Telegram" value={row.linkCode ? "ready to connect" : "starting up"}
+        <Row tone="warn" label="Telegram" value={row.linkCode ? t("strip.tg.ready") : t("strip.tg.startingUp")}
           action={
             row.linkCode ? (
               <>
@@ -122,16 +139,18 @@ function TelegramLine({ row }: { row: TelegramRow }) {
                   // Carries the code into the chat instead of asking somebody
                   // to retype it, the way the mobile client already does.
                   <a href={`https://t.me/${row.botUsername}?start=${row.linkCode}`} target="_blank" rel="noreferrer">
-                    Open Telegram →
+                    {t("strip.tg.open")}
                   </a>
                 ) : null}
-                <span className="mm-hint">
-                  or send <code>/link {row.linkCode}</code> to your bot. Anyone who has this code can
-                  control your agent — do not share or screenshot it.
-                </span>
+                <span className="mm-hint">{t("strip.tg.sendThis")}</span>
+                {/* A LITERAL, NOT A SENTENCE. The command is retyped verbatim
+                    into a chat, so it stays out of the translated copy and out
+                    of reach of a translator's autocorrect. */}
+                <code>/link {row.linkCode}</code>
+                <span className="mm-hint">{t("strip.tg.codeWarning")}</span>
               </>
             ) : (
-              <span className="mm-hint">Your agent mints a link code on its next pass. Check back shortly.</span>
+              <span className="mm-hint">{t("strip.tg.noCodeYet")}</span>
             )
           }
         />
@@ -139,21 +158,22 @@ function TelegramLine({ row }: { row: TelegramRow }) {
     case "linked":
       return (
         <Row tone="ok" label="Telegram"
-          value={row.botUsername ? `connected as @${row.botUsername}` : "connected"}
-          action={<Link href="/settings#telegram">Manage →</Link>}
+          value={row.botUsername ? t("strip.tg.connectedAs", { bot: row.botUsername }) : t("strip.tg.connected")}
+          action={<Link href="/settings#telegram">{t("strip.tg.manage")}</Link>}
         />
       );
   }
 }
 
 function TrencherLine({ row }: { row: TrencherRow }) {
+  const t = useT();
   switch (row.kind) {
     case "unread":
-      return <Row tone="quiet" label="Trencher" value="checking…" />;
+      return <Row tone="quiet" label="Trencher" value={t("strip.checking")} />;
     case "off":
       return (
-        <Row tone="quiet" label="Trencher" value="not your strategy"
-          action={<Link href="/settings#trencher-mode">What is this? →</Link>}
+        <Row tone="quiet" label="Trencher" value={t("strip.trencher.off")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.whatIsThis")}</Link>}
         />
       );
     case "no-crypto":
@@ -164,20 +184,20 @@ function TrencherLine({ row }: { row: TrencherRow }) {
        * out why nothing is happening.
        */
       return (
-        <Row tone="warn" label="Trencher" value="on, but your asset mode is stocks only — no coins can be considered"
-          action={<Link href="/settings#trencher-mode">Change it →</Link>}
+        <Row tone="warn" label="Trencher" value={t("strip.trencher.noCrypto")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.changeIt")}</Link>}
         />
       );
     case "paper":
       return (
-        <Row tone="quiet" label="Trencher" value="on, practice money only"
-          action={<Link href="/settings#trencher-mode">Settings →</Link>}
+        <Row tone="quiet" label="Trencher" value={t("strip.trencher.paper")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
         />
       );
     case "live":
       return (
-        <Row tone="ok" label="Trencher" value="on, trading real money"
-          action={<Link href="/settings#trencher-mode">Settings →</Link>}
+        <Row tone="ok" label="Trencher" value={t("strip.trencher.live")}
+          action={<Link href="/settings#trencher-mode">{t("strip.trencher.settings")}</Link>}
         />
       );
   }
@@ -189,6 +209,7 @@ function Row({
   action,
   tone,
 }: {
+  /** A product name — `Telegram`, `Trencher`. Never translated. */
   label: string;
   value: string;
   action?: React.ReactNode;
