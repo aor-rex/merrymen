@@ -245,6 +245,19 @@ const CHILD_SECRET_STRIP = [
   // never sees this token" a fact about the process boundary rather than a
   // claim about our own carefulness. See research-files.ts.
   "MERRYMEN_MARKETAUX_API_KEY",
+  // THE BUILDER DIRECTORY TOKEN, for the same reason and one extra.
+  //
+  // The same reason: a child holding it could put it in a prompt, a decision
+  // row, a log line or a thesis, and any of those is a published key.
+  //
+  // The extra one is worth stating because it cuts the other way and could
+  // otherwise be used to argue this entry is unnecessary. That directory
+  // answers UNAUTHENTICATED at a lower rate limit, so a child stripped of the
+  // key is not a child that cannot ask — research/hey.ts makes the request
+  // either way. Which means the strip costs nothing and buys the boundary
+  // outright, and there is no "but then the fetch fails" pressure to ever
+  // remove it. See research/hey.ts.
+  "MERRYMEN_HEY_API_KEY",
   // Privy authenticates PEOPLE at the web edge. A worker child acts for an
   // agent that is already authorized by a signed grant; it has no login to
   // verify and no reason to hold the key that would verify one.
