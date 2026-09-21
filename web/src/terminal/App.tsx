@@ -448,6 +448,7 @@ export function App() {
             onDeposit={() => openScreen({ kind: "deposit" })}
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
+            hasAgent={account?.status.exists === true}
           />
         )}
         {screen.kind === "tab" && screen.tab === "feed" && (

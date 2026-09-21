@@ -13,6 +13,7 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import { telegramLabel, telegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
 import { count } from "@/lib/format";
 import { unreadableSetting } from "@/lib/parse-amount";
@@ -643,6 +644,41 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 checked={trencherFast ?? view.values.trencherFastEnabled ?? d.trencherFastEnabled}
                 onChange={event => setTrencherFast(event.target.checked)} />Use fast Trencher exits</span>
               <span className="mm-hint">Applies when the strategy is Trencher. Off restores its standard exit profile.</span>
+            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN, NOW BESIDE ITS OWN EXPLANATION.
+
+                It has had an API branch and no control, so an owner who picked
+                trencher and went live got a candidate feed that returned nothing,
+                forever, with nothing said. index.ts says the surprise out loud
+                -- “the strategy stopped seeing anything at the exact moment it
+                became able to act” -- and then left the only remedy unreachable.
+
+                Giving it a control fixed the first half of that and left the
+                second: the checkbox lived ~445 lines below this card, inside a
+                COLLAPSED "Custom tokens & discovery" drawer, while the prose
+                explaining Trencher sat up here. Every route into this feature —
+                the release notice, the home strip, the chat — deep-links to
+                #trencher-mode, which is this card, which did not contain the one
+                switch that decides whether any of it spends money.
+
+                It is still OFF by default and still bounded by the signed wall;
+                this moves where it is read, not what it permits. */}
+            <label className="mm-field">
+              <span className="mm-label">let trencher trade for real</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={trencherLiveVal}
+                  onChange={(e) => setTrencherLive(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
+                </span>
+              </span>
+              <span className="mm-hint">
+                Allows live Trencher trades in tokens covered by your trading permissions.
+              </span>
+            </label>
             </label>
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
               You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
@@ -1062,29 +1098,6 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 Requires a Bitquery key or Merry Circle token in Connections.
               </span>
             </label>
-            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN.
-                It has had an API branch and no control, so an owner who picked
-                trencher and went live got a candidate feed that returned nothing,
-                forever, with nothing said. index.ts says the surprise out loud
-                -- “the strategy stopped seeing anything at the exact moment it
-                became able to act” -- and then left the only remedy unreachable. */}
-            <label className="mm-field">
-              <span className="mm-label">let trencher trade for real</span>
-              <span className="mm-input">
-                <input
-                  type="checkbox"
-                  checked={trencherLiveVal}
-                  onChange={(e) => setTrencherLive(e.target.checked)}
-                  style={{ width: "auto" }}
-                />
-                <span className="mm-unit">
-                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
-                </span>
-              </span>
-              <span className="mm-hint">
-                Allows live Trencher trades in tokens covered by your trading permissions.
-              </span>
-            </label>
             {/* THE ONE TOGGLE ON THIS SCREEN THAT STARTS ON.
                 Everything around it opts INTO something discovered; this opts OUT
                 of a list the platform curates and stands behind, which is why it
@@ -1305,9 +1318,39 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.
+
+              These were in two different collapsed drawers: this sentence
+              here, and the actual link code far below inside "Advanced
+              settings". Two beta testers stopped exactly there — "I'm stuck
+              at this point, no code from /link" — and the incident is written
+              up at length in the API route. The placeholder made it worse by
+              rendering "……" as though a code existed and was merely hidden.
+
+              A missing code is a WAIT, not an absence: the agent mints one on
+              its next pass after a token is saved, so the copy says that
+              rather than claiming there is no code. */}
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with @BotFather, add its token, then send <code>/link {tg?.linkCode ?? "……"}</code> to connect it.
+            Create a bot with @BotFather and add its token below.
           </p>
+          {tg?.linkCode ? (
+            <p className="mm-hint">
+              Then send <code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
+              {tg.botUsername ? (
+                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">Open Telegram →</a>
+              ) : null}
+              <br />
+              {/* A BEARER CREDENTIAL. `/link <code>` is accepted from ANY chat,
+                  first come, and grants control of this agent. */}
+              Anyone who has this code can control your agent — do not share or screenshot it.
+            </p>
+          ) : (
+            <p className="mm-hint">
+              {view.telegramBotToken.set
+                ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
+                : "Your link code appears here once a token is saved."}
+            </p>
+          )}
           <div className="mm-grid">
             <Field
               label="bot token"
@@ -1329,9 +1372,16 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
-              <span className="mm-unit">
-                {tgTest ?? (tg?.connected ? `✓ @${tg.botUsername}` : tg?.hasToken ? "not verified" : "no token")}
-              </span>
+              {/* AN UNREAD BRIDGE IS NOT A MISSING TOKEN.
+
+                  `loadTelegram` only calls `setTg` on a truthy response, so a
+                  failed or non-ok /api/telegram leaves `tg` null — and the
+                  ternary that used to be here fell through to the literal
+                  "no token", telling an owner whose network hiccupped that
+                  they had never saved the token they were looking at. The
+                  reading now lives in agent-status.ts, where a test executes
+                  it and the home strip shares the same words. */}
+              <span className="mm-unit">{tgTest ?? telegramLabel(telegramRow(tg))}</span>
             </Field>
             <label className="mm-field">
               <span className="mm-label">enable telegram</span>

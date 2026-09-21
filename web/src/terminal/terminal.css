@@ -8293,3 +8293,90 @@ html[lang|="ko"] .terminal-host {
 :where(.terminal-host) .resign-strip {
   margin: 12px 0;
 }
+/* `.mm-btn` IS ONLY STYLED INSIDE `.terminal-form-page`, and this dialog is
+   mounted in the shell so it can be true on every screen. Without these the
+   buttons render as bare text — measured in the browser: no background, no
+   border, no padding, so the one action this prompt exists to offer did not
+   look pressable at all.
+
+   The geometry is copied from the form page's own rules rather than invented,
+   so a prompt about money looks like every other control in the product. */
+:where(.terminal-host) .resign-actions .mm-btn,
+:where(.terminal-host) .resign-strip .mm-btn {
+  padding: 10px 14px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--tx);
+  cursor: pointer;
+}
+:where(.terminal-host) .resign-actions .mm-btn.primary {
+  padding: 14px 22px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--tx);
+  color: var(--ink);
+}
+/* The header's close control is a bare glyph, not a pill — it sits inside
+   .portfolio-dialog-header, which already positions it. */
+:where(.terminal-host) .resign-dialog .portfolio-dialog-header .mm-btn {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: none;
+}
+
+/* ── WHAT IS CONNECTED, ON THE HOME SCREEN ──────────────────────────────────
+   A reading, not a control panel, so it is styled as a list of facts rather
+   than as a card competing with the hero above it. One quiet rule between
+   rows; no border, no fill, no shadow — those say "separate object", and this
+   belongs to the screen it sits on.
+
+   `is-warn` is amber and there is deliberately no red state. Red in this
+   product means a FAULT (.desk-blocked), and none of these are one — a bot
+   nobody has linked yet is an unfinished setup, not a broken agent. A beta
+   owner once concluded the product was broken because a non-fault state wore
+   the red box. */
+:where(.terminal-host) .agent-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+:where(.terminal-host) .agent-strip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+:where(.terminal-host) .agent-strip-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+:where(.terminal-host) .agent-strip-label {
+  min-width: 72px;
+  font-weight: 600;
+}
+/* The status itself carries the tone, so the label and the link stay neutral
+   and the eye lands on the one word that changes. */
+:where(.terminal-host) .agent-strip-value {
+  flex: 1 1 auto;
+  color: var(--dim);
+}
+:where(.terminal-host) .agent-strip-row.is-ok .agent-strip-value { color: var(--up, #4ade80); }
+:where(.terminal-host) .agent-strip-row.is-warn .agent-strip-value { color: var(--warn, #fbbf24); }
+:where(.terminal-host) .agent-strip-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  flex-basis: 100%;
+}
+/* The link code is the one piece of text here somebody has to read exactly.
+   It must not wrap mid-code or be mistaken for prose. */
+:where(.terminal-host) .agent-strip-action code {
+  white-space: nowrap;
+  user-select: all;
+}
