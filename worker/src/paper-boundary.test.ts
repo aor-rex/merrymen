@@ -30,7 +30,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-paper-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const { admitCapitalFlow, tradingModeOf } = await import("./paper-boundary");
-const { initStore, addFlow, ensureAgent, setAgentMode, listFlows, getNetContributionsUsdg } = await import("./store");
+const { closeStoreForTest, initStore, addFlow, ensureAgent, setAgentMode, listFlows, getNetContributionsUsdg } = await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { planReconstruction } = await import("./accounting-reconstruction");
@@ -67,11 +67,8 @@ function grant(smartAccount: string) {
 }
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* best effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // ── THE RULE ───────────────────────────────────────────────────────────────

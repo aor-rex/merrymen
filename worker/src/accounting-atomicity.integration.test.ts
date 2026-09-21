@@ -25,11 +25,8 @@ const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME, "merrymen.db")
 
 after(() => {
   raw.close();
-  try {
-    rmSync(scratch, { recursive: true, force: true });
-  } catch {
-    // The store's SQLite connection can keep the disposable directory open on Windows.
-  }
+  store.closeStoreForTest();
+  rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 let nextAccount = 1;

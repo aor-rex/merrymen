@@ -29,6 +29,9 @@ import { flowKey } from "./deposit-log";
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
 
 let driver: Db | null = null;
+/** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
+ *  the file; a running worker never closes its ledger. */
+let ledgerFile: DatabaseSync | null = null;
 
 /**
  * The schema, written once in the sqlite dialect — the single source of truth for
@@ -899,6 +902,7 @@ function initSqlite(): Db {
   // and a diagnostic line landing in the middle of it corrupts the file. A log
   // is not data.
   console.error(`[store] sqlite at ${DB_FILE}`);
+  ledgerFile = db;
   return wrapSqlite(db);
 }
 
@@ -957,9 +961,26 @@ function getDb(): Db {
   return driver;
 }
 
-/** Test seam: drop the cached driver so a test can point MERRYMEN_HOME elsewhere. */
-export function resetStoreForTest(): void {
+/**
+ * Test seam: CLOSE the ledger and drop the cached driver.
+ *
+ * This replaces a resetStoreForTest() that only forgot the driver. Forgetting is
+ * enough to re-point MERRYMEN_HOME, and that is all it claimed, but it left the
+ * sqlite file open — and on Windows an open file is one that cannot be deleted.
+ * Every test that points MERRYMEN_HOME at a mkdtemp and imports this module was
+ * holding <home>/merrymen.db for the life of the process, so its cleanup hook
+ * could only swallow the failure and leak the whole tree into %TEMP% on each run.
+ *
+ * Sqlite only, because that is the backend a test opens: the Postgres path owns a
+ * pool that db.ts's resetPoolsForTest() releases, and no test sets DATABASE_URL.
+ * Idempotent — a second call after the handle is gone is a no-op, so a hook can
+ * call it without knowing whether the store was ever touched.
+ */
+export function closeStoreForTest(): void {
+  const open = ledgerFile;
+  ledgerFile = null;
   driver = null;
+  open?.close();
 }
 
 /** Create the DB + schema eagerly so a broken store fails at startup, not mid-trade.

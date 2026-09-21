@@ -25,7 +25,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-inflight-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addTrade, getOpsToday, getSpentTodayUsdg, listOpHashes, listSubmittedOps } =
+const { closeStoreForTest, initStore, addTrade, getOpsToday, getSpentTodayUsdg, listOpHashes, listSubmittedOps } =
   await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
@@ -35,17 +35,22 @@ const HASH = "0xfeed00000000000000000000000000000000000000000000000000000000beef
 const OTHER = "0xdead00000000000000000000000000000000000000000000000000000000cafe";
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* temp dir cleanup is best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const rows = (hash: string) =>
-  new DatabaseSync(homePaths.db())
-    .prepare("SELECT status, tx_hash, amount_usdg, epoch FROM trades WHERE agent_id = ? AND user_op_hash = ?")
-    .all(AGENT, hash) as { status: string; tx_hash: string | null; amount_usdg: number; epoch: number }[];
+// Opened per call and CLOSED per call: this helper runs eleven times, and a
+// handle left behind by each is eleven reasons Windows cannot delete HOME.
+const rows = (hash: string) => {
+  const raw = new DatabaseSync(homePaths.db());
+  try {
+    return raw
+      .prepare("SELECT status, tx_hash, amount_usdg, epoch FROM trades WHERE agent_id = ? AND user_op_hash = ?")
+      .all(AGENT, hash) as { status: string; tx_hash: string | null; amount_usdg: number; epoch: number }[];
+  } finally {
+    raw.close();
+  }
+};
 
 const submitted = (hash: string, amount: number) =>
   addTrade({

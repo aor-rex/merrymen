@@ -23,7 +23,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-iso-"));
 process.env.MERRYMEN_HOME = HOME;
 process.env.MERRYMEN_HOSTED = "1";
 
-const { initStore, addTrade, addEvent, addEquity, setPositions, addDecision, newDecisionId } =
+const { closeStoreForTest, initStore, addTrade, addEvent, addEquity, setPositions, addDecision, newDecisionId } =
   await import("../store");
 const { readTrades, readPositions, readRecentEvents, readWhyEvidence, readStatus, readReport } =
   await import("./reads");
@@ -32,11 +32,8 @@ const ALICE = "0x00000000000000000000000000000000000a11ce" as const;
 const BOB = "0x0000000000000000000000000000000000000b0b" as const;
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* windows temp lock; disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const ctx = (agentId: string | null) => ({

@@ -31,7 +31,8 @@ const { GET } = await import("../../web/src/app/api/decision/[id]/route");
 
 after(() => {
   raw.close();
-  try { rmSync(scratch, { recursive: true, force: true }); } catch { /* SQLite may retain its handle on Windows. */ }
+  store.closeStoreForTest();
+  rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const AGENT = "0x1111111111111111111111111111111111111111";

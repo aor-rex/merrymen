@@ -20,7 +20,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-rails-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addTrade, getOpsToday, getSpentTodayUsdg } = await import("./store");
+const { closeStoreForTest, initStore, addTrade, getOpsToday, getSpentTodayUsdg } = await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 
@@ -29,11 +29,8 @@ const PAPER = "0xpaperaccount00000000000000000000000000b";
 const AGED = "0xagedaccount000000000000000000000000000c";
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* temp dir cleanup is best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("paper and live budgets are separate books", () => {
