@@ -5,7 +5,6 @@ import { Search } from "lucide-react";
 import {
   coinPrice,
   quoteTitle,
-  money,
   pctBps,
   pctPts,
   type LiveAgent,
@@ -16,6 +15,8 @@ import {
   deltaClass,
 } from "../live";
 import { Coin, Face, NameBlock, Pill } from "../ui";
+import { AgentStrip } from "../AgentStrip";
+import { usd, usdParts } from "@/lib/format";
 
 export function Home({
   tokens,
@@ -29,6 +30,7 @@ export function Home({
   onDeposit,
   onSearch,
   onDesk,
+  hasAgent,
   read,
 }: {
   tokens: LiveToken[];
@@ -42,6 +44,14 @@ export function Home({
   onDeposit: () => void;
   onSearch: () => void;
   onDesk: () => void;
+  /**
+   * Has the SERVER said this owner has an agent?
+   *
+   * Deliberately NOT `!!mine`. `mine` is falsy while the account is still
+   * loading as well as when there is genuinely no agent, so a card gated on
+   * it appears late, on top of whatever the reader had already started.
+   */
+  hasAgent: boolean;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
 }) {
@@ -98,7 +108,13 @@ export function Home({
   const visibleTokens = showAll ? shown : shown.slice(0, 8);
   const eq = mine?.equity ?? null;
   const chg = mine?.chg24 ?? null;
-  const [whole, frac] = money(eq).replace("$", "").split(".");
+  // WAS `money(eq).replace("$", "").split(".")`, and both halves of that were
+  // English-shaped. The symbol is a SUFFIX in Spanish, Vietnamese, Russian and
+  // Indonesian so the replace missed it, and the decimal mark is a COMMA in
+  // most of the shipped languages so the split returned the whole figure as
+  // `whole` and nothing as `frac` — a balance with its cents silently dropped
+  // and a stray symbol left in front of it.
+  const { lead, fraction, trail } = usdParts(eq);
 
   return (
     <div className="home-page">
@@ -113,12 +129,17 @@ export function Home({
             </div>
             <span className="home-balance-label">Portfolio balance</span>
               <div className="balance">
-                {eq === null ? "—" : `$${whole}`}
-                {frac !== undefined && <sup>.{frac}</sup>}
+                {lead}
+                {fraction !== null && <sup>{fraction}</sup>}
+                {trail}
               </div>
             {chg !== null && (
               <p className={`chg-24 ${chg < 0 ? "down" : "up"}`}>
-                {chg < 0 ? "−" : "+"}${Math.abs(chg).toFixed(2)} today
+                {/* The sign is this product's own — U+2212, not a hyphen, so
+                    it reads as a minus in the monospace column. The figure and
+                    its symbol are the locale's. */}
+                {chg < 0 ? "−" : "+"}
+                {usd(Math.abs(chg))} today
               </p>
             )}
           </button>
@@ -135,6 +156,19 @@ export function Home({
           />
         )}
       </header>
+
+      {/* WHAT IS CONNECTED, AND WHAT IS NOT.
+
+          Telegram and Trencher both live behind collapsed drawers in a
+          1854-line settings form reachable from one row at the bottom of the
+          profile screen, and both produced stuck testers rather than mere
+          inconvenience — the Telegram link code is in a DIFFERENT closed
+          drawer from the instruction that needs it.
+
+          A reading, not a second set of controls: it says what the settings
+          say and links to them. It renders nothing for a visitor with no
+          agent, who has no bot to connect and no strategy to run. */}
+      <AgentStrip hasAgent={hasAgent} />
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.

@@ -138,7 +138,7 @@ export function CandleChart({
               if (p < 0) return "";
               if (p >= 1) return usdFixed(p, 2);
               if (p >= 0.01) return usdFixed(p, 4);
-              return `$${p.toPrecision(3)}`;
+              return subCentUsd(p);
             },
           },
         });

@@ -145,11 +145,27 @@ export function currentLocale(): LocaleTag {
 }
 
 /**
- * Choose a language. Writes the cookie and moves the document immediately, so
- * the font stack changes without a reload.
+ * Choose a language.
+ *
+ * THE RELOAD IS THE POINT, not laziness. The font stack is CSS and switches the
+ * instant the attribute moves, but the figures are not: `displayLocale()` is
+ * read inside plain functions — `live.ts`, `status-line.ts`, `chat-commands.ts`
+ * — that React has no way to re-run, and `Intl` formatters are memoised per
+ * locale. Moving the attribute alone would give a page in one language with its
+ * money still grouped in another, which is the exact confusion this whole piece
+ * of work exists to remove.
+ *
+ * A language change is a deliberate, rare act, and nothing on this screen is
+ * unsaved: state comes from the chain and the server. So the honest move is to
+ * change it everywhere at once rather than in the half we can reach cheaply.
+ *
+ * The attribute is set first so the fonts are already right in the frame before
+ * the navigation starts, and the cookie is written first of all so that a
+ * blocked reload still leaves the choice recorded for the next visit.
  */
 export function setLocale(tag: LocaleTag): void {
   if (typeof document === "undefined") return;
+  const before = normalizeLocale(document.documentElement.lang);
   try {
     document.cookie =
       `${LOCALE_COOKIE}=${encodeURIComponent(tag)};path=/;max-age=${LOCALE_MAX_AGE};samesite=lax`;
@@ -157,4 +173,11 @@ export function setLocale(tag: LocaleTag): void {
     // A blocked cookie is not a reason to refuse the change for this page.
   }
   document.documentElement.lang = tag;
+  // Nothing to re-render if they picked the language they were already in.
+  if (before === tag) return;
+  try {
+    window.location.reload();
+  } catch {
+    // Left in the new language for this page either way.
+  }
 }

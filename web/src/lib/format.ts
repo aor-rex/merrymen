@@ -43,23 +43,48 @@
  * in a fallback face inside a box laid out for a different one.
  */
 
+import { DEFAULT_LOCALE, normalizeLocale } from "./locale";
+
 const DASH = "—";
 
 /**
  * The locale every figure in the product is rendered in.
  *
- * ONE ANSWER FOR THE WHOLE APP, deliberately. Before this, ten call sites
- * pinned "en-US" and one — the chat confirmation card, which is the last
- * sentence read before an order is placed — used `undefined`, which means the
- * browser's own locale. So a German owner already saw `$1.000` on the
- * confirmation card beside `$1,234.50` in the top bar: two number systems in
- * one viewport, on the screen where the number matters most.
+ * ONE ANSWER FOR THE WHOLE APP, deliberately. Before the seam, ten call sites
+ * pinned "en-US" and one — the chat confirmation card, the last sentence read
+ * before an order is placed — used `undefined`, which means the browser's own
+ * locale. So a German owner saw `$1.000` on the card authorising a trade beside
+ * `$1,234.50` in the top bar: two number systems in one viewport, a factor of a
+ * thousand apart.
  *
- * It is a function rather than a constant so that the day this starts
- * answering something else, no call site has to change.
+ * ── WHY READING THE DOM IS SAFE HERE, AND NOT A SHORTCUT ─────────────────
+ *
+ * The obvious fear is a hydration mismatch: the server renders `$1,234.50` and
+ * the client re-renders `1 234,50 $`, and React reconciles the difference into
+ * a flash or a warning on a screen full of money.
+ *
+ * It cannot happen in this app, and that is a property of the architecture
+ * rather than a hope. Every route under `(app)` renders the same client tree
+ * (`(app)/layout.tsx` → `<Providers><App/></Providers>`) and is handed NO
+ * server data — the figures arrive from client fetches. So at SSR every value
+ * is null, every formatter returns the em dash, and the em dash is the same
+ * string in all eleven languages. The first client render runs with the same
+ * empty state and produces the same markup; the locale only starts mattering
+ * after the data lands, which is after hydration.
+ *
+ * Measured, not assumed: the server HTML for `/`, `/leaderboard`, `/feed` and
+ * `/lookup` contains zero currency figures, zero percentages and zero dates.
+ * `server-formatting.test.ts` then pins the STRUCTURE that makes it true, by
+ * walking the import graph from every route and stopping at the `"use client"`
+ * boundary — so the day a server component starts formatting a figure, that
+ * test fails rather than a Russian reader seeing a flicker.
+ *
+ * On the server the answer is the default, because there is no reader to be
+ * specific about and nothing server-rendered asks.
  */
 export function displayLocale(): string {
-  return "en-US";
+  if (typeof document === "undefined") return DEFAULT_LOCALE;
+  return normalizeLocale(document.documentElement.lang) ?? DEFAULT_LOCALE;
 }
 
 /**
@@ -143,6 +168,44 @@ export function pct(n: number | null): string {
     maximumFractionDigits: places,
     // The value arrives as percentage POINTS, not a ratio.
   }).format(n / 100);
+}
+
+/**
+ * A money figure split into the parts a typographic layout needs, WITHOUT
+ * taking a formatted string back apart.
+ *
+ * The home screen sets the cents as a superscript, and did it by running
+ * `money(eq).replace("$", "").split(".")`. Both halves of that break outside
+ * `en`: the symbol is a SUFFIX in Spanish, Vietnamese, Russian and Indonesian
+ * so the `replace` misses it, and the decimal mark is a COMMA in most of the
+ * shipped languages so the `split` returns the whole figure as `whole` and
+ * nothing as `frac` — a balance rendered with no cents and a stray symbol.
+ *
+ * `formatToParts` is the structured answer, and using it is the same rule
+ * `packages/core/src/tokens.ts:111` arrived at from the other direction: a
+ * number should never be round-tripped through a sentence.
+ *
+ * `trail` is not padding. In Russian the symbol comes after the figure, so a
+ * caller that drops it prints a balance with no currency on it at all.
+ */
+export function usdParts(n: number | null): { lead: string; fraction: string | null; trail: string } {
+  if (n === null || !Number.isFinite(n)) return { lead: DASH, fraction: null, trail: "" };
+  const parts = nf({ ...USD, minimumFractionDigits: 2, maximumFractionDigits: 2 }).formatToParts(n);
+  const at = parts.findIndex((p) => p.type === "decimal");
+  if (at === -1) return { lead: parts.map((p) => p.value).join(""), fraction: null, trail: "" };
+  const digits = parts.find((p) => p.type === "fraction")?.value;
+  return {
+    lead: parts.slice(0, at).map((p) => p.value).join(""),
+    // THE MARK TRAVELS WITH THE DIGITS, because the caller superscripts this
+    // and the original rendering put the point up there with the cents. It is
+    // the locale's own mark, so this is "," in most of the shipped languages.
+    fraction: digits === undefined ? null : `${parts[at]!.value}${digits}`,
+    trail: parts
+      .slice(at + 1)
+      .filter((p) => p.type !== "fraction")
+      .map((p) => p.value)
+      .join(""),
+  };
 }
 
 /** A sub-cent price, to three significant figures. */

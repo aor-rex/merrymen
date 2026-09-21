@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { MarketData } from "@/lib/market";
-import { count, usdFixed } from "@/lib/format";
+import { compactUsd, count, subCentUsd, usdFixed } from "@/lib/format";
 
 /**
  * THE TAPE ALONG THE BOTTOM.
@@ -24,16 +24,17 @@ const money = (n: number | null): string => {
   if (n === null || !Number.isFinite(n)) return "—";
   if (n >= 1000) return usdFixed(n, 0);
   if (n >= 1) return usdFixed(n, 2);
-  return `$${n.toPrecision(3)}`;
+  return subCentUsd(n);
 };
 
-const compact = (n: number | null): string => {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-};
+/**
+ * WAS A HAND-ROLLED SCALE, and it is the exact case the seam exists for.
+ * "$1.2B" read on the long scale — Spanish, Italian, Dutch, European
+ * Portuguese — is 10^12, a thousandfold overstatement with nothing on screen
+ * to notice; and no k/M/B table can express Chinese, Japanese or Korean, which
+ * regroup at 10^8.
+ */
+const compact = compactUsd;
 
 export function Ticker() {
   const [market, setMarket] = useState<MarketData | null>(null);

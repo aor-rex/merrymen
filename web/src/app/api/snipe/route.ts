@@ -29,6 +29,7 @@ import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { sharedRead } from "@/lib/read-discoveries";
+import { usd } from "@/lib/format";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -193,6 +194,6 @@ export async function POST(req: Request) {
     say:
       `${t.symbol} at ${shortAddress(t.address)}` +
       (resolved.matchedOn === "name" ? ` — matched on its name, not its ticker` : "") +
-      `. Placing $${usdgAmount}.`,
+      `. Placing ${usd(usdgAmount)}.`,
   });
 }

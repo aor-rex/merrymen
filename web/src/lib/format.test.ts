@@ -21,6 +21,7 @@ import {
   usdAdaptive,
   usdFixed,
 } from "./format";
+import { DEFAULT_LOCALE } from "./locale";
 
 /**
  * THE SEAM, AND THE THREE THINGS IT EXISTS TO STOP.
@@ -81,7 +82,12 @@ describe("a figure we do not have is never a figure of zero", () => {
 
 describe("what an English reader sees, pinned", () => {
   it("money, counts and percentages", () => {
-    assert.equal(displayLocale(), "en-US", "the seam has not been flipped yet");
+    // Under `node:test` there is no `document`, so `displayLocale()` answers
+    // the default — which is the same answer the SERVER gives, and these are
+    // therefore the figures the server renders. `en` and `en-US` produce
+    // identical output for every shape below; the tag is shorter because it is
+    // the one the picker offers.
+    assert.equal(displayLocale(), DEFAULT_LOCALE);
     assert.equal(usd(1234.5), "$1,234.50");
     assert.equal(count(1234), "1,234");
     assert.equal(pct(40.8), "+40.8%");
@@ -217,16 +223,26 @@ describe("the seam is the only way through", () => {
     assert.deepEqual(offenders, [], "these must go through format.ts");
   });
 
-  it("and no call site builds a currency string by hand", () => {
+  it("and NO CALL SITE PUTS A CURRENCY SYMBOL THERE ITSELF", () => {
     // `$${n}` is the other way round the seam, and it is wrong in five of the
-    // eleven shipped locales before anyone has typed a translation.
+    // eleven shipped locales before anyone has typed a translation: Spanish,
+    // Vietnamese, Russian and Indonesian suffix the symbol, Brazilian
+    // Portuguese writes `US$ `.
+    //
+    // MATCHED ON THE LITERAL `$`, not on what follows it. The first version of
+    // this test looked for `$${n.toFixed(2)}` — the shape that existed at the
+    // time — so when those call sites were rewritten to `$${usd(n)}` the test
+    // went green while the screen read `$$50.00`. A dollar sign glued to an
+    // interpolation is the defect; what is inside the braces is beside the
+    // point.
     const offenders: string[] = [];
     for (const f of sources()) {
       if (f.endsWith("src/lib/format.ts")) continue;
       const body = readFileSync(new URL(`../../${f}`, import.meta.url), "utf8");
-      for (const m of body.matchAll(/\$\{[a-zA-Z][\w.]*\.toFixed\(\d\)\}/g)) {
-        const before = body.slice(Math.max(0, m.index - 2), m.index);
-        if (before.endsWith("$")) offenders.push(`${f}: ${m[0]}`);
+      for (const m of body.matchAll(/\$\$\{([^}]{1,60})\}/g)) {
+        const line = body.slice(body.lastIndexOf("\n", m.index) + 1, body.indexOf("\n", m.index));
+        if (/^\s*(\*|\/\/)/.test(line)) continue; // prose about the rule
+        offenders.push(`${f}: ${m[0]}`);
       }
     }
     assert.deepEqual(offenders, [], "a currency symbol is the locale's to place");
