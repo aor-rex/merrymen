@@ -93,7 +93,12 @@ describe("what the words may not be", () => {
     // chat app and a settings heading. A key for either would invite a
     // translation, and a translated product name is a product nobody can find.
     for (const key of STRIP_KEYS) {
-      const english = EN[key];
+      // WIDENED TO `string` ON PURPOSE. `EN[key]` is a union of literal types,
+      // so comparing it against a name no key currently holds is a comparison
+      // TypeScript can prove is always true — and it rejects it (TS2367) rather
+      // than let a tautology sit in a test. The check is about what a FUTURE
+      // key might contain, which is a runtime question, not a type-level one.
+      const english: string = EN[key];
       assert.ok(
         english !== "Telegram" && english !== "Trencher",
         `${key} keys a product name`,
