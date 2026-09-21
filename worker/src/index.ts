@@ -109,6 +109,7 @@ import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
+import { coinDisplayName } from "./coin-name";
 import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { takeTick } from "./strategies/types";
@@ -5978,14 +5979,7 @@ async function main() {
    * because a post may never carry one.
    */
   function displayNameOf(symbol: string): string | null {
-    const token = watchTokens.find((t) => t.symbol === symbol);
-    const raw = (token?.name ?? "").trim();
-    // A GeckoTerminal pool label is "CASHCAT / WETH 1%" — the coin is the part
-    // before the pair separator, and the rest is the venue, not the name.
-    const head = raw.split("/")[0]!.trim();
-    const clean = head.replace(/[^A-Za-z0-9 ._-]/g, "").trim().slice(0, 24);
-    if (!clean || clean === symbol || /^0x/i.test(clean) || !/[A-Za-z]/.test(clean)) return null;
-    return clean;
+    return coinDisplayName(watchTokens.find((t) => t.symbol === symbol));
   }
 
   async function maybePost(decisionId: string, status: string): Promise<void> {
@@ -6189,6 +6183,13 @@ async function main() {
       agent_id: active.agentId,
       source,
       symbol: known?.symbol ?? d.symbol,
+      // A SELL IS A ROW TOO. The mechanical exits — stop, take, drain, aged —
+      // never pass through the Brain, so they were the one side of a Trencher
+      // round trip the feed could not name: "buy AI (T3AD…)" and then "sell
+      // T3AD…" for the same coin, minutes apart. Same column, same rule, and
+      // it is a no-op for the issuer-backed tickers these strategies mostly
+      // trade — see coin-name.ts.
+      display_name: displayNameOf(known?.symbol ?? d.symbol ?? ""),
       action: known?.action ?? d.action,
       size_usdg: d.sizeUsdg,
       reason,
