@@ -13,6 +13,7 @@ import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
+import { usd } from "@/lib/format";
 
 /**
  * YOUR agent. One tab in a social product, not a control room.
@@ -73,7 +74,7 @@ interface GrantsResponse {
 }
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 export function YouClient() {
   const [feed, setFeed] = useState<FeedResponse | null>(null);

@@ -5,6 +5,7 @@ import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
 import { parseAmount, type AmountField } from "@/lib/parse-amount";
+import { fullDateTime } from "@/lib/format";
 import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, erc20Abi, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
@@ -1862,7 +1863,7 @@ export default function GrantPage() {
               </div>
               <div>
                 <span className="rk">expires</span>
-                <span className="rv">{new Date(grant.expiresAt * 1000).toLocaleString()}</span>
+                <span className="rv">{fullDateTime(grant.expiresAt * 1000)}</span>
               </div>
             </div>
 

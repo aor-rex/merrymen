@@ -6,6 +6,7 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { badgeOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
+import { usdAdaptive } from "@/lib/format";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -25,7 +26,7 @@ import type { PublicThesis } from "@/lib/thesis";
  */
 
 const money = (n: number | null) =>
-  n === null ? null : `$${n.toLocaleString("en-US", { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
+  n === null ? null : usdAdaptive(n);
 
 function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
   if (kind === "bought") return "up";

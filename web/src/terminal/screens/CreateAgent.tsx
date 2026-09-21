@@ -17,6 +17,7 @@ import { Face } from "../ui";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
+import { count, decimalSeparator } from "@/lib/format";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -135,7 +136,10 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
       // edited afterwards.
       setError(r.reason==="ambiguous"?`${label}: that reads as either ${r.readings.join(" or ")}. Which did you mean?`
         :r.reason==="out-of-range"?`${label}: enter an amount between ${r.min} and ${r.max}.`
-        :`${label}: enter an amount, for example 10 or 10${(1.1).toLocaleString().includes(",")?",":"."}50.`);
+        // The example is written in the reader's own separator. A hint that
+        // shows a dot to somebody whose keyboard has a comma is the original
+        // bug wearing a helpful expression.
+        :`${label}: enter an amount, for example 10 or 10${decimalSeparator()}50.`);
       return;
     }
     if(!perTrade.ok||!perDay.ok)return;
@@ -206,8 +210,8 @@ export function CreateAgent({account,onRefresh,onBack,onDone,onFund}:{account:Ac
                     </p>
                   ) : (
                     <p>
-                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and this one
-                      needs {tier.needTokens.toLocaleString("en-US")}. Your agent will arm, read the
+                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and this one
+                      needs {count(tier.needTokens)}. Your agent will arm, read the
                       market and stay idle until you hold enough. Steady basket and Strategist run
                       for everyone.
                     </p>

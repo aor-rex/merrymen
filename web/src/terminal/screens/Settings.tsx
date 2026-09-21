@@ -14,6 +14,7 @@ import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncovere
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import SetupChecklist from "../SetupChecklist";
+import { count } from "@/lib/format";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
@@ -815,8 +816,8 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                     </p>
                   ) : (
                     <p>
-                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and it needs{" "}
-                      {tier.needTokens.toLocaleString("en-US")}. Your agent will keep running and
+                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and it needs{" "}
+                      {count(tier.needTokens)}. Your agent will keep running and
                       stay idle until you hold enough — saving this won&apos;t change that.
                     </p>
                   )}

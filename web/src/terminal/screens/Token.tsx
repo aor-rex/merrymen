@@ -29,6 +29,7 @@ import {
 import { TvChart } from "../tv";
 import { Coin, Face, Empty } from "../ui";
 import { useWatchlist } from "../watchlist";
+import { shortDateTime } from "@/lib/format";
 
 const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
 
@@ -96,12 +97,7 @@ export function Token({
     () =>
       bars.map((bar) => ({
         value: bar.close,
-        label: new Date(bar.time * 1000).toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
+        label: shortDateTime(bar.time * 1000),
       })),
     [bars],
   );

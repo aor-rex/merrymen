@@ -10,6 +10,7 @@ import { PrivySignIn } from "@/terminal/PrivySignIn";
 import { privyEnabled } from "@/lib/privy-client";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/core";
+import { usd } from "@/lib/format";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -194,5 +195,5 @@ function RiskBar({ onDone }: { onDone: () => void }) {
 
 export function LimitsPanel({account,onClose}:{account:AccountState|null;onClose:()=>void}) {
   const caps=account?.status.grant?.caps;
-  return <section className="hosted-entry money-flow"><header className="flow-top"><h2>Trading limits</h2><button aria-label="Close limits" onClick={onClose}><X size={18}/></button></header><RiskBar onDone={()=>{}}/><dl className="fund-breakdown"><div><dt>Per trade</dt><dd>{caps ? `$${caps.perTradeUsdg.toFixed(2)}` : "—"}</dd></div><div><dt>Per day</dt><dd>{caps ? `$${caps.dailyUsdg.toFixed(2)}` : "—"}</dd></div></dl><p>Changing these limits requires a new signature for your agent’s trading permission.</p><a className="flow-primary" href="/grant">Edit signed limits</a><a className="flow-secondary" href="/settings">Strategy and account settings</a></section>;
+  return <section className="hosted-entry money-flow"><header className="flow-top"><h2>Trading limits</h2><button aria-label="Close limits" onClick={onClose}><X size={18}/></button></header><RiskBar onDone={()=>{}}/><dl className="fund-breakdown"><div><dt>Per trade</dt><dd>{caps ? `$${usd(caps.perTradeUsdg)}` : "—"}</dd></div><div><dt>Per day</dt><dd>{caps ? `$${usd(caps.dailyUsdg)}` : "—"}</dd></div></dl><p>Changing these limits requires a new signature for your agent’s trading permission.</p><a className="flow-primary" href="/grant">Edit signed limits</a><a className="flow-secondary" href="/settings">Strategy and account settings</a></section>;
 }

@@ -27,6 +27,7 @@ import { TradeTokenCard } from "../TradeTokenCard";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
+import { count } from "@/lib/format";
 
 /**
  * How many recent moves the agent is shown.
@@ -766,11 +767,11 @@ export function Agent({
             <p>
               {tier?.why === "unreadable"
                 ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
-                : `Your agent is armed and watching, but this strategy only runs while you hold ${(
-                    tier?.needTokens ?? 100_000
-                  ).toLocaleString("en-US")} $MERRYMEN — you hold ${(
-                    tier?.tokens ?? 0
-                  ).toLocaleString("en-US")}. Adding funds won't change it. Switch to Steady basket or Strategist, which run for everyone, or hold the token.`}
+                : `Your agent is armed and watching, but this strategy only runs while you hold ${count(
+                    tier?.needTokens ?? 100_000,
+                  )} $MERRYMEN — you hold ${count(
+                    tier?.tokens ?? 0,
+                  )}. Adding funds won't change it. Switch to Steady basket or Strategist, which run for everyone, or hold the token.`}
             </p>
           </section>
         )}

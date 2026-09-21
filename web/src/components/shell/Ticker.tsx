@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { MarketData } from "@/lib/market";
+import { count, usdFixed } from "@/lib/format";
 
 /**
  * THE TAPE ALONG THE BOTTOM.
@@ -21,8 +22,8 @@ import type { MarketData } from "@/lib/market";
 
 const money = (n: number | null): string => {
   if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1000) return `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 1000) return usdFixed(n, 0);
+  if (n >= 1) return usdFixed(n, 2);
   return `$${n.toPrecision(3)}`;
 };
 
@@ -81,9 +82,9 @@ export function Ticker() {
         {wall && (
           <Link href="/" className="mm-tick fleet">
             <span className="k">wall</span>
-            <b className="mono warn">{wall.turned.toLocaleString("en-US")}</b>
+            <b className="mono warn">{count(wall.turned)}</b>
             <span className="mono dim">turned</span>
-            <b className="mono up">{wall.through.toLocaleString("en-US")}</b>
+            <b className="mono up">{count(wall.through)}</b>
             <span className="mono dim">through</span>
           </Link>
         )}

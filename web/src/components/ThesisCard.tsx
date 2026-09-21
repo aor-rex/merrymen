@@ -3,6 +3,7 @@ import type { PublicThesis } from "@/lib/thesis";
 import { badgeOf, hasTrade } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { usd } from "@/lib/format";
 
 /**
  * THE ATOM.
@@ -22,7 +23,7 @@ import { AgentAvatar } from "@/components/AgentAvatar";
  */
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 export function ThesisCard({
   t,

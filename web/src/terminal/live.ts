@@ -1,3 +1,20 @@
+/**
+ * THE TERMINAL'S FIGURES COME FROM THE SAME PLACE AS EVERY OTHER FIGURE.
+ *
+ * These were five hand-written formatters here and ten more elsewhere, each
+ * pinning "en-US" — except the chat confirmation card, which used the browser's
+ * locale. So the last sentence read before an order was placed rendered its
+ * number in a different system from the balance above it.
+ */
+import {
+  compactUsd as fmtCompactUsd,
+  pctBps as fmtPctBps,
+  pctPts as fmtPctPts,
+  subCentUsd as fmtCoinPrice,
+  usd as fmtUsd,
+  usdFixed as fmtDecimals,
+  fullDateTime as fmtFullDateTime,
+} from "@/lib/format";
 import { loadTokenQuotes, applyTokenQuotes } from "./quotes";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { rejectRuleLabel } from "@merrymen/thesis";
@@ -306,33 +323,23 @@ const LOGO = (addr: string) =>
 const COMPANY = (symbol: string) =>
   `https://financialmodelingprep.com/image-stock/${symbol}.png`;
 
-export function compactUsd(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-}
+export const compactUsd = fmtCompactUsd;
 
 export function coinPrice(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
-  if (n === 0) return "$0";
-  if (n < 0.01) return `$${n.toPrecision(3)}`;
-  if (n >= 100)
-    return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return `$${n.toFixed(n >= 1 ? 2 : 4)}`;
+  if (n === 0) return fmtUsd(0);
+  if (n < 0.01) return fmtCoinPrice(n);
+  if (n >= 100) return fmtUsd(n);
+  return fmtDecimals(n, n >= 1 ? 2 : 4);
 }
 
 export function quoteTitle(token: LiveToken): string | undefined {
   if (token.priceSource !== "robinhood" || !token.priceUpdatedAt)
     return undefined;
-  return `Robinhood bid/ask midpoint · ${new Date(token.priceUpdatedAt * 1000).toLocaleString()}`;
+  return `Robinhood bid/ask midpoint · ${fmtFullDateTime(token.priceUpdatedAt * 1000)}`;
 }
 
-export function pctPts(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  return `${n > 0 ? "+" : ""}${n.toFixed(n >= 100 || n <= -100 ? 0 : 2)}%`;
-}
+export const pctPts = fmtPctPts;
 
 /**
  * WHICH COLOUR A CHANGE GETS — and the one that says "we do not know".
@@ -351,17 +358,9 @@ export function deltaClass(n: number | null | undefined): "up" | "down" | "flat"
   return n < 0 ? "down" : "up";
 }
 
-export function pctBps(bps: number | null): string {
-  if (bps === null) return "—";
-  const pct = bps / 100;
-  if (Math.abs(pct) < 0.05) return "0.0%";
-  return `${pct > 0 ? "+" : "\u2212"}${Math.abs(pct).toFixed(1)}%`;
-}
+export const pctBps = fmtPctBps;
 
-export function money(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+export const money = fmtUsd;
 
 /**
  * How long ago this printed.

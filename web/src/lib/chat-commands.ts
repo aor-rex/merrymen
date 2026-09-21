@@ -56,6 +56,7 @@
  */
 import { riskProfile } from "@merrymen/core";
 import { isCircleStrategyId } from "@/terminal/strategy";
+import { usd } from "@/lib/format";
 
 /** A value an owner can be asked to confirm. Strings and numbers only. */
 export type CommandArg = string | number | boolean;
@@ -138,7 +139,17 @@ export interface ChatCommand {
   weighty?: boolean;
 }
 
-const money = (n: CommandArg) => `$${Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+/**
+ * THE LAST FIGURE READ BEFORE AN ORDER IS PLACED, so it must be the same
+ * figure the rest of the screen is showing.
+ *
+ * This was `toLocaleString(undefined, …)` — the BROWSER's locale — while every
+ * other money site in the app pinned "en-US". A German owner therefore read
+ * `$1.000` on this confirmation card beside `$1,234.50` in the top bar: two
+ * number systems in one viewport, on the one card that authorises a trade,
+ * where the difference between them is a factor of a thousand.
+ */
+const money = (n: CommandArg) => usd(Number(n));
 
 /**
  * THE REGISTRY IS THE ALLOWLIST. A command the model names that is not here

@@ -18,6 +18,7 @@ import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
 import { useAgentImageSrc } from "../agent-image-state";
 import { WireButton } from "@/components/WireButton";
+import { fullDateTime } from "@/lib/format";
 
 export function Profile({
   agent,
@@ -202,7 +203,7 @@ export function Profile({
               <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
               <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
                 {trade.symbol == null && <small style={{ display: "block" }}>Token label unavailable in this historical record.</small>}
-                <small>{new Date(trade.at * 1000).toLocaleString()} · {trade.paper ? "Paper trade" : "Completed"}</small>
+                <small>{fullDateTime(trade.at * 1000)} · {trade.paper ? "Paper trade" : "Completed"}</small>
                 <p className={trade.realizedPnlBps != null ? trade.realizedPnlBps < 0 ? "down" : "up" : "public-empty"}>
                   Realized P&L: {trade.action === "buy" ? "Not realized on a buy" : trade.realizedPnlBps != null || trade.realizedPnlUsdg != null ? <>
                     {trade.realizedPnlBps != null && pctBps(trade.realizedPnlBps)}

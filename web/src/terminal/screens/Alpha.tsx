@@ -3,6 +3,7 @@ import { LockKeyhole, FileText, Activity, ExternalLink } from "lucide-react";
 import { compactUsd, coinPrice } from "../live";
 import { Empty } from "../ui";
 import type { AlphaExtras, DiscoveryRow } from "@/lib/read-discoveries";
+import { count } from "@/lib/format";
 
 /**
  * ALPHA — what the scout looked at, and what it threw out.
@@ -111,7 +112,7 @@ function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; on
     <section className="alpha-gate">
       <LockKeyhole size={32}/><h2>An edge for holders.</h2>
       <p>Hold {wire.token.symbol} in your signed-in wallet to unlock Alpha.</p>
-      <div className="alpha-threshold"><strong>{wire.need.tokens.toLocaleString()}</strong><span>{wire.token.symbol}</span></div>
+      <div className="alpha-threshold"><strong>{count(wire.need.tokens)}</strong><span>{wire.token.symbol}</span></div>
       {wire.why === "unreachable" && <p role="status">Could not verify your holdings. Try again.</p>}
       {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">Sign in with wallet</a> : <button className="flow-primary" onClick={onRefresh}>Verify wallet holdings</button>}
     </section>
