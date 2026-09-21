@@ -25,7 +25,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSyn
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
+import { makePrompter } from "./prompter.mjs";
 import { fileURLToPath } from "node:url";
 import { banner, c, spinner, type as typeOut, withSpinner } from "./ui.mjs";
 
@@ -225,34 +225,6 @@ function localBin(name) {
     process.exit(1);
   }
   return bin;
-}
-
-function makePrompter() {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = (q) =>
-    new Promise((res) => {
-      let done = false;
-      const onClose = () => {
-        if (!done) { done = true; res(null); }
-      };
-      rl.once("close", onClose);
-      rl.question(q, (answer) => {
-        if (!done) { done = true; rl.off("close", onClose); res(answer); }
-      });
-    });
-  const askSecret = (q) =>
-    new Promise((res) => {
-      const orig = rl._writeToOutput.bind(rl);
-      console.log(q);
-      rl._writeToOutput = (s) => {
-        if (s.includes("\n") || s.includes("\r")) orig(s);
-      };
-      rl.question("", (answer) => {
-        rl._writeToOutput = orig;
-        res(answer);
-      });
-    });
-  return { rl, ask, askSecret, close: () => rl.close() };
 }
 
 async function rpcCall(url, method, params = []) {
