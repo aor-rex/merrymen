@@ -35,7 +35,7 @@ before(async () => {
 after(async () => {
   if (saved === undefined) delete process.env.MERRYMEN_HOME;
   else process.env.MERRYMEN_HOME = saved;
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("who has already been shown around", () => {

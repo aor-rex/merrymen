@@ -29,7 +29,7 @@ beforeEach(async () => {
 afterEach(async () => {
   if (prev === undefined) delete process.env.MERRYMEN_HOME;
   else process.env.MERRYMEN_HOME = prev;
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the image store", () => {

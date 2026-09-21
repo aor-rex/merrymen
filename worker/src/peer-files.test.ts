@@ -49,7 +49,7 @@ beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), "mm-peers-"));
 });
 afterEach(async () => {
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the peer file", () => {

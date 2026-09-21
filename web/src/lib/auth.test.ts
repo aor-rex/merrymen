@@ -22,7 +22,7 @@ const testHome = mkdtempSync(join(tmpdir(), "merrymen-auth-"));
 process.env.MERRYMEN_HOME = testHome;
 delete process.env.DATABASE_URL;
 delete process.env.MERRYMEN_HOSTED;
-after(() => rmSync(testHome, { recursive: true, force: true }));
+after(() => rmSync(testHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 import {
   challengeMessage,

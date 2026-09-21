@@ -33,7 +33,7 @@ const home = (): string => {
   return d;
 };
 after(() => {
-  for (const d of homes) rmSync(d, { recursive: true, force: true });
+  for (const d of homes) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const story = (over: Partial<NewsItem> = {}): NewsItem => ({

@@ -42,7 +42,7 @@ test("a command written to a home is claimed from that home", () => {
     assert.equal(got?.id, "a");
     assert.equal(got?.kind, "selftest");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -56,7 +56,7 @@ test("THE UNLINK IS THE CLAIM — a second reader gets nothing", () => {
     assert.equal(claimCommandFile(home)?.id, "a");
     assert.equal(claimCommandFile(home), null, "a claimed command must never be handed out twice");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -70,8 +70,8 @@ test("commands for one home are invisible to another", () => {
     assert.equal(claimCommandFile(b), null);
     assert.equal(claimCommandFile(a)?.id, "mine");
   } finally {
-    rmSync(a, { recursive: true, force: true });
-    rmSync(b, { recursive: true, force: true });
+    rmSync(a, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    rmSync(b, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -85,7 +85,7 @@ test("oldest first, by the timestamp INSIDE the file", () => {
     assert.equal(claimCommandFile(home)?.id, "first");
     assert.equal(claimCommandFile(home)?.id, "second");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -103,7 +103,7 @@ test("an unreadable command is removed rather than blocking the queue", () => {
       "the unreadable file is gone, not skipped forever",
     );
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -127,7 +127,7 @@ test("results travel back and are drained exactly once", () => {
     dropCommandResult(home, "a");
     assert.deepEqual(drainCommandResults(home), [], "and the caller drops it once the row lands");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -140,7 +140,7 @@ test("a result is never mistaken for a command", () => {
     assert.equal(claimCommandFile(home), null, "a result is not a pending command");
     assert.equal(drainCommandResults(home).length, 1);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -154,7 +154,7 @@ test("a half-written file is never observed — write then rename", () => {
     assert.deepEqual(names, ["a.json"], "no temp file left behind");
     assert.equal(names.some((n) => n.startsWith(".")), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -165,7 +165,7 @@ test("an empty or missing home is empty, not an error", () => {
     assert.deepEqual(drainCommandResults(home), []);
     assert.equal(claimCommandFile(path.join(home, "nope")), null);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -195,7 +195,7 @@ test("AN ID THAT IS NOT A PLAIN ID IS REFUSED, not sanitised", () => {
     // partially-sanitised id would have left.
     assert.equal(hasPendingCommand(home), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -213,7 +213,7 @@ test("an order carries its arguments and its expiry across the file", () => {
     assert.deepEqual(got?.args, { side: "buy", symbol: "TSLA", usdgAmount: 25 });
     assert.equal(got?.expiresAt, 500);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -230,7 +230,7 @@ test("AN EXPIRED ORDER IS STILL CLAIMED — it must leave a receipt, not vanish"
     assert.equal(isExpired({ id: "x", kind: "selftest", at: 1 }, Date.now()), false);
     assert.equal(claimCommandFile(home), null, "and it left the queue");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -255,7 +255,7 @@ test("THE FILE THAT WAS READ IS THE FILE THAT IS UNLINKED", () => {
     assert.equal(claimCommandFile(home)?.kind, "selftest");
     assert.deepEqual(readdirSync(commandDir(home)), []);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -267,7 +267,7 @@ test("a file that parses but is the wrong shape is removed, not re-read forever"
     assert.equal(claimCommandFile(home), null);
     assert.deepEqual(readdirSync(commandDir(home)), [], "the unreadable branch already knew to unlink; this one did not");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -296,7 +296,7 @@ test("SELF-HOSTED CAN TELL 'RAN' FROM 'NEVER RAN'", () => {
     // And an id that could be a path is not read either.
     assert.equal(readCommandState(home, "../secret"), null);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -308,7 +308,7 @@ test("old receipts are swept, because self-hosted nothing drains them", () => {
     const left = readdirSync(commandDir(home)).sort();
     assert.deepEqual(left, ["fresh.done.json"], "a home must not accumulate receipts forever");
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -333,7 +333,7 @@ test("CLAIMED IS NOT ANSWERED — a running order still reads as waiting", () =>
     // The marker is gone too — it must not outlive the thing it describes.
     assert.equal(readdirSync(commandDir(home)).some((n) => n.endsWith(".running")), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -345,6 +345,6 @@ test("and a marker cannot be written for an id that is not a plain id", () => {
     assert.equal(readdirSync(home).includes("escape"), false);
     assert.equal(hasPendingCommand(home), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

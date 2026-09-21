@@ -12,7 +12,7 @@ process.env.MERRYMEN_HOSTED = "1";
 process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
 delete process.env.DATABASE_URL;
 delete process.env.MERRYMEN_PUBLIC_ORIGIN;
-after(() => rmSync(home, { recursive: true, force: true }));
+after(() => rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 test("X proof refuses invalid, expired, and unrecordable challenges before fetching a post", async () => {
   const fetch = mock.method(globalThis, "fetch", async () => { throw new Error("unexpected network access"); });

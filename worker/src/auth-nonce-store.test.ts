@@ -37,7 +37,7 @@ test("independent SQL store instances share one atomic claim and survive reopeni
     assert.equal(await fresh.consume("expired-challenge", now, now), false);
   } finally {
     reopened.close();
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -55,7 +55,7 @@ test("local replay protection survives separate processes and process restart", 
     assert.deepEqual(results.map((result) => JSON.parse(result.stdout.trim())).sort(), [false, true]);
     assert.equal(JSON.parse((await child()).stdout.trim()), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -69,7 +69,7 @@ test("expired cleanup does not reopen an unexpired nonce", async () => {
     assert.equal(await store.consume("current", now + 60_000, now), false);
     assert.equal(await store.consume("old", now - 20 * 60_000, now), false);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 

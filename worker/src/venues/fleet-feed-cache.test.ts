@@ -17,7 +17,7 @@ test("different pages share a request pace across independent worker connections
     assert.equal(starts.length, 3);
     assert.ok(starts[1]! - starts[0]! >= 85);
     assert.ok(starts[2]! - starts[1]! >= 85);
-  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true }); }
+  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("a queued page stops when another request encounters a provider rate limit", async () => {
@@ -33,7 +33,7 @@ test("a queued page stops when another request encounters a provider rate limit"
     assert.equal(results[0].failure, "http-429");
     assert.equal(results[1].failure, "provider-cooldown");
     assert.equal(laterCalls, 0);
-  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true }); }
+  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("independent fleet connections coalesce a page request and preserve observation time", async () => {
@@ -50,7 +50,7 @@ test("independent fleet connections coalesce a page request and preserve observa
     assert.equal(results[1].observedAt, observedAt);
     await b.get<FeedResult>("pools:1", fetch, unavailable);
     assert.equal(calls, 1);
-  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true }); }
+  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("429 cooldown is shared across pages while a fresh cached page remains readable", async () => {
@@ -65,7 +65,7 @@ test("429 cooldown is shared across pages while a fresh cached page remains read
     assert.equal((await b.get<FeedResult>("other-page", request, unavailable)).failure, "provider-cooldown");
     assert.equal((await b.get<FeedResult>("fresh", request, unavailable)).failed, false);
     assert.equal(calls, 0);
-  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true }); }
+  } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("expired observations are fetched again and thrown requests release their lease", async () => {
@@ -79,5 +79,5 @@ test("expired observations are fetched again and thrown requests release their l
     assert.equal(calls, 1);
     await assert.rejects(a.get<FeedResult>("thrown", async () => { throw new Error("offline"); }, unavailable));
     assert.equal((await a.get<FeedResult>("thrown", async () => ({ failed: false }), unavailable)).failed, false);
-  } finally { a.close(); rmSync(home, { recursive: true, force: true }); }
+  } finally { a.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

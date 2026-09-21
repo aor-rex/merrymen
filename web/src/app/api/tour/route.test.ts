@@ -24,7 +24,7 @@ after(async () => {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
   resetTourStoreForTest();
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 function request(tenant: typeof A | typeof B | null, method = "GET", body?: unknown) {
   return new Request("https://app.example.test/api/tour", {
