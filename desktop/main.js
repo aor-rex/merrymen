@@ -367,9 +367,35 @@ function startBackend() {
   startDashboard();
   startWorker();
 }
-function restartWorker() {
-  killChild(workerChild);
-  startWorker();
+/**
+ * Restart the worker WITHOUT overlapping the old one — sequencing lives in
+ * worker-lifecycle.cjs (testable; this file needs Electron). Single-flight,
+ * exit-awaited, SIGKILL-escalated: see there for why each piece exists.
+ */
+const { createRestarter } = require("./worker-lifecycle.cjs");
+const restartWorkerOp = createRestarter({
+  getCurrent: () => workerChild,
+  setCurrent: (c) => {
+    workerChild = c;
+  },
+  startWorker: () => {
+    startWorker();
+    return workerChild;
+  },
+  killGraceful: (c) => killChild(c),
+  killForce: (c) => {
+    try {
+      c.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  },
+  onEvent: (e) => {
+    if (e === "escalate") console.log("[worker] SIGTERM ignored — escalating to SIGKILL");
+  },
+});
+async function restartWorker() {
+  await restartWorkerOp.restart();
   refreshTray();
 }
 
