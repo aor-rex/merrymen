@@ -5,6 +5,7 @@ import { Compass } from "lucide-react";
 import type { Screen } from "./live";
 import { TOUR_VERSION } from "@/lib/tour-version";
 import { tourCardPosition, visibleTourTarget, type TourRect } from "./tour-layout";
+import { LanguagePicker } from "./LanguagePicker";
 
 /** Guided topics, available before sign-in. Anonymous dismissal can be claimed
  * by one account; explicit replay is separate from permanent dismissal. */
@@ -344,6 +345,12 @@ function AccountTour({
   if (done) {
     return (
       <div className="tour-relaunch">
+        {/*
+          Beside the tour rather than inside Settings, which is five taps in
+          behind an English label. A reader who cannot navigate there is exactly
+          the reader the picker is for.
+        */}
+        <LanguagePicker />
         <button
           type="button"
           onClick={() => {
@@ -381,6 +388,13 @@ function AccountTour({
       )}
       <section ref={cardRef} className="tour-card" style={style}>
         <header>
+          {/*
+            ON THE FIRST SCREEN, not behind it. The picker used to live only in
+            the dismissed state, so the one reader it exists for had to get past
+            twenty-six stops of English prose to reach the control that would
+            have let them read any of it.
+          */}
+          <LanguagePicker />
           <span className="tour-count">
             {step + 1} / {STOPS.length}
           </span>

@@ -15,6 +15,7 @@ import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import SetupChecklist from "../SetupChecklist";
 import { count } from "@/lib/format";
+import { unreadableSetting } from "@/lib/parse-amount";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
@@ -243,6 +244,39 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
 
+  /**
+   * A NUMERIC SETTING, HELD AS TEXT.
+   *
+   * These fields were `<input type="number">`, and that control hands
+   * JavaScript an EMPTY STRING for anything its own locale cannot parse. Empty
+   * means "clear to default" at the server, so a German owner typing 25,50 did
+   * not get an error — they silently reset the setting, and the screen said
+   * "Changes saved".
+   *
+   * It is also the reason `<html lang>` could not become dynamic while these
+   * existed: Firefox resolves a number input's decimal separator from the page
+   * language, so translating the UI would have changed which strings these
+   * fields accept and which collapsed to "".
+   *
+   * THE SHAPE IS CHECKED HERE AND THE BOUNDS ARE NOT. Mirroring the server's
+   * thirty min/max pairs into the browser is the duplication route.ts's own
+   * comments warn about three times over. "I cannot read that" and "that is
+   * too large" are different questions, and only the first is the screen's.
+   */
+  const [numError, setNumError] = useState<Record<string, string>>({});
+  const setNum = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    setDraft((d) => ({ ...d, [k]: raw }));
+    setNumError((n) => {
+      const why = unreadableSetting(k, raw);
+      if (why === (n[k] ?? null)) return n;
+      const next = { ...n };
+      if (why) next[k] = why;
+      else delete next[k];
+      return next;
+    });
+  };
+
   const v = (k: keyof SettingsView["values"]): string => {
     if (k in draft) return draft[k as string]!;
     const stored = view?.values[k];
@@ -307,6 +341,14 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
   async function save() {
     setStatus("saving…");
     setErrors([]);
+    // An unreadable field would be sent as typed and rejected, or — worse, if
+    // it were ever blanked first — sent as "" and read as "clear to default".
+    const unreadable = Object.entries(numError);
+    if (unreadable.length > 0) {
+      setStatus("");
+      setErrors(unreadable.map(([k, why]) => `${k}: ${why}`));
+      return;
+    }
     const body: Record<string, unknown> = { ...draft };
     if (symbols !== null) body.basketSymbols = symbols;
     if (tokens !== null) body.customTokens = tokens;
@@ -971,7 +1013,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("minPoolLiquidityUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.minPoolLiquidityUsdg)}
-                onChange={set("minPoolLiquidityUsdg")}
+                onChange={setNum("minPoolLiquidityUsdg")} aria-invalid={!!numError.minPoolLiquidityUsdg}
               />
             </Field>
             <Field
@@ -982,7 +1024,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("maxPriceDivergenceBps")}
                 inputMode="numeric"
                 placeholder={String(d.maxPriceDivergenceBps)}
-                onChange={set("maxPriceDivergenceBps")}
+                onChange={setNum("maxPriceDivergenceBps")} aria-invalid={!!numError.maxPriceDivergenceBps}
               />
             </Field>
           </div>
@@ -1089,7 +1131,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("discoveryIntervalMin")}
                 inputMode="numeric"
                 placeholder={String(d.discoveryIntervalMin)}
-                onChange={set("discoveryIntervalMin")}
+                onChange={setNum("discoveryIntervalMin")} aria-invalid={!!numError.discoveryIntervalMin}
               />
             </Field>
           </div>
@@ -1150,7 +1192,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("scoutBudgetUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.scoutBudgetUsdg)}
-                onChange={set("scoutBudgetUsdg")}
+                onChange={setNum("scoutBudgetUsdg")} aria-invalid={!!numError.scoutBudgetUsdg}
               />
             </Field>
             <Field
@@ -1161,7 +1203,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("scoutPerTokenUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.scoutPerTokenUsdg)}
-                onChange={set("scoutPerTokenUsdg")}
+                onChange={setNum("scoutPerTokenUsdg")} aria-invalid={!!numError.scoutPerTokenUsdg}
               />
             </Field>
           </div>
@@ -1224,7 +1266,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("classPerEntryUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.classPerEntryUsdg)}
-                onChange={set("classPerEntryUsdg")}
+                onChange={setNum("classPerEntryUsdg")} aria-invalid={!!numError.classPerEntryUsdg}
               />
             </Field>
             <Field
@@ -1235,11 +1277,11 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("classMaxPositions")}
                 inputMode="numeric"
                 placeholder={String(d.classMaxPositions)}
-                onChange={set("classMaxPositions")}
+                onChange={setNum("classMaxPositions")} aria-invalid={!!numError.classMaxPositions}
               />
             </Field>
             <Field label="maximum holding time (seconds)" hint="For bonding-curve positions: attempt an exit after this duration, even when a market price is unavailable. Quotes, liquidity and signed limits still apply.">
-              <input type="number" min={60} max={2592000} value={v("classMaxHoldSec")} placeholder={String(d.classMaxHoldSec)} onChange={set("classMaxHoldSec")} />
+              <input type="text" inputMode="numeric" value={v("classMaxHoldSec")} placeholder={String(d.classMaxHoldSec)} onChange={setNum("classMaxHoldSec")} aria-invalid={!!numError.classMaxHoldSec} />
             </Field>
             <Field
               label="minimum curve depth (USDG)"
@@ -1249,7 +1291,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
                 value={v("classMinDepthUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.classMinDepthUsdg)}
-                onChange={set("classMinDepthUsdg")}
+                onChange={setNum("classMinDepthUsdg")} aria-invalid={!!numError.classMinDepthUsdg}
               />
             </Field>
           </div>
@@ -1318,12 +1360,10 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             </label>
             <Field label="chat trade ceiling" hint="Max USDG per chat-triggered trade — beneath your grant caps.">
               <input
-                type="number"
-                min={1}
+                type="text" inputMode="decimal"
                 placeholder={String(d.telegramMaxActionUsdg)}
                 value={v("telegramMaxActionUsdg")}
-                onChange={set("telegramMaxActionUsdg")}
-              />
+                onChange={setNum("telegramMaxActionUsdg")} aria-invalid={!!numError.telegramMaxActionUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
             <label className="mm-field">
@@ -1338,12 +1378,10 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             </label>
             <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">
               <input
-                type="number"
-                min={1}
+                type="text" inputMode="decimal"
                 placeholder={String(d.telegramTransferDailyUsdg)}
                 value={v("telegramTransferDailyUsdg")}
-                onChange={set("telegramTransferDailyUsdg")}
-              />
+                onChange={setNum("telegramTransferDailyUsdg")} aria-invalid={!!numError.telegramTransferDailyUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
             <label className="mm-field">
@@ -1370,13 +1408,10 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
             )}
             <Field label="daily report hour" hint="Local hour (0–23) after which the campfire report is sent.">
               <input
-                type="number"
-                min={0}
-                max={23}
+                type="text" inputMode="numeric"
                 placeholder={String(d.telegramDigestHour)}
                 value={v("telegramDigestHour")}
-                onChange={set("telegramDigestHour")}
-              />
+                onChange={setNum("telegramDigestHour")} aria-invalid={!!numError.telegramDigestHour} />
               <span className="mm-unit">h</span>
             </Field>
           </div>
@@ -1530,7 +1565,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               )}
               <div className="mm-grid">
                 <Field label="step budget" hint="Maximum steps per task.">
-                  <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
+                  <input type="text" inputMode="numeric" placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={setNum("telegramAgentMaxSteps")} aria-invalid={!!numError.telegramAgentMaxSteps} />
                   <span className="mm-unit">steps</span>
                 </Field>
               </div>
@@ -1757,45 +1792,45 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
               </select>
             </Field>
             <Field label="max slippage" hint="vs the pre-trade quote.">
-              <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
+              <input type="text" inputMode="numeric" placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={setNum("slippageBps")} aria-invalid={!!numError.slippageBps} />
               <span className="mm-unit">bps</span>
             </Field>
             <Field label="performance fee" hint="Calculated on new peak profits. Fees are recorded but not collected.">
-              <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
+              <input type="text" inputMode="numeric" placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={setNum("perfFeeBps")} aria-invalid={!!numError.perfFeeBps} />
               <span className="mm-unit">bps</span>
             </Field>
             <Field label="Market check interval" hint="An active book is reviewed at least every five minutes, subject to available reads and budget.">
-              <input type="number" min={15} max={300} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
+              <input type="text" inputMode="numeric" placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={setNum("tickSeconds")} aria-invalid={!!numError.tickSeconds} />
               <span className="mm-unit">sec</span>
             </Field>
             <Field label="Buy amount per check" hint="Amount spread across the Steady Basket.">
-              <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
+              <input type="text" inputMode="decimal" placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={setNum("buyPerTickUsdg")} aria-invalid={!!numError.buyPerTickUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
             <Field
               label="take profit"
               hint="steady-basket: sell a leg once it is this far ahead of what it cost. 0 never sells — and this is the only exit this strategy has, so at 0 it only ever buys."
             >
-              <input type="number" min={0} placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={set("takeProfitBps")} />
+              <input type="text" inputMode="numeric" placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={setNum("takeProfitBps")} aria-invalid={!!numError.takeProfitBps} />
               <span className="mm-unit">bps</span>
             </Field>
             <Field label="idle cash floor" hint="steady-basket: cash kept liquid; the excess sweeps to the Morpho vault.">
-              <input type="number" min={0} placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={set("idleFloorUsdg")} />
+              <input type="text" inputMode="decimal" placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={setNum("idleFloorUsdg")} aria-invalid={!!numError.idleFloorUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
             <Field label="gap budget" hint="weekend-gap: total USDG deployed per gap window.">
-              <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
+              <input type="text" inputMode="decimal" placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={setNum("gapEnterBudgetUsdg")} aria-invalid={!!numError.gapEnterBudgetUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
             <Field label="Claude / vision model" hint="Model for Anthropic and screen analysis.">
               <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
             </Field>
             <Field label="Strategist decision interval">
-              <input type="number" min={1} max={1440} placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={set("llmIntervalMin")} />
+              <input type="text" inputMode="numeric" placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={setNum("llmIntervalMin")} aria-invalid={!!numError.llmIntervalMin} />
               <span className="mm-unit">min</span>
             </Field>
             <Field label="LLM max per action" hint="Hard strategist ceiling per proposed trade — beneath the grant caps.">
-              <input type="number" min={1} placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={set("llmMaxActionUsdg")} />
+              <input type="text" inputMode="decimal" placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={setNum("llmMaxActionUsdg")} aria-invalid={!!numError.llmMaxActionUsdg} />
               <span className="mm-unit">USDG</span>
             </Field>
           </div>

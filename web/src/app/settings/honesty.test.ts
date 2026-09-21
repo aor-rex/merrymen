@@ -110,8 +110,15 @@ describe("every control survives the restyle", () => {
     // The half a label census cannot see. A rename is cosmetic; losing the
     // binding means the owner keeps a setting they can no longer change — and
     // for `bundlerApiKey` that is the difference between paper and live.
+    // `set` OR `setNum` — the numeric ones moved to a handler that keeps the
+    // owner's raw text instead of letting a number input throw it away. What
+    // this test cares about is that the control is still bound to something,
+    // which is the half a label census cannot see.
     for (const key of ["bundlerApiKey", "tickSeconds", "buyPerTickUsdg", "llmIntervalMin"]) {
-      assert.ok(SRC.includes(`set("${key}")`), `${key} lost its onChange binding`);
+      assert.ok(
+        SRC.includes(`set("${key}")`) || SRC.includes(`setNum("${key}")`),
+        `${key} lost its onChange binding`,
+      );
     }
   });
 
@@ -156,13 +163,35 @@ describe("every control survives the restyle", () => {
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
     // 14 includes the owner-configurable class-position exit timer.
-    assert.equal(count(/type="number"/g), 14, "number inputs");
+    //
+    // COUNTED BY HANDLER, NOT BY `type`. The census used to count
+    // `type="number"`, and every one of those became `type="text"` with an
+    // `inputMode`: a number input hands JavaScript an EMPTY STRING for anything
+    // its own locale cannot parse, and empty means "clear to default" at the
+    // server — so a comma keystroke silently reset the setting. `setNum` is now
+    // the thing that makes a field numeric, so it is the thing to count.
+    //
+    // 22, not 14, because the eight fields that were ALREADY plain text with an
+    // `inputMode` were on the same broken path and now share the handler.
+    assert.equal(count(/setNum\("/g), 22, "numeric settings");
+    // And every one of them shows its own refusal, rather than relying on a
+    // save-time error for a field the reader has already scrolled past.
+    assert.equal(count(/aria-invalid=/g), 22, "numeric settings marking themselves invalid");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
     // census exists to allow — a control was ADDED, deliberately — and the
     // check below pins that it is bound, because an address field nobody can
     // save is how ponsAdapterAddress spent a release being undocumentedly dead.
-    assert.equal(count(/type="text"/g), 13, "text inputs");
+    //
+    // 27 since the fourteen `type="number"` fields became `type="text"`. No
+    // control was added or removed — the SAME fourteen are on the page — but a
+    // number input destroys the owner's raw text before JavaScript sees it,
+    // handing over an empty string for anything its locale cannot parse, and
+    // empty means "clear to default" at the server. It is also what kept
+    // `<html lang>` static: Firefox picks a number input's decimal separator
+    // from the page language, so translating the UI would have changed which
+    // strings these fields accept.
+    assert.equal(count(/type="text"/g), 27, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
     // 6 since ASSET MODE — All assets / Stocks only / Crypto only. Several
     // owners asked for it at once ("there should be an option mode for stocks

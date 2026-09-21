@@ -78,6 +78,50 @@ export type AmountField = {
 export const CAP_FIELD: AmountField = { maxDecimals: 2, min: 0.01, max: MAX_USDG_UI };
 
 /**
+ * How many decimal places a SETTING accepts, derived from its name rather than
+ * listed beside it.
+ *
+ * Derived on purpose. The settings route records three separate incidents where
+ * a field missing from a list was silently dropped while the PUT answered
+ * `{ok:true}` — `maxImpactBps`, `takeProfitBps` and `ponsAdapterAddress`. A
+ * second list keyed on field name would be a fourth place to forget. A rule
+ * that reads the name cannot be forgotten.
+ *
+ * Money is quoted to cents. Everything else — basis points, seconds, minutes,
+ * counts, hours, steps — is a whole number by construction, and saying so is
+ * what lets `25.000` be read as twenty-five thousand with no question asked:
+ * the decimal reading needs three places and the field has none, so only one
+ * reading survives.
+ *
+ * HERE RATHER THAN IN THE ROUTE because the settings SCREEN needs the same
+ * answer. Two copies of this rule would drift, and the direction it would drift
+ * in is a field the screen accepts and the server rejects.
+ */
+export function settingDecimals(key: string): number {
+  return /Usdg?$/.test(key) ? 2 : 0;
+}
+
+/**
+ * Can this be read as a number at all, without asking whether it is in range?
+ *
+ * The SHAPE question, which is the client's half. Bounds stay on the server,
+ * where the table that defines them lives — mirroring thirty min/max pairs into
+ * the browser is exactly the duplication the route's own comments warn about.
+ * So this answers "I cannot read that" and never "that is too large".
+ */
+export function unreadableSetting(key: string, raw: string): string | null {
+  if (raw.trim() === "") return null; // empty means "clear to default"
+  const r = parseAmount(raw, {
+    maxDecimals: settingDecimals(key),
+    min: -Number.MAX_SAFE_INTEGER,
+    max: Number.MAX_SAFE_INTEGER,
+  });
+  if (r.ok) return null;
+  if (r.reason === "ambiguous") return `reads as either ${r.readings.join(" or ")}`;
+  return "not a number";
+}
+
+/**
  * Non-ASCII decimal digits, by numbering system.
  *
  * Each run is ten consecutive code points, zero first, which is guaranteed by

@@ -185,6 +185,10 @@ describe("the digits stay put", () => {
     })
       .split("\n")
       .filter(Boolean)
+      // Components only. A test that names a class in a comment is not a
+      // component rendering it — and this file names `.hero-fig` two dozen
+      // lines up, so without this the scan reads its own prose back.
+      .filter((f) => !f.includes(".test."))
       .map((f) => readFileSync(new URL(`../../${f}`, import.meta.url), "utf8"))
       .join("\n");
 

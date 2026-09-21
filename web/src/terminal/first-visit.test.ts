@@ -138,9 +138,15 @@ it("contains keyboard focus, closes with Escape and restores previous focus", as
   await ui.render(tour());
   assert.equal(document.activeElement?.getAttribute("role"), "dialog");
   await act(async () => window.dispatchEvent(new ui.dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
-  assert.equal(document.activeElement?.textContent, "Skip tour");
+  // THE FIRST TAB STOP IS THE LANGUAGE CONTROL, and that is the point rather
+  // than an accident of ordering. Somebody who cannot read this card should
+  // reach the control that fixes that before anything else on it — including
+  // the way out, which they also cannot read.
+  const first = document.activeElement;
+  assert.ok(ui.container.querySelector('[role="dialog"]')?.contains(first), "focus left the dialog");
+  assert.equal(first?.closest(".lang-picker") !== null, true, "the first stop should be the picker");
   await act(async () => outside.focus());
-  assert.equal(document.activeElement?.textContent, "Skip tour");
+  assert.equal(document.activeElement, first, "focus must not escape the dialog");
   await act(async () => window.dispatchEvent(new ui.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   assert.equal(ui.container.querySelector('[role="dialog"]'), null);
   assert.equal(document.activeElement, outside);

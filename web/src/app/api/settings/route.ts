@@ -27,7 +27,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { parseAmount } from "@/lib/parse-amount";
+import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export const dynamic = "force-dynamic";
@@ -162,23 +162,6 @@ export async function GET(req: Request) {
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
-/**
- * How many decimal places a setting accepts, DERIVED from its name rather than
- * listed beside it.
- *
- * Derived on purpose. This file already records three separate incidents where
- * a field missing from a list was silently dropped while the PUT answered
- * `{ok:true}` — `maxImpactBps`, `takeProfitBps` and `ponsAdapterAddress`. A
- * second list keyed on field name would be a fourth place to forget. A rule
- * that reads the name cannot be forgotten.
- *
- * Money is quoted to cents. Everything else here — basis points, seconds,
- * minutes, counts, hours, steps — is a whole number by construction, and
- * saying so is what lets `25.000` be read as twenty-five thousand with no
- * question asked: the decimal reading needs three places and the field has
- * none, so only one reading survives.
- */
-const decimalsFor = (key: string): number => (/Usdg?$/.test(key) ? 2 : 0);
 
 const NUM_FIELDS: Record<string, [number, number]> = {
   // Imported, never a literal. This entry and the worker's own clamp are two
@@ -386,7 +369,7 @@ export async function PUT(req: Request) {
       // Dutch, Brazilian or Turkish owner setting the price-manipulation guard
       // to twenty-five thousand stored twenty-five, in range, no error, while
       // the screen said "Changes saved".
-      const parsed = parseAmount(String(v), { maxDecimals: decimalsFor(key), min, max });
+      const parsed = parseAmount(String(v), { maxDecimals: settingDecimals(key), min, max });
       if (parsed.ok) setOrClear(k, parsed.value as never);
       else if (parsed.reason === "ambiguous") {
         // Two honest readings. Naming both is the only answer that does not

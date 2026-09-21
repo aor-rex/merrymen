@@ -259,3 +259,89 @@
     transition: none;
   }
 }
+
+/* ── choosing a language ─────────────────────────────────────────────────── */
+
+/*
+ * An ICON and the reader's own language name, never the word "Language". The
+ * person who needs this control cannot read the interface it sits in, so
+ * nothing about finding it may depend on English.
+ */
+.terminal-host .lang-picker {
+  position: relative;
+  margin-right: auto;
+}
+.terminal-host .lang-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--tx-2);
+  min-height: 28px;
+}
+.terminal-host .lang-trigger:hover {
+  color: var(--tx);
+}
+.terminal-host .lang-trigger:focus-visible,
+.terminal-host .lang-menu button:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+
+.terminal-host .lang-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 61; /* above the tour overlay's own layer */
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  min-width: 210px;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--card);
+  box-shadow: 0 18px 44px rgb(0 0 0 / 0.55);
+}
+.terminal-host .lang-menu button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  text-align: left;
+  min-height: 34px;
+}
+.terminal-host .lang-menu button:hover {
+  background: var(--raised);
+}
+.terminal-host .lang-menu button.on {
+  color: var(--lime);
+}
+.terminal-host .lang-endonym {
+  font-size: 14px;
+}
+/* The English name is a hint for somebody helping, not the label. */
+.terminal-host .lang-english {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .lang-menu {
+    transition: none;
+  }
+}
+
+/* Inside the tour card the picker leads the header row, so the step counter
+   and the way out keep their places on the right. */
+.terminal-host .tour-card header .lang-picker {
+  margin-right: auto;
+}
+.terminal-host .tour-card header .lang-menu {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
