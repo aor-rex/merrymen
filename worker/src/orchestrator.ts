@@ -89,7 +89,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
-import { dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
+import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -1474,23 +1474,74 @@ export async function ferryForChild(
     // than the floor, so nothing younger can qualify; past it, each row is held
     // to the `expiresAt` it was placed with. `done_at IS NULL` is repeated on
     // the write so a result the up-leg landed in between is never overwritten.
+    //
+    // "NEVER RAN" ONLY WHERE IT IS TRUE, WHICH MEANS LOOKING IN THE CHILD'S HOME
+    // FIRST. It used to be written onto every unanswered row once deadline and
+    // grace had passed — including rows the child had already CLAIMED and
+    // might be filling that minute, because a live fill waits on its receipt
+    // for up to three reads of two minutes each and a child that claims near
+    // its deadline is still waiting when the grace runs out. The owner's card
+    // repeats `done` word for word, and the closed row freed the one-at-a-time
+    // slot: "nothing happened, ask again", with the first order on chain.
+    //
+    //   - never delivered: nobody has it, and the row is claimed HERE so the
+    //     down-leg — which does not look at done_at — can never hand it over.
+    //   - the file still queued, with a deadline: the child never took it, and
+    //     from here on it refuses it at the claim (isExpired). Nothing went out.
+    //   - a `.running` marker, or the file gone with no answer: the child took
+    //     it. Left OPEN — so the route goes on holding the slot — until the
+    //     in-flight bound has passed as well, and then closed with a sentence
+    //     that does not claim to know. A late answer still replaces it.
+    //   - an answer on disk: the up-leg's to land, never ours to overwrite.
     try {
       const now = Date.now();
       const candidates = (await shared
         .prepare(
-          `SELECT id, args, created_at FROM agent_commands
+          `SELECT id, args, created_at, claimed_at FROM agent_commands
             WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at < ?`,
         )
-        .all(smartAccount, now - ORDER_STALE_MS)) as { id: string; args: string | null; created_at: number }[];
+        .all(smartAccount, now - ORDER_STALE_MS)) as {
+        id: string;
+        args: string | null;
+        created_at: number;
+        claimed_at: number | string | null;
+      }[];
+      const neverRan =
+        "never ran — this order sat in my queue past its window without being picked up, and I will not fill it into a different market, so nothing was sent. Ask again if you still want it.";
+      // Says only what is known: no answer came. Not "took it" — a delivery
+      // whose file write failed after the row was claimed lands here too.
+      const unanswered =
+        "I never heard back from my worker about this order, so I cannot tell you whether it filled — it may have. Check your trades before asking again.";
       for (const r of candidates) {
-        if (now <= orderClosesAt(r)) continue;
+        const closesAt = orderClosesAt(r);
+        if (now <= closesAt) continue;
+        const id = String(r.id);
+        const where = commandWhereabouts(home, id);
+        if (where === "answered") continue;
+        if (r.claimed_at === null || r.claimed_at === undefined) {
+          // Undelivered, so no file can exist yet; a replica that delivers it
+          // in the meantime wins the `claimed_at IS NULL` race and we stand down.
+          if (where !== "gone") continue;
+          await shared
+            .prepare(
+              "UPDATE agent_commands SET done_at = ?, claimed_at = ?, result = ? WHERE id = ? AND done_at IS NULL AND claimed_at IS NULL",
+            )
+            .run(now, now, neverRan, id);
+          continue;
+        }
+        const expiresAt = r.args ? parseArgs(r.args).expiresAt : undefined;
+        if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
+          await shared
+            .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
+            .run(now, neverRan, id);
+          continue;
+        }
+        // Taken, or a deadline-less file the child would still run: either
+        // way it may go out, so nothing is said until it no longer can.
+        if (now <= closesAt + ORDER_IN_FLIGHT_MS) continue;
         await shared
           .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
-          .run(
-            now,
-            "never ran — this order sat past its window without an answer and I will not fill it into a different market. Ask again if you still want it.",
-            r.id,
-          );
+          .run(now, unanswered, id);
       }
     } catch {
       /* best effort; the age bound in the route is the other half of this */

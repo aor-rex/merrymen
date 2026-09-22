@@ -6,11 +6,12 @@ import path from "node:path";
 import {
   claimCommandFile,
   commandDir,
+  commandWhereabouts,
   drainCommandResults,
   dropCommandResult,
-  hasPendingCommand,
   isExpired,
   markRunning,
+  openCommands,
   readCommandState,
   writeCommand,
   writeCommandResult,
@@ -33,6 +34,9 @@ import {
 function tmpHome(): string {
   return mkdtempSync(path.join(os.tmpdir(), "merrymen-cmdfile-"));
 }
+
+/** What the one-at-a-time rule sees in a home, as `id:state`. */
+const ids = (home: string) => openCommands(home).map((c) => `${c.id}:${c.state}`).sort();
 
 test("a command written to a home is claimed from that home", () => {
   const home = tmpHome();
@@ -193,7 +197,7 @@ test("AN ID THAT IS NOT A PLAIN ID IS REFUSED, not sanitised", () => {
     }
     // Refused, so nothing at all was created — not even the directory entry a
     // partially-sanitised id would have left.
-    assert.equal(hasPendingCommand(home), false);
+    assert.deepEqual(openCommands(home), []);
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -281,10 +285,10 @@ test("SELF-HOSTED CAN TELL 'RAN' FROM 'NEVER RAN'", () => {
     assert.equal(readCommandState(home, "nope")?.state, "running", "claimed and unanswered is its own state");
     writeCommand(home, { id: "q", kind: "trade", at: 1 });
     assert.equal(readCommandState(home, "q")?.state, "queued");
-    assert.equal(hasPendingCommand(home), true);
+    assert.deepEqual(ids(home), ["q:queued"]);
     claimCommandFile(home);
     assert.equal(readCommandState(home, "q")?.state, "running");
-    assert.equal(hasPendingCommand(home), false, "a claimed order is no longer waiting");
+    assert.deepEqual(ids(home), [], "claimed and not yet marked: the window the marker exists to close");
     writeCommandResult(home, { id: "q", ok: true, line: "bought 25.00 USDG of TSLA", at: 9 });
     const done = readCommandState(home, "q");
     assert.equal(done?.state, "done");
@@ -292,7 +296,7 @@ test("SELF-HOSTED CAN TELL 'RAN' FROM 'NEVER RAN'", () => {
     // Read twice: a person refreshing a page must not consume their own receipt.
     assert.equal(readCommandState(home, "q")?.state, "done");
     // A result is not a pending command, so it never blocks the next order.
-    assert.equal(hasPendingCommand(home), false);
+    assert.deepEqual(ids(home), []);
     // And an id that could be a path is not read either.
     assert.equal(readCommandState(home, "../secret"), null);
   } finally {
@@ -317,19 +321,19 @@ test("CLAIMED IS NOT ANSWERED — a running order still reads as waiting", () =>
   try {
     // Self-hosted, the claim is an unlink and the receipt lands only when the
     // trade finishes, so between them the queue directory was EMPTY and
-    // hasPendingCommand said false while an order was mid-flight. That is the
+    // the pending check said false while an order was mid-flight. That is the
     // one-at-a-time rule and the idempotency key both going soft at once: an
     // owner who saw nothing on the tape after 25 seconds and asked again got a
     // second file, a second fill, and two positions for one intention.
     writeCommand(home, { id: "ord", kind: "trade", at: 1 });
-    assert.equal(hasPendingCommand(home), true, "queued");
+    assert.deepEqual(ids(home), ["ord:queued"]);
     const cmd = claimCommandFile(home);
     assert.equal(cmd?.id, "ord");
-    assert.equal(hasPendingCommand(home), false, "the file is gone — this is the window that was open");
+    assert.deepEqual(ids(home), [], "the file is gone — this is the window that was open");
     markRunning(home, "ord");
-    assert.equal(hasPendingCommand(home), true, "and now it reads as what it is: still unanswered");
+    assert.deepEqual(ids(home), ["ord:running"], "and now it reads as what it is: still unanswered");
     writeCommandResult(home, { id: "ord", ok: true, line: "bought", at: 9 });
-    assert.equal(hasPendingCommand(home), false, "answered, so the next order may go");
+    assert.deepEqual(ids(home), [], "answered, so the next order may go");
     // The marker is gone too — it must not outlive the thing it describes.
     assert.equal(readdirSync(commandDir(home)).some((n) => n.endsWith(".running")), false);
   } finally {
@@ -343,7 +347,78 @@ test("and a marker cannot be written for an id that is not a plain id", () => {
   try {
     markRunning(home, "../escape");
     assert.equal(readdirSync(home).includes("escape"), false);
-    assert.equal(hasPendingCommand(home), false);
+    assert.deepEqual(openCommands(home), []);
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("THE ONE-AT-A-TIME RULE GETS DEADLINES, not a yes/no", () => {
+  // The old check was a boolean over filenames, so a queued file past its own
+  // deadline held the slot for as long as the worker stayed unarmed, while GET
+  // read that same file's deadline and told the owner to ask again. The rule
+  // that decides lives beside that answer (web/src/lib/order-state.ts); what
+  // this owes it is the deadline and the age, read from disk.
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "q", kind: "trade", at: 1_000, args: { side: "buy" }, expiresAt: 5_000 });
+    writeCommand(home, { id: "probe", kind: "selftest", at: 2_000 });
+    markRunning(home, "r");
+    const before = Date.now();
+    const open = Object.fromEntries(openCommands(home).map((c) => [c.id, c]));
+    assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000 });
+    assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000 }, "no deadline is null, never 0");
+    assert.equal(open.r?.state, "running");
+    assert.equal(open.r?.expiresAt, null, "a marker carries no deadline");
+    assert.ok(Math.abs(open.r!.at - before) < 60_000, "its age is when it was claimed");
+    // Receipts and temp files are not orders.
+    writeCommandResult(home, { id: "done", ok: true, line: "bought", at: 9 });
+    assert.deepEqual(ids(home), ["probe:queued", "q:queued", "r:running"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("an unlistable queue THROWS — a read that failed is not an empty queue", () => {
+  // The boolean answered false on any error, which on this path is a second
+  // order admitted beside the first.
+  const home = tmpHome();
+  try {
+    writeFileSync(path.join(home, "commands"), "not a directory", "utf8");
+    assert.throws(() => openCommands(home));
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("a queued file's deadline comes back WITH its state, from one read", () => {
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "q", kind: "trade", at: 1, expiresAt: 777 });
+    assert.deepEqual(readCommandState(home, "q"), { state: "queued", expiresAt: 777 });
+    writeCommand(home, { id: "p", kind: "selftest", at: 1 });
+    assert.deepEqual(readCommandState(home, "p"), { state: "queued", expiresAt: null });
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("WHERE AN ORDER IS, as the orchestrator's sweep must know it before it speaks", () => {
+  // The sweep wrote "never ran" onto any unanswered row past its deadline,
+  // including rows a child had claimed and might be filling that minute. Only
+  // "queued" lets anybody say nothing went out.
+  const home = tmpHome();
+  try {
+    assert.equal(commandWhereabouts(home, "o"), "gone", "nothing on disk at all");
+    writeCommand(home, { id: "o", kind: "trade", at: 1, expiresAt: 5 });
+    assert.equal(commandWhereabouts(home, "o"), "queued");
+    claimCommandFile(home);
+    assert.equal(commandWhereabouts(home, "o"), "gone", "claimed, and no marker yet: taken, not unsent");
+    markRunning(home, "o");
+    assert.equal(commandWhereabouts(home, "o"), "running");
+    writeCommandResult(home, { id: "o", ok: true, line: "bought", at: 9 });
+    assert.equal(commandWhereabouts(home, "o"), "answered");
+    assert.equal(commandWhereabouts(home, "../o"), null, "an id that could be a path is never looked up");
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
