@@ -1,4 +1,5 @@
 import { readerHead } from "@merrymen/thesis";
+import { xHandleTag } from "@/lib/x-handle";
 import { elapsed, whenOf } from "./clock";
 import { sizeOf, type LiveAgent, type Thesis } from "./live";
 import { strategyForSlug, type StrategyId } from "./strategy";
@@ -20,6 +21,16 @@ export type FeedRow = Thesis & {
   firstAt?: number;
   /** The coin's own name when it has one that is not its id — see PublicThesis. */
   displayName?: string | null;
+  /**
+   * Epoch SECONDS this post has stood UNCHANGED since — null when something
+   * else was said about the name after its first copy. `firstAt` counts every
+   * copy in the window, across any change of mind, so it cannot say "since".
+   */
+  unchangedSince?: number | null;
+  /** The author had more names in the window than this read carries. */
+  moreNames?: boolean;
+  /** The owner PROVED `handle`. Absent is not proven. */
+  handleVerified?: boolean;
 };
 
 /**
@@ -32,8 +43,18 @@ const TRENCH_ID = /^T[0-9A-F]{11}$/;
 export interface Actor {
   trencher?: boolean;
   slug: string;
+  /**
+   * WHO THE ROW IS ABOUT: the agent, by its name. It was the owner's X handle,
+   * which the owner typed and nothing checked — so any agent could head every
+   * one of its posts with somebody else's name.
+   */
   name: string;
-  handle: string;
+  /**
+   * The owner's handle, "@x", ONLY when the owner proved it. Null otherwise —
+   * an unproven handle is not shown at all rather than shown with a caveat,
+   * because the row itself is the claim.
+   */
+  owner: string | null;
   strategy: StrategyId;
 }
 
@@ -198,22 +219,31 @@ export type ViewBeat = Core & {
   symbol: string | null;
   /** An explicit hold on a name — the kind a review clock produces by the hundred. */
   hold: boolean;
+  /** Its author had more names in the window than the read carried. */
+  more: boolean;
 };
 
 /**
- * ONE AGENT'S HOLDS, SAID ONCE: "watching 12 tokens · latest: hold X".
+ * ONE AGENT'S UNCHANGED HOLDS, SAID ONCE: "still watching 12 tokens · latest:
+ * hold X".
  *
- * A Trencher reviews a coin every 30 seconds and concludes HOLD on almost all
- * of them; printed one per row they were the whole feed. This is those rows,
- * counted rather than dropped — the latest is carried in full, and the Holds
- * pill still lays every one of them out. Everything on `Core` is the latest
- * member's, so every surface that reads a beat reads a real row; `postId` is
- * null because a summary is not a post and cannot be liked.
+ * A strategy re-proposes the same hold on every name every tick; printed one
+ * per row they were the whole feed. This is those rows, counted rather than
+ * dropped — the latest is carried in full, and the Holds pill still lays every
+ * one of them out. Only a hold that has stood UNCHANGED is folded: a fresh or
+ * changed one is news, and keeps its own row. Everything on `Core` is the
+ * latest member's, so every surface that reads a beat reads a real row;
+ * `postId` is null because a summary is not a post and cannot be liked.
  */
 export type WatchBeat = Core & {
   kind: "watch";
-  /** Distinct names this agent is holding a view on. */
+  /** Distinct names among the folded holds. */
   count: number;
+  /**
+   * The read did not carry all of this agent's names, so `count` is a floor
+   * and is printed as one — never a total taken from a truncated slice.
+   */
+  more: boolean;
   latest: ViewBeat;
   members: ViewBeat[];
   head: string;
@@ -308,17 +338,19 @@ export function verbOf(b: TradeBeat): string {
 }
 
 export function whoOf(b: Beat): string {
-  return b.actor.handle;
+  return b.actor.name;
 }
 
-function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
+function actorOf(t: FeedRow, agents: Map<string, LiveAgent>): Actor | null {
   const slug = t.slug;
   if (!slug) return null;
   return {
     slug,
     name: t.name,
     trencher: t.trencher === true,
-    handle: t.handle ?? t.name,
+    // Shape-checked as well as proven: the proof is of a handle, and only a
+    // handle that is one may become a link.
+    owner: t.handleVerified === true ? xHandleTag(t.handle) : null,
     strategy: strategyForSlug(slug, agents.get(slug)?.glance.id),
   };
 }
@@ -368,9 +400,21 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     const named = (t.displayName ?? "").trim() || null;
     const label = named ?? (t.symbol ? t.symbol.toUpperCase() : null);
     const trench = !!t.symbol && TRENCH_ID.test(t.symbol.toUpperCase());
+    // ONLY AN UNBROKEN REPEAT HAS A "SINCE". A first-time post, one the agent
+    // changed its mind about in between, or a row from before the publisher
+    // sent `unchangedSince`, sits at its own time — never at a guessed one.
+    const standing = typeof t.unchangedSince === "number" && Number.isFinite(t.unchangedSince) ? t.unchangedSince : null;
+    const repeatSinceMs = said > 1 && standing !== null && standing < atSec ? standing * 1000 : null;
 
     if ((action === "buy" || action === "sell") && t.symbol) {
       const symbol = t.symbol.toUpperCase();
+      // A TRADE IS AN EVENT and sits where it happened — unless nothing
+      // happened, over and over. A strategy re-proposes a leg the key does not
+      // cover on every tick, and each refusal arrived as "now", so the same
+      // refusal sat on top of the feed all day. Repeated, it sits where it
+      // began and says "×N · since", the way an unchanged view does.
+      const repeatedNonEvent = outcome === "refused" || outcome === "dropped";
+      const sinceMs = repeatedNonEvent ? repeatSinceMs : null;
       out.push({
         kind: "trade",
         // Built from atSec, deliberately: the id is a React key and a like
@@ -387,9 +431,8 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
         outcome,
         outcomeText,
         said,
-        // A trade is an event, not a standing view: it sits where it happened.
-        sinceMs: null,
-        rankMs: atMs,
+        sinceMs,
+        rankMs: sinceMs ?? atMs,
         label,
         trench,
         action,
@@ -405,10 +448,7 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     const head = readerHead({ head: t.head, symbol: t.symbol, displayName: named }).trim();
     if (!head && !reason) continue;
     const symbol = t.symbol ? t.symbol.toUpperCase() : null;
-    // ONLY A REPEAT HAS A "SINCE". A first-time view, or a row from before the
-    // publisher sent `firstAt`, sits at its own time — never at a guessed one.
-    const firstSec = typeof t.firstAt === "number" && Number.isFinite(t.firstAt) ? t.firstAt : null;
-    const sinceMs = said > 1 && firstSec !== null && firstSec < atSec ? firstSec * 1000 : null;
+    const sinceMs = repeatSinceMs;
     out.push({
       kind: "view",
       id: `view-${actor.slug}-${atSec}-${symbol ?? ""}`,
@@ -429,12 +469,16 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
       head,
       symbol,
       hold: action === "hold",
+      more: t.moreNames === true,
     });
   }
 
-  const beats = chorusOf(out);
-  beats.sort((a, b) => b.rankMs - a.rankMs);
-  return beats;
+  // EVERY POST, ONE ROW EACH. Folding into choruses and watch lines is a
+  // presentation of the All and Holds pills (see `pillBeats`), not of the read:
+  // a chorus is not a post, so a liked hold folded here left Top and lost its
+  // like control, and a member's mention of another agent left Debates.
+  out.sort((a, b) => b.rankMs - a.rankMs);
+  return out;
 }
 
 /**
@@ -445,11 +489,15 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
  * anything. A shared sentence that differs only in its figures counts as the
  * same one (see `crowdKey`); the chorus still shows the latest member's own
  * words, attributed to them, rather than a sentence nobody wrote.
+ *
+ * A LIKED POST IS NEVER FOLDED. A chorus is not a post and has no like
+ * control, so a liked member folded into one lost its heart, its place under
+ * "Most liked", and every reader's way to see what others had liked.
  */
-function chorusOf(beats: Beat[]): Beat[] {
+export function chorusOf(beats: Beat[], keep: (b: Beat) => boolean = () => false): Beat[] {
   const groups = new Map<string, ViewBeat[]>();
   for (const b of beats) {
-    if (b.kind !== "view" || !b.hold || !b.symbol) continue;
+    if (b.kind !== "view" || !b.hold || !b.symbol || keep(b)) continue;
     const key = `${b.symbol}|${crowdKey(b.reason || b.head)}`;
     const list = groups.get(key) ?? [];
     list.push(b);
@@ -486,21 +534,31 @@ function chorusOf(beats: Beat[]): Beat[] {
     }
     out.push(b);
   }
+  out.sort((a, b) => b.rankMs - a.rankMs);
   return out;
 }
 
 /**
- * WHAT "ALL" SHOWS: every trade and every view, with each agent's holds said once.
+ * WHAT "ALL" SHOWS: every trade and every view, with each agent's UNCHANGED
+ * holds said once.
  *
- * An agent with two or more hold views becomes one `watch` beat carrying the
- * latest in full. One hold stays a normal row — a summary of one thing is the
+ * Only a hold that has stood unchanged — a repeat with a "since" — is folded.
+ * A market review is published only when its bias flipped or a breakout
+ * confirmed, so it is news by construction, and it was being folded into
+ * "watching N tokens" unless it happened to be that agent's newest hold. A
+ * fresh or changed hold keeps its own row; so does a liked one, for the same
+ * reason a chorus does not take it.
+ *
+ * An agent with two or more foldable holds becomes one `watch` beat carrying
+ * the latest in full. One stays a normal row — a summary of one thing is the
  * thing. Nothing is removed from the read: the Holds pill lays every member
  * out, and the count on the summary says how many there are.
  */
-export function compactHolds(beats: Beat[]): Beat[] {
+export function compactHolds(beats: Beat[], keep: (b: Beat) => boolean = () => false): Beat[] {
+  const foldable = (b: Beat): b is ViewBeat => b.kind === "view" && b.hold && b.sinceMs !== null && !keep(b);
   const holds = new Map<string, ViewBeat[]>();
   for (const b of beats) {
-    if (b.kind !== "view" || !b.hold) continue;
+    if (!foldable(b)) continue;
     const list = holds.get(b.actor.slug) ?? [];
     list.push(b);
     holds.set(b.actor.slug, list);
@@ -508,7 +566,7 @@ export function compactHolds(beats: Beat[]): Beat[] {
   const out: Beat[] = [];
   const summarised = new Set<string>();
   for (const b of beats) {
-    const members = b.kind === "view" && b.hold ? holds.get(b.actor.slug) : undefined;
+    const members = foldable(b) ? holds.get(b.actor.slug) : undefined;
     if (!members || members.length < 2) {
       out.push(b);
       continue;
@@ -525,11 +583,114 @@ export function compactHolds(beats: Beat[]): Beat[] {
       postId: null,
       rankMs: Math.max(...members.map((m) => m.rankMs)),
       count: new Set(members.map((m) => m.symbol ?? "")).size,
+      more: members.some((m) => m.more),
       latest,
       members,
     });
   }
   out.sort((a, b) => b.rankMs - a.rankMs);
+  return out;
+}
+
+/**
+ * "12 tokens", or "at least 12 tokens" when the read did not carry every name
+ * the agent has — a count from a truncated slice is a floor, and says so.
+ */
+export function watchCount(b: WatchBeat): string {
+  const noun = b.count === 1 ? "token" : "tokens";
+  return b.more ? `at least ${b.count} ${noun}` : `${b.count} ${noun}`;
+}
+
+/** The feed's filters, one tap each. */
+export type Pill = "all" | "trades" | "theses" | "holds" | "debate" | "top";
+
+/**
+ * WHAT ONE PILL SHOWS, from every post read.
+ *
+ * Summaries are a presentation of two pills and nothing else: All folds
+ * crowds and each agent's unchanged holds, Holds folds crowds. Every other
+ * pill filters the posts themselves, so a post that is liked, or that names
+ * another agent, is found by Top and Debates whether or not All folded it.
+ */
+export function pillBeats(
+  beats: Beat[],
+  pill: Pill,
+  replies: ReadonlyMap<string, unknown>,
+  counts: Readonly<Record<string, number>>,
+): Beat[] {
+  const liked = (b: Beat) => !!b.postId && (counts[b.postId] ?? 0) > 0;
+  const base =
+    pill === "all" ? compactHolds(chorusOf(beats, liked), liked) : pill === "holds" ? chorusOf(beats, liked) : beats;
+  return base.filter((b) => keepBeat(b, pill, replies, counts));
+}
+
+function keepBeat(
+  beat: Beat,
+  pill: Pill,
+  replies: ReadonlyMap<string, unknown>,
+  counts: Readonly<Record<string, number>>,
+): boolean {
+  switch (pill) {
+    case "all":
+      return true;
+    case "trades":
+      return beat.kind === "trade";
+    case "theses":
+      return beat.kind === "view" && !beat.hold;
+    case "holds":
+      return (beat.kind === "view" && beat.hold) || beat.kind === "chorus";
+    case "debate":
+      return replies.has(beat.id);
+    case "top":
+      // A post nobody liked is not "top". An unslugged post has no postId and
+      // therefore cannot be liked at all, so it is absent here by construction
+      // rather than by a check.
+      return !!beat.postId && (counts[beat.postId] ?? 0) > 0;
+    default: {
+      const _x: never = pill;
+      return _x;
+    }
+  }
+}
+
+/** An agent a post's own words named, and where to go to read them. */
+export interface Mention {
+  /** The token as it follows the "@", lowercased — what the text is matched on. */
+  handle: string;
+  slug: string;
+  /** What the row prints: the agent's name, whichever token named it. */
+  name: string;
+}
+
+/**
+ * WHAT AN "@" IN A POST CAN NAME, and whom.
+ *
+ * Each agent answers to its NAME, and to its owner's handle only when the
+ * owner proved it. An unproven handle names nobody here: it is text the owner
+ * typed, and treating it as the agent would let a post about the person whose
+ * handle was borrowed "mention" somebody's agent. A token two agents share —
+ * two agents are called Robin — names neither, because picking one would
+ * attribute the post to a guess.
+ */
+export function mentionTargets(beats: Beat[]): Map<string, Mention> {
+  const actors = new Map<string, Actor>();
+  for (const b of beats) for (const a of b.kind === "chorus" ? b.actors : [b.actor]) actors.set(a.slug, a);
+  const claims = new Map<string, Set<string>>();
+  for (const a of actors.values()) {
+    for (const tag of [a.name, a.owner]) {
+      const token = (tag ?? "").replace(/^@/, "").trim().toLowerCase();
+      if (!token) continue;
+      const slugs = claims.get(token) ?? new Set<string>();
+      slugs.add(a.slug);
+      claims.set(token, slugs);
+    }
+  }
+  const out = new Map<string, Mention>();
+  for (const [token, slugs] of claims) {
+    if (slugs.size !== 1) continue;
+    const slug = [...slugs][0]!;
+    out.set(token, { handle: token, slug, name: actors.get(slug)!.name });
+  }
   return out;
 }
 
