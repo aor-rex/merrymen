@@ -81,6 +81,19 @@ export interface MerrymenSettings {
   rialtoApiKeyHeader?: string;
 
   // ── contracts ──────────────────────────────────────────────────────────
+  /**
+   * Unix seconds of the last settings change made FROM TELEGRAM that the
+   * orchestrator has already promoted into this tenant's stored settings.
+   *
+   * NOT A USER SETTING — bookkeeping, and the only durable place to keep it.
+   * A child cannot write the tenant store (CHILD_SECRET_STRIP removes
+   * DATABASE_URL), so a chat-originated change reaches the store only by the
+   * parent promoting it; and the parent's own memory does not survive a
+   * redeploy, so without a stored marker every restart would re-apply the
+   * last chat change over whatever the dashboard has saved since.
+   */
+  telegramSettingsAt?: number;
+
   /** Deployed BreakerRegistry; a tripped breaker halts all intents. */
   breakerAddress?: string;
   /**

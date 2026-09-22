@@ -4,6 +4,7 @@ import { ensureLinkCode, rotateLinkCode, type TelegramState } from "./state";
 
 const base: TelegramState = {
   offset: 0,
+  chatSettings: null,
   linkCode: "",
   linkedChats: [],
   linkRound: 0,

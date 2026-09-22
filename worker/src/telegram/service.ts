@@ -24,6 +24,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
 import { PC_CAPABILITIES } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
+import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
 import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgMessage } from "./api";
@@ -455,16 +456,30 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
         },
       },
+      /**
+       * BOTH FILES, FOR THE REASON /link ALREADY LEARNED.
+       *
+       * `patchSettingsFile` writes the child's settings.json, which the
+       * orchestrator replaces wholesale from the tenant store every fifteen
+       * seconds — so hosted, this reply was true for fifteen seconds and then
+       * silently false. `rememberChatSetting` writes the child-owned telegram
+       * state, which nothing above overwrites and which the parent promotes
+       * into the stored settings. The settings.json write stays because it is
+       * what makes the change take effect on the NEXT TICK rather than on the
+       * next reconcile, and self-hosted it is the whole mechanism.
+       */
       setStrategy: (name) => {
         const r = deps.setStrategy(name);
         if (r.ok) {
           patchSettingsFile({ strategy: name });
+          rememberChatSetting(stateRef, { strategy: name }, now());
           deps.note("ok", `Telegram: strategy → ${name}`);
         }
         return r;
       },
       setCap: (usdg) => {
         patchSettingsFile({ telegramMaxActionUsdg: usdg });
+        rememberChatSetting(stateRef, { telegramMaxActionUsdg: usdg }, now());
         deps.note("ok", `Telegram: chat cap → ${usdg} USDG`);
       },
       setPaused: (paused) => {

@@ -69,6 +69,22 @@ export interface TelegramState {
    * can be removed.
    */
   linkedChats: number[];
+  /**
+   * SETTINGS THE OWNER CHANGED FROM CHAT, and when — recorded here because
+   * the settings copy does not survive.
+   *
+   * Exactly the problem `linkedChats` above solves, for the other two things
+   * chat can change. `/strategy` and `/cap` called `patchSettingsFile` and
+   * nothing else, so hosted they wrote a file the orchestrator replaces
+   * wholesale from the tenant store fifteen seconds later: the bot replied
+   * "strategy → dip-hunter", the owner watched it revert, and nothing
+   * anywhere said why. Self-hosted there is no orchestrator and both always
+   * worked, which is why it survived.
+   *
+   * The parent reads this and promotes it into the tenant's stored settings,
+   * guarded on `at` so one change is applied once.
+   */
+  chatSettings: { at: number; patch: Record<string, unknown> } | null;
   /** Owner messages handled — feeds the relationship stage. */
   messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
@@ -103,6 +119,7 @@ export interface TelegramState {
 
 const DEFAULT: TelegramState = {
   offset: 0,
+  chatSettings: null,
   linkCode: "",
   linkRound: 0,
   ownerId: null,
@@ -127,6 +144,14 @@ export function loadTelegramState(): TelegramState {
     const s = JSON.parse(raw) as Partial<TelegramState>;
     return {
       offset: typeof s.offset === "number" ? s.offset : 0,
+      // A malformed record is dropped rather than carried: a half-read patch
+      // would be promoted to the tenant store as if the owner had asked for it.
+      chatSettings:
+        s.chatSettings && typeof s.chatSettings === "object" &&
+        typeof s.chatSettings.at === "number" &&
+        s.chatSettings.patch && typeof s.chatSettings.patch === "object"
+          ? { at: s.chatSettings.at, patch: s.chatSettings.patch as Record<string, unknown> }
+          : null,
       linkCode: typeof s.linkCode === "string" ? s.linkCode : "",
       linkRound: typeof s.linkRound === "number" ? s.linkRound : 0,
       ownerId: typeof s.ownerId === "number" ? s.ownerId : null,
@@ -223,4 +248,28 @@ export function createStateRef(): StateRef {
       saveTelegramState(next);
     },
   };
+}
+
+/**
+ * Record a settings change the owner made FROM CHAT, for the parent to promote.
+ *
+ * MERGED, NOT REPLACED, and stamped with the latest time. An owner who sends
+ * /strategy and then /cap has made two changes and expects both; keeping only
+ * the last would apply one and drop the other with nothing to show for it.
+ *
+ * The stamp is what the parent's guard reads, so it must move forward on every
+ * write — including a write that only repeats a value, because "already stored"
+ * and "changed back to the same thing" are the same state and neither needs a
+ * second promotion.
+ */
+export function rememberChatSetting(
+  ref: { get(): TelegramState; set(next: TelegramState): void },
+  patch: Record<string, unknown>,
+  at: number,
+): void {
+  const st = ref.get();
+  ref.set({
+    ...st,
+    chatSettings: { at, patch: { ...(st.chatSettings?.patch ?? {}), ...patch } },
+  });
 }

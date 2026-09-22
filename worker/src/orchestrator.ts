@@ -61,6 +61,7 @@ import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
+import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
@@ -459,6 +460,7 @@ function readChildTelegram(tenant: string): {
   ownerId: number | null;
   linkedAt: number | null;
   linkedChats: number[];
+  chatSettings: { at: number; patch: Record<string, unknown> } | null;
 } | null {
   try {
     const raw = readFileSync(path.join(childHome(tenant), "telegram.json"), "utf8").replace(/^﻿/, "");
@@ -470,6 +472,7 @@ function readChildTelegram(tenant: string): {
       linkedChats: Array.isArray(t.linkedChats)
         ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
+      chatSettings: readChatSettings(t.chatSettings),
     };
   } catch {
     // No file yet (no bot token set, or the child has not booted) is not an
@@ -597,6 +600,38 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
     log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
   } catch (e) {
     log(`${tenant}: could not promote telegram link — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  await promoteChatSettings(tenant, tg.chatSettings);
+}
+
+/**
+ * PUT A CHANGE THE OWNER MADE FROM CHAT INTO THE SETTINGS THAT SURVIVE.
+ *
+ * /strategy and /cap wrote the child's settings.json and nothing else, and
+ * `writeSettingsForChild` replaces that file wholesale from the tenant store
+ * every fifteen seconds. Hosted, the bot answered "strategy → dip-hunter", the
+ * owner watched it revert, and nothing anywhere said why. Self-hosted there is
+ * no orchestrator, so both always worked — which is how it survived this long.
+ *
+ * The allowlist, the `at` guard and the race they leave are all in
+ * telegram/chat-settings.ts, where a test can execute them — this function is
+ * the store round-trip around that decision and nothing else.
+ */
+async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | null): Promise<void> {
+  if (!chat) return;
+  try {
+    const stored = (await getSettingsStore().get(tenant)) ?? {};
+    const next = promotedSettings(stored, chat);
+    if (!next) return;
+    await getSettingsStore().put(tenant, next);
+    const names = Object.keys(chat.patch).filter((k) => CHAT_SETTABLE.has(k));
+    log(
+      names.length
+        ? `${tenant}: telegram settings promoted — ${names.join(", ")}`
+        : `${tenant}: telegram settings change carried nothing this build accepts`,
+    );
+  } catch (e) {
+    log(`${tenant}: could not promote telegram settings — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
