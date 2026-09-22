@@ -1318,8 +1318,38 @@ function parseArgs(raw: string): Record<string, string | number | boolean> {
  * which the row is closed with a reason. Kept here rather than imported from
  * the web tier because the two processes share no module — and stated in both
  * places so a change to one is visibly a change to the other.
+ *
+ * NOW ONLY THE FLOOR, and the fallback for a row that carries no deadline. The
+ * route stopped stamping five minutes when the window became two ticks of the
+ * tenant's own cadence — 8m15s at the hosted 240 s tick — and this constant did
+ * not follow. So a row was closed as "never ran" at seven minutes while the
+ * child was still entitled to fill it, and closing it freed the one-at-a-time
+ * slot early enough to admit a second order beside the first. Each row is now
+ * judged against its own `expiresAt` plus ORDER_GRACE_MS below.
  */
 const ORDER_STALE_MS = 7 * 60_000;
+
+/**
+ * How long past its own deadline an unanswered order keeps its row open.
+ *
+ * The route's ORDER_STALE_GRACE_MS (web/src/lib/order-state.ts), for the same reason:
+ * the child enforces the deadline at the claim, so a row can be a ferry pass and
+ * a tick behind it while genuinely being decided. The route holds the owner's
+ * one-at-a-time slot for exactly this long, and the two must agree — a row this
+ * closes early is a slot the route hands out while the first order can still run.
+ */
+const ORDER_GRACE_MS = 2 * 60_000;
+
+/**
+ * When an unanswered trade row may be closed: its own deadline plus the grace,
+ * or — for a row that carries none — the old fixed age.
+ */
+function orderClosesAt(r: { args: string | null; created_at: number }): number {
+  const expiresAt = r.args ? parseArgs(r.args).expiresAt : undefined;
+  return typeof expiresAt === "number" && Number.isFinite(expiresAt)
+    ? expiresAt + ORDER_GRACE_MS
+    : Number(r.created_at) + ORDER_STALE_MS;
+}
 
 async function ferryCommands(shared: Db): Promise<void> {
   for (const [tenant, child] of [...children.entries()]) {
@@ -1439,19 +1469,29 @@ export async function ferryForChild(
     // shows an eternal spinner while the one-at-a-time rule refuses them any
     // new order. Past its expiry it can no longer legally run, so it is closed
     // with a sentence saying so rather than left to look like it is working.
+    //
+    // THE FLOOR SELECTS, THE ROW'S OWN DEADLINE DECIDES. No window is shorter
+    // than the floor, so nothing younger can qualify; past it, each row is held
+    // to the `expiresAt` it was placed with. `done_at IS NULL` is repeated on
+    // the write so a result the up-leg landed in between is never overwritten.
     try {
-      const stale = Date.now() - ORDER_STALE_MS;
-      await shared
+      const now = Date.now();
+      const candidates = (await shared
         .prepare(
-          `UPDATE agent_commands SET done_at = ?, result = ?
+          `SELECT id, args, created_at FROM agent_commands
             WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at < ?`,
         )
-        .run(
-          Date.now(),
-          "never ran — this order sat past its five-minute window and I will not fill it into a different market. Ask again if you still want it.",
-          smartAccount,
-          stale,
-        );
+        .all(smartAccount, now - ORDER_STALE_MS)) as { id: string; args: string | null; created_at: number }[];
+      for (const r of candidates) {
+        if (now <= orderClosesAt(r)) continue;
+        await shared
+          .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
+          .run(
+            now,
+            "never ran — this order sat past its window without an answer and I will not fill it into a different market. Ask again if you still want it.",
+            r.id,
+          );
+      }
     } catch {
       /* best effort; the age bound in the route is the other half of this */
     }

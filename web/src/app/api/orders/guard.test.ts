@@ -91,8 +91,11 @@ describe("one click is at most one trade", () => {
     // entire window without being looked at once.
     assert.match(CODE, /const ORDER_TTL_FLOOR_MS = 5 \* 60_000;/);
     assert.match(CODE, /Math\.max\(ORDER_TTL_FLOOR_MS, \(2 \* tickSeconds \+ 15\) \* 1000\)/);
-    assert.ok(CODE.includes("now + ttlMs"), "hosted and self-hosted both stamp it");
-    assert.equal((CODE.match(/now \+ ttlMs/g) ?? []).length, 2);
+    // ONE deadline, computed once, stamped on both rails and handed back to the
+    // card that waits for it — so the card cannot run on a clock of its own.
+    assert.equal((CODE.match(/now \+ ttlMs/g) ?? []).length, 1);
+    assert.match(CODE, /writeCommand\(merrymenHome\(\), \{ id, kind: "trade", at: now, args, expiresAt \}\)/, "self-hosted stamps it");
+    assert.match(CODE, /JSON\.stringify\(\{ \.\.\.args, expiresAt \}\)/, "hosted stamps it");
     // And it is the CALLER's tick, not this container's — the same lesson the
     // ceiling above it had to learn.
     assert.match(CODE, /\(await getSettingsStore\(\)\.get\(tenant\)\)\?\.tickSeconds/);
@@ -153,7 +156,12 @@ describe("what the caller is told", () => {
     // "queued" and "running" look identical to somebody watching and mean
     // different things when they stop changing: queued-forever is a worker that
     // is not draining, running-forever is an order that hung.
-    assert.match(CODE, /state: done \? "done" : claimed \? "running" : "queued"/);
+    // The states themselves — and the fifth, "expired", which is the only one
+    // that may say nothing was sent — are EXECUTED across the deadline in
+    // lib/order-state.test.ts. What stays here is that the route uses that rule
+    // on both rails rather than a copy of it.
+    assert.match(CODE, /hostedOrderReply\(read\.row, Date\.now\(\)\)/);
+    assert.match(CODE, /state: orderStateOf\(/);
     assert.match(CODE, /\{ state: "none" \}/);
   });
 
