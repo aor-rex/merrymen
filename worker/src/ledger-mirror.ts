@@ -208,6 +208,9 @@ export interface MirrorReport {
    * An append-only table records its ZERO rather than being absent — leaving it
    * out is what made a stalled cursor look exactly like a quiet table. A
    * snapshot table is absent only when the tenant has no agent row at all.
+   *
+   * `trades_already_mirrored` counts rows read and deliberately NOT inserted:
+   * an operation whose hash the shared ledger already holds. See the insert.
    */
   copied: Record<string, number>;
   /**
@@ -425,6 +428,7 @@ export async function mirrorTenant(args: {
       }
 
       const highest = Number(rows[rows.length - 1]!.id);
+      let alreadyHeld = 0;
       // One transaction: the rows and the watermark that says they arrived.
       // Split them and a crash between the two duplicates the tape forever.
       await shared.tx(async (db) => {
@@ -452,7 +456,63 @@ export async function mirrorTenant(args: {
           `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
            ON CONFLICT DO NOTHING`,
         );
-        for (const r of rows) await ins.run(...cols.map((c) => r[c] ?? null));
+        // ONE OPERATION, ONE ROW — and the rewind above is exactly what breaks
+        // that for `trades`. A rebuilt child is not only a restart of ids: at
+        // its first arm the in-flight reconciler finds every successful op of
+        // the last 26 hours missing from the empty ledger and writes each one
+        // AGAIN, as a bare 'swap' with no decision and no fill side, stamped at
+        // the restart. Rewound onto that ledger, this loop carried every one of
+        // them up beside the evidenced original, and nothing stopped it: the
+        // shared `trades` has no unique key on user_op_hash, on purpose (see
+        // trades_agent_userop in store.ts). So every profile's newest fills
+        // were the copies, and every count of operations read each one twice.
+        //
+        // So a hash this account already holds here is not inserted again. The
+        // row that is already here is the one to keep — it was copied from the
+        // incarnation that executed the op and carries its evidence — and the
+        // copy's only new fact, the outcome of an op still marked 'submitted'
+        // here, reaches that row through the resolution pass below, which
+        // updates by hash rather than inserting.
+        //
+        // WHY THIS IS NOT A SPEND ISSUE: the child's own row is untouched, and
+        // that is the row its daily cap is seeded from. Nothing is summed
+        // against a cap from the shared ledger.
+        //
+        // Read as one set per account per batch rather than asked row by row:
+        // lowercased on both sides, which no index serves, so a per-row probe
+        // would scan the fleet's whole tape five hundred times on the one pass
+        // that matters, the rewind. And a set, not INSERT … WHERE NOT EXISTS, so
+        // the insert stays the statement Postgres already runs. Hashes inserted
+        // in this batch join the set, so a child holding one op twice does not
+        // put it here twice either. A row with no hash — a refusal, a paper
+        // fill — is always inserted.
+        const heldBy = new Map<string, Set<string>>();
+        const holding = async (account: string): Promise<Set<string>> => {
+          let set = heldBy.get(account);
+          if (!set) {
+            const got = (await db
+              .prepare(
+                `SELECT lower(user_op_hash) AS h FROM trades
+                  WHERE lower(agent_id) = ? AND user_op_hash IS NOT NULL`,
+              )
+              .all(account)) as { h: string }[];
+            set = new Set(got.map((g) => String(g.h)));
+            heldBy.set(account, set);
+          }
+          return set;
+        };
+        for (const r of rows) {
+          const hash = typeof r.user_op_hash === "string" ? r.user_op_hash.toLowerCase() : "";
+          if (table === "trades" && hash !== "") {
+            const held = await holding(String(r.agent_id ?? "").toLowerCase());
+            if (held.has(hash)) {
+              alreadyHeld++;
+              continue;
+            }
+            held.add(hash);
+          }
+          await ins.run(...cols.map((c) => r[c] ?? null));
+        }
         // THE WITNESS MOVES WITH THE WATERMARK, in the same transaction and for
         // the same reason: a cursor whose stamp belongs to a different row is
         // exactly the state this column exists to make impossible.
@@ -465,7 +525,11 @@ export async function mirrorTenant(args: {
           )
           .run(tenant, table, highest, rows[rows.length - 1]![stamp] ?? null, nowSec);
       });
-      copied[table] = rows.length;
+      // Rows that ARRIVED, and beside them the ones deliberately not copied —
+      // printed by the orchestrator like every other key here, so a redeploy's
+      // re-recorded ops show up as what they are rather than as a quiet pass.
+      copied[table] = rows.length - alreadyHeld;
+      if (alreadyHeld > 0) copied[`${table}_already_mirrored`] = alreadyHeld;
     } catch (e) {
       // One table failing is one table's worth of lag, not a reason to abandon
       // the others — and the watermark did not move, so the next pass retries.

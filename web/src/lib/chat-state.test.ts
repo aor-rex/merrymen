@@ -98,9 +98,30 @@ describe("the surfaces that feed it", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("../app/api/feed/route.ts", import.meta.url), "utf8");
     assert.match(src, /TAPE_WINDOW_SEC/, "the trades read must be bounded in time");
-    const trades = src.slice(src.indexOf("FROM trades WHERE agent_id"));
-    assert.match(trades.slice(0, 200), /created_at > \?/, "the window must be in the query, not applied after");
-    assert.match(trades.slice(0, 200), /LIMIT 30/, "and the size bound stays — neither substitutes for the other");
+    // The read lives in lib/desk-trades.ts, so the route has to hand it the window…
+    assert.match(src, /readDeskTrades\([^;]*TAPE_WINDOW_SEC/, "the window must be in the query, not applied after");
+    // …and the query itself bounds both, which is run here rather than read.
+    const { DatabaseSync } = await import("node:sqlite");
+    const { wrapSqlite } = await import("../../../worker/src/db");
+    const { readDeskTrades } = await import("./desk-trades");
+    const raw = new DatabaseSync(":memory:");
+    try {
+      raw.exec(`CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, sell_token TEXT, buy_token TEXT,
+        amount_usdg REAL, tx_hash TEXT, status TEXT, reject_rule TEXT, sim_quote_out TEXT, sim_min_out TEXT, sim_fee_tier INTEGER,
+        sim_gas TEXT, created_at INTEGER, user_op_hash TEXT, decision_id TEXT, fill_side TEXT, fill_symbol TEXT,
+        realized_pnl_usdg REAL, epoch INTEGER);
+        CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT, reason TEXT);`);
+      const since = 1_000_000;
+      const ins = raw.prepare(`INSERT INTO trades (agent_id, kind, amount_usdg, status, reject_rule, created_at, epoch) VALUES ('a','swap',1,'rejected','no-gas',?,1)`);
+      ins.run(since - 60);
+      for (let i = 1; i <= 40; i++) ins.run(since + i);
+      const db = wrapSqlite(raw);
+      assert.equal((await readDeskTrades(db, "a", 1, since)).length, 30, "and the size bound stays — neither substitutes for the other");
+      const unbounded = await readDeskTrades(db, "a", 1, since, 100);
+      assert.equal(unbounded.length, 40, "the refusal from before the window is not on the tape, however roomy the limit");
+    } finally {
+      raw.close();
+    }
   });
 
   it("the client sends a bounded tape and says how much it left out", async () => {

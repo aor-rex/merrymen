@@ -11,6 +11,7 @@ import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
+import { countLandedOps, readDeskTrades } from "@/lib/desk-trades";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { hostedAgentFor } from "@/lib/agent-for";
 
@@ -103,6 +104,13 @@ export interface TradeRecord {
   sim_fee_tier: number | null;
   sim_gas: string | null;
   created_at: string;
+  /** What the ledger knows the trade WAS — see lib/desk-trades.ts. Absent on an older ledger. */
+  fill_side?: string | null;
+  symbol?: string | null;
+  display_name?: string | null;
+  action?: string | null;
+  reason?: string | null;
+  realized_pnl_usdg?: number | null;
 }
 export interface AgentFinancials {
   hwm_usdg: number;
@@ -450,18 +458,15 @@ export async function GET(req: Request) {
       }
     }
     try {
-      const rows = (await db
-        .prepare(
-          `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
-                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
-           FROM trades WHERE agent_id = ?${epochWhere} AND created_at > ?
-           ORDER BY created_at DESC, id DESC LIMIT 30`,
-        )
-        .all(scope, ...epochArg, Math.floor(Date.now() / 1000) - TAPE_WINDOW_SEC)) as (Omit<
-        TradeRecord,
-        "created_at"
-      > & { created_at: number })[];
-      trades = rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
+      // One row per operation, with the side, the coin and the decision's
+      // reason — see lib/desk-trades.ts for what the bare select cost the desk.
+      const rows = await readDeskTrades(
+        db,
+        scope,
+        epochArg.length ? epochArg[0]! : null,
+        Math.floor(Date.now() / 1000) - TAPE_WINDOW_SEC,
+      );
+      trades = rows.map((r) => ({ ...r, status: r.status as TradeRecord["status"], created_at: fmtEpoch(r.created_at) }));
     } catch {
       /* table not created yet */
     }
@@ -517,13 +522,8 @@ export async function GET(req: Request) {
     let landed = 0;
     let contributionsKnown: boolean | null = null;
     try {
-      const row = (await db
-        .prepare(
-          `SELECT SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed
-             FROM trades WHERE agent_id = ?${epochWhere}`,
-        )
-        .get(scope, ...epochArg)) as { landed: number | null } | undefined;
-      landed = Number(row?.landed ?? 0);
+      // Operations, not rows: a redeploy's re-recorded copies doubled this.
+      landed = await countLandedOps(db, scope, epochArg.length ? epochArg[0]! : null);
     } catch {
       /* older ledger */
     }

@@ -202,6 +202,7 @@ export function Profile({
             {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
               <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
               <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
+                {trade.displayName != null && <small style={{ display: "block" }}>{trade.displayName}</small>}
                 {trade.symbol == null && <small style={{ display: "block" }}>Token label unavailable in this historical record.</small>}
                 <small>{fullDateTime(trade.at * 1000)} · {trade.paper ? "Paper trade" : "Completed"}</small>
                 <p className={trade.realizedPnlBps != null ? trade.realizedPnlBps < 0 ? "down" : "up" : "public-empty"}>

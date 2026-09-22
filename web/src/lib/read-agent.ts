@@ -23,6 +23,7 @@ import { readPaperReturn } from "./paper-return";
  * No session read. Same property as the other public readers, same reason.
  */
 import { readProfileTrades, type ProfileTrade } from "./profile-trades";
+import { readOperationCounts } from "./distinct-trades";
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
@@ -330,34 +331,23 @@ export const readAgent = cache(async function readAgent(
     let tokensTouched = 0;
     let tradesRead = false;
     try {
-      const t = (await db
-        .prepare(
-          `SELECT COALESCE(SUM(CASE WHEN status = 'landed' THEN gas_usdg ELSE 0 END), 0) AS gas,
-                  SUM(CASE WHEN status = 'landed' AND gas_wei IS NOT NULL AND gas_usdg IS NULL
-                           THEN 1 ELSE 0 END) AS unpriced,
-                  SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
-                  SUM(CASE WHEN status = 'paper' THEN 1 ELSE 0 END) AS paper_filled,
-                  SUM(CASE WHEN status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS refused,
-                  COUNT(DISTINCT CASE WHEN fill_side = 'buy' AND status = ?
-                                      THEN LOWER(buy_token) END) AS tokens
-             FROM trades WHERE agent_id = ? AND epoch = ?`,
-        )
-        .get(paper ? "paper" : "landed", account, epoch)) as
-        | Record<string, number | null>
-        | undefined;
+      // OPERATIONS, NOT ROWS. A redeploy re-records every recent op and the
+      // mirror used to copy each one up again, so counting rows put every one
+      // of those ops into "Completed operations" twice.
+      // ONE evidence class for tokens, chosen from the agent's own mode. An
+      // integer cannot carry a chip, so folding a real acquisition and a
+      // simulated one into one number is mixing nobody could see.
+      const t = await readOperationCounts(db, account, epoch, paper ? "paper" : "landed");
       tradesRead = true;
-      gasUsdg = Number(t?.gas ?? 0);
+      gasUsdg = t.gasUsdg;
       // A fill whose gas could not be priced contributes nothing to the SUM and
       // is never counted, so the return silently understated its own cost.
       // Unpriced is a different fact from free.
-      unpricedTrades = Number(t?.unpriced ?? 0);
-      landed = Number(t?.landed ?? 0);
-      filledPaper = Number(t?.paper_filled ?? 0);
-      refused = Number(t?.refused ?? 0);
-      // ONE evidence class, chosen from the agent's own mode. An integer cannot
-      // carry a chip, so folding a real acquisition and a simulated one into one
-      // number is mixing nobody could see.
-      tokensTouched = Number(t?.tokens ?? 0);
+      unpricedTrades = t.unpricedTrades;
+      landed = t.landed;
+      filledPaper = t.filledPaper;
+      refused = t.refused;
+      tokensTouched = t.tokensTouched;
     } catch {
       /* older ledger */
     }
