@@ -28,18 +28,22 @@
  *      worker, which is the only process that resolves it.
  */
 
-/** The balance shape the status route returns — wei/6dp as decimal strings. */
+/**
+ * The balance shape the status route returns — wei/6dp as decimal strings, and
+ * null for a read that failed. Null is falsy below, so an unread balance is
+ * never gas and never capital: "can start" stays closed until the chain says so.
+ */
 export interface StartBalances {
-  ethWei?: string;
-  cashUsdg?: string;
-  vaultUsdg?: string;
+  ethWei?: string | null;
+  cashUsdg?: string | null;
+  vaultUsdg?: string | null;
 }
 
 /**
  * Any gas at all. Kept byte-identical to the predicate both components already
  * used, including its lenient fallback, so the unsponsored path cannot shift.
  */
-export function hasGas(wei?: string): boolean {
+export function hasGas(wei?: string | null): boolean {
   if (!wei) return false;
   try {
     return BigInt(wei) > 0n;
@@ -61,7 +65,7 @@ export function hasGas(wei?: string): boolean {
  * a funding step they still need.
  */
 export function hasCapital(b?: StartBalances): boolean {
-  const read = (v?: string): bigint => {
+  const read = (v?: string | null): bigint => {
     if (!v) return 0n;
     try {
       return BigInt(v);

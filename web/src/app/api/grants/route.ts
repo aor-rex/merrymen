@@ -7,6 +7,7 @@
  */
 
 import { webChainRead } from "@/lib/chain-read";
+import { readGrantBalances, type GrantBalances } from "@/lib/grant-balances";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
@@ -75,7 +76,8 @@ async function archiveCurrentGrant(): Promise<void> {
 export interface AgentStatus {
   exists: boolean;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
-  balances?: { ethWei: string; cashUsdg: string; vaultUsdg: string };
+  /** Decimal strings as read from the chain; null for any read that failed. */
+  balances?: GrantBalances;
   workerAliveAt?: number | null;
   /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
   mode?: "paper" | "live" | "idle" | null;
@@ -440,17 +442,18 @@ export async function GET(req: Request) {
   const chain = chainForId(grant.chainId);
   const client = createPublicClient({ chain, transport: webChainRead() });
 
-  const [ethWei, tokenReads] = await Promise.all([
-    client.getBalance({ address: grant.smartAccount }).catch(() => 0n),
-    client
-      .multicall({
+  // A READ THAT FAILED IS NULL, NOT ZERO — see grant-balances.ts. Zero here
+  // is what told funded owners to "Add funds" whenever the node was slow.
+  const balances = await readGrantBalances({
+    eth: () => client.getBalance({ address: grant.smartAccount }),
+    tokens: () =>
+      client.multicall({
         contracts: [
           { address: CASH.USDG as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
           { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
         ],
-      })
-      .catch(() => null),
-  ]);
+      }),
+  });
 
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;
@@ -515,11 +518,7 @@ export async function GET(req: Request) {
   const status: AgentStatus = {
     exists: true,
     grant: publicGrant,
-    balances: {
-      ethWei: ethWei.toString(),
-      cashUsdg: (tokenReads?.[0]?.status === "success" ? (tokenReads[0].result as bigint) : 0n).toString(),
-      vaultUsdg: (tokenReads?.[1]?.status === "success" ? (tokenReads[1].result as bigint) : 0n).toString(),
-    },
+    balances,
     workerAliveAt,
     mode,
     gasSponsored,
