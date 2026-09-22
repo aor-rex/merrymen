@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { GENERATED_NAME_PARTS, SETTINGS_DEFAULTS, TRADEABLE_SYMBOLS } from "@merrymen/core";
 import { identityOf, type IdentitySources } from "@/lib/feed-identity";
+import { AGENT_NAME_RE, normalizeAgentName } from "@/lib/agent-name-rule";
 
 /**
  * THE NAME MUST BE READ BACK FROM WHERE IT WAS WRITTEN.
@@ -23,7 +24,6 @@ import { identityOf, type IdentitySources } from "@/lib/feed-identity";
  * halves agree there and only there.
  */
 
-const SETTINGS = readFileSync(new URL("../settings/route.ts", import.meta.url), "utf8");
 const WORKER = readFileSync(new URL("../../../../../worker/src/index.ts", import.meta.url), "utf8");
 const SOUL = readFileSync(new URL("../../../../../worker/src/soul.ts", import.meta.url), "utf8");
 
@@ -169,11 +169,13 @@ describe("the feed says where the name came from", () => {
 });
 
 /**
- * The name rule as each file actually ships it, compiled from the source.
+ * The SOUL's name rule as it ships, compiled from its source.
  *
- * Reading it out rather than restating it here is the point: a copy in the test
- * would let the two drift and still pass, which is the exact failure the
- * duplication comment in settings/route.ts warns about.
+ * The web tier's copy is imported and run (lib/agent-name-rule.ts, which the
+ * settings route and partner enrollment both write through). The soul's cannot
+ * be imported here — the module touches the filesystem at load — so it is read
+ * out rather than restated: a copy in the test would let the two drift and
+ * still pass. Moving the rule into packages/core would end this read.
  */
 function ruleIn(src: string): RegExp {
   // Found by the one class no other regex in either file carries, not by how
@@ -197,8 +199,14 @@ describe("the two name normalisers agree", () => {
     // this fail the moment NFC was added to both — a true statement reported
     // as a broken one, which is the failure mode that teaches people to edit
     // the assertion rather than read it.
+    //
+    // The web half is RUN: every web write stores normalizeAgentName's output
+    // (the settings route and partner enrollment both call it). The soul's half
+    // is still read from its source, because the worker module touches the
+    // filesystem at import.
+    assert.equal(normalizeAgentName("  Little   John "), "Little John", "the API must normalise before it stores");
+    assert.equal(normalizeAgentName("José"), "José", "decomposed and precomposed are one name");
     const shape = /\.normalize\("NFC"\)\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/;
-    assert.match(SETTINGS, shape, "the API must normalise before it stores");
     assert.match(SOUL, shape, "and the soul must do the identical thing");
   });
 
@@ -214,7 +222,7 @@ describe("the two name normalisers agree", () => {
     // text and passed while `\p{Join_Control}` was silently missing its
     // backslash — which parses, and admits `{`, `}` and `_`. Building the
     // shipped rule and running names through it cannot be fooled that way.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const name of [
         "Robin", "José", "Müller", "Łukasz", "Nguyễn", "Робин", "小红", "로빈",
         "रोबिन", "โรบิน", "রোবিন", "ரோபின்", "رَوبِن", "דוד", "Ελένη",
@@ -231,7 +239,7 @@ describe("the two name normalisers agree", () => {
     // an agent's figures, and U+202E exists to make text display as something
     // other than what it is. `\p{Join_Control}` is the one exception, because
     // Persian and several Indic orthographies need ZWNJ inside a single word.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const [name, why] of [
         [`Robin${RLO}evil`, "right-to-left override"],
         [`Robin${ZWSP}x`, "zero-width space"],
@@ -252,7 +260,7 @@ describe("the two name normalisers agree", () => {
     // "99.5" or "1000" there reads as a number nobody measured — the same
     // failure as showing a figure for data nobody read, arriving by the name
     // field instead. Digits stay welcome inside a name that has a letter.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const name of ["007", "2024", "99.5", "1 2 3", "4-20", "١٢٣", "१२३"]) {
         assert.ok(!re.test(name), `${who} must refuse the letterless "${name}"`);
       }
@@ -266,7 +274,7 @@ describe("the two name normalisers agree", () => {
     // Behaviour above is what matters, but a drift that no listed name happens
     // to exercise would still split the web tier from the soul, and the worker
     // then silently keeps the old name. Same source, same rule.
-    assert.equal(ruleIn(SETTINGS).source, ruleIn(SOUL).source);
+    assert.equal(AGENT_NAME_RE.source, ruleIn(SOUL).source);
   });
 
   it("every generated name passes both copies", () => {
@@ -274,7 +282,7 @@ describe("the two name normalisers agree", () => {
     // reconciles it into the soul. A combination either rule refused would be
     // stored by one tier and refused by the other: the owner is told the
     // agent is called one thing while it keeps answering to "Robin".
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const a of GENERATED_NAME_PARTS.adjectives) {
         for (const n of GENERATED_NAME_PARTS.nouns) {
           assert.ok(re.test(`${a} ${n}`), `${who} refuses the generated "${a} ${n}"`);
