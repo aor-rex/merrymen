@@ -103,8 +103,8 @@ export function Agent({
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
-  perTrade: string;
-  perDay: string;
+  perTrade: number | null;
+  perDay: number | null;
   stopped: boolean;
   turns: ChatTurn[];
   draft: string;
@@ -720,7 +720,7 @@ export function Agent({
             >
               Trading limits{" "}
               <span>
-                {money(Number(perTrade))} / trade{" "}
+                {money(perTrade)} / trade{" "}
                 <ArrowUpRight size={14} aria-hidden="true" />
               </span>
             </button>

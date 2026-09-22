@@ -377,8 +377,9 @@ export function DesktopPortfolio({
   selectedToken?: LiveToken;
   tokens: LiveToken[];
   stopped: boolean;
-  perTrade: string;
-  perDay: string;
+  /** Null until the signed caps are read — drawn as a dash, never as $0.00. */
+  perTrade: number | null;
+  perDay: number | null;
 }) {
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
@@ -539,11 +540,11 @@ export function DesktopPortfolio({
         </div>
         <div className="desktop-cash">
           <span>Per trade</span>
-          <strong>{money(Number(perTrade))}</strong>
+          <strong>{money(perTrade)}</strong>
         </div>
         <div className="desktop-cash">
           <span>Per day</span>
-          <strong>{money(Number(perDay))}</strong>
+          <strong>{money(perDay)}</strong>
         </div>
         <button className="desktop-chat-link" onClick={() => onTab("agent")}>
           Chat with {mine.name}

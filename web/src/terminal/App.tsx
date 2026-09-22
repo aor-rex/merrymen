@@ -55,6 +55,11 @@ import "./first-visit.css";
 import { WiredProvider } from "@/components/WiredProvider";
 import { useDesktopDetail } from "./desktop-detail";
 import { ChatDock } from "./ChatDock";
+import { capsOf, portfolioReadOf, profileShown, usdgOrNull } from "./account-read";
+import { startRefreshLoop, type LoopState } from "./refresh-loop";
+import { LoadFailure } from "./LoadFailure";
+import { SkeletonRows } from "./Skeleton";
+import "./skeleton.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -88,7 +93,16 @@ export function App() {
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
   const setScreen = (next: Screen) => router.push(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
-  const [loadError,setLoadError]=useState("");
+  /**
+   * DID THE LAST ACCOUNT READ FAIL? `account` alone cannot say: it is null both
+   * before the first read answers and after it failed, and the screens rendered
+   * "Loading your account…" for both — for ever, after a failure.
+   */
+  const [accountFailed, setAccountFailed] = useState(false);
+  /** Where the refresh loop stands — see refresh-loop.ts. Null until its first pass reports. */
+  const [loop, setLoop] = useState<LoopState | null>(null);
+  const failing = loop !== null && loop.failuresInARow > 0;
+  const retryNow = useRef<() => void>(() => {});
   const [refreshKey,setRefreshKey]=useState(0);
   const refreshAccount=()=>setRefreshKey(k=>k+1);
   const [sidebarSection, setSidebarSection] =
@@ -127,8 +141,8 @@ export function App() {
     money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
   ) ? desktopDetail : requestedScreen;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
-  const perTrade = String(account?.status.grant?.caps.perTradeUsdg ?? "");
-  const perDay = String(account?.status.grant?.caps.dailyUsdg ?? "");
+  // Null until read — `String(caps ?? "")` rendered an unread key as "$0.00 per trade".
+  const { perTrade, perDay } = capsOf(account);
   const stopped = account?.status.mode !== "live" && account?.status.mode !== "paper";
   const [chatDraft, setChatDraft] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -171,10 +185,24 @@ export function App() {
     saveTurns(chatKey, turns);
   }, [chatKey, turns]);
 
+  /**
+   * ONE LOOP FOR THE ACCOUNT AND THE MARKET — see refresh-loop.ts.
+   *
+   * This was a first load plus a 60s interval that returned early until that
+   * first load had succeeded, so a first load that failed was never retried;
+   * and it set an error on failure that no success ever cleared. Every pass now
+   * books the next (backing off 5s, 15s, 60s while failing), and the loop's own
+   * report is the only thing that says whether we are failing — so the first
+   * pass that succeeds takes the banner down.
+   *
+   * THE TWO READS ARE INDEPENDENT. A market outage no longer stops the account
+   * refreshing, nor the reverse; either failing makes the pass a failure.
+   * Whatever was already on screen stays there, and the banner says how old it
+   * is.
+   */
   useEffect(() => {
     let alive = true;
-    let refreshing = false;
-    setLoadError("");
+    let firstPass = true;
     let loaded: LiveState | undefined;
     const refreshChanges = async (tokens: LiveState["tokens"]) => {
       const changes = await loadSessionChanges(tokens);
@@ -186,52 +214,69 @@ export function App() {
           ),
         }));
     };
-    void Promise.all([requestJson<AccountState["session"]>("/api/auth/session"), requestJson<AccountState["status"]>("/api/grants")]).then(([session,status])=>{ if(alive) setAccount({session,status}); }).catch(error=>{if(alive)setLoadError(error.message);});
-    void loadLive(mine=>{if(alive)setLive(previous=>({...previous,mine}));})
-      .then((data) => {
-        if (!alive) return;
-        loaded = data;
-        setLive(data);
-        setLiveLoaded(true);
-        void refreshChanges(data.tokens);
-      })
-      // SET ON BOTH ARMS, deliberately. "The fetch finished" is what the screens
-      // need to know; whether it finished well is `loadError`'s job. Setting it
-      // only on success would leave a failed load looking identical to one that
-      // is still running, which is the same conflation one level down.
-      .catch((error) => {if(alive){setLoadError(error.message);setLiveLoaded(true);}});
-    const refresh = async () => {
-      if (!loaded || refreshing || document.hidden) return;
-      refreshing = true;
+    const readAccount = async (first: boolean) => {
       try {
-        const quotes = await loadTokenQuotes();
-        if (alive && quotes.size)
-          setLive((previous) => ({
-            ...previous,
-            tokens: applyTokenQuotes(previous.tokens, quotes),
-          }));
-        const next = await loadLive();
         const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
-        if(alive) {
-          setAccount({session,status});
-          if(session.hosted && !session.address){setTurns([]);setChatDraft("");}
-          setLive(previous=>({...next,tokens:next.tokens.map(t=>{const old=previous.tokens.find(p=>p.id===t.id);return {...t,priceUsd:t.priceUsd ?? old?.priceUsd ?? null,change24hPct:t.change24hPct ?? old?.change24hPct ?? null};})}));
-        }
-        await refreshChanges(next.tokens);
-      } catch(error) {
-        if(alive)setLoadError(error instanceof Error ? error.message : "Could not refresh data.");
-      } finally {
-        refreshing = false;
+        if(!alive) return;
+        setAccount({session,status});
+        setAccountFailed(false);
+        // Not on the first pass: there is no conversation of this session's to
+        // clear yet, and a draft typed while the page loaded is the owner's.
+        if(!first && session.hosted && !session.address){setTurns([]);setChatDraft("");}
+      } catch (error) {
+        if (alive) setAccountFailed(true);
+        throw error;
       }
     };
-    const timer = window.setInterval(() => void refresh(), 60_000);
+    const readLive = async () => {
+      if (!loaded) {
+        try {
+          const data = await loadLive(mine=>{if(alive)setLive(previous=>({...previous,mine}));});
+          if (!alive) return;
+          loaded = data;
+          setLive(data);
+          void refreshChanges(data.tokens);
+        } finally {
+          // SET ON BOTH ARMS, deliberately. "The fetch finished" is what the
+          // screens need to know; whether it finished well is the loop's job.
+          // Setting it only on success would leave a failed load looking
+          // identical to one that is still running, which is the same
+          // conflation one level down.
+          if (alive) setLiveLoaded(true);
+        }
+        return;
+      }
+      const quotes = await loadTokenQuotes();
+      if (alive && quotes.size)
+        setLive((previous) => ({
+          ...previous,
+          tokens: applyTokenQuotes(previous.tokens, quotes),
+        }));
+      const next = await loadLive();
+      if(alive) setLive(previous=>({...next,tokens:next.tokens.map(t=>{const old=previous.tokens.find(p=>p.id===t.id);return {...t,priceUsd:t.priceUsd ?? old?.priceUsd ?? null,change24hPct:t.change24hPct ?? old?.change24hPct ?? null};})}));
+      await refreshChanges(next.tokens);
+    };
+    const pass = async () => {
+      const first = firstPass;
+      firstPass = false;
+      const results = await Promise.allSettled([readAccount(first), readLive()]);
+      // The reader gets one plain sentence (LoadFailure); the cause goes here.
+      for (const r of results) if (r.status === "rejected") console.warn("[merrymen] refresh failed:", r.reason);
+      return results.every((r) => r.status === "fulfilled");
+    };
+    const refresh = startRefreshLoop({
+      pass,
+      report: (state) => { if (alive) setLoop(state); },
+      paused: () => document.hidden,
+    });
+    retryNow.current = refresh.retryNow;
     const onVisible = () => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden) refresh.retryNow();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      refresh.stop();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refreshKey]);
@@ -300,7 +345,8 @@ export function App() {
   useEffect(() => {
     if (desktop && (pathname === "/" || pathname === "/feed")) setSidebarSection("feed");
   }, [desktop, pathname]);
-  const agent=profile ?? listedAgent;
+  // Never the leaderboard row while the profile read is in flight — see profileShown.
+  const agent=profileShown(profile, profileError, listedAgent);
   /**
    * WHAT THIS AGENT ACTUALLY IS, decided once and handed to every surface.
    *
@@ -330,8 +376,11 @@ export function App() {
       account?.status.grant?.expiresAt !== undefined
         ? account.status.grant.expiresAt * 1000 < Date.now()
         : false,
+    // NULL WHEN THE ROUTE COULD NOT READ IT. `Number(null)` is 0, and zero is
+    // the one value `autonomyOf` answers with "Add funds" — to a funded owner,
+    // whenever the node was slow.
     realCashUsd: account?.status.balances
-      ? Number(account.status.balances.cashUsdg) / 1e6
+      ? usdgOrNull(account.status.balances.cashUsdg)
       : null,
     /**
      * IS THE BLOCKER OLDER THAN THE SIGNATURE?
@@ -373,6 +422,7 @@ export function App() {
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
+  const portfolioRead = portfolioReadOf(live.reads.mine, liveLoaded);
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
@@ -404,7 +454,7 @@ export function App() {
         ref={bodyRef}
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
-        {loadError && <p className="flow-error" role="alert">{loadError} <button onClick={refreshAccount}>Try again</button></p>}
+        {failing && <LoadFailure nextAt={loop.nextAt} lastOkAt={loop.lastOkAt} onRetry={() => retryNow.current()}/>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -430,8 +480,8 @@ export function App() {
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
-        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
+        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} onRefresh={refreshAccount}/>}
+        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
@@ -543,7 +593,7 @@ export function App() {
           // unreadable-before-absent, which is the ordering the whole product
           // uses.
           const unreadable =
-            !!loadError || live.reads.market === "unreadable" || live.reads.discoveries === "unreadable";
+            failing || live.reads.market === "unreadable" || live.reads.discoveries === "unreadable";
           return (
             <section className="hosted-entry">
               <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
@@ -567,17 +617,23 @@ export function App() {
             onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
-        {screen.kind === "profile" && !agent && <section className="hosted-entry"><p role="status">{profileError || "Loading agent…"}</p>{profileError && <button onClick={()=>goTab("agent")}>Back to agents</button>}</section>}
+        {screen.kind === "profile" && !agent && (profileError
+          ? <section className="hosted-entry"><p role="status">{profileError}</p><button onClick={()=>goTab("agent")}>Back to agents</button></section>
+          : <section className="hosted-entry"><SkeletonRows rows={4} label="Loading agent"/></section>)}
         {/* THE FAILURE IS SAID EVEN WHEN THERE IS SOMETHING TO SHOW.
-            `agent = profile ?? listedAgent` means a failed profile fetch is
-            invisible whenever the agent also happens to be on the leaderboard —
+            `agent` falls back to `listedAgent` once the profile read fails, so a
+            failed profile fetch is invisible whenever the agent also happens to
+            be on the leaderboard —
             the page renders, from a different and much thinner read, with no
             indication that the thing it was asked for did not arrive. The
             leaderboard row is worth showing; passing it off as the profile is
-            not. */}
+            not. And when a profile that DID load fails its next refresh, what
+            is on screen is that profile, older — so it says that instead. */}
         {screen.kind === "profile" && agent && profileError && (
           <p role="status" className="hosted-note">
-            Some profile details are unavailable. Showing the agent’s leaderboard summary.
+            {profile
+              ? "Couldn’t refresh this profile — showing what we last read."
+              : "Some profile details are unavailable. Showing the agent’s leaderboard summary."}
           </p>
         )}
         {screen.kind === "profile" && agent && (
@@ -634,7 +690,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} onRefresh={refreshAccount}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} onRefresh={refreshAccount}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (
