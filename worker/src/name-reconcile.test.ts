@@ -215,11 +215,11 @@ describe("a name the soul refuses is never a silent refusal", () => {
  * AN AGENT THAT ALREADY HAS A NAME KEEPS IT.
  *
  * The letter rule arrived after agents had been named "007". Applied to what
- * was already stored, it read that name back as "Robin", the reconcile refused
- * the configured "007" and told the owner their agent "is still called Robin"
- * — false, it had been 007 until that deploy — and the first re-arm (every
- * restart is one) wrote "Robin" onto the roster the leaderboard reads, while
- * the owner's feed and the Brain persona still said 007. The rule is for a
+ * was already stored, it reads that name back as "Robin", the reconcile refuses
+ * the configured "007" and tells the owner their agent "is still called Robin"
+ * — false, it was 007 until that deploy — and the first re-arm (every restart
+ * is one) writes "Robin" onto the roster the leaderboard reads, while the
+ * owner's feed and the Brain persona still say 007. The rule is for a
  * name somebody is choosing now: the settings form, chat /name, the wizard.
  */
 describe("an existing letterless name survives: the letter rule is for names chosen now", () => {

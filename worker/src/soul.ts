@@ -65,10 +65,10 @@ const NAME_RE = /^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.
  *
  * Agents were named "007" before the letter rule existed, and the owner's rule
  * is that an existing agent is not renamed. Read back through NAME_RE, "007"
- * came out as the default: the reconcile then refused the configured "007" and
- * told the owner the agent "is still called Robin", which was false, and the
- * first re-arm — every restart is one — wrote "Robin" onto the roster while
- * the owner's own feed and the Brain persona still said 007. So reading the
+ * comes out as the default: the reconcile would refuse the configured "007" and
+ * tell the owner the agent "is still called Robin", which is false, and the
+ * first re-arm — every restart is one — would write "Robin" onto the roster
+ * while the owner's own feed and the Brain persona still said 007. So reading the
  * identity file, and carrying a name settings already holds into it, use this;
  * only a name typed now meets the letter rule.
  *

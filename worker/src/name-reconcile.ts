@@ -24,8 +24,9 @@ export interface NameSeat {
   /**
    * Write a name settings ALREADY holds — soul.ts `carryStoredName`, never
    * `setName`. The configured name was accepted when it was saved; this step
-   * only carries it. Holding it to the rule for a name typed now renamed every
-   * agent called "007" before the letter rule to "Robin", at the first restart.
+   * only carries it. Holding it to the rule for a name typed now would rename
+   * every agent called "007" before the letter rule to "Robin" at its first
+   * restart.
    */
   carryName(raw: string): { ok: true; name: string } | { ok: false; reason: string };
 }
@@ -110,10 +111,10 @@ export function createNameReconciler(seat: NameSeat) {
  *
  * Every restart is a re-arm, so this runs on every deploy for every agent. It
  * was two inline lines in index.ts, and it is out here because it is where a
- * name the soul reads back wrongly becomes public: when "007" read back as the
- * default, this is the call that wrote "Robin" onto the row the leaderboard,
- * the public feed and the profile all read. A test can now run the arm's own
- * step instead of trusting it.
+ * name the soul reads back wrongly becomes public: with "007" read back as the
+ * default, this is the call that would write "Robin" onto the row the
+ * leaderboard, the public feed and the profile all read. A test can now run
+ * the arm's own step instead of trusting it.
  */
 export async function mirrorNameOnArm(
   seat: Pick<NameSeat, "ensureSoul" | "getName">,
