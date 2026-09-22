@@ -32,7 +32,7 @@
  * semantics.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /** One instruction, as it sits on disk. */
@@ -232,7 +232,7 @@ export function isExpired(cmd: FileCommand, nowMs: number): boolean {
 export function readCommandState(
   home: string,
   id: string,
-): { state: "queued" | "running" | "done"; result?: FileCommandResult } | null {
+): { state: "queued" | "running" | "done"; result?: FileCommandResult; expiresAt?: number | null } | null {
   if (!ID_OK.test(id)) return null;
   const dir = commandDir(home);
   try {
@@ -241,34 +241,153 @@ export function readCommandState(
   } catch {
     /* not finished — or not ours */
   }
-  return existsSync(path.join(dir, `${id}.json`)) ? { state: "queued" } : { state: "running" };
+  // A file still in the queue carries its own deadline, read in the SAME read
+  // that says it is queued. Two reads — "does it exist", then "what does it
+  // say" — let a claim land between them, and the route then had to guess.
+  let raw: string;
+  try {
+    raw = readFileSync(path.join(dir, `${id}.json`), "utf8");
+  } catch {
+    return { state: "running" };
+  }
+  return { state: "queued", expiresAt: deadlineIn(raw) };
 }
 
 /**
- * Is there an order for this home that has not been ANSWERED yet?
+ * The deadline a queued file was written with, or null when it carries none.
+ * Null is NOT "already expired": `isExpired` runs a deadline-less command, so
+ * nothing may tell the owner it will not.
+ */
+function deadlineIn(raw: string): number | null {
+  try {
+    const v = (JSON.parse(raw) as { expiresAt?: unknown })?.expiresAt;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One unanswered command in a self-hosted home, as the one-at-a-time rule reads it. */
+export interface OpenCommand {
+  id: string;
+  /** "queued": the file is still waiting. "running": claimed, marker down, no answer yet. */
+  state: "queued" | "running";
+  /** The queued file's own deadline; null for a marker, which carries none. */
+  expiresAt: number | null;
+  /** When it was placed (queued) or claimed (running), in milliseconds. */
+  at: number;
+}
+
+/**
+ * Every order in this home that has not been ANSWERED yet, with what the
+ * one-at-a-time rule needs to judge it.
  *
  * QUEUED *OR* RUNNING, and the second half is the whole point. The claim is an
  * unlink, and the receipt is written only after the trade finishes — so between
- * those two moments the queue directory is empty and this returned false while
- * an order was mid-flight. Self-hosted that is the one-at-a-time rule AND the
- * idempotency key both going soft at once: an owner who saw nothing on the tape
- * after 25 seconds and asked again got a second file, a second fill, and two
- * positions at two prices for what they experienced as one order.
+ * those two moments the queue directory is empty and the old check returned
+ * false while an order was mid-flight. Self-hosted that is the one-at-a-time
+ * rule AND the idempotency key both going soft at once: an owner who saw
+ * nothing on the tape after 25 seconds and asked again got a second file, a
+ * second fill, and two positions at two prices for what they experienced as one
+ * order.
  *
- * Hosted has never had that hole, because the row keeps `done_at IS NULL`
- * across the whole run. The two modes now mean the same thing by "waiting".
+ * A LIST WITH DEADLINES, NOT A YES/NO. This used to be `hasPendingCommand`, a
+ * boolean over filenames, so a queued file past its own deadline held the slot
+ * for ever — the worker drains only while armed — while GET, reading the same
+ * file's deadline, told the owner it had expired and to ask again, and asking
+ * again was refused. The rule that decides lives beside that answer, in the
+ * web tier's order-state.ts; this only reports what is on disk.
+ *
+ * THROWS when the directory cannot be listed, rather than answering "nothing
+ * waiting": a read that failed is not an empty queue, and on this path the
+ * difference is a second order.
  */
-export function hasPendingCommand(home: string): boolean {
+export function openCommands(home: string): OpenCommand[] {
   const dir = commandDir(home);
-  if (!existsSync(dir)) return false;
+  if (!existsSync(dir)) return [];
+  const out: OpenCommand[] = [];
+  for (const n of readdirSync(dir)) {
+    const f = path.join(dir, n);
+    if (n.endsWith(".json") && !n.endsWith(".done.json")) {
+      let raw = "";
+      try {
+        raw = readFileSync(f, "utf8");
+      } catch {
+        continue; // claimed between the listing and the read — the marker says so next
+      }
+      let at: unknown;
+      try {
+        at = (JSON.parse(raw) as { at?: unknown })?.at;
+      } catch {
+        /* unreadable: the worker drops it at the claim; until then its age is the file's */
+      }
+      out.push({
+        id: n.slice(0, -".json".length),
+        state: "queued",
+        expiresAt: deadlineIn(raw),
+        at: typeof at === "number" && Number.isFinite(at) ? at : mtimeOf(f),
+      });
+    } else if (n.endsWith(RUNNING)) {
+      out.push({ id: n.slice(0, -RUNNING.length), state: "running", expiresAt: null, at: mtimeOf(f) });
+    }
+  }
+  return out;
+}
+
+/** A file's age, or now when it vanished under us — the reading that holds a slot longer, never shorter. */
+function mtimeOf(f: string): number {
   try {
-    return readdirSync(dir).some(
-      (n) => (n.endsWith(".json") && !n.endsWith(".done.json")) || n.endsWith(RUNNING),
-    );
+    return statSync(f).mtimeMs;
   } catch {
-    return false;
+    return Date.now();
   }
 }
+
+/**
+ * Where one command is in a child's home, for the orchestrator's stale sweep.
+ *
+ *   "answered" — a result is waiting for the up-leg
+ *   "queued"   — the file is still there: the child has NOT taken it
+ *   "running"  — the child took it and put its marker down
+ *   "gone"     — taken, with no marker and no answer (a crash between the
+ *                claim's unlink and the marker, or a marker that failed)
+ *
+ * THE SWEEP CANNOT TELL THE LAST TWO FROM A FILL IN PROGRESS, and that is why
+ * this exists. It used to write "never ran" onto any unanswered row past its
+ * deadline, including rows a child had claimed and might be filling that
+ * minute. Only "queued" lets anybody say nothing went out. Null for an id that
+ * is not a plain id, which never becomes a path.
+ */
+export type CommandWhereabouts = "answered" | "queued" | "running" | "gone";
+
+export function commandWhereabouts(home: string, id: string): CommandWhereabouts | null {
+  if (!ID_OK.test(id)) return null;
+  const dir = commandDir(home);
+  // An answer outranks anything else on disk about the same id. A result that
+  // lands between these reads is seen as "gone" — the direction that waits
+  // rather than the one that speaks.
+  if (existsSync(path.join(dir, `${id}.done.json`))) return "answered";
+  if (existsSync(path.join(dir, `${id}.json`))) return "queued";
+  if (existsSync(path.join(dir, `${id}${RUNNING}`))) return "running";
+  return "gone";
+}
+
+/**
+ * How long past its own deadline and grace a CLAIMED order may still be
+ * trading, as far as the worker's own pipeline goes.
+ *
+ * The child claims no later than the deadline — a later claim is refused as
+ * expired — and a live fill then waits on its receipt for up to three reads of
+ * two minutes each (executor.ts RECEIPT_ATTEMPTS, viem's default timeout), on
+ * top of the reads, the quote and the signature before it. Ten minutes covers
+ * that with room. Until it has passed, nothing may say the order did not go
+ * out, and nothing may free the owner's one-at-a-time slot for a second one.
+ *
+ * Read by the orchestrator's stale sweep. The web route's slot reads the same
+ * figure from web/src/lib/order-state.ts — the two processes share no module
+ * the browser can load — and a test holds them equal.
+ */
+export const ORDER_IN_FLIGHT_MS = 10 * 60_000;
 
 /** Suffix of the marker that says "claimed, not yet answered". */
 const RUNNING = ".running";

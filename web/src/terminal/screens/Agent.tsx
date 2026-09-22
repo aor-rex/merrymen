@@ -4,7 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
-import { followOrder as followOrderAnswer } from "../order-follow";
+import { followOrder as followOrderAnswer, followWindowMs } from "../order-follow";
 import {
   ArrowDown,
   ArrowUp,
@@ -251,13 +251,14 @@ export function Agent({
    * claim this codebase refuses to make.
    *
    * Bounded and best-effort: it stops when the server answers, when the order
-   * outlives its OWN window and grace — carried back from the POST, never a
-   * constant here — or when the screen goes away. A poll that cannot end is a
-   * worse bug than a missing sentence. See order-follow.ts for why a fixed seven
-   * minutes told owners "nothing was sent" about orders that went on to fill.
+   * outlives its OWN window and grace — carried back from the POST as a
+   * duration and counted on this browser's clock, never a constant here — or
+   * when the screen goes away. A poll that cannot end is a worse bug than a
+   * missing sentence. See order-follow.ts for why a fixed seven minutes told
+   * owners "nothing was sent" about orders that went on to fill.
    */
-  const followOrder = (id: string, expiresAt: number | null) =>
-    followOrderAnswer(id, expiresAt, {
+  const followOrder = (id: string, expiresInMs: number | null) =>
+    followOrderAnswer(id, expiresInMs, {
       alive: () => alive.current,
       say: (answer) => onTurn({ question: "", answer }),
     });
@@ -348,7 +349,7 @@ export function Agent({
           body: JSON.stringify(commandPayload(cmd, pending!.args)),
         });
         const body = (await placed.json().catch(() => null)) as
-          | { error?: string; id?: string; duplicate?: boolean; expiresAt?: number }
+          | { error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }
           | null;
         if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
         // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
@@ -368,7 +369,7 @@ export function Agent({
             : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         });
         setPending(null);
-        if (body?.id) void followOrder(body.id, typeof body.expiresAt === "number" ? body.expiresAt : null);
+        if (body?.id) void followOrder(body.id, followWindowMs(body));
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.

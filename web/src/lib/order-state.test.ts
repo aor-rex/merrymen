@@ -14,7 +14,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ORDER_STALE_GRACE_MS, hostedOrderReply, orderExpiresAt, orderStateOf } from "./order-state";
+import {
+  ORDER_IN_FLIGHT_MS,
+  ORDER_STALE_GRACE_MS,
+  ORDER_TTL_FLOOR_MS,
+  holdsSlot,
+  hostedOrderReply,
+  orderExpiresAt,
+  orderStateOf,
+  orderTtlMs,
+  slotFreesAt,
+} from "./order-state";
 
 const T = 1_800_000_000_000;
 /** The hosted tick: 240 s, so the window is (2 × 240 + 15) s. */
@@ -97,5 +107,50 @@ describe("the same rule for the self-hosted files", () => {
     assert.equal(orderStateOf({ done: false, claimed: true, expiresAt: EXPIRES }, late), "running");
     assert.equal(orderStateOf({ done: true, claimed: true, expiresAt: EXPIRES }, late), "done");
     assert.equal(orderStateOf({ done: false, claimed: false, expiresAt: EXPIRES }, T + 7 * MIN), "queued");
+  });
+});
+
+describe("THE SLOT LETS GO WHEN GET SAYS 'EXPIRED' — not a moment before, not a moment after", () => {
+  // An unclaimed order: the one-at-a-time slot and GET's "expired" read the
+  // same deadline. Earlier, a second order is admitted while the first can
+  // still be claimed. Later, the owner is told "ask again" and refused for it.
+  const unclaimed = { claimed: false, expiresAt: EXPIRES, at: T };
+  for (const at of [T, T + 7 * MIN, EXPIRES, EXPIRES + ORDER_STALE_GRACE_MS, EXPIRES + ORDER_STALE_GRACE_MS + 1, EXPIRES + 60 * MIN]) {
+    it(`at +${Math.round((at - T) / 1000)}s`, () => {
+      const expired = orderStateOf({ done: false, claimed: false, expiresAt: EXPIRES }, at) === "expired";
+      assert.equal(holdsSlot(unclaimed, at), !expired);
+    });
+  }
+});
+
+describe("A CLAIMED ORDER HOLDS THE SLOT UNTIL IT CAN NO LONGER BE TRADING", () => {
+  it("through deadline and grace, and the in-flight bound after them", () => {
+    // Its deadline bounds the CLAIM, not the fill: a live fill still waits on
+    // its receipt. Freeing the slot at deadline + grace was "ask again" with the
+    // first order on chain.
+    const claimed = { claimed: true, expiresAt: EXPIRES, at: T };
+    assert.equal(holdsSlot(claimed, EXPIRES + ORDER_STALE_GRACE_MS + 1), true);
+    assert.equal(holdsSlot(claimed, EXPIRES + ORDER_STALE_GRACE_MS + ORDER_IN_FLIGHT_MS), true);
+  });
+
+  it("and NOT FOR EVER — a child SIGKILLed mid-trade never answers", () => {
+    // A row nothing can finish used to refuse every future order from that
+    // owner, for good.
+    const claimed = { claimed: true, expiresAt: EXPIRES, at: T };
+    assert.equal(holdsSlot(claimed, EXPIRES + ORDER_STALE_GRACE_MS + ORDER_IN_FLIGHT_MS + 1), false);
+  });
+});
+
+describe("the window itself", () => {
+  it("is two ticks and a ferry pass, never under five minutes", () => {
+    assert.equal(orderTtlMs(240), WINDOW_MS, "the hosted tick");
+    assert.equal(orderTtlMs(60), 5 * MIN, "the default tick sits on the floor");
+    assert.equal(orderTtlMs(1), ORDER_TTL_FLOOR_MS);
+    assert.equal(orderTtlMs(3600), (2 * 3600 + 15) * 1000);
+  });
+
+  it("a row with no deadline is held for the floor window and its grace — the sweep's old seven minutes", () => {
+    const legacy = { claimed: false, expiresAt: null, at: T };
+    assert.equal(slotFreesAt(legacy), T + 7 * MIN);
   });
 });

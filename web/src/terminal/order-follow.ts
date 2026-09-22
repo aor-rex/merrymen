@@ -19,6 +19,10 @@
  * at all, it says THAT, without converting silence into "nothing was sent": a
  * worker that took an order and has not reported back may still have filled it.
  *
+ * ON THE BROWSER'S OWN CLOCK. The window comes back from POST as a duration
+ * (`expiresInMs`) and is counted from when the reply arrived — see
+ * followWindowMs for what comparing the server's epoch with Date.now() did.
+ *
  * STILL DIES WITH THE SCREEN (`alive`). Lifting the poll out of the component
  * so a tab switch does not end it is the next step, not this one.
  */
@@ -107,16 +111,34 @@ export async function fetchOrderPoll(id: string): Promise<OrderPoll> {
   }
 }
 
+/**
+ * How long the order's own window has left, as POST measured it — or null when
+ * the reply did not say.
+ *
+ * A DURATION, NOT THE DEADLINE. `expiresAt` is the server's epoch, and the card
+ * used to hold it against the browser's Date.now(): a clock eleven minutes fast
+ * gave up before asking once, and a smaller skew stopped asking before the fill
+ * arrived. Time elapsed is the one thing both clocks agree on.
+ */
+export function followWindowMs(body: unknown): number | null {
+  const v = (body as { expiresInMs?: unknown } | null | undefined)?.expiresInMs;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 export async function followOrder(
   id: string,
-  expiresAt: number | null,
+  /** From followWindowMs: the order's window left at the POST, on no particular clock. */
+  expiresInMs: number | null,
   deps: Partial<Pick<FollowDeps, "poll" | "sleep" | "now">> & Pick<FollowDeps, "alive" | "say">,
 ): Promise<void> {
   const poll = deps.poll ?? fetchOrderPoll;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? Date.now;
+  // Measured from NOW on THIS clock. Starting the count when the reply is in
+  // hand can only make the wait longer than the server's, never shorter.
   const giveUpAt =
-    (expiresAt !== null && Number.isFinite(expiresAt) ? expiresAt + ORDER_STALE_GRACE_MS : now() + FALLBACK_WAIT_MS) +
+    now() +
+    (expiresInMs !== null && Number.isFinite(expiresInMs) ? Math.max(0, expiresInMs) + ORDER_STALE_GRACE_MS : FALLBACK_WAIT_MS) +
     FOLLOW_SLACK_MS;
   let last: OrderPoll = null;
   while (now() < giveUpAt) {
