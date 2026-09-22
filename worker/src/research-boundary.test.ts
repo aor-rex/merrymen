@@ -258,3 +258,74 @@ describe("the child does the builder lookup nowhere", () => {
     assert.ok(!/fetch\(|readBoundedJson/.test(renderer), "the renderer reaches nothing");
   });
 });
+
+/**
+ * THE DESK MUST ASK ABOUT EVERY CANDIDATE THE AGENT REASONS ABOUT.
+ *
+ * `coinAddressesFor` reads the child's `discovered_pools`; `proposeClassEntries`
+ * reads the same table through `recentCandidates(CLASS_WINDOW_SEC, CLASS_LIMIT)`.
+ * The first version of the orchestrator's query used a bare `LIMIT 25` with no
+ * time bound, against an agent looking at the newest 40 inside six hours — so
+ * the fifteen oldest candidates of every tick were never looked up.
+ *
+ * THAT SHORTFALL IS INVISIBLE AT RUNTIME, which is why it is pinned here rather
+ * than left to review. A contract nobody asked about and a contract with no page
+ * both produce no record, no block and NO DATA AVAILABLE; nothing errors, and
+ * the only symptom is a lens that quietly has less to say than it should.
+ *
+ * The constants cannot be imported — they live in another process and
+ * `CLASS_LIMIT` is a function-local — so the numbers are copied and this test is
+ * what keeps the copies honest.
+ */
+describe("the builder desk's candidate window matches the agent's", () => {
+  const numberFrom = (src: string, re: RegExp, what: string): number => {
+    const m = src.match(re);
+    assert.ok(m, `could not find ${what} — the test must be updated with the code`);
+    // eslint-disable-next-line no-eval
+    const value = Function(`"use strict";return (${m![1]})`)() as number;
+    assert.ok(Number.isFinite(value), `${what} did not evaluate to a number`);
+    return value;
+  };
+
+  it("the same six-hour window", () => {
+    const agent = numberFrom(
+      readFileSync(path.join(WORKER_SRC, "index.ts"), "utf8"),
+      /const CLASS_WINDOW_SEC = ([^;]+);/,
+      "CLASS_WINDOW_SEC in index.ts",
+    );
+    const desk = numberFrom(
+      readFileSync(path.join(WORKER_SRC, "orchestrator.ts"), "utf8"),
+      /const CLASS_CANDIDATE_WINDOW_SEC = ([^;]+);/,
+      "CLASS_CANDIDATE_WINDOW_SEC in orchestrator.ts",
+    );
+    assert.equal(desk, agent, "the desk must not look at a different span of time");
+  });
+
+  it("and the same ceiling", () => {
+    const agent = numberFrom(
+      readFileSync(path.join(WORKER_SRC, "index.ts"), "utf8"),
+      /const CLASS_LIMIT = ([^;]+);/,
+      "CLASS_LIMIT in index.ts",
+    );
+    const desk = numberFrom(
+      readFileSync(path.join(WORKER_SRC, "orchestrator.ts"), "utf8"),
+      /const CLASS_CANDIDATE_LIMIT = ([^;]+);/,
+      "CLASS_CANDIDATE_LIMIT in orchestrator.ts",
+    );
+    assert.equal(
+      desk,
+      agent,
+      "a desk that looks up fewer candidates than the agent evaluates is a silent gap",
+    );
+  });
+
+  it("and the query actually uses them rather than a literal", () => {
+    const src = readFileSync(path.join(WORKER_SRC, "orchestrator.ts"), "utf8");
+    const start = src.indexOf("async function coinAddressesFor");
+    assert.ok(start > 0);
+    const body = src.slice(start, src.indexOf("\n}", start));
+    const query = body.slice(body.indexOf("FROM discovered_pools"));
+    assert.match(query, /CLASS_CANDIDATE_WINDOW_SEC/, "the window must be the shared constant");
+    assert.match(query, /CLASS_CANDIDATE_LIMIT/, "so must the ceiling");
+  });
+});
