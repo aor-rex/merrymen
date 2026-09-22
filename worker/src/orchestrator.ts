@@ -3987,6 +3987,16 @@ let fleetNewsDesk: NewsDesk | null = null;
  * child's own sqlite, which the mirror already opens.
  */
 const tenantCoinAddresses = new Map<string, string[]>();
+/**
+ * The agent's own candidate window, restated because it cannot be imported.
+ *
+ * `CLASS_WINDOW_SEC` and `CLASS_LIMIT` are index.ts's, and `CLASS_LIMIT` is a
+ * const inside `proposeClassEntries` — a closure in another process. Copying
+ * the numbers is the only option; a test greps both files and fails when they
+ * part, which is the half that makes the copy safe.
+ */
+const CLASS_CANDIDATE_WINDOW_SEC = 6 * 3600;
+const CLASS_CANDIDATE_LIMIT = 40;
 /** Built on first use, like the news desk, so a deployment logs its cadence. */
 let fleetBuilderDesk: BuilderDesk | null = null;
 
@@ -4110,12 +4120,34 @@ async function coinAddressesFor(db: Db): Promise<string[]> {
     "SELECT token FROM class_positions ORDER BY first_seen DESC LIMIT 50",
     "token",
   );
-  // BOUNDED. A long-lived child accumulates every pool it has ever seen, and
-  // the desk's per-pass ceiling would then spend every pass on coins nobody has
-  // looked at since March. Newest first is the right slice: discovery surfaced
-  // them because they are trading now.
+  // THE SAME WINDOW AND THE SAME CEILING THE AGENT ITSELF USES, and the first
+  // version of this was neither.
+  //
+  // It read the newest 25 rows with no time bound, which was a number chosen
+  // for how it sounded. The agent's own candidate set is
+  // `recentCandidates(CLASS_WINDOW_SEC, CLASS_LIMIT)` — the newest FORTY rows
+  // inside SIX HOURS — so the desk looked up a strict subset and the fifteen
+  // oldest candidates of every tick were never asked about at all.
+  //
+  // WHY THAT WAS WORSE THAN A COVERAGE GAP. A contract nobody looked up and a
+  // contract the directory has no page for produce the same thing downstream:
+  // no record, no block, NO DATA AVAILABLE. So the shortfall was invisible —
+  // it could not show up as an error, only as a lens that seemed to have less
+  // to say than it does. That is exactly the confusion `builder.ts` is built
+  // to keep out, arriving through the back door of a scheduling constant.
+  //
+  // The six-hour bound matters in its own right, and not only for parity: a
+  // pool from yesterday cannot become a class entry, so a lookup spent on one
+  // is a lookup not spent on a coin the agent may actually buy.
+  //
+  // PINNED BY A TEST rather than by this comment. The two constants live in a
+  // different process — `CLASS_LIMIT` is a function-local in index.ts — so
+  // they cannot be imported, and a copied number with no check is a number
+  // that drifts. See research-boundary.test.ts.
   const candidates = await pull(
-    "SELECT address FROM discovered_pools ORDER BY first_seen DESC LIMIT 25",
+    `SELECT address FROM discovered_pools
+      WHERE first_seen > unixepoch() - ${CLASS_CANDIDATE_WINDOW_SEC}
+      ORDER BY first_seen DESC LIMIT ${CLASS_CANDIDATE_LIMIT}`,
     "address",
   );
   return addressesOf([...held, ...classHeld, ...candidates]).filter((a) => !notCoins.has(a));
