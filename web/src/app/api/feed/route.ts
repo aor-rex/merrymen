@@ -3,14 +3,34 @@
  * shared SQLite file the worker writes (.data/merrymen.db).
  */
 
+import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
+import { homePaths } from "@merrymen/home";
 import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { getIdentityStore } from "@merrymen/identity-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { readDeskPositions } from "@/lib/desk-positions";
 import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
-import { identityOf, type FeedIdentity } from "@/lib/feed-identity";
+import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
+
+/**
+ * Where identity is read from on this deploy — see lib/feed-identity.ts for
+ * what is read and why. Hosted, a tenant's settings live in the sealed
+ * per-tenant store and never in this container's file.
+ */
+const IDENTITY_SOURCES: IdentitySources = {
+  hosted: isHostedMode,
+  settingsOf: (tenant) => getSettingsStore().get(tenant),
+  settingsFile: () => readFileSync(homePaths.settings(), "utf8"),
+  slugOf: async (tenant) => (await getIdentityStore().get(tenant))?.slug ?? null,
+};
+
+/** Name (and where it came from) + slug + strategy + basket, for this tenant. */
+const identityOf = (fromLedger: string | null, tenant: `0x${string}` | null) =>
+  identityFrom(fromLedger, tenant, IDENTITY_SOURCES);
 
 export const dynamic = "force-dynamic";
 

@@ -4,13 +4,11 @@
  *
  * Kept out of the route so the rules can be run rather than read. Every source
  * it touches is passed in (`IdentitySources`), so a test can stand in for the
- * settings store, the file and the identity store without a deploy.
+ * settings store, the file and the identity store without a deploy — and the
+ * route, which runs only on the server, is the one place that knows whether
+ * this is the hosted deploy (client-env.test.ts keeps isHostedMode there).
  */
-import { readFileSync } from "node:fs";
-import { homePaths } from "@merrymen/home";
-import { DEFAULT_AGENT_NAME, SETTINGS_DEFAULTS, isHostedMode, type MerrymenSettings } from "@merrymen/core";
-import { getSettingsStore } from "@merrymen/settings-store";
-import { getIdentityStore } from "@merrymen/identity-store";
+import { DEFAULT_AGENT_NAME, SETTINGS_DEFAULTS, type MerrymenSettings } from "@merrymen/core";
 
 // The basket the WORKER actually defaults to when none is configured.
 // TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
@@ -66,7 +64,7 @@ function pickIdentity(s: MerrymenSettings): IdentitySettings {
   };
 }
 
-/** Everything identity is read from. The default is the real thing. */
+/** Everything identity is read from. The route passes the real ones. */
 export interface IdentitySources {
   hosted: () => boolean;
   /** The tenant's sealed settings; null when they have saved none. */
@@ -75,13 +73,6 @@ export interface IdentitySources {
   settingsFile: () => string;
   slugOf: (tenant: `0x${string}`) => Promise<string | null>;
 }
-
-const LIVE_SOURCES: IdentitySources = {
-  hosted: isHostedMode,
-  settingsOf: (tenant) => getSettingsStore().get(tenant),
-  settingsFile: () => readFileSync(homePaths.settings(), "utf8"),
-  slugOf: async (tenant) => (await getIdentityStore().get(tenant))?.slug ?? null,
-};
 
 /**
  * The configured strategy, basket and name — from WHERE THIS TENANT'S SETTINGS
@@ -107,7 +98,7 @@ const LIVE_SOURCES: IdentitySources = {
  */
 export async function readIdentitySettings(
   tenant: `0x${string}` | null,
-  src: IdentitySources = LIVE_SOURCES,
+  src: IdentitySources,
 ): Promise<IdentitySettings> {
   if (src.hosted()) {
     if (!tenant) return IDENTITY_FALLBACK;
@@ -159,7 +150,7 @@ export function resolveAgentName(
 export async function identityOf(
   fromLedger: string | null,
   tenant: `0x${string}` | null,
-  src: IdentitySources = LIVE_SOURCES,
+  src: IdentitySources,
 ): Promise<FeedIdentity> {
   const { agentName, read, strategy, basket } = await readIdentitySettings(tenant, src);
   const slug = tenant ? await src.slugOf(tenant).catch(() => null) : null;
