@@ -9,15 +9,15 @@
  * always worked, which is how it survived.
  *
  * `/link` hit this first and solved it by writing a second, child-owned record
- * the parent promotes. These tests cover the same mechanism for the two
- * settings chat can change, and the rules that keep the promotion safe: an
- * allowlist of what a chat may touch at all, and a stored marker so one change
- * is applied once rather than re-applied over the dashboard for ever.
+ * the parent promotes. These tests cover the same mechanism for the three
+ * settings chat can change — /strategy, /cap and /name — and the rules that
+ * keep the promotion safe: an allowlist of what a chat may touch at all, and a
+ * stored marker so one change is applied once, not re-applied for ever.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { rememberChatSetting, type TelegramState } from "./state";
-import { promotedSettings } from "./chat-settings";
+import { CHAT_SETTABLE, promotedSettings } from "./chat-settings";
 
 const base = { chatSettings: null } as unknown as TelegramState;
 
@@ -156,5 +156,34 @@ describe("what a chat may not change", () => {
       patch: { telegramPcControlEnabled: true, telegramAgentEnabled: true, telegramAgentAutoShell: true },
     })!;
     assert.deepEqual(Object.keys(out).sort(), ["telegramSettingsAt"]);
+  });
+});
+
+describe("a rename from chat survives the next tick", () => {
+  it("is a setting a chat may change", () => {
+    // /name was the worst of the three. /strategy and /cap lasted the fifteen
+    // seconds until the orchestrator's reconcile; a rename lasted ONE TICK,
+    // because index.ts rewrites the identity file from cfg.agentName whenever
+    // the two differ — a reconciliation that exists so the dashboard wins, and
+    // which therefore undid the chat rename immediately.
+    const out = promote({}, { at: 1_000, patch: { agentName: "Shogun" } });
+    assert.equal(out?.agentName, "Shogun");
+  });
+
+  it("carries a rename alongside the other two", () => {
+    const out = promote({}, {
+      at: 1_000,
+      patch: { agentName: "Shogun", strategy: "trencher", telegramMaxActionUsdg: 25 },
+    })!;
+    assert.equal(out.agentName, "Shogun");
+    assert.equal(out.strategy, "trencher");
+    assert.equal(out.telegramMaxActionUsdg, 25);
+  });
+
+  it("stores exactly three settable fields, and no more", () => {
+    // The allowlist is the boundary a bearer link code runs into. Widening it
+    // is a security decision; this fails loudly when someone widens it without
+    // reading why, rather than quietly accepting the new field.
+    assert.deepEqual([...CHAT_SETTABLE].sort(), ["agentName", "strategy", "telegramMaxActionUsdg"]);
   });
 });

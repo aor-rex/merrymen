@@ -265,6 +265,27 @@ const CHILD_SECRET_STRIP = [
   // verify and no reason to hold the key that would verify one.
   "PRIVY_APP_SECRET",
   /**
+   * THE TELEGRAM BOT TOKEN, which is both kinds of entry on this list at once.
+   *
+   * A secret a child could leak, and an answer to a question about somebody
+   * else. settings.ts:443 resolves it `str(file.telegramBotToken, env...)` —
+   * file first, env as the FALLBACK — so an orchestrator environment that
+   * ever carried this would hand the house bot to every tenant who has not
+   * set one of their own. They would all long-poll the same bot, and a /link
+   * from any chat would bind to whichever child answered first: control of
+   * one stranger's agent handed to another.
+   *
+   * AND THE EXISTING GUARD WOULD NOT CATCH IT. `dedupeBotToken` compares the
+   * tokens in tenants' SETTINGS, so tokens arriving by env are invisible to
+   * it — the one collision it is built to prevent is the one it cannot see.
+   *
+   * Latent today: the variable is set nowhere in this repo and is absent from
+   * the deployed environment. Stripped anyway, because the cost is one line
+   * and the failure is silent, cross-tenant and indistinguishable from the
+   * product working.
+   */
+  "MERRYMEN_TELEGRAM_BOT_TOKEN",
+  /**
    * NOT A SECRET — AN ANSWER TO A QUESTION ABOUT SOMEBODY ELSE, which is why it
    * belongs on this list even though nothing here could leak or misuse it.
    *

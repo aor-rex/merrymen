@@ -407,6 +407,23 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
       setAgentEnabled(null);
       setAgentAutoShell(null);
       setTokens(null);
+      // THE SEVEN THAT WERE LEFT BEHIND.
+      //
+      // Everything above is cleared so the refetch below is what the screen
+      // shows. These were not, so after a save they kept displaying the LOCAL
+      // value while `view` held the server's — and the two differ exactly when
+      // a write did not land. A hosted tenant toggling a field the API strips
+      // reads "Changes saved" and goes on seeing their own toggle until a
+      // reload; the strip is deliberate (route.ts deletes the RCE fields before
+      // any handler sees them) but the screen then disagrees with the server
+      // about whether an agent may spend real money, which this form may not do.
+      setTrencherLive(null);
+      setTrencherFast(null);
+      setLiveTrading(null);
+      setAssetMode(null);
+      setDeskEnabled(null);
+      setClassSnipe(null);
+      setOfficialCoins(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();

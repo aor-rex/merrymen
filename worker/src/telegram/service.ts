@@ -519,9 +519,31 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         stateRef.set({ ...st, priceAlerts: next });
         return `🔕 alert #${id} removed.`;
       },
+      /**
+       * A RENAME FROM CHAT LASTED ONE TICK.
+       *
+       * `setSoulName` rewrites the identity file, and index.ts:5220 rewrites
+       * that file back from `cfg.agentName` on every tick it differs — a
+       * reconciliation that exists so the dashboard's name wins, and which
+       * therefore undid a chat rename before the owner finished reading the
+       * confirmation. Worse than /strategy and /cap, which at least lasted
+       * the fifteen seconds until the next reconcile.
+       *
+       * So the settings copy moves too: `patchSettingsFile` stops this tick
+       * from reverting it, and `rememberChatSetting` is what survives the
+       * orchestrator replacing that file wholesale.
+       *
+       * `r.name` and not `name` — the NORMALISED form setName returned. The
+       * web tier stores soul-form for exactly this reason (route.ts shares
+       * NAME_RE and the NFC-plus-collapse with soul.ts), and storing the raw
+       * input would leave cfg.agentName !== getName() true for ever, which
+       * is the every-tick rewrite this fix exists to stop.
+       */
       setName: (name) => {
         const r = setSoulName(name);
         if (r.ok) {
+          patchSettingsFile({ agentName: r.name });
+          rememberChatSetting(stateRef, { agentName: r.name }, now());
           deps.onNameChange?.(r.name);
           deps.note("ok", `Telegram: the merryman is now called ${r.name}`);
         }

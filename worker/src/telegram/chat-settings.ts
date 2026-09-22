@@ -41,7 +41,7 @@ import type { MerrymenSettings } from "../../../packages/core/src/index";
  * the remote-execution fields, which worker/src/settings.ts forces off hosted
  * precisely because a chat can reach them.
  */
-export const CHAT_SETTABLE: ReadonlySet<string> = new Set(["strategy", "telegramMaxActionUsdg"]);
+export const CHAT_SETTABLE: ReadonlySet<string> = new Set(["strategy", "telegramMaxActionUsdg", "agentName"]);
 
 /** A chat-originated change, as the child recorded it. */
 export interface ChatSettings {
