@@ -1607,8 +1607,6 @@ async function fleetHealth(): Promise<void> {
       const failed = n((r) => r.status === "reverted");
       const submitted = n((r) => r.status === "submitted") + landed + failed;
       const tooWide = n((r) => r.rule === "grant-too-wide");
-      const holds = (k: string) =>
-        h.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
 
       // SILENT ONLY WHEN NOBODY IS LIVE — because silence means two things and
       // this is a health metric.
@@ -1629,8 +1627,7 @@ async function fleetHealth(): Promise<void> {
           `autonomy| 1h — ${liveAgents ?? "?"} live · proposals ${proposals} · ` +
             `policy-passed ${proposals - rejected} · ` +
             `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
-            `grant-too-wide ${tooWide} · holds ${holds("MODEL_HOLD")} model, ` +
-            `${holds("GATE_FORCED_HOLD")} gate-forced, ${holds("unreported")} unreported`,
+            `grant-too-wide ${tooWide} · holds ${autonomyHolds(h)}`,
         );
         // The refusals, largest first, so a new one announces itself rather
         // than hiding inside a total. Bounded — a fleet refusing in twenty ways
@@ -1676,6 +1673,36 @@ async function fleetHealth(): Promise<void> {
     // A health read that fails is not a fleet that is down. Say nothing rather
     // than raise a false alarm, and never take the loop with it.
   }
+}
+
+/** The kinds the autonomy line names, in the order it names them. */
+const HOLD_BUCKETS: readonly (readonly [kind: string, label: string])[] = [
+  ["MODEL_HOLD", "model"],
+  ["GATE_FORCED_HOLD", "gate-forced"],
+  ["STALE_MARK_HOLD", "stale-mark"],
+  ["unreported", "unreported"],
+];
+
+/**
+ * THE HOLDS CLAUSE OF THE AUTONOMY LINE, and every hold the query read is in it.
+ *
+ * It named three kinds and summed only those. When the writer started stamping
+ * a hold on a stale price as STALE_MARK_HOLD — which had counted as a model
+ * hold until then — those holds fell out of the line entirely, and a fleet
+ * holding on dead feeds read as a fleet holding less. So the named buckets are
+ * always printed (a kind the query found none of is a measured zero), and any
+ * kind this list does not know is printed under its own name rather than
+ * dropped. A new kind at the writer then shows up here the first hour it
+ * happens, instead of being noticed as a gap in a total.
+ */
+export function autonomyHolds(rows: readonly { kind: string; n: number | string }[]): string {
+  const count = (k: string) => rows.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
+  const named = new Set(HOLD_BUCKETS.map(([k]) => k));
+  const unknown = [...new Set(rows.map((r) => r.kind).filter((k) => !named.has(k)))].sort();
+  return [
+    ...HOLD_BUCKETS.map(([k, label]) => `${count(k)} ${label}`),
+    ...unknown.map((k) => `${count(k)} ${k}`),
+  ].join(", ");
 }
 
 /**

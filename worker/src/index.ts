@@ -120,7 +120,7 @@ import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeCons
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { publishesAView, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
@@ -10520,7 +10520,9 @@ async function main() {
           // analysts must not read as a considered view of thin evidence.
           if (outcome.ran && outcome.result.ok) {
             const dd = outcome.result.decision;
-            if (publishableThesis({ name: cfg.agentName || "Merryman", source: inputs.decisionSource, action: dd.action, symbol: dd.symbol, reason: dd.thesis, hold_kind: dd.hold_kind })) {
+            // The kind the ledger recorded, not the Brain's: a hold on a stale
+            // mark is kept private, so it must not defer the public review.
+            if (publishesAView(dd, { name: cfg.agentName || "Merryman", source: inputs.decisionSource }, inputs.market)) {
               reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
             }
             const answered = (dd.analyst_views ?? [])
