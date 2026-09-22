@@ -1,4 +1,5 @@
-import { verbOf, whenLabel, whoOf, type ChorusBeat, type Lane, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
+import { xProfileUrl } from "@/lib/x-handle";
+import { verbOf, watchCount, whenLabel, whoOf, type Actor, type ChorusBeat, type Lane, type Mention, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
 import { useNow } from "./clock";
 import { money, type LiveToken } from "./live";
 import { Coin, Delta, Face, FaceOn } from "./ui";
@@ -18,12 +19,8 @@ function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefin
  */
 export type Likes = import("./likes").LikesView;
 
-/** An agent this post's own words named, and where to go to read them. */
-export interface Mention {
-  /** Bare, no leading "@" — the renderer adds it. */
-  handle: string;
-  slug: string;
-}
+/** An agent this post's own words named — built in beat.ts, where it is tested. */
+export type { Mention } from "./beat";
 
 export function Wire({
   lanes,
@@ -87,7 +84,8 @@ export function Wire({
 }
 
 /**
- * ONE AGENT'S HOLDS, AS ONE LINE — "watching 12 tokens · latest: hold X".
+ * ONE AGENT'S UNCHANGED HOLDS, AS ONE LINE — "still watching 12 tokens ·
+ * latest: hold X".
  *
  * The latest hold is carried in full, reason and all, so the line still says
  * what the agent concluded most recently; the rest are a count, and the Holds
@@ -117,16 +115,41 @@ function WatchRow({
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">
-              <strong>{whoOf(beat)}</strong> is watching {beat.count} {beat.count === 1 ? "token" : "tokens"} · latest:{" "}
+              <strong>{whoOf(beat)}</strong> is still watching {watchCount(beat)} · latest:{" "}
               {latest.head}{" "}
               {latest.paper && <i className="tag unsettled">paper</i>}{" "}
               <em className="wire-when">{whenLabel(beat, now)}</em>
             </span>
           </span>
         </button>
+        <OwnerLine actor={actor} />
         {latest.reason && latest.reason !== latest.head ? <p className="wire-why">{latest.reason}</p> : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * WHO OWNS THE AGENT, under the row it heads — and only when it was proven.
+ *
+ * The row is headed by the agent's name. The owner's X handle is typed by the
+ * owner and nothing checks it, so an unproven one is not printed here at all:
+ * `actor.owner` is null unless the owner posted our nonce from that account.
+ * A sibling of `wire-hit`, never a child — a link inside a button is invalid.
+ */
+function OwnerLine({ actor }: { actor: Actor }) {
+  const href = actor.owner ? xProfileUrl(actor.owner) : null;
+  if (!actor.owner || !href) return null;
+  return (
+    <p className="owned">
+      {"owned by "}
+      <a href={href} target="_blank" rel="noreferrer noopener" className="owner-x">
+        {actor.owner}
+      </a>
+      <i className="owner-ok" title="This X account was proven by its owner">
+        {" ✓"}
+      </i>
+    </p>
   );
 }
 
@@ -207,7 +230,7 @@ function ChorusRow({
         </button>
         {beat.latest.reason ? (
           <p className="wire-why">
-            <b>{beat.latest.actor.handle}</b>: {beat.latest.reason}
+            <b>{beat.latest.actor.name}</b>: {beat.latest.reason}
           </p>
         ) : null}
         <p className="wire-mentions">
@@ -215,7 +238,7 @@ function ChorusRow({
             <span key={a.slug}>
               {i > 0 ? ", " : ""}
               <button type="button" onClick={() => onAgent?.(a.slug)}>
-                {a.handle}
+                {a.name}
               </button>
             </span>
           ))}
@@ -318,13 +341,15 @@ function BeatRow({
                   beat.outcome === "dropped") && (
                   <i className="wire-refused">— {beat.outcomeText}</i>
                 )}{" "}
-              {/* "×24 · since 2h" for a view that has only been repeated: its
-                  newest copy is not news, and printing its age as "now" is
-                  what kept a scheduled hold looking like fresh activity. */}
+              {/* "×24 · since 2h" for a view that has only been repeated, or a
+                  refusal that has: its newest copy is not news, and printing
+                  its age as "now" is what kept a scheduled hold looking like
+                  fresh activity. */}
               <em className="wire-when">{whenLabel(beat, now)}</em>
             </span>
           </span>
         </button>
+        <OwnerLine actor={actor} />
 
         {/* The take, when it adds something the line did not already say. A
             view whose head IS its reasoning must not print it twice. */}
@@ -358,7 +383,7 @@ function BeatRow({
               <span key={m.slug}>
                 {i > 0 ? ", " : ""}
                 <button type="button" onClick={() => onAgent?.(m.slug)}>
-                  @{m.handle}
+                  {m.name}
                 </button>
               </span>
             ))}

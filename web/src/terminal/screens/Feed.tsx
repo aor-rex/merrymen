@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { beatsOf, compactHolds, lanesOf, type Beat } from "../beat";
+import { beatsOf, lanesOf, mentionTargets, pillBeats, type Beat, type Pill } from "../beat";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
@@ -25,13 +25,12 @@ import { Wire, type Mention } from "../wire";
  * what did the agents do, and what did they say about it.
  *
  * HOLDS GOT THEIR OWN PILL because they were drowning everything else. A
- * Trencher concludes HOLD on a coin every 30 seconds; laid out one per row they
- * were the whole of "All". There each agent's holds are one line — "watching
- * 12 tokens · latest: hold X" — and Holds lays every one of them out again.
+ * strategy re-proposes the same hold on every name every tick; laid out one
+ * per row they were the whole of "All". There each agent's UNCHANGED holds are
+ * one line — "still watching 12 tokens · latest: hold X" — while a fresh or
+ * changed hold keeps its own row, and Holds lays every one of them out again.
  * Counted, never dropped.
  */
-type Pill = "all" | "trades" | "theses" | "holds" | "debate" | "top";
-
 const PILLS: { id: Pill; label: string }[] = [
   { id: "all", label: "All" },
   { id: "trades", label: "Trades" },
@@ -74,9 +73,9 @@ export function Feed({
   const beats = useMemo(() => beatsOf(theses, agents), [theses, agents]);
   const replies = useMemo(() => repliesIn(beats), [beats]);
   const shown = useMemo(() => {
-    // Only "All" summarises; every other pill filters the rows themselves.
-    const base = active === "all" ? compactHolds(beats) : beats;
-    const kept = base.filter((b) => keepBeat(b, active, replies, counts ?? {}));
+    // Only All and Holds summarise, and only after every post was read one row
+    // each — see pillBeats. The rest filter the posts themselves.
+    const kept = pillBeats(beats, active, replies, counts ?? {});
     if (!likes || sort !== "liked") return kept;
     // MOST LIKED FIRST, then newest — a stable second key so equal counts do
     // not shuffle under the reader on every poll. Sorted in a COPY: `beats` is
@@ -175,51 +174,22 @@ function emptyFor(pill: Pill, likesRead: boolean): string {
  * classified it, which is how a feed goes silent for a week with no error.
  */
 function repliesIn(beats: Beat[]): Map<string, Mention[]> {
-  const handles = new Map<string, Mention>(); // bare handle → who it belongs to
-  for (const b of beats) {
-    const handle = b.actor.handle.replace(/^@/, "").toLowerCase();
-    if (handle) handles.set(handle, { handle, slug: b.actor.slug });
-  }
+  // "@token" → the one agent it names: its name, or a handle its owner proved.
+  // An unproven handle names nobody, and neither does a name two agents share.
+  const handles = mentionTargets(beats);
   const out = new Map<string, Mention[]>();
-  if (handles.size < 2) return out;
+  if (new Set([...handles.values()].map((m) => m.slug)).size < 2) return out;
   for (const b of beats) {
     const text = `${b.kind === "view" ? b.head : ""} ${b.reason}`.toLowerCase();
     const named: Mention[] = [];
     for (const who of handles.values()) {
-      // The `@` is required. Agent handles are short words, and matching a bare
-      // one would make every thesis mentioning "value" a reply to @value.
-      if (who.slug !== b.actor.slug && text.includes(`@${who.handle}`)) named.push(who);
+      // The `@` is required. Agent names are short words, and matching a bare
+      // one would make every thesis mentioning "value" a reply to @value. One
+      // agent named by both its tokens is still one mention.
+      if (who.slug !== b.actor.slug && text.includes(`@${who.handle}`) && !named.some((m) => m.slug === who.slug)) named.push(who);
     }
     if (named.length) out.set(b.id, named);
   }
   return out;
 }
 
-function keepBeat(
-  beat: Beat,
-  pill: Pill,
-  replies: Map<string, Mention[]>,
-  counts: Record<string, number>,
-): boolean {
-  switch (pill) {
-    case "all":
-      return true;
-    case "trades":
-      return beat.kind === "trade";
-    case "theses":
-      return beat.kind === "view" && !beat.hold;
-    case "holds":
-      return (beat.kind === "view" && beat.hold) || beat.kind === "chorus";
-    case "debate":
-      return replies.has(beat.id);
-    case "top":
-      // A post nobody liked is not "top". An unslugged post has no postId and
-      // therefore cannot be liked at all, so it is absent here by construction
-      // rather than by a check.
-      return !!beat.postId && (counts[beat.postId] ?? 0) > 0;
-    default: {
-      const _x: never = pill;
-      return _x;
-    }
-  }
-}

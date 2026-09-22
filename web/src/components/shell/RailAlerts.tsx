@@ -7,7 +7,7 @@ import { badgeOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
-import { alertsOf, alertsRead, coinName } from "@/lib/rail-alerts";
+import { alertsOf, alertsRead, coinName, emptyAlerts, type AlertsRead } from "@/lib/rail-alerts";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -42,7 +42,7 @@ function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
 
 export function RailAlerts() {
   const [theses, setTheses] = useState<PublicThesis[] | null>(null);
-  const [read, setRead] = useState<"ok" | "unreadable">("ok");
+  const [read, setRead] = useState<AlertsRead>("partial");
 
   useEffect(() => {
     let alive = true;
@@ -57,7 +57,7 @@ export function RailAlerts() {
         // last good read is still true — and only says so when there is none.
         const state = alertsRead(d);
         setRead(state);
-        if (state === "ok") setTheses(alertsOf(d.theses ?? []));
+        if (state !== "unreadable") setTheses(alertsOf(d.theses ?? []));
         else setTheses((prev) => prev ?? []);
       } catch {
         /* keep what is on screen */
@@ -87,12 +87,12 @@ export function RailAlerts() {
   }
 
   if (theses.length === 0) {
-    // TWO DIFFERENT NOTHINGS. A read that answered with no trades is a quiet
-    // day and may say so; a read that did not answer may not.
+    // THREE DIFFERENT NOTHINGS — see `emptyAlerts`. A whole day read with no
+    // published trade, the latest posts read with none, and no read at all.
     return (
       <div className="mm-alerts">
         <p className="mm-kicker">Alerts</p>
-        <p className="mm-kicker" role="status">{read === "ok" ? "No trades in the last day." : "Alerts unavailable."}</p>
+        <p className="mm-kicker" role="status">{emptyAlerts(read)}</p>
       </div>
     );
   }

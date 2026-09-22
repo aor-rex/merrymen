@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { publishableThesis } from "@merrymen/thesis";
-import { beatsOf, type FeedRow } from "./beat";
+import { beatsOf, whoOf, type FeedRow } from "./beat";
 import type { LiveAgent } from "./live";
 import { coinName } from "../lib/rail-alerts";
 
@@ -92,5 +92,27 @@ describe("the trench byline comes from the row, not from the author's current mo
   it("and a trench coin stays a trench row after its author switches away", () => {
     const [beat] = beatsOf([published({}, { trencher: false })], agents);
     assert.equal(beat!.trench, true);
+  });
+});
+
+describe("a row is about the agent, and names its owner only on proof", () => {
+  // The subject of every feed row was `handle ?? name` — the owner's X
+  // handle, which the owner typed and nothing checked. Any agent could head
+  // each of its posts with somebody else's name.
+  it("AN UNPROVEN HANDLE IS NOT SHOWN AT ALL — the agent's name heads the row", () => {
+    const [beat] = beatsOf([published({ x_handle: "elonmusk" })], agents);
+    assert.equal(whoOf(beat!), "Shogun");
+    assert.equal(beat!.actor.owner, null, "no proof flag, no handle");
+  });
+
+  it("a proven handle is carried, beside the name rather than instead of it", () => {
+    const [beat] = beatsOf([published({ x_handle: "shogun_x" }, { handleVerified: true })], agents);
+    assert.equal(whoOf(beat!), "Shogun");
+    assert.equal(beat!.actor.owner, "@shogun_x");
+  });
+
+  it("and a proof flag on something that is not a handle links nothing", () => {
+    const [beat] = beatsOf([published({ x_handle: "javascript:alert(1)" }, { handleVerified: true })], agents);
+    assert.equal(beat!.actor.owner, null);
   });
 });

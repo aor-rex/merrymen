@@ -31,23 +31,28 @@
  * day. One LIMIT over both, ordered by the newest row in each group, meant a
  * re-proposed hold jumped back to the top on every tick — measured on
  * production, 37 of 40 posts were holds covering the last ten minutes, and a
- * buy that landed three hours earlier was simply not in the response. So a
- * buy or sell is read by its own query with its own budget, and a view is read
- * as the LATEST word per (agent, name), which is bounded by how many names an
- * agent watches rather than by how often its clock fires. Nothing is hidden by
- * this — every row still passes the same gate — it is re-ranked.
+ * buy that landed three hours earlier was simply not in the response.
+ *
+ * So anything that can carry an execution outcome — a buy, a sell, a vault
+ * move, a transfer — is an ACTION, read newest first and paged until enough
+ * pass the gate. A hold or a pure view is a VIEW, read as the latest word per
+ * (agent, name). A view that is not an agent's latest word on a name is not
+ * published at all: that is a choice, and the ledger and /why still have it.
  *
  * WHY THE JOIN TO `trades` IS NOT OPTIONAL. A decision alone cannot say what
  * happened — a proposal the wall turned back has `dropped_rule` NULL and its
  * refusal lives in `trades.reject_rule`. Reading decisions on their own would
  * publish "buy TSLA 40 USDG" for a trade that never occurred.
  *
- * TWO GATES, ON PURPOSE. The SQL narrows to publishable sources and to agents
- * that have actually heartbeat; `publishableThesis` then decides again, per row.
- * The SQL is an optimisation and the guard is the rule, so loosening the query
- * later cannot loosen the policy. `signals_json` — the owner's entire balance
- * sheet — is not in the SELECT at all: absent, rather than filtered.
+ * TWO GATES, ON PURPOSE. The SQL narrows to publishable sources, to agents that
+ * have actually heartbeat, and — through `publicationNarrowing` — past the rows
+ * the gate drops for their source, action or rule; `publishableThesis` then
+ * decides again, per row. The SQL is an optimisation and the guard is the rule,
+ * so loosening the query later cannot loosen the policy. `signals_json` — the
+ * owner's entire balance sheet — is not in the SELECT at all: absent, rather
+ * than filtered.
  */
+import { publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -56,19 +61,45 @@ import { getSettingsStore } from "@merrymen/settings-store";
 
 /** How far back a post can be and still be news. */
 export const WINDOW_SEC = 24 * 3600;
-/** Trade groups to read, before the guard trims to what may be shown. */
-const ACTION_SCAN = 90;
+/** Action groups per page, before the guard trims to what may be shown. */
+const ACTION_PAGE = 90;
 /**
- * (agent, name) pairs to read. Not ticks: by the time this LIMIT applies each
- * pair is already one row, so a busy clock cannot spend it.
+ * How far the action scan pages before it stops and says it stopped. Ten pages:
+ * the SQL has already skipped what the gate drops by source, action and rule,
+ * so what is left to page past is rows only the gate can judge by their words.
  */
-const VIEW_SCAN = 120;
+const ACTION_SCAN_MAX = 900;
+/**
+ * (agent, name) pairs to read, before the gate. More than are shown, so a pair
+ * whose every recent word the gate refuses does not cost a slot.
+ */
+const VIEW_PAIRS = 60;
+/**
+ * Groups read per pair: the newest, and enough behind it that a newer row only
+ * the gate can refuse — an address in a model's reason, a provider error —
+ * does not decide the name on its own. A bound, not a principle: a name whose
+ * newest three DIFFERENT words are all refused publishes nothing, which claims
+ * nothing, rather than letting one chatty name cost the whole read.
+ */
+const VIEW_DEPTH = 3;
+/**
+ * The most names one agent may fill of the public view lane. The lane is also
+ * dealt out in turns — every agent's newest name before anybody's second — so
+ * a Trencher rotating sixty coins cannot hold a quieter agent's changed view
+ * off the page. An agent's own profile is not shared, and gets the whole lane.
+ */
+const PER_AGENT_VIEWS = 10;
 /** Per lane — a busy view lane cannot take a slot a trade needed. */
 const SHOW = 40;
 
-/** A buy or a sell. Everything else — a hold, a pure view, a vault move — is a view. */
-const IS_ACTION = "d.action IN ('buy', 'sell')";
-const IS_VIEW = "(d.action IS NULL OR d.action NOT IN ('buy', 'sell'))";
+/**
+ * An ACTION is anything that can carry an execution outcome. A vault move was
+ * a "view" once, and views keep only the latest word per name: vault moves have
+ * no symbol, so every deposit, withdrawal and pure thesis of an agent shared one
+ * name, and a refused re-proposal erased the deposit that had landed before it.
+ */
+const IS_ACTION = "(d.action IS NOT NULL AND d.action <> 'hold')";
+const IS_VIEW = "(d.action IS NULL OR d.action = 'hold')";
 
 // DERIVED, never listed again here. The SQL narrowing is an optimisation and
 // `publishableThesis` is the rule — but a second hand-maintained list makes the
@@ -96,12 +127,37 @@ export type FeedThesis = PublicThesis & {
   postId: string | null;
   /** Current agent mode, not a claim about the mode when an older post was written. */
   trencher?: boolean;
+  /**
+   * Whether `handle` is one its owner PROVED, by posting a nonce from it. The
+   * handle alone is typed by the owner and nothing checked it, so a surface
+   * that names the owner may do so only when this is true.
+   */
+  handleVerified: boolean;
+  /**
+   * Epoch SECONDS this post, as it stands, was first said with nothing else
+   * said about the same name after it. Null when something else was — then
+   * `said` and `firstAt` still count every copy in the window, but the copies
+   * are not one unbroken stretch, and "×N · since" would hide the change.
+   */
+  unchangedSince: number | null;
+  /**
+   * VIEWS ONLY: this agent said something about more names in the window than
+   * this response carries, so a count of its names taken from here is a floor
+   * and not a total.
+   */
+  moreNames?: boolean;
 };
 
 export interface ThesesRead {
   /** "none" means the ledger could not be read — NOT that nobody said anything. */
   source: "sqlite" | "none";
   theses: FeedThesis[];
+  /**
+   * Every action group in the window reached the gate, and none that passed
+   * was cut. Only then does an empty action lane mean no published trades; a
+   * scan that stopped at its bound says nothing about what lay past it.
+   */
+  tradesComplete: boolean;
 }
 
 export interface ReadThesesOptions {
@@ -113,11 +169,23 @@ export interface ReadThesesOptions {
   limit?: number;
 }
 
+/** A group as the query returns it: the row the gate reads, and where it sits. */
+type Group = ThesisRow & {
+  x_verified?: number | null;
+  sym: string;
+  /** 1 for the newest group of its (agent, name) in this lane, then 2, 3… */
+  in_pair: number;
+  /** The newest time of the next group of the same (agent, name), or null. */
+  next_at: number | null;
+  /** Views only: how many names this account said something about. */
+  agent_names?: number;
+};
+
 export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore().get(tenant)): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
   return readDb(async (db): Promise<ThesesRead> => {
-    if (!db) return { source: "none", theses: [] };
+    if (!db) return { source: "none", theses: [], tradesComplete: false };
 
     // The slug map, read once. NOT a SQL join: the identity store is not the
     // ledger, and the file backend makes a join impossible — the code has to
@@ -139,9 +207,10 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
 
     // Scoping to one agent means scoping to every account it has ever held.
     const only = opts.agentSlug ? (accountsFor.get(opts.agentSlug) ?? []) : null;
-    if (only !== null && only.length === 0) return { source: "sqlite", theses: [] };
+    if (only !== null && only.length === 0) return { source: "sqlite", theses: [], tradesComplete: true };
 
     const since = Math.floor(Date.now() / 1000) - (opts.agentSlug ? 30 * WINDOW_SEC : WINDOW_SEC);
+    const narrow = publicationNarrowing("d", "t");
     const where: string[] = [
       "a.mode IN ('live', 'paper')",
       "d.agent_id NOT LIKE 'rh:%'",
@@ -152,8 +221,12 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       // the gate, and take the last real view of the name down with it.
       "(d.hold_kind IS NULL OR d.hold_kind NOT IN ('GATE_FORCED_HOLD', 'STALE_MARK_HOLD'))",
       "(d.dropped_rule IS NULL OR d.dropped_rule NOT LIKE 'brain-%')",
+      // The rows the gate drops for their source, action or rule: a day of the
+      // class route's refused re-proposals, or a basket blocked on its own
+      // account, is otherwise the whole of a bounded scan.
+      narrow.sql,
     ];
-    const args: unknown[] = [since, ...SOURCES];
+    const args: unknown[] = [since, ...SOURCES, ...narrow.args];
     if (only) {
       where.push(`LOWER(d.agent_id) IN (${only.map(() => "?").join(", ")})`);
       args.push(...only);
@@ -162,36 +235,37 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       where.push("d.symbol = ?");
       args.push(opts.symbol);
     }
-    let rows: { actions: ThesisRow[]; views: ThesisRow[] } = { actions: [], views: [] };
     // ── THE NAME IS OPTIONAL TO READ, ON PURPOSE ─────────────────────────
     //
-    // `decisions.display_name` is created by the WRITER's migration, and the
-    // reader is a different service that deploys at the same moment. For the
-    // minute between the two, selecting a column that does not exist yet
-    // throws — and the catch below turns that into an empty list, which on a
-    // public feed is indistinguishable from a fleet that has never spoken.
+    // `decisions.display_name` and `agents.x_verified` are created by the
+    // WRITER's migrations, and the reader is a different service that deploys
+    // at the same moment. For the minute between the two, selecting a column
+    // that does not exist yet throws — and the catch below turns that into an
+    // empty list, which on a public feed is indistinguishable from a fleet
+    // that has never spoken.
     //
-    // So it is attempted, and dropped if the column is not there yet. A feed
-    // without the coin's name is a worse feed; a blank one is a broken
-    // product, and the blankness would be silent.
+    // So they are attempted, and dropped if they are not there yet. A feed
+    // without the coin's name is a worse feed, and one without the proof
+    // shows no owner handle at all; a blank one is a broken product, and the
+    // blankness would be silent.
     //
-    // ONE SELECT, TWO QUERIES. The column list, the joins and the group key are
-    // shared text, so the two lanes cannot drift into two ideas of what a post
-    // is; only the lane predicate and the budget differ.
-    const selectFrom = (named: boolean) =>
-      `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
-              d.action AS action, d.symbol AS symbol, ${named ? "d.display_name AS display_name," : ""}
+    // ONE GROUPED READ, TWO LANES. The column list, the joins and the group
+    // key are shared text, so the lanes cannot drift into two ideas of what a
+    // post is; only the lane predicate and the budget differ.
+    const grouped = (named: boolean, lane: string) =>
+      `SELECT a.name AS name, a.x_handle AS x_handle, ${named ? "COALESCE(a.x_verified, 0) AS x_verified," : ""}
+              d.agent_id AS agent_id, d.action AS action, d.symbol AS symbol, COALESCE(d.symbol, '') AS sym,
+              ${named ? "d.display_name AS display_name," : ""}
               d.size_usdg AS size_usdg,
               d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
               d.hold_kind AS hold_kind,
               p.body AS post,
               t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
-              COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
+              COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at, MAX(d.id) AS last_id
          FROM decisions d
          JOIN agents a ON a.smart_account = d.agent_id
-         -- The LAST trade for this decision. A correlated MAX(id) rather than
-         -- a window function: the scoreboard already hedges against a SQLite
-         -- build without them, and this needs to run on both backends.
+         -- The LAST trade for this decision. A correlated MAX(id) keeps this
+         -- join to one row per decision on both backends.
          LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
          -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
          -- almost no decision has a post: one is written only for a class
@@ -207,55 +281,96 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         -- LEADERBOARD still ranks live only — a ranking of returns must not
         -- mix fake capital in. 'idle' stays out: an agent that has never
         -- heartbeat has not said anything.
-        `;
-    const groupBy = (named: boolean) =>
-      `GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
-                d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body`;
-    const actionWhere = [...where, IS_ACTION].join(" AND ");
-    const viewWhere = [...where, IS_VIEW].join(" AND ");
-    const run = async (named: boolean) => ({
-      actions: (await db
+        WHERE ${[...where, lane].join(" AND ")}
+        GROUP BY a.name, a.x_handle, ${named ? "a.x_verified," : ""} a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
+                 d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body`;
+    // WHERE EACH GROUP SITS AMONG THE OTHERS ABOUT THE SAME NAME. Window
+    // functions over the grouped rows, as distinct-trades.ts already runs on
+    // both backends: `in_pair` says whether this is the agent's latest word on
+    // the name, and `next_at` says when the word before it last appeared —
+    // which is what decides whether a repeat is one unbroken stretch.
+    const placed = (named: boolean, lane: string) =>
+      `SELECT g.*,
+              ROW_NUMBER() OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS in_pair,
+              LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at,
+              MAX(g.last_at) OVER (PARTITION BY g.agent_id, g.sym) AS pair_at
+         FROM (${grouped(named, lane)}) g`;
+
+    const actionPage = (named: boolean, offset: number) =>
+      db
         .prepare(
-          `${selectFrom(named)}
-            WHERE ${actionWhere}
-            ${groupBy(named)}
-            ORDER BY MAX(d.at) DESC
-            LIMIT ?`,
+          `SELECT r.* FROM (${placed(named, IS_ACTION)}) r
+            ORDER BY r.last_at DESC, r.last_id DESC
+            LIMIT ? OFFSET ?`,
         )
-        .all(...args, Math.max(ACTION_SCAN, limit))) as ThesisRow[],
-      // THE LATEST WORD PER (agent, name), and the count and first time of
-      // exactly that sentence. `latest` finds each pair's newest row; HAVING
-      // keeps the one group containing it, so `said` and `first_at` describe
-      // the view as it stands now rather than everything the agent ever said
-      // about the name. A derived table and HAVING rather than a window
-      // function, for the same two-backend reason as the trade join above.
-      views: (await db
+        .all(...args, ACTION_PAGE, offset) as Promise<Group[]>;
+
+    // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
+    // re-said every tick always had the freshest time, so any agent with forty
+    // names took all forty slots. Here each agent's names are numbered newest
+    // first (`agent_turn`), and the lane is filled turn by turn: every agent's
+    // newest name, then every agent's second, up to a cap per agent. Each pair
+    // brings its newest VIEW_DEPTH groups, so the gate — not the SQL — picks
+    // the word that is published. `agent_names` is the account's whole count
+    // of names, read before any cap, so a count cut by the cap can say so.
+    const perAgent = opts.agentSlug ? limit : Math.min(limit, PER_AGENT_VIEWS);
+    const viewRead = (named: boolean) =>
+      db
         .prepare(
-          `${selectFrom(named)}
-             JOIN (SELECT d.agent_id AS agent_id, COALESCE(d.symbol, '') AS sym, MAX(d.at) AS at
-                     FROM decisions d
-                     JOIN agents a ON a.smart_account = d.agent_id
-                    WHERE ${viewWhere}
-                    GROUP BY d.agent_id, COALESCE(d.symbol, '')) latest
-               ON latest.agent_id = d.agent_id AND latest.sym = COALESCE(d.symbol, '')
-            WHERE ${viewWhere}
-            ${groupBy(named)}
-           HAVING MAX(d.at) = MAX(latest.at)
-            ORDER BY MAX(d.at) DESC
-            LIMIT ?`,
+          `SELECT s.* FROM (
+             SELECT q.*,
+                    MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
+                    DENSE_RANK() OVER (ORDER BY q.agent_turn, q.pair_at DESC, q.agent_id, q.sym) AS turn
+               FROM (
+                 SELECT r.*, DENSE_RANK() OVER (PARTITION BY r.agent_id ORDER BY r.pair_at DESC, r.sym) AS agent_turn
+                   FROM (${placed(named, IS_VIEW)}) r
+                  WHERE r.in_pair <= ?
+               ) q
+           ) s
+           WHERE s.agent_turn <= ? AND s.turn <= ?
+           ORDER BY s.turn, s.in_pair`,
         )
-        .all(...args, ...args, Math.max(VIEW_SCAN, limit))) as ThesisRow[],
-    });
+        .all(...args, VIEW_DEPTH, perAgent, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+
+    // The gate alone, for counting while paging. The post it builds here is
+    // thrown away; `gated` below builds the one that is returned.
+    const gate = (r: Group): boolean => publishableThesis({ ...r, slug: slugFor.get(String(r.agent_id).toLowerCase()) ?? null }) !== null;
+
+    // THE ACTION LANE PAGES until enough posts pass the gate or the window
+    // runs out, and records which: an empty lane from a scan that stopped at
+    // its bound is not "no trades", and the rail must not be told it is.
+    const readActions = async (named: boolean) => {
+      const out: Group[] = [];
+      let exhausted = false;
+      let passed = 0;
+      for (let offset = 0; offset < ACTION_SCAN_MAX; offset += ACTION_PAGE) {
+        const page = await actionPage(named, offset);
+        out.push(...page);
+        passed += page.filter((r) => gate(r)).length;
+        if (page.length < ACTION_PAGE) {
+          exhausted = true;
+          break;
+        }
+        if (passed >= limit) break;
+      }
+      return { rows: out, complete: exhausted && passed <= limit };
+    };
+
+    let rows: { actions: Group[]; views: Group[]; tradesComplete: boolean };
+    const run = async (named: boolean) => {
+      const actions = await readActions(named);
+      return { actions: actions.rows, tradesComplete: actions.complete, views: await viewRead(named) };
+    };
     try {
       rows = await run(true);
     } catch {
-      // Second and last attempt, without the column. A failure here is a real
+      // Second and last attempt, without the columns. A failure here is a real
       // read failure and is reported as one.
       try {
         rows = await run(false);
       } catch (error) {
         console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
-        return { source: "none", theses: [] };
+        return { source: "none", theses: [], tradesComplete: false };
       }
     }
 
@@ -276,13 +391,15 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         modeFor.set(slug, config?.strategy === "trencher");
       } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
     }));
-    const gated = (r: ThesisRow): FeedThesis | null => {
+    const gated = (r: Group, unchangedSince: number | null): FeedThesis | null => {
       const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
       const post = publishableThesis({ ...r, slug });
       if (!post) return null;
       return {
         ...post,
         trencher: slug ? modeFor.get(slug) === true : false,
+        handleVerified: post.handle !== null && Number(r.x_verified ?? 0) !== 0,
+        unchangedSince,
         postId: postIdOf({
           slug: post.slug,
           action: post.action,
@@ -293,26 +410,71 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         }),
       } satisfies FeedThesis;
     };
-    const actions = rows.actions.map(gated).filter((t): t is FeedThesis => t !== null).slice(0, limit);
-    // One view per agent and name. Keyed on the SLUG, not the account: a
-    // re-granted agent holds several accounts and is still one author. Two
-    // groups can share a pair's newest second; the first to pass the gate wins,
-    // and the rest are the same moment said twice.
-    const pairs = new Set<string>();
-    const views = rows.views
-      .map(gated)
-      .filter((t): t is FeedThesis => {
-        if (!t) return false;
-        const pair = `${t.slug ?? t.name}|${t.symbol ?? ""}`;
-        if (pairs.has(pair)) return false;
-        pairs.add(pair);
-        return true;
+
+    // AN ACTION REPEATS FROM ITS FIRST TIME only while nothing else happened to
+    // the same name after it began: it is the newest group on the name, and
+    // the group before it last appeared before this one's first copy.
+    const actions = rows.actions
+      .map((r) => {
+        const first = Number(r.first_at ?? r.last_at ?? 0);
+        const unbroken = Number(r.in_pair) === 1 && (r.next_at === null || r.next_at === undefined || Number(r.next_at) < first);
+        return gated(r, unbroken ? first : null);
       })
+      .filter((t): t is FeedThesis => t !== null)
       .slice(0, limit);
+
+    // ONE VIEW PER AGENT AND NAME, chosen AFTER the gate. Keyed on the SLUG,
+    // not the account: a re-granted agent holds several accounts and is still
+    // one author. An unslugged account is its own author — keyed on the name,
+    // every unslugged "Robin" in the fleet would have shared one view of TSLA.
+    const authorOf = (r: Group) => slugFor.get(String(r.agent_id).toLowerCase()) ?? `account:${String(r.agent_id).toLowerCase()}`;
+    const byPair = new Map<string, Group[]>();
+    for (const r of rows.views) {
+      const key = `${authorOf(r)}|${r.sym}`;
+      const list = byPair.get(key) ?? [];
+      list.push(r);
+      byPair.set(key, list);
+    }
+    const chosen: { post: FeedThesis; author: string }[] = [];
+    for (const groups of byPair.values()) {
+      if (chosen.length >= limit) break;
+      const newest = [...groups].sort((a, b) => Number(b.last_at) - Number(a.last_at));
+      for (const winner of newest) {
+        // The word is the newest one the gate lets out. It stands unchanged
+        // since its first copy only if no other word about the name came after
+        // that. Every word that could have is among those read: a winner that
+        // is not the newest already has a newer one here, and behind the newest
+        // VIEW_DEPTH reads at least one more.
+        const first = Number(winner.first_at ?? winner.last_at ?? 0);
+        const others = newest.filter((g) => g !== winner).map((g) => Number(g.last_at));
+        const post = gated(winner, others.every((at) => at < first) ? first : null);
+        if (!post) continue;
+        chosen.push({ post, author: authorOf(winner) });
+        break;
+      }
+    }
+    // HOW MANY NAMES EACH AUTHOR HAS, against how many are here. Summed over
+    // the author's accounts; whenever the two differ a count taken from this
+    // response is a floor, and each of that author's views says so.
+    const namesOf = new Map<string, number>();
+    const counted = new Set<string>();
+    for (const r of rows.views) {
+      const account = String(r.agent_id).toLowerCase();
+      if (counted.has(account)) continue;
+      counted.add(account);
+      namesOf.set(authorOf(r), (namesOf.get(authorOf(r)) ?? 0) + Number(r.agent_names ?? 0));
+    }
+    const shownOf = new Map<string, number>();
+    for (const c of chosen) shownOf.set(c.author, (shownOf.get(c.author) ?? 0) + 1);
+    const views = chosen.map(({ post, author }) => ({
+      ...post,
+      moreNames: (namesOf.get(author) ?? 0) > (shownOf.get(author) ?? 0),
+    }));
+
     // Newest first, as it always was: callers that take "the agent's latest
     // post" off the front of this list must still get the latest of both.
     const theses = [...actions, ...views].sort((a, b) => b.at - a.at);
 
-    return { source: "sqlite", theses };
+    return { source: "sqlite", theses, tradesComplete: rows.tradesComplete };
   });
 }

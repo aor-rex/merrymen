@@ -11,11 +11,18 @@
  * These run the real query against a real SQLite ledger, because the defect was
  * the query: a LIMIT shared between two kinds of row that arrive at rates three
  * orders of magnitude apart.
+ *
+ * The review of that split found the same shape five more times — a lane that
+ * one busy agent could fill, a bounded scan spent on rows the gate drops, a
+ * newer unpublishable row deciding a name on its own, a vault move treated as
+ * a view a newer row could replace, and "since" claimed across a change of
+ * mind. Each has a case below, built from the reviewer's own reproduction.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { translateQuery, wrapSqlite } from "../../../worker/src/db";
+import { alertsOf, alertsRead, emptyAlerts } from "./rail-alerts";
 import { readTheses } from "./read-theses";
 
 const SLUG = "ems76d3cncwbt3dz";
@@ -34,23 +41,42 @@ type Row = {
   display?: string | null;
   holdKind?: string | null;
 };
+type Trade = { decision: string; status: string; rule?: string | null };
+type Agent = { account: string; name: string; handle?: string | null; verified?: number };
 
-async function ledger(rows: Row[], trades: { decision: string; status: string }[] = []) {
+const AGENTS: Agent[] = [
+  { account: "0xabc", name: "Shogun" },
+  { account: "0xdef", name: "SirSendIt" },
+];
+
+/**
+ * A ledger shaped like the worker's. `legacy` is one written before the coin's
+ * name and the handle's proof had columns — the reader must still read it.
+ */
+async function ledger(rows: Row[], trades: Trade[] = [], opts: { legacy?: boolean; agents?: Agent[] } = {}) {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
-  await db.exec(`CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, mode TEXT);
-    CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT, size_usdg REAL, source TEXT, reason TEXT, dropped_rule TEXT, hold_kind TEXT, at INTEGER);
+  raw.exec(`CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, mode TEXT${opts.legacy ? "" : ", x_verified INTEGER NOT NULL DEFAULT 0"});
+    CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, ${opts.legacy ? "" : "display_name TEXT,"} size_usdg REAL, source TEXT, reason TEXT, dropped_rule TEXT, hold_kind TEXT, at INTEGER);
     CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, status TEXT, reject_rule TEXT);
-    CREATE TABLE posts(decision_id TEXT, body TEXT);
-    INSERT INTO agents VALUES ('0xabc','Shogun',NULL,'live');
-    INSERT INTO agents VALUES ('0xdef','SirSendIt',NULL,'live');`);
-  const insert = db.prepare("INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?,NULL,?,?)");
+    CREATE TABLE posts(decision_id TEXT, body TEXT);`);
+  for (const a of opts.agents ?? AGENTS) {
+    if (opts.legacy) raw.prepare("INSERT INTO agents VALUES (?,?,?,'live')").run(a.account, a.name, a.handle ?? null);
+    else raw.prepare("INSERT INTO agents VALUES (?,?,?,'live',?)").run(a.account, a.name, a.handle ?? null, a.verified ?? 0);
+  }
+  const insert = opts.legacy
+    ? raw.prepare("INSERT INTO decisions (id, agent_id, action, symbol, size_usdg, source, reason, hold_kind, at) VALUES (?,?,?,?,?,?,?,?,?)")
+    : raw.prepare("INSERT INTO decisions (id, agent_id, action, symbol, display_name, size_usdg, source, reason, hold_kind, at) VALUES (?,?,?,?,?,?,?,?,?,?)");
+  raw.exec("BEGIN");
   for (const r of rows) {
-    await insert.run(r.id, r.agent ?? "0xabc", r.action, r.symbol, r.display ?? null, r.size ?? null, r.source ?? "brain", r.reason, r.holdKind ?? null, r.at);
+    const head = [r.id, r.agent ?? "0xabc", r.action, r.symbol];
+    const tail = [r.size ?? null, r.source ?? "brain", r.reason, r.holdKind ?? null, r.at];
+    if (opts.legacy) insert.run(...(head as never[]), ...(tail as never[]));
+    else insert.run(...(head as never[]), r.display ?? null, ...(tail as never[]));
   }
-  for (const t of trades) {
-    await db.prepare("INSERT INTO trades (decision_id, status, reject_rule) VALUES (?,?,NULL)").run(t.decision, t.status);
-  }
+  const trade = raw.prepare("INSERT INTO trades (decision_id, status, reject_rule) VALUES (?,?,?)");
+  for (const t of trades) trade.run(t.decision, t.status, t.rule ?? null);
+  raw.exec("COMMIT");
   return { raw, db };
 }
 
@@ -59,6 +85,15 @@ const identities = async () => [
   { tenant: "0x2" as const, slug: OTHER, accounts: ["0xdef" as const], createdAt: 1, updatedAt: 1 },
 ];
 const settings = async () => ({ strategy: "trencher" as const });
+
+async function read(rows: Row[], trades: Trade[] = [], opts: { legacy?: boolean; agents?: Agent[]; agentSlug?: string } = {}) {
+  const { raw, db } = await ledger(rows, trades, opts);
+  try {
+    return await readTheses(opts.agentSlug ? { agentSlug: opts.agentSlug } : {}, (fn) => fn(db), identities, settings);
+  } finally {
+    raw.close();
+  }
+}
 
 /** A Trencher's review cadence: a fresh hold every 30 seconds, rotating coins. */
 function holds(n: number, agent = "0xabc", symbols = 10): Row[] {
@@ -84,79 +119,195 @@ describe("actions and views have separate budgets", () => {
       reason: "Adding to the basket while it trades under its average.",
       at: NOW - 3 * 3600,
     };
-    const { raw, db } = await ledger([...holds(100), buy], [{ decision: "buy-1", status: "landed" }]);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      assert.equal(read.source, "sqlite");
-      const bought = read.theses.filter((t) => t.action === "buy");
-      assert.equal(bought.length, 1, "the trade must be on the feed");
-      assert.equal(bought[0]!.outcome, "landed");
-      assert.equal(bought[0]!.symbol, "TSLA");
-    } finally {
-      raw.close();
-    }
+    const r = await read([...holds(100), buy], [{ decision: "buy-1", status: "landed" }]);
+    assert.equal(r.source, "sqlite");
+    const bought = r.theses.filter((t) => t.action === "buy");
+    assert.equal(bought.length, 1, "the trade must be on the feed");
+    assert.equal(bought[0]!.outcome, "landed");
+    assert.equal(bought[0]!.symbol, "TSLA");
   });
 
   it("and it survives on the agent's own profile too", async () => {
     // The profile used the same one-budget reader, so a Trencher's history was
     // about twenty minutes of holds and none of its trades.
-    const buy: Row = { id: "buy-2", action: "sell", symbol: "TABC", size: 4, reason: "Took the exit; depth fell away.", at: NOW - 6 * 3600 };
-    const { raw, db } = await ledger([...holds(300), buy], [{ decision: "buy-2", status: "landed" }]);
-    try {
-      const read = await readTheses({ agentSlug: SLUG, limit: 40 }, (fn) => fn(db), identities, settings);
-      assert.ok(read.theses.some((t) => t.action === "sell" && t.outcome === "landed"));
-    } finally {
-      raw.close();
-    }
+    const sell: Row = { id: "buy-2", action: "sell", symbol: "TABC", size: 4, reason: "Took the exit; depth fell away.", at: NOW - 6 * 3600 };
+    const r = await read([...holds(300), sell], [{ decision: "buy-2", status: "landed" }], { agentSlug: SLUG });
+    assert.ok(r.theses.some((t) => t.action === "sell" && t.outcome === "landed"));
   });
 
   it("A REFUSED TRADE STILL COUNTS AS AN ACTION — the owner is told what the wall did", async () => {
     const buy: Row = { id: "buy-3", action: "buy", symbol: "NVDA", size: 40, source: "strategy:steady-basket", reason: "Adding while it trades under its average.", at: NOW - 7200 };
-    const { raw, db } = await ledger([...holds(100), buy], [{ decision: "buy-3", status: "rejected" }]);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      const refused = read.theses.find((t) => t.symbol === "NVDA");
-      assert.ok(refused, "a refusal is not hidden to make room");
-      assert.equal(refused.outcome, "refused");
-    } finally {
-      raw.close();
-    }
+    const r = await read([...holds(100), buy], [{ decision: "buy-3", status: "rejected", rule: "per-trade-cap" }]);
+    const refused = r.theses.find((t) => t.symbol === "NVDA");
+    assert.ok(refused, "a refusal is not hidden to make room");
+    assert.equal(refused.outcome, "refused");
+  });
+});
+
+describe("a vault move is an action, not a view a newer row can replace", () => {
+  // Vault moves have no symbol, so as "views" they shared ONE (agent, '') pair
+  // with each other and with every pure thesis, and only the newest survived.
+  const parked: Row = { id: "v1", action: "vault-deposit", symbol: null, size: 25, source: "strategy:steady-basket", reason: "Parking 25.00 USDG idle above the 50.00 floor.", at: NOW - 7200 };
+
+  it("A LANDED DEPOSIT SURVIVES A LATER REFUSED ONE", async () => {
+    const again: Row = { ...parked, id: "v2", size: 3, reason: "Parking 3.00 USDG idle above the 50.00 floor.", at: NOW - 60 };
+    const r = await read([parked, again], [{ decision: "v1", status: "landed" }, { decision: "v2", status: "rejected" }]);
+    assert.deepEqual(r.theses.map((t) => [t.head, t.outcome]), [["vault-deposit 25.00 USDG", "landed"]]);
+  });
+
+  it("and a deposit and a later withdrawal are both on the feed", async () => {
+    const out: Row = { ...parked, id: "v2", action: "vault-withdraw", size: 10, reason: "Topping cash back up to the floor.", at: NOW - 60 };
+    const r = await read([parked, out], [{ decision: "v1", status: "landed" }, { decision: "v2", status: "landed" }]);
+    assert.deepEqual(r.theses.map((t) => t.head).sort(), ["vault-deposit 25.00 USDG", "vault-withdraw 10.00 USDG"]);
+  });
+});
+
+describe("the action lane is not spent on rows the gate drops", () => {
+  const basketBuy: Row = { id: "landed", action: "buy", symbol: "TSLA", size: 5, source: "strategy:steady-basket", reason: "Adding to the basket while it trades under its average.", at: NOW - 3 * 3600 };
+
+  it("A HUNDRED AND TWENTY REFUSED CLASS ENTRIES, THEN A LANDED BUY — the buy is on the feed", async () => {
+    // The reviewer's reproduction: the class route re-proposes a refused entry
+    // every tick with drifting evidence, so each is its own group and the gate
+    // drops every one. A scan of ninety held nothing but those.
+    const refusals = Array.from({ length: 120 }, (_, i): Row => ({
+      id: `c${i}`, action: "buy", symbol: "TKNB", size: 5, source: "class-route",
+      reason: `Taking 5.00 USDG of TKNB; depth ${1000 + i} and rising.`, at: NOW - i * 60,
+    }));
+    const r = await read([...refusals, basketBuy], [
+      ...refusals.map((c) => ({ decision: c.id, status: "rejected", rule: "per-trade-cap" })),
+      { decision: "landed", status: "landed" },
+    ]);
+    assert.ok(r.theses.some((t) => t.action === "buy" && t.symbol === "TSLA" && t.outcome === "landed"));
+    assert.equal(r.tradesComplete, true, "every trade in the window reached the gate");
+  });
+
+  it("A BASKET BLOCKED ON ITS OWN ACCOUNT DOES NOT PUSH A LANDED BUY OFF — even a thousand legs of it", async () => {
+    // Four steady baskets in "refuse" mode write live-not-enabled for every leg
+    // on every tick. Past the scan's whole bound, only the SQL can skip them.
+    const legs = Array.from({ length: 1000 }, (_, i): Row => ({
+      id: `l${i}`, action: "buy", symbol: `LEG${i % 24}`, size: 4 + (i % 7), source: "strategy:steady-basket",
+      reason: `the schedule says buy — leg ${i % 24} of a 24-leg basket, round ${i}`, at: NOW - i * 10,
+    }));
+    const r = await read([...legs, basketBuy], [
+      ...legs.map((l) => ({ decision: l.id, status: "rejected", rule: "live-not-enabled" })),
+      { decision: "landed", status: "landed" },
+    ]);
+    assert.ok(r.theses.some((t) => t.symbol === "TSLA" && t.outcome === "landed"));
+    assert.equal(r.tradesComplete, true);
+  });
+
+  it("rows only the gate can judge are paged past, not stopped at", async () => {
+    // An address in a model's reason is checked by the gate alone — SQL cannot.
+    const leaky = Array.from({ length: 150 }, (_, i): Row => ({
+      id: `m${i}`, action: "buy", symbol: "TSLA", size: 5 + i, source: "strategist",
+      reason: `Copying wallet 0xdeadbeef${i.toString(16).padStart(4, "0")} into TSLA.`, at: NOW - i * 20,
+    }));
+    const r = await read([...leaky, basketBuy], [
+      ...leaky.map((m) => ({ decision: m.id, status: "landed" })),
+      { decision: "landed", status: "landed" },
+    ]);
+    assert.ok(r.theses.some((t) => t.symbol === "TSLA" && t.outcome === "landed" && t.reason?.startsWith("Adding")));
+  });
+
+  it("A SCAN THAT HIT ITS BOUND SAYS SO — it does not claim there were no trades", async () => {
+    const leaky = Array.from({ length: 1000 }, (_, i): Row => ({
+      id: `m${i}`, action: "buy", symbol: "TSLA", size: 5 + i, source: "strategist",
+      reason: `Copying wallet 0xdeadbeef${i.toString(16).padStart(4, "0")} into TSLA.`, at: NOW - i * 10,
+    }));
+    const r = await read(leaky, leaky.map((m) => ({ decision: m.id, status: "landed" })));
+    assert.equal(r.theses.filter((t) => t.action === "buy").length, 0);
+    assert.equal(r.tradesComplete, false, "an empty page after a bounded scan is not zero trades");
+  });
+
+  it("a quiet window IS complete, and says so", async () => {
+    const r = await read(holds(5));
+    assert.equal(r.tradesComplete, true);
+  });
+});
+
+describe("what the alerts rail makes of it", () => {
+  it("THE REVIEWER'S CASE: the rail shows the landed buy, not 'no trades'", async () => {
+    const refusals = Array.from({ length: 120 }, (_, i): Row => ({
+      id: `c${i}`, action: "buy", symbol: "TKNB", size: 5, source: "class-route",
+      reason: `Taking 5.00 USDG of TKNB; depth ${1000 + i} and rising.`, at: NOW - i * 60,
+    }));
+    const buy: Row = { id: "landed", action: "buy", symbol: "TSLA", size: 5, source: "strategy:steady-basket", reason: "Adding to the basket while it trades under its average.", at: NOW - 3 * 3600 };
+    const r = await read([...refusals, buy], [
+      ...refusals.map((c) => ({ decision: c.id, status: "rejected", rule: "per-trade-cap" })),
+      { decision: "landed", status: "landed" },
+    ]);
+    assert.deepEqual(alertsOf(r.theses).map((t) => `${t.action} ${t.symbol} ${t.outcome}`), ["buy TSLA landed"]);
+  });
+
+  it("a day whose only trade was the owner's own chat order says what is true about published posts", async () => {
+    const chat: Row = { id: "chat", action: "buy", symbol: "TSLA", size: 5, source: "chat", reason: "owner asked in chat", at: NOW - 600 };
+    const r = await read([chat], [{ decision: "chat", status: "landed" }]);
+    assert.deepEqual(alertsOf(r.theses), []);
+    assert.equal(emptyAlerts(alertsRead(r)), "No published trades in the last day.");
+  });
+
+  it("and a scan that stopped early does not speak for the whole day", async () => {
+    const leaky = Array.from({ length: 1000 }, (_, i): Row => ({
+      id: `m${i}`, action: "buy", symbol: "TSLA", size: 5 + i, source: "strategist",
+      reason: `Copying wallet 0xdeadbeef${i.toString(16).padStart(4, "0")} into TSLA.`, at: NOW - i * 10,
+    }));
+    const r = await read(leaky, leaky.map((m) => ({ decision: m.id, status: "landed" })));
+    assert.deepEqual(alertsOf(r.theses), []);
+    assert.equal(emptyAlerts(alertsRead(r)), "No published trades among the latest posts.");
   });
 });
 
 describe("a view is the latest word per agent and name", () => {
   it("one row per agent and coin, not one per tick", async () => {
-    const { raw, db } = await ledger(holds(100));
+    const r = await read(holds(100));
+    const views = r.theses.filter((t) => t.action === "hold");
+    assert.equal(views.length, 10, "ten coins reviewed, ten posts");
+    assert.equal(new Set(views.map((v) => v.symbol)).size, 10);
+    // And it is the NEWEST review of each coin, not an arbitrary one.
+    const first = views.find((v) => v.symbol === "T00000000000")!;
+    assert.match(first.reason!, /review 0;/);
+  });
+
+  it("ONE AGENT CANNOT TAKE THE WHOLE VIEW LANE — sixty coins every 30s, and a quiet agent's hour-old view", async () => {
+    // The reviewer's reproduction: 2880 holds rotating through 60 ids. Ranked
+    // by the clock, every one of the 60 pairs was fresher than the quiet view.
+    const quiet: Row = { id: "quiet-1", agent: "0xdef", action: "hold", symbol: "AAPL", source: "strategy:even-keel", reason: "Depth remains thin; I am holding until liquidity recovers.", at: NOW - 3600 };
+    const r = await read([...holds(2880, "0xabc", 60), quiet]);
+    const quietView = r.theses.find((t) => t.slug === OTHER && t.symbol === "AAPL");
+    assert.ok(quietView, "the quieter agent's view reaches the client");
+    const busy = r.theses.filter((t) => t.slug === SLUG);
+    assert.ok(busy.length > 0 && busy.length <= 10, `one agent is capped, not the whole lane (${busy.length})`);
+    // AND ITS COUNT IS NOT A TOTAL. Sixty names were reviewed; fewer were read.
+    assert.ok(busy.every((t) => t.moreNames === true), "a truncated agent's views say there are more");
+    assert.equal(quietView.moreNames, false, "an agent read in full is not flagged");
+  });
+
+  it("SEVEN BUSY AGENTS AND A QUIET ONE — the lane is dealt in turns, so the quiet view still arrives", async () => {
+    // A per-agent cap alone is not enough once enough agents are busy: seven
+    // Trenchers at their cap are seventy names, every one fresher than an
+    // hour-old view. Every agent's newest name comes before anybody's second.
+    const busy = Array.from({ length: 7 }, (_, i) => `0xb${i}`);
+    const agents: Agent[] = [...busy.map((account, i) => ({ account, name: `Trencher${i}` })), { account: "0xdef", name: "SirSendIt" }];
+    const rows = busy.flatMap((account) => holds(600, account, 20));
+    const quiet: Row = { id: "quiet-1", agent: "0xdef", action: "hold", symbol: "AAPL", source: "strategy:even-keel", reason: "Depth remains thin; I am holding until liquidity recovers.", at: NOW - 3600 };
+    const { raw, db } = await ledger([...rows, quiet], [], { agents });
     try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      const views = read.theses.filter((t) => t.action === "hold");
-      assert.equal(views.length, 10, "ten coins reviewed, ten posts");
-      assert.equal(new Set(views.map((v) => v.symbol)).size, 10);
-      // And it is the NEWEST review of each coin, not an arbitrary one.
-      const first = views.find((v) => v.symbol === "T00000000000")!;
-      assert.match(first.reason!, /review 0;/);
+      const everyone = async () => [
+        ...busy.map((account, i) => ({ tenant: `0x${i + 10}` as `0x${string}`, slug: `b${i}zzzzzzzzzzzzzz`, accounts: [account as `0x${string}`], createdAt: 1, updatedAt: 1 })),
+        { tenant: "0x2" as const, slug: OTHER, accounts: ["0xdef" as const], createdAt: 1, updatedAt: 1 },
+      ];
+      const r = await readTheses({}, (fn) => fn(db), everyone, settings);
+      assert.ok(r.theses.some((t) => t.slug === OTHER && t.symbol === "AAPL"), "the quiet agent's view is in the lane");
+      assert.ok(busy.every((_, i) => r.theses.some((t) => t.slug === `b${i}zzzzzzzzzzzzzz`)), "and so is every busy one");
     } finally {
       raw.close();
     }
   });
 
   it("another agent's quieter view is not crowded out by a busy one", async () => {
-    const quiet: Row = {
-      id: "quiet-1",
-      agent: "0xdef",
-      action: "hold",
-      symbol: "AAPL",
-      source: "strategy:even-keel",
-      reason: "Depth remains thin; I am holding until liquidity recovers.",
-      at: NOW - 5 * 3600,
-    };
-    const { raw, db } = await ledger([...holds(400), quiet]);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      assert.ok(read.theses.some((t) => t.slug === OTHER && t.symbol === "AAPL"));
-    } finally {
-      raw.close();
-    }
+    const quiet: Row = { id: "quiet-1", agent: "0xdef", action: "hold", symbol: "AAPL", source: "strategy:even-keel", reason: "Depth remains thin; I am holding until liquidity recovers.", at: NOW - 5 * 3600 };
+    const r = await read([...holds(400), quiet]);
+    assert.ok(r.theses.some((t) => t.slug === OTHER && t.symbol === "AAPL"));
   });
 
   it("an unchanged view keeps the time it was FIRST said, and how often", async () => {
@@ -170,17 +321,30 @@ describe("a view is the latest word per agent and name", () => {
       reason: "Depth remains thin; I am holding until liquidity recovers.",
       at: NOW - i * 300,
     }));
-    const { raw, db } = await ledger(same);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      assert.equal(read.theses.length, 1);
-      const [view] = read.theses;
-      assert.equal(view!.said, 24);
-      assert.equal(view!.firstAt, NOW - 23 * 300);
-      assert.equal(view!.at, NOW);
-    } finally {
-      raw.close();
-    }
+    const r = await read(same);
+    assert.equal(r.theses.length, 1);
+    const [view] = r.theses;
+    assert.equal(view!.said, 24);
+    assert.equal(view!.firstAt, NOW - 23 * 300);
+    assert.equal(view!.unchangedSince, NOW - 23 * 300, "nothing else was said, so it has stood since then");
+    assert.equal(view!.at, NOW);
+  });
+
+  it("A, THEN B, THEN A AGAIN IS NOT 'UNCHANGED SINCE' THE FIRST A", async () => {
+    // The reviewer's reproduction. The latest group holds every A in the
+    // window, so `said` and `firstAt` spanned the B — and the feed printed
+    // "×2 · since 2h" about an agent that changed its mind twice in that time.
+    const thin = "Depth remains thin; I am holding until liquidity recovers.";
+    const rows: Row[] = [
+      { id: "a1", action: "hold", symbol: "TSLA", source: "strategy:even-keel", reason: thin, at: NOW - 7200 },
+      { id: "b1", action: "hold", symbol: "TSLA", source: "strategy:even-keel", reason: "Depth recovered; watching for an entry.", at: NOW - 3600 },
+      { id: "a2", action: "hold", symbol: "TSLA", source: "strategy:even-keel", reason: thin, at: NOW - 60 },
+    ];
+    const r = await read(rows);
+    assert.equal(r.theses.length, 1, "still the latest word only");
+    const [view] = r.theses;
+    assert.equal(view!.reason, thin);
+    assert.equal(view!.unchangedSince, null, "something else was said in between, so there is no 'since'");
   });
 });
 
@@ -189,13 +353,8 @@ describe("what the gate refuses stays refused", () => {
     // An operational notice was never a post. Two queries must not make it one.
     const notice: Row = { id: "n-1", action: "hold", symbol: "TSLA", source: "brain", reason: "error: provider unavailable", at: NOW };
     const chat: Row = { id: "c-1", action: "buy", symbol: "TSLA", size: 5, source: "chat", reason: "owner asked in chat", at: NOW };
-    const { raw, db } = await ledger([notice, chat]);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      assert.deepEqual(read.theses, []);
-    } finally {
-      raw.close();
-    }
+    const r = await read([notice, chat]);
+    assert.deepEqual(r.theses, []);
   });
 
   it("a private hold does not take the last real view of its coin down with it", async () => {
@@ -206,30 +365,94 @@ describe("what the gate refuses stays refused", () => {
     const real: Row = { id: "v-real", action: "hold", symbol: "TSLA", reason: "Buyers thinned into the close; nothing to add here.", at: NOW - 600 };
     const stale: Row = { id: "v-stale", action: "hold", symbol: "TSLA", reason: "Price feed stale, no volume to read.", holdKind: "STALE_MARK_HOLD", at: NOW };
     const gated: Row = { id: "v-gated", action: "hold", symbol: "NVDA", reason: "Held.", holdKind: "GATE_FORCED_HOLD", at: NOW };
-    const { raw, db } = await ledger([real, stale, gated]);
-    try {
-      const read = await readTheses({}, (fn) => fn(db), identities, settings);
-      assert.deepEqual(read.theses.map((t) => t.reason), ["Buyers thinned into the close; nothing to add here."]);
-    } finally {
-      raw.close();
-    }
+    const r = await read([real, stale, gated]);
+    assert.deepEqual(r.theses.map((t) => t.reason), ["Buyers thinned into the close; nothing to add here."]);
+  });
+
+  it("NOR DOES A NEWER ROW ONLY THE GATE CAN REFUSE — an address in the reason", async () => {
+    // The reviewer's reproduction. The winner per name was chosen in SQL,
+    // before the gate, so a newer row the gate drops decided the name alone.
+    const real: Row = { id: "h1", action: "hold", symbol: "TABC", reason: "Buyers thinned; nothing to add.", at: NOW - 120 };
+    const leaky: Row = { id: "h2", action: "hold", symbol: "TABC", reason: "Deployer 0xdeadbeefcafe still holds 40%; waiting.", at: NOW - 30 };
+    const r = await read([real, leaky]);
+    assert.deepEqual(r.theses.map((t) => [t.head, t.reason]), [["hold TABC", "Buyers thinned; nothing to add."]]);
+    assert.equal(r.theses[0]!.unchangedSince, null, "and it is not the latest thing said, so it is not 'unchanged'");
+  });
+
+  it("nor an hour of the same provider error, re-written every tick", async () => {
+    // One sentence repeated is one group, so however long the outage it is one
+    // word the gate refuses and the view behind it is the next.
+    const real: Row = { id: "h0", action: "hold", symbol: "TSLA", reason: "Buyers thinned into the close; nothing to add here.", at: NOW - 3600 };
+    const outage = Array.from({ length: 12 }, (_, i): Row => ({ id: `e${i}`, action: "hold", symbol: "TSLA", reason: "error: provider unavailable", at: NOW - i * 290 }));
+    const r = await read([real, ...outage]);
+    assert.deepEqual(r.theses.map((t) => t.reason), ["Buyers thinned into the close; nothing to add here."]);
   });
 
   it("the coin's name reaches the post as a field, with the id kept as the symbol", async () => {
     const named: Row = { id: "n-1", action: "buy", symbol: "T3139F043B88", size: 5, display: "JUGGERNAUT", reason: "Two-sided flow into a deep enough book.", at: NOW };
-    const { raw, db } = await ledger([named], [{ decision: "n-1", status: "landed" }]);
-    try {
-      const [post] = (await readTheses({}, (fn) => fn(db), identities, settings)).theses;
-      assert.equal(post!.displayName, "JUGGERNAUT");
-      assert.equal(post!.symbol, "T3139F043B88");
-    } finally {
-      raw.close();
-    }
+    const [post] = (await read([named], [{ decision: "n-1", status: "landed" }])).theses;
+    assert.equal(post!.displayName, "JUGGERNAUT");
+    assert.equal(post!.symbol, "T3139F043B88");
   });
 
   it("an unreadable ledger is reported as one, not as a quiet fleet", async () => {
-    const read = await readTheses({}, (fn) => fn(null), identities, settings);
-    assert.equal(read.source, "none");
+    const r = await readTheses({}, (fn) => fn(null), identities, settings);
+    assert.equal(r.source, "none");
+    assert.equal(r.tradesComplete, false);
+  });
+});
+
+describe("a refusal that repeats sits where it started", () => {
+  const leg = (i: number): Row => ({
+    id: `r${i}`, action: "buy", symbol: "TSLA", size: 8.33, source: "strategy:steady-basket",
+    reason: "the schedule says buy — 8.33 USDG into TSLA, its 33% of a 3-leg basket", at: NOW - (29 - i) * 300,
+  });
+
+  it("THIRTY OF THE SAME REFUSAL IS ONE POST, WITH THE TIME IT BEGAN", async () => {
+    // A trade-specific rule still publishes — a basket leg the key does not
+    // cover says something true — but it is re-proposed every tick.
+    const rows = Array.from({ length: 30 }, (_, i) => leg(i));
+    const r = await read(rows, rows.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" })));
+    assert.equal(r.theses.length, 1);
+    const [post] = r.theses;
+    assert.equal(post!.outcome, "refused");
+    assert.equal(post!.said, 30);
+    assert.equal(post!.unchangedSince, NOW - 29 * 300);
+  });
+
+  it("but not across something else that happened to the same name", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => leg(i));
+    const sold: Row = { id: "sold", action: "sell", symbol: "TSLA", size: 3, source: "strategy:steady-basket", reason: "Trimming back to weight.", at: NOW - 20 * 300 + 1 };
+    const r = await read([...rows, sold], [...rows.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" })), { decision: "sold", status: "landed" }]);
+    const refused = r.theses.find((t) => t.outcome === "refused")!;
+    assert.equal(refused.unchangedSince, null);
+  });
+
+  it("nor once something newer happened to it", async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => leg(i + 10));
+    const sold: Row = { id: "sold", action: "sell", symbol: "TSLA", size: 3, source: "strategy:steady-basket", reason: "Trimming back to weight.", at: NOW + 60 };
+    const r = await read([...rows, sold], [...rows.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" })), { decision: "sold", status: "landed" }]);
+    const refused = r.theses.find((t) => t.outcome === "refused")!;
+    assert.equal(refused.said, 10);
+    assert.equal(refused.unchangedSince, null, "the refusals stopped being the latest word on TSLA");
+  });
+});
+
+describe("the owner's handle travels only with its proof", () => {
+  const view: Row = { id: "h", action: "hold", symbol: "TSLA", reason: "Buyers thinned into the close; nothing to add here.", at: NOW };
+
+  it("a proven handle is marked proven, and an unproven one is not", async () => {
+    const proven = await read([view], [], { agents: [{ account: "0xabc", name: "Shogun", handle: "shogun_x", verified: 1 }] });
+    assert.equal(proven.theses[0]!.handleVerified, true);
+    const typed = await read([view], [], { agents: [{ account: "0xabc", name: "Shogun", handle: "elonmusk", verified: 0 }] });
+    assert.equal(typed.theses[0]!.handleVerified, false);
+  });
+
+  it("A LEDGER FROM BEFORE THE PROOF COLUMN STILL READS — with nothing proven", async () => {
+    const r = await read([view], [], { legacy: true, agents: [{ account: "0xabc", name: "Shogun", handle: "shogun_x" }] });
+    assert.equal(r.source, "sqlite");
+    assert.equal(r.theses.length, 1);
+    assert.equal(r.theses[0]!.handleVerified, false);
   });
 });
 
@@ -251,7 +474,7 @@ describe("the same queries run on the hosted backend", () => {
     for (const opts of [{}, { agentSlug: SLUG }, { symbol: "TSLA" }]) {
       issued.length = 0;
       await readTheses(opts, (fn) => fn(fake as never), identities, settings);
-      assert.equal(issued.length, 2, "one query per lane");
+      assert.equal(issued.length, 2, "one query per lane when the first page is short");
       for (const q of issued) {
         const pg = translateQuery(q.sql);
         assert.ok(!pg.includes("?"), "a placeholder was left unrenumbered");
