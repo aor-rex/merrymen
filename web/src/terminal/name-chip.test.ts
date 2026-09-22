@@ -25,7 +25,7 @@ afterEach(async () => {
 
 let n = 0;
 const slug = () => `7y2kq0m4c1x9h${(n++).toString(32).padStart(3, "0")}`;
-const chip = (name: string, s: string | null, onSettings = () => {}) => React.createElement(NameChip, { name, slug: s, onSettings });
+const chip = (name: string, s: string | null, onSettings = () => {}) => React.createElement(NameChip, { name, slug: s, nameSource: "ledger", onSettings });
 const text = () => ui.container.textContent ?? "";
 
 it("one tap names an unnamed agent with its slug's name, and nothing else is sent", async () => {
@@ -94,5 +94,18 @@ it("an owner who wants to stay Robin can say so once, and is not asked again", a
   assert.equal(ui.container.querySelectorAll("button").length, 0);
   await ui.remount(chip(DEFAULT_AGENT_NAME, s));
   assert.equal(ui.container.querySelectorAll("button").length, 0, "remembered in this browser");
+  assert.deepEqual(requests, []);
+});
+
+it("a 'Robin' the feed fell back to is not offered a new name", async () => {
+  // The feed answers "Robin" when it could not read the settings store or the
+  // ledger. An owner whose agent is already "Shogun" could then be offered
+  // "Name your agent: <generated>", and one tap would overwrite Shogun.
+  await ui.render(React.createElement(NameChip, { name: DEFAULT_AGENT_NAME, slug: slug(), nameSource: "fallback", onSettings: () => {} }));
+  assert.equal(ui.container.querySelectorAll("button").length, 0);
+  await ui.render(React.createElement(NameChip, { name: DEFAULT_AGENT_NAME, slug: slug(), nameSource: null, onSettings: () => {} }));
+  assert.equal(ui.container.querySelectorAll("button").length, 0, "nor one from a feed that does not say where its name came from");
+  await ui.render(React.createElement(NameChip, { name: DEFAULT_AGENT_NAME, slug: slug(), nameSource: "ledger", onSettings: () => {} }));
+  assert.ok(ui.container.querySelectorAll("button").length > 0, "a Robin actually read is offered one");
   assert.deepEqual(requests, []);
 });

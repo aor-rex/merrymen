@@ -75,8 +75,9 @@ export async function readDeskTrades(
           ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
       )
       // The collapse reaches further back than the tape: a copy is stamped at
-      // the restart, up to a day after the op it repeats, and must still find
-      // that op to collapse into when the op itself is just outside the window.
+      // the restart, long after the op it repeats (see OP_COPY_REACH_SEC), and
+      // must still find that op to collapse into when the op itself is outside
+      // the window.
       .all(account, ...runArg, sinceSec - OP_COPY_REACH_SEC, sinceSec, limit)) as unknown as DeskTradeRow[];
   } catch {
     return (await db
@@ -102,4 +103,70 @@ export async function countLandedOps(db: Db, account: string, epoch: number | nu
     )
     .get(account, ...(epoch === null ? [] : [epoch]))) as { landed: number | null } | undefined;
   return Number(row?.landed ?? 0);
+}
+
+/**
+ * HOW FAR BACK THE OWNER'S TAPE REACHES.
+ *
+ * The trades select was `LIMIT 30` with no window at all, so for an agent that
+ * has done nothing lately the newest thirty rows are simply its last thirty
+ * refusals — however old. The chat sends this tape to a model, the system
+ * prompt tells the model to ground itself in it, and the rows carry no
+ * timestamp the model can reason about. A tester's agent therefore narrated
+ * months-old `no-gas` and `per-trade-cap` refusals in the present tense, and
+ * was believed, because it was reading its own ledger faithfully.
+ *
+ * The window bounds RECENCY and the limit bounds SIZE. Neither substitutes for
+ * the other, so both stay.
+ */
+export const TAPE_WINDOW_SEC = 7 * 24 * 3600;
+
+/**
+ * The account's current RUN, or null when this ledger predates runs.
+ *
+ * Null, not 1: an older worker's database has no `epoch` column, and naming a
+ * missing column throws at query time — so every read scoped by it would blank
+ * its panel. With null the caller leaves the rows unfiltered, which on such a
+ * ledger is the same thing, since every row in it is epoch 1 by definition. An
+ * account with no agents row yet is on its first run.
+ */
+export async function readRunEpoch(db: Db, account: string): Promise<number | null> {
+  try {
+    const row = (await db.prepare("SELECT epoch FROM agents WHERE smart_account = ?").get(account)) as
+      | { epoch: number }
+      | undefined;
+    return row?.epoch ?? 1;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The owner's tape and the count of what landed, for one account and run, as
+ * /api/feed serves them. `nowSec` is passed in so the window is a fact a test
+ * can move rather than whatever the clock said.
+ *
+ * Each half fails on its own and says so with null: an unreadable tape is not
+ * a reason to lose the landed count, nor the other way round.
+ */
+export async function readOwnerTape(
+  db: Db,
+  account: string,
+  epoch: number | null,
+  nowSec: number,
+): Promise<{ trades: DeskTradeRow[] | null; landed: number | null }> {
+  let trades: DeskTradeRow[] | null = null;
+  let landed: number | null = null;
+  try {
+    trades = await readDeskTrades(db, account, epoch, nowSec - TAPE_WINDOW_SEC);
+  } catch {
+    trades = null;
+  }
+  try {
+    // Operations, not rows: a redeploy's re-recorded copies doubled this.
+    landed = await countLandedOps(db, account, epoch);
+  } catch {
+    landed = null;
+  }
+  return { trades, landed };
 }

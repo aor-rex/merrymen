@@ -17,6 +17,7 @@ import type { SettingsStore } from "../../../worker/src/settings-store";
 import type { IdentityStore } from "../../../worker/src/identity-store";
 import { getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
 import { onlyFields, PartnerError, requirePartnerScope, type PartnerPrincipal } from "./partner-bridge";
+import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "./agent-name-rule";
 
 export const PARTNER_ENROLLMENT_TTL_MS = 5 * 60_000;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -56,13 +57,17 @@ function chainId(value: unknown): number {
 function safeSettings(value: unknown): PartnerEnrollmentSettings {
   const body = object(value, "settings");
   onlyFields(body, ["name", "strategy", "basket_symbols", "live_trading_enabled"]);
-  if (typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 24 || /[\u0000-\u001f]/.test(body.name)) return fail(400, "invalid_settings", "Agent name must contain 1–24 characters");
+  // THE SAME RULE AS EVERY OTHER NAME WRITE. This accepted any 1–24
+  // characters, so "007" got a 200 and the soul then refused it: the partner
+  // was told one name while the agent ran as Robin. Refused here, out loud.
+  const name = typeof body.name === "string" ? normalizeAgentName(body.name) : null;
+  if (name === null || !AGENT_NAME_RE.test(name)) return fail(400, "invalid_settings", `Agent name must be ${AGENT_NAME_RULE}`);
   if (body.strategy !== "steady-basket" && body.strategy !== "llm-strategist") return fail(400, "invalid_settings", "Choose steady-basket or llm-strategist");
   if (!Array.isArray(body.basket_symbols) || !body.basket_symbols.length || body.basket_symbols.length > 10 || body.basket_symbols.some(s => typeof s !== "string" || !SYMBOLS.has(s))) {
     return fail(400, "invalid_settings", "basket_symbols must contain 1–10 supported stock symbols");
   }
   if (typeof body.live_trading_enabled !== "boolean") return fail(400, "invalid_settings", "live_trading_enabled must be an explicit boolean");
-  return { name: body.name.trim(), strategy: body.strategy, basket_symbols: [...new Set(body.basket_symbols as string[])], live_trading_enabled: body.live_trading_enabled };
+  return { name, strategy: body.strategy, basket_symbols: [...new Set(body.basket_symbols as string[])], live_trading_enabled: body.live_trading_enabled };
 }
 function secretDefault(): string {
   const secret = process.env.MERRYMEN_PARTNER_BRIDGE_SECRET ?? "";

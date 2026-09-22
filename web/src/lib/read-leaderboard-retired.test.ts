@@ -129,3 +129,43 @@ describe("the board folds retired agents into a count", () => {
     assert.equal(r.retired, null);
   });
 });
+
+describe("when the identity store cannot be read", () => {
+  it("named agents stay listed, and the retired count is unknown rather than built from nothing", async () => {
+    // Without slugs every row looked unlinked, and an unlinked row that has not
+    // beaten in a day is retired — so Shogun and SirSendIt, live with good keys
+    // through a quiet worker, left the board, and `retired` came back 2.
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    try {
+      await db.exec(`CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, x_verified INTEGER, epoch INTEGER, mode TEXT, created_at INTEGER, contributions_known INTEGER, status TEXT, beat_at INTEGER, expires_at INTEGER);
+        CREATE TABLE equity(agent_id TEXT, epoch INTEGER, equity_usdg REAL, at INTEGER, id INTEGER, mode TEXT);
+        CREATE TABLE flows(agent_id TEXT, epoch INTEGER, direction TEXT, amount_usdg REAL);
+        CREATE TABLE trades(agent_id TEXT, epoch INTEGER, status TEXT, gas_usdg REAL);
+        INSERT INTO agents VALUES
+          ('0xs1','Shogun',NULL,0,1,'live',2,1,'armed',${NOW - 2 * DAY},${NOW + 5 * DAY}),
+          ('0xs2','SirSendIt',NULL,0,1,'live',1,1,'armed',${NOW - 2 * DAY},${NOW + 5 * DAY});`);
+      const readable = await readLeaderboard(
+        (fn) => fn(db),
+        async () => [
+          { tenant: "0x1" as const, slug: "shogunshogunshog", accounts: ["0xs1"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
+          { tenant: "0x2" as const, slug: "sirsendsirsendsi", accounts: ["0xs2"] as `0x${string}`[], createdAt: 1, updatedAt: 1 },
+        ],
+        () => NOW,
+      );
+      assert.deepEqual(readable.agents.map((a) => a.name).sort(), ["Shogun", "SirSendIt"]);
+      assert.equal(readable.retired, 0);
+      const unreadable = await readLeaderboard(
+        (fn) => fn(db),
+        async () => {
+          throw new Error("identity store down");
+        },
+        () => NOW,
+      );
+      assert.deepEqual(unreadable.agents.map((a) => a.name).sort(), ["Shogun", "SirSendIt"]);
+      assert.equal(unreadable.retired, null);
+    } finally {
+      raw.close();
+    }
+  });
+});

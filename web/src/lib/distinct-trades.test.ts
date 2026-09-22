@@ -129,6 +129,40 @@ for (const [label, open] of [
       }
     });
 
+    it("an empty hash is no hash: each such row is its own operation", async () => {
+      // The mirror already reads "" as no hash. As a key it made every such row
+      // of an account one operation, so all but one of them disappeared.
+      const raw = new DatabaseSync(":memory:");
+      try {
+        seed(raw);
+        raw.exec(`INSERT INTO trades (agent_id, kind, status, user_op_hash, epoch, created_at) VALUES
+          ('0xA', 'swap', 'rejected', '', 2, 1900), ('0xA', 'swap', 'rejected', '', 2, 1910);`);
+        const db = open(raw);
+        const rows = (await db
+          .prepare(`SELECT t.id FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")} WHERE t.user_op_hash = '' ORDER BY t.id`)
+          .all("0xA", 2)) as { id: number }[];
+        assert.deepEqual(rows.map((r) => r.id), [16, 17]);
+        assert.equal((await readOperationCounts(db, "0xA", 2, "landed")).refused, 5, "three before, and these two");
+      } finally {
+        raw.close();
+      }
+    });
+
+    it("rows with no hash pass through beside the ranked ones, each once", async () => {
+      const raw = new DatabaseSync(":memory:");
+      try {
+        seed(raw);
+        const db = open(raw);
+        const rows = (await db
+          .prepare(`SELECT t.id, t.op_rank FROM ${distinctTrades("t.agent_id = ?")} WHERE t.user_op_hash IS NULL ORDER BY t.id`)
+          .all("0xA")) as { id: number; op_rank: number }[];
+        assert.deepEqual(rows.map((r) => r.id), [5, 6, 7]);
+        assert.ok(rows.every((r) => Number(r.op_rank) === 1));
+      } finally {
+        raw.close();
+      }
+    });
+
     it("the key never lets an unhashed row collide with another", async () => {
       const raw = new DatabaseSync(":memory:");
       try {

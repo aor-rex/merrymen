@@ -55,7 +55,17 @@ import "./first-visit.css";
 import { WiredProvider } from "@/components/WiredProvider";
 import { useDesktopDetail } from "./desktop-detail";
 import { ChatDock } from "./ChatDock";
-import { capsOf, portfolioReadOf, profileShown, usdgOrNull } from "./account-read";
+import {
+  capsOf,
+  liveReadsOk,
+  passOutcome,
+  portfolioReadOf,
+  profileShown,
+  realCashOf,
+  staleSince,
+  tokenPageUnreadable,
+  type PassFailure,
+} from "./account-read";
 import { startRefreshLoop, type LoopState } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
@@ -102,6 +112,12 @@ export function App() {
   /** Where the refresh loop stands — see refresh-loop.ts. Null until its first pass reports. */
   const [loop, setLoop] = useState<LoopState | null>(null);
   const failing = loop !== null && loop.failuresInARow > 0;
+  /** A pass is running now — a retry the reader asked for, or the timer's. */
+  const [inFlight, setInFlight] = useState(false);
+  /** Which half the last pass failed, and whether anything answered. Null when it read both. */
+  const [failure, setFailure] = useState<PassFailure | null>(null);
+  /** When each half last read, so the outage line dates the half that is stale. */
+  const [okAt, setOkAt] = useState<{ account: number | null; market: number | null }>({ account: null, market: null });
   const retryNow = useRef<() => void>(() => {});
   const [refreshKey,setRefreshKey]=useState(0);
   const refreshAccount=()=>setRefreshKey(k=>k+1);
@@ -197,8 +213,14 @@ export function App() {
    *
    * THE TWO READS ARE INDEPENDENT. A market outage no longer stops the account
    * refreshing, nor the reverse; either failing makes the pass a failure.
-   * Whatever was already on screen stays there, and the banner says how old it
-   * is.
+   * Whatever was already on screen stays there, and the banner says which half
+   * failed and how old that half is.
+   *
+   * A MARKET READ THAT HALF LANDED IS A FAILURE TOO. loadLive throws only when
+   * the market, the board and the theses all failed, so a lost /api/market
+   * alone used to count as a healthy pass: the backoff reset, the last-read
+   * time was stamped as now, and old prices were carried forward under no
+   * banner. readLive answers whether the public reads came back (liveReadsOk).
    */
   useEffect(() => {
     let alive = true;
@@ -228,14 +250,15 @@ export function App() {
         throw error;
       }
     };
-    const readLive = async () => {
+    const readLive = async (): Promise<boolean> => {
       if (!loaded) {
         try {
           const data = await loadLive(mine=>{if(alive)setLive(previous=>({...previous,mine}));});
-          if (!alive) return;
+          if (!alive) return true;
           loaded = data;
           setLive(data);
           void refreshChanges(data.tokens);
+          return liveReadsOk(data.reads);
         } finally {
           // SET ON BOTH ARMS, deliberately. "The fetch finished" is what the
           // screens need to know; whether it finished well is the loop's job.
@@ -244,7 +267,6 @@ export function App() {
           // conflation one level down.
           if (alive) setLiveLoaded(true);
         }
-        return;
       }
       const quotes = await loadTokenQuotes();
       if (alive && quotes.size)
@@ -255,18 +277,29 @@ export function App() {
       const next = await loadLive();
       if(alive) setLive(previous=>({...next,tokens:next.tokens.map(t=>{const old=previous.tokens.find(p=>p.id===t.id);return {...t,priceUsd:t.priceUsd ?? old?.priceUsd ?? null,change24hPct:t.change24hPct ?? old?.change24hPct ?? null};})}));
       await refreshChanges(next.tokens);
+      return liveReadsOk(next.reads);
     };
     const pass = async () => {
       const first = firstPass;
       firstPass = false;
-      const results = await Promise.allSettled([readAccount(first), readLive()]);
+      const [accountRead, marketRead] = await Promise.allSettled([readAccount(first), readLive()]);
       // The reader gets one plain sentence (LoadFailure); the cause goes here.
-      for (const r of results) if (r.status === "rejected") console.warn("[merrymen] refresh failed:", r.reason);
-      return results.every((r) => r.status === "fulfilled");
+      for (const r of [accountRead, marketRead]) if (r.status === "rejected") console.warn("[merrymen] refresh failed:", r.reason);
+      const outcome = passOutcome(accountRead, marketRead);
+      if (alive) {
+        const now = Date.now();
+        setOkAt((prev) => ({
+          account: accountRead.status === "fulfilled" ? now : prev.account,
+          market: outcome?.market ? prev.market : now,
+        }));
+        setFailure(outcome);
+      }
+      return outcome === null;
     };
     const refresh = startRefreshLoop({
       pass,
       report: (state) => { if (alive) setLoop(state); },
+      onFlight: (running) => { if (alive) setInFlight(running); },
       paused: () => document.hidden,
     });
     retryNow.current = refresh.retryNow;
@@ -378,10 +411,8 @@ export function App() {
         : false,
     // NULL WHEN THE ROUTE COULD NOT READ IT. `Number(null)` is 0, and zero is
     // the one value `autonomyOf` answers with "Add funds" — to a funded owner,
-    // whenever the node was slow.
-    realCashUsd: account?.status.balances
-      ? usdgOrNull(account.status.balances.cashUsdg)
-      : null,
+    // whenever the node was slow. See realCashOf.
+    realCashUsd: realCashOf(account),
     /**
      * IS THE BLOCKER OLDER THAN THE SIGNATURE?
      *
@@ -438,6 +469,7 @@ export function App() {
       {desktop && (
         <DesktopSidebar
           reads={live.reads}
+          retired={live.retired}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -454,7 +486,7 @@ export function App() {
         ref={bodyRef}
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
-        {failing && <LoadFailure nextAt={loop.nextAt} lastOkAt={loop.lastOkAt} onRetry={() => retryNow.current()}/>}
+        {failing && <LoadFailure nextAt={loop.nextAt} lastOkAt={failure ? staleSince(failure, okAt) : loop.lastOkAt} inFlight={inFlight} failed={failure ?? undefined} unreachable={failure?.unreachable} onRetry={() => retryNow.current()}/>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -480,8 +512,8 @@ export function App() {
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
-        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
+        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={inFlight} onRefresh={refreshAccount}/>}
+        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={inFlight} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
@@ -490,6 +522,7 @@ export function App() {
             agents={live.agents}
             theses={live.theses}
             read={live.reads.board}
+            retired={live.retired}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}
@@ -592,8 +625,15 @@ export function App() {
           // outage as a fact about the instrument. The three arms are ordered
           // unreadable-before-absent, which is the ordering the whole product
           // uses.
-          const unreadable =
-            failing || live.reads.market === "unreadable" || live.reads.discoveries === "unreadable";
+          //
+          // A load that finished without reading the market is unreadable too,
+          // not merely unread — see tokenPageUnreadable.
+          const unreadable = tokenPageUnreadable({
+            failing,
+            market: live.reads.market,
+            discoveries: live.reads.discoveries,
+            liveLoaded,
+          });
           return (
             <section className="hosted-entry">
               <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
@@ -690,7 +730,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} onRefresh={refreshAccount}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={inFlight} onRefresh={refreshAccount}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (

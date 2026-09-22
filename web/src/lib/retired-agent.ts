@@ -8,8 +8,10 @@
  * thing. The board read as a wall of clones.
  *
  * Retired agents are not deleted from anything. They are COUNTED — the board
- * says "Retired agents (N)" — because hiding them without a word would be its
- * own small lie about how many agents there have been.
+ * says "Retired accounts (N)" — because hiding them without a word would be its
+ * own small lie about how many agents there have been. Accounts, because that
+ * is what is counted: a key from before the identity store is linked to no
+ * slug, so an agent re-granted back then can leave one behind it.
  *
  * Its own module with NO IMPORTS, like rank-pnl.ts, so the rule is tested by
  * calling it rather than by standing up a ledger.

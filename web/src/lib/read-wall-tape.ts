@@ -128,16 +128,26 @@ export async function readWallTape(opts: { agentSlug?: string } = {}, readDb = w
     // at the moment of the deploy. The collapse reaches OP_COPY_REACH_SEC past
     // the window so that a copy whose original is just outside the day still
     // has it to collapse into, rather than standing alone inside the day.
-    const inner = ["t.created_at > ?", "t.agent_id NOT LIKE 'rh:%'"];
-    const args: unknown[] = [from - OP_COPY_REACH_SEC];
+    //
+    // Only a row WITH a hash can be a copy or have one, so only those reach
+    // back; a refusal from before the day is read for nothing.
+    const inner = ["t.created_at > ?", "(t.user_op_hash IS NOT NULL OR t.created_at > ?)", "t.agent_id NOT LIKE 'rh:%'"];
+    const args: unknown[] = [from - OP_COPY_REACH_SEC, from];
     if (only) {
       inner.push(`LOWER(t.agent_id) IN (${only.map(() => "?").join(", ")})`);
       args.push(...only);
     }
     args.push(from);
+    // THE AGENT IS MATCHED THE WAY THE COLLAPSE MATCHES IT, case-blind. The
+    // collapse keys on lower(agent_id) and this was an exact join, so when the
+    // evidenced original was filed under '0xAbC…' and its copy under the
+    // spelling the agents row holds, the collapse kept the original, the join
+    // dropped it, and the operation vanished from the band. EXISTS rather than
+    // a join, so an account spelt two ways in `agents` cannot count a row twice.
     const source = `${distinctTrades(inner.join(" AND "))}
-           JOIN agents a ON a.smart_account = t.agent_id
-          WHERE t.created_at > ? AND a.mode IN ('live','paper')`;
+          WHERE t.created_at > ?
+            AND EXISTS (SELECT 1 FROM agents a
+                         WHERE LOWER(a.smart_account) = LOWER(t.agent_id) AND a.mode IN ('live','paper'))`;
 
     // THE COUNT IS OF THE WINDOW, THE SAMPLE IS FOR THE CANVAS. One extra
     // aggregate over the same predicate, served by trades_time.

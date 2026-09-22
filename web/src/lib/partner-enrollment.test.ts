@@ -268,3 +268,23 @@ test("a storage failure never enables live trading and does not reopen its signe
   assert.equal(f.savedGrants.size, 0);
   await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
 });
+
+test("a partner is told a name the soul would refuse, instead of the agent silently running as Robin", async () => {
+  // The web and the soul both require a letter in an agent's name. Enrollment
+  // accepted any 1-24 characters, so "007" got a 200 here and the worker then
+  // refused it and kept the default: the partner was told one name while the
+  // agent answered to another.
+  const f = await fixture();
+  for (const name of ["007", "99.5", `Robin${String.fromCharCode(0x202e)}evil`, "-Robin"]) {
+    await assert.rejects(f.challengeFor(f.grant, { ...settings, name }), errorCode("invalid_settings"), `"${name}" must be refused`);
+  }
+  // A name the rule admits is stored the way the settings route stores it.
+  const challenge = await f.challengeFor(f.grant, { ...settings, name: "  Little   John  " });
+  assert.ok(challenge.challenge_token);
+  await f.service.activate(principal, f.connection, {
+    grant: f.grant,
+    challenge_token: challenge.challenge_token,
+    signature: await f.owner.signMessage({ message: challenge.message }),
+  });
+  assert.equal([...f.savedSettings.values()][0]?.agentName, "Little John");
+});

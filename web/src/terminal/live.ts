@@ -256,8 +256,19 @@ export interface LiveMine {
    */
   notice?: { level: string; message: string; at: string } | null;
   history?: number[];
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  /**
+   * `costFromQuote` is whether a fill booked from the pre-trade quote, rather
+   * than its receipt, may still be in `costUsd` — false only when the ledger
+   * said so, and null when that could not be read. See positionsOf.
+   */
+  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
+  /**
+   * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
+   * could not read one and printed what was left. Null from a feed that does
+   * not say. Only a measured "Robin" is offered a new name — see NameChip.
+   */
+  nameSource?: "settings" | "ledger" | "fallback" | null;
   slug: string | null;
   handle: string | null;
   owner: string | null;
@@ -287,6 +298,12 @@ export interface LiveState {
   agents: LiveAgent[];
   theses: Thesis[];
   mine: FeedMine | null;
+  /**
+   * How many accounts the leaderboard folded into a count instead of a row, or
+   * null when it could not tell (or did not say). The board prints the count
+   * only when it is a number — see read-leaderboard.ts.
+   */
+  retired: number | null;
   /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
@@ -451,6 +468,7 @@ export function seedLive(): LiveState {
     agents: [],
     theses: [],
     mine: null,
+    retired: null,
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
@@ -498,9 +516,15 @@ function robinhoodFallback(): LiveToken[] {
  */
 export type ReadState = "unread" | "unreadable" | "ok";
 
-async function getJson<T>(url: string): Promise<T | null> {
+/**
+ * `onAnswer` is told when the server answered at all, whatever it said — the
+ * difference between "merrymen could not load this" and "nothing reached
+ * merrymen", which the outage line must not blur (see LiveLoadError).
+ */
+async function getJson<T>(url: string, onAnswer?: () => void): Promise<T | null> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    onAnswer?.();
     if (!r.ok) return null;
     return (await r.json()) as T;
   } catch {
@@ -518,18 +542,36 @@ export function readStateOf(body: { source?: string } | null | undefined): ReadS
   return body.source === "none" ? "unreadable" : "ok";
 }
 
+/**
+ * A market load that came back with nothing to draw — and whether anything
+ * answered at all. `answered` false means no merrymen route replied, which is
+ * the only case the shell may call "can't reach merrymen"; true means it
+ * replied and could not load the data, which is a different sentence.
+ */
+export class LiveLoadError extends Error {
+  readonly answered: boolean;
+  constructor(answered: boolean) {
+    super("Market and agent data could not be loaded.");
+    this.name = "LiveLoadError";
+    this.answered = answered;
+  }
+}
+
 export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promise<LiveState> {
+  let answered = false;
+  const heard = () => {
+    answered = true;
+  };
   const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
-    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
-    getJson<{ agents: BoardRow[]; source?: string }>("/api/leaderboard"),
-    getJson<{ theses: Thesis[]; source?: string }>("/api/theses"),
-    getJson<Feed>("/api/feed").then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
+    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market", heard),
+    getJson<{ agents: BoardRow[]; source?: string; retired?: unknown }>("/api/leaderboard", heard),
+    getJson<{ theses: Thesis[]; source?: string }>("/api/theses", heard),
+    getJson<Feed>("/api/feed", heard).then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
     loadTokenQuotes(),
-    getJson<Disc>("/api/discoveries"),
+    getJson<Disc>("/api/discoveries", heard),
   ]);
 
-
-  if(!market && !board && !thesesRes) throw new Error("Market and agent data could not be loaded.");
+  if(!market && !board && !thesesRes) throw new LiveLoadError(answered);
   const theses = (thesesRes?.theses ?? []).filter((t) => t.slug || t.name);
   const bySymbol = new Map<string, Thesis[]>();
   for (const t of theses) {
@@ -672,6 +714,10 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
     agents,
     theses,
     mine,
+    // THE ROWS THE BOARD FOLDED, which this dropped: the fold shipped, the
+    // count did not reach a screen, and folded agents left the board without
+    // a word. A number only when the server sent one.
+    retired: typeof board?.retired === "number" && Number.isFinite(board.retired) ? board.retired : null,
     // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
     // that arrived with `source: "none"` counts as unreadable even though the
     // request succeeded: that shape IS the reader telling us it could not open
@@ -835,8 +881,10 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   const notice = (feed.events ?? []).find(
     (e) => (e.level === "warn" || e.level === "err" || e.level === "error") && !!e.message,
   );
+  const nameSource = feed.agent?.nameSource;
   return {
     name,
+    nameSource: nameSource === "settings" || nameSource === "ledger" || nameSource === "fallback" ? nameSource : null,
     slug,
     handle: mineTheses[0]?.handle ?? null,
     owner: "you",
@@ -857,6 +905,9 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         valueUsd:p.value_usdg,
         stale:!!p.price_stale,
         costUsd,
+        // THE LEDGER'S WORD ON WHERE THAT COST CAME FROM, carried and not inferred:
+        // true or false only as /api/feed replayed it, null when it could not.
+        costFromQuote: typeof p.cost_from_quote === "boolean" ? p.cost_from_quote : null,
         pnlPct: costUsd === null ? null : ((p.value_usdg - costUsd) / costUsd) * 100,
         // THIS position's own floor, when it carries one. Null means the
         // owner's single setting applies — what the whole book did before a
@@ -1133,7 +1184,7 @@ interface Feed {
    * and still tracked in mounted.test.ts KNOWN_DEBT; that half has not moved.
    */
   events?: { level?: string; message?: string; created_at?: string }[];
-  agent?: { name?: string; strategy?: string; slug?: string | null } | null;
+  agent?: { name?: string; nameSource?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
     kind: string;
     buy_token: string | null;
@@ -1164,5 +1215,5 @@ interface Feed {
     realized_pnl_usdg?: number | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

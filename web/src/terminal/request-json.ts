@@ -29,10 +29,15 @@ export class RequestError extends Error {
 /** Said for a timeout, a dropped connection, or a DNS failure alike — to the reader they are one thing. */
 export const UNREACHABLE = "Can't reach merrymen right now.";
 
-/** The server's own explanation, in the three shapes the routes use. */
-function explained(data: unknown): string | null {
+/**
+ * The server's own explanation, in the three shapes the routes use.
+ *
+ * On a 5xx only when the route marked it `ownerFacing` — see requestJson.
+ */
+function explained(data: unknown, status: number): string | null {
   if (!data || typeof data !== "object") return null;
-  const d = data as { error?: unknown; errors?: unknown; why?: unknown };
+  const d = data as { error?: unknown; errors?: unknown; why?: unknown; ownerFacing?: unknown };
+  if (status >= 500 && d.ownerFacing !== true) return null;
   if (typeof d.error === "string" && d.error) return d.error;
   if (Array.isArray(d.errors) && d.errors.length) return d.errors.join(" ");
   if (typeof d.why === "string" && d.why) return d.why;
@@ -50,8 +55,16 @@ export async function requestJson<T>(url: string, init?: RequestInit): Promise<T
   // A body that promised JSON and broke off half way is the same as no body.
   const data: unknown = isJson ? await response.json().catch(() => undefined) : undefined;
   if (!response.ok) {
+    // THE SERVER'S SENTENCE FOR A 4xx, OR A 5xx THE ROUTE MARKED AS WRITTEN
+    // FOR THE OWNER. A 4xx is a route telling the owner something about their
+    // request. A 5xx is our own failure, and several routes fill `error` with
+    // the raw exception on one — so a database driver's "connect ECONNREFUSED
+    // 127.0.0.1:5432" reached the sign-in screen verbatim. An unmarked 5xx body
+    // goes to the console, where the person who can act on it looks.
+    const owned = explained(data, response.status);
+    if (response.status >= 500 && owned === null && data !== undefined) console.warn(`[merrymen] ${url} answered ${response.status}:`, data);
     throw new RequestError(
-      explained(data) ?? `merrymen answered with an error (${response.status}). Try again in a moment.`,
+      owned ?? `merrymen answered with an error (${response.status}). Try again in a moment.`,
       response.status,
     );
   }

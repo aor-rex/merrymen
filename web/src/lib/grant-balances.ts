@@ -18,6 +18,9 @@
  * coalesces a missing value (`?? 0`, `if (!v)`); the Android client does not
  * read `balances` at all, and no other client calls GET /api/grants.
  */
+import { parseAbi } from "viem";
+import { CASH, MORPHO } from "@merrymen/core";
+
 export interface GrantBalances {
   ethWei: string | null;
   cashUsdg: string | null;
@@ -47,4 +50,42 @@ export async function readGrantBalances(read: {
   const entry = (i: number): string | null =>
     tokens?.[i]?.status === "success" ? amount(tokens[i]!.result) : null;
   return { ethWei: eth, cashUsdg: entry(0), vaultUsdg: entry(1) };
+}
+
+/** The two viem calls the status route makes, and nothing else of the client. */
+export interface BalanceClient {
+  getBalance(args: { address: `0x${string}` }): Promise<bigint>;
+  multicall(args: {
+    contracts: readonly {
+      address: `0x${string}`;
+      abi: typeof BALANCE_ABI;
+      functionName: "balanceOf";
+      args: readonly [`0x${string}`];
+    }[];
+  }): Promise<readonly Settled[]>;
+}
+
+const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+
+/**
+ * THE ROUTE'S READ, WITH THE CALLS INSIDE IT.
+ *
+ * The route used to build the two thunks itself, which kept the viem calls out
+ * of reach of any test: putting `.catch(() => 0n)` back inside its `eth` thunk,
+ * or a success fallback inside `tokens`, would have brought "funded owner told
+ * to Add funds" back with the whole suite green. The route now hands over its
+ * client and nothing else, so the calls a failure has to survive are the ones
+ * a test runs against a client that refuses.
+ */
+export function readGrantBalancesFrom(client: BalanceClient, account: `0x${string}`): Promise<GrantBalances> {
+  return readGrantBalances({
+    eth: () => client.getBalance({ address: account }),
+    tokens: () =>
+      client.multicall({
+        contracts: [
+          { address: CASH.USDG as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [account] },
+          { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [account] },
+        ],
+      }),
+  });
 }

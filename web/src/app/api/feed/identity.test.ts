@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { GENERATED_NAME_PARTS } from "@merrymen/core";
+import { GENERATED_NAME_PARTS, SETTINGS_DEFAULTS, TRADEABLE_SYMBOLS } from "@merrymen/core";
+import { identityOf, type IdentitySources } from "@/lib/feed-identity";
+import { AGENT_NAME_RE, normalizeAgentName } from "@/lib/agent-name-rule";
 
 /**
  * THE NAME MUST BE READ BACK FROM WHERE IT WAS WRITTEN.
@@ -22,8 +24,6 @@ import { GENERATED_NAME_PARTS } from "@merrymen/core";
  * halves agree there and only there.
  */
 
-const FEED = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
-const SETTINGS = readFileSync(new URL("../settings/route.ts", import.meta.url), "utf8");
 const WORKER = readFileSync(new URL("../../../../../worker/src/index.ts", import.meta.url), "utf8");
 const SOUL = readFileSync(new URL("../../../../../worker/src/soul.ts", import.meta.url), "utf8");
 
@@ -43,45 +43,139 @@ const ZWSP = String.fromCharCode(0x200b); // zero-width space: not a joiner
 const NUL = String.fromCharCode(0x0);
 const ACUTE = String.fromCharCode(0x301); // a combining mark, which cannot lead
 
+/** The sources identity is read from, each one recording that it was asked. */
+function sources(over: Partial<IdentitySources> & { calls?: string[] } = {}) {
+  const calls = over.calls ?? [];
+  const src: IdentitySources = {
+    hosted: over.hosted ?? (() => true),
+    settingsOf:
+      over.settingsOf ??
+      (async (tenant) => {
+        calls.push(`settings:${tenant}`);
+        return { agentName: "Shogun", strategy: "trencher", basketSymbols: ["NVDA"] };
+      }),
+    settingsFile:
+      over.settingsFile ??
+      (() => {
+        calls.push("file");
+        return JSON.stringify({ agentName: "Container Global" });
+      }),
+    slugOf:
+      over.slugOf ??
+      (async (tenant) => {
+        calls.push(`slug:${tenant}`);
+        return "7y2kq0m4c1x9h000";
+      }),
+  };
+  return { src, calls };
+}
+
+const TENANT = "0x1111111111111111111111111111111111111111" as const;
+
 describe("the feed reads identity from the tenant's own store", () => {
-  it("hosted goes to the settings store, never to a file", () => {
-    assert.match(FEED, /import \{ getSettingsStore \} from "@merrymen\/settings-store"/);
-    assert.match(FEED, /if \(isHostedMode\(\)\)[\s\S]{0,300}?getSettingsStore\(\)\.get\(tenant\)/);
+  it("hosted goes to the tenant's settings store, never to a file", async () => {
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Shogun");
+    assert.equal(id.strategy, "trencher");
+    assert.deepEqual(id.basket, ["NVDA"]);
+    assert.ok(calls.includes(`settings:${TENANT}`));
+    assert.ok(!calls.includes("file"), "the container's file holds no tenant's settings");
   });
 
-  it("a signed-out hosted caller does NOT fall through to the file read", () => {
+  it("a signed-out hosted caller does NOT fall through to the file read", async () => {
     // Load-bearing: falling through would show a signed-out visitor whatever
     // container-global config happened to be on disk.
-    assert.match(FEED, /if \(!tenant\) return IDENTITY_FALLBACK;/);
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", null, src);
+    assert.notEqual(id.name, "Container Global");
+    assert.deepEqual(calls, [], "nothing is read for nobody");
+    assert.equal(id.slug, null);
   });
 
-  it("identity is threaded with the tenant at every call site", () => {
+  it("identity is resolved for the tenant who asked", async () => {
     // The whole failure was one function that could not see who was asking.
-    assert.match(FEED, /async function readIdentitySettings\(tenant: `0x\$\{string\}` \| null\)/);
-    assert.match(FEED, /async function identityOf\(fromLedger: string, tenant: `0x\$\{string\}` \| null\)/);
-    for (const m of FEED.matchAll(/identityOf\(([^)]*)\)/g)) {
-      if (m[1]!.includes(":")) continue; // the declaration itself
-      assert.match(m[0], /,\s*tenant\)|,\s*null\)/, `identityOf must be given a tenant: ${m[0]}`);
-    }
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.slug, "7y2kq0m4c1x9h000");
+    assert.deepEqual(calls.sort(), [`settings:${TENANT}`, `slug:${TENANT}`]);
   });
 
-  it("the basket falls back to what the WORKER actually trades", () => {
+  it("self-hosted, the file IS the store", async () => {
+    const { src } = sources({ hosted: () => false });
+    assert.equal((await identityOf("Robin", null, src)).name, "Container Global");
+  });
+
+  it("the basket falls back to what the WORKER actually trades", async () => {
     // TRADEABLE_SYMBOLS is the registry of what CAN be traded (14 symbols), not
     // the default holding (3). A tenant on defaults was shown a basket their
     // agent was never going to trade.
-    assert.match(FEED, /const DEFAULT_BASKET = \[\.\.\.SETTINGS_DEFAULTS\.basketSymbols\]/);
-    // Anchored to the IMPORT, not any mention — the comment above the constant
-    // explains what it replaced, and matching prose would fail forever.
-    assert.ok(!/^import[\s\S]*?TRADEABLE_SYMBOLS[\s\S]*?from "@merrymen\/core"/m.test(FEED));
+    const { src } = sources({ settingsOf: async () => ({}) });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.deepEqual(id.basket, [...SETTINGS_DEFAULTS.basketSymbols]);
+    assert.notDeepEqual(id.basket, [...TRADEABLE_SYMBOLS]);
+  });
+});
+
+describe("the feed says where the name came from", () => {
+  // The "Name your agent" chip offers a generated name to a Robin. A Robin the
+  // feed fell back to, because the settings store or the ledger could not be
+  // read, is not one — offering there would overwrite a name the owner chose.
+  it("a configured name is the owner's, whatever the ledger says", async () => {
+    const { src } = sources();
+    assert.deepEqual(
+      { name: (await identityOf("Robin", TENANT, src)).name, from: (await identityOf("Robin", TENANT, src)).nameSource },
+      { name: "Shogun", from: "settings" },
+    );
+  });
+
+  it("with nothing configured, the ledger's Robin is a measured one", async () => {
+    const { src } = sources({ settingsOf: async () => null });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "ledger");
+  });
+
+  it("an unreadable settings store makes every name a fallback", async () => {
+    const { src } = sources({
+      settingsOf: async () => {
+        throw new Error("store down");
+      },
+    });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "fallback", "the settings may hold Shogun");
+  });
+
+  it("an unread ledger name is a fallback too", async () => {
+    const { src } = sources({ settingsOf: async () => null });
+    const id = await identityOf(null, TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "fallback");
+  });
+
+  it("a self-hosted install with no settings file has configured nothing, which is not a failed read", async () => {
+    const missing = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    const { src } = sources({
+      hosted: () => false,
+      settingsFile: () => {
+        throw missing;
+      },
+    });
+    assert.equal((await identityOf("Robin", null, src)).nameSource, "ledger");
+    const { src: broken } = sources({ hosted: () => false, settingsFile: () => "{not json" });
+    assert.equal((await identityOf("Robin", null, broken)).nameSource, "fallback");
   });
 });
 
 /**
- * The name rule as each file actually ships it, compiled from the source.
+ * The SOUL's name rule as it ships, compiled from its source.
  *
- * Reading it out rather than restating it here is the point: a copy in the test
- * would let the two drift and still pass, which is the exact failure the
- * duplication comment in settings/route.ts warns about.
+ * The web tier's copy is imported and run (lib/agent-name-rule.ts, which the
+ * settings route and partner enrollment both write through). The soul's cannot
+ * be imported here — the module touches the filesystem at load — so it is read
+ * out rather than restated: a copy in the test would let the two drift and
+ * still pass. Moving the rule into packages/core would end this read.
  */
 function ruleIn(src: string): RegExp {
   // Found by the one class no other regex in either file carries, not by how
@@ -105,8 +199,14 @@ describe("the two name normalisers agree", () => {
     // this fail the moment NFC was added to both — a true statement reported
     // as a broken one, which is the failure mode that teaches people to edit
     // the assertion rather than read it.
+    //
+    // The web half is RUN: every web write stores normalizeAgentName's output
+    // (the settings route and partner enrollment both call it). The soul's half
+    // is still read from its source, because the worker module touches the
+    // filesystem at import.
+    assert.equal(normalizeAgentName("  Little   John "), "Little John", "the API must normalise before it stores");
+    assert.equal(normalizeAgentName("José"), "José", "decomposed and precomposed are one name");
     const shape = /\.normalize\("NFC"\)\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/;
-    assert.match(SETTINGS, shape, "the API must normalise before it stores");
     assert.match(SOUL, shape, "and the soul must do the identical thing");
   });
 
@@ -122,7 +222,7 @@ describe("the two name normalisers agree", () => {
     // text and passed while `\p{Join_Control}` was silently missing its
     // backslash — which parses, and admits `{`, `}` and `_`. Building the
     // shipped rule and running names through it cannot be fooled that way.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const name of [
         "Robin", "José", "Müller", "Łukasz", "Nguyễn", "Робин", "小红", "로빈",
         "रोबिन", "โรบิน", "রোবিন", "ரோபின்", "رَوبِن", "דוד", "Ελένη",
@@ -139,7 +239,7 @@ describe("the two name normalisers agree", () => {
     // an agent's figures, and U+202E exists to make text display as something
     // other than what it is. `\p{Join_Control}` is the one exception, because
     // Persian and several Indic orthographies need ZWNJ inside a single word.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const [name, why] of [
         [`Robin${RLO}evil`, "right-to-left override"],
         [`Robin${ZWSP}x`, "zero-width space"],
@@ -160,7 +260,7 @@ describe("the two name normalisers agree", () => {
     // "99.5" or "1000" there reads as a number nobody measured — the same
     // failure as showing a figure for data nobody read, arriving by the name
     // field instead. Digits stay welcome inside a name that has a letter.
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const name of ["007", "2024", "99.5", "1 2 3", "4-20", "١٢٣", "१२३"]) {
         assert.ok(!re.test(name), `${who} must refuse the letterless "${name}"`);
       }
@@ -174,7 +274,7 @@ describe("the two name normalisers agree", () => {
     // Behaviour above is what matters, but a drift that no listed name happens
     // to exercise would still split the web tier from the soul, and the worker
     // then silently keeps the old name. Same source, same rule.
-    assert.equal(ruleIn(SETTINGS).source, ruleIn(SOUL).source);
+    assert.equal(AGENT_NAME_RE.source, ruleIn(SOUL).source);
   });
 
   it("every generated name passes both copies", () => {
@@ -182,7 +282,7 @@ describe("the two name normalisers agree", () => {
     // reconciles it into the soul. A combination either rule refused would be
     // stored by one tier and refused by the other: the owner is told the
     // agent is called one thing while it keeps answering to "Robin".
-    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
       for (const a of GENERATED_NAME_PARTS.adjectives) {
         for (const n of GENERATED_NAME_PARTS.nouns) {
           assert.ok(re.test(`${a} ${n}`), `${who} refuses the generated "${a} ${n}"`);

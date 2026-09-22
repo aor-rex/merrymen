@@ -52,7 +52,7 @@ interface FeedResponse {
   equity?: { equity_usdg: number }[];
   positions?: FeedPosition[];
   trades?: FeedTrade[];
-  agent?: { name?: string; strategy?: string; basket?: string[] } | null;
+  agent?: { name?: string; slug?: string | null; strategy?: string; basket?: string[] } | null;
   netContributionsUsdg?: number | null;
   gasUsdg?: number;
   /** Landed fills whose gas could not be priced. Non-zero means GROSS of gas. */
@@ -288,7 +288,7 @@ export function YouClient() {
 
         <section className="mm-hero">
           <div className="mm-hero-top">
-            <AgentAvatar name={name} size={44} />
+            <AgentAvatar name={name} slug={feed?.agent?.slug ?? null} size={44} />
             <div>
               <p className="mm-kicker">everything it holds</p>
               <p className="big mono">{money(latest || cash + vault + positionsUsdg)}</p>

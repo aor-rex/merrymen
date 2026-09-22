@@ -17,6 +17,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { ADVISED_RULES, blockerAdvice } from "./live-blocker";
+import { chatStateOf } from "../terminal/chat-payload";
+
+/** An agent as the chat screen holds it — only what the state builder reads. */
+const CHAT_MINE = { name: "Robin", equity: 1, moves: [], glance: { id: "steady-basket" } } as never;
 
 /**
  * Every member of the `RefuseRule` union, read from its source.
@@ -223,8 +227,13 @@ describe("the chat is told what the screen already knows", () => {
     // never sent to the chat — so an owner asking "do I still need to send gas
     // in ETH?" got a general answer while the specific one sat in the same
     // component. Reported verbatim in the beta.
-    const agent = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
-    assert.match(agent, /liveBlocker:liveBlocker \?\? null,/);
+    const state = chatStateOf({ mine: CHAT_MINE, settings: null, liveBlocker: "no-gas", perTrade: null, perDay: null, stopped: false });
+    assert.equal(state.liveBlocker, "no-gas");
+    assert.equal(
+      chatStateOf({ mine: CHAT_MINE, settings: null, liveBlocker: undefined, perTrade: null, perDay: null, stopped: false }).liveBlocker,
+      null,
+      "no verdict is null, not a missing key the model reads as nothing to say",
+    );
   });
 
   it("and the prompt names every rule the screen advises on", () => {
@@ -299,10 +308,10 @@ describe("the chat is not instructed to deny the switch it now has", () => {
   it("and the STATE actually carries it", () => {
     // The prompt can only reason about fields the client sends. This one was
     // sending the misleading field and not the decisive one.
-    const AGENT = readFileSync(
-      new URL("../terminal/screens/Agent.tsx", import.meta.url),
-      "utf8",
-    );
-    assert.match(AGENT, /liveTradingEnabled:settings\?\.values\?\.liveTradingEnabled/);
+    const state = (settings: Parameters<typeof chatStateOf>[0]["settings"]) =>
+      chatStateOf({ mine: CHAT_MINE, settings, liveBlocker: null, perTrade: null, perDay: null, stopped: false });
+    assert.equal(state({ values: { liveTradingEnabled: true }, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, true);
+    assert.equal(state({ values: {}, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, false);
+    assert.equal(state(null).liveTradingEnabled, null, "an unread switch is not an off one");
   });
 });

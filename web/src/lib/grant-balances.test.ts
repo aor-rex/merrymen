@@ -62,3 +62,36 @@ describe("the agent's chain balances", () => {
     assert.equal(bare.action?.kind, "add-funds");
   });
 });
+
+describe("the route's own calls", () => {
+  // The route built these thunks itself, so re-adding `.catch(() => 0n)` inside
+  // its `eth` call was invisible to every test. It passes its client now, and
+  // this runs the real calls against one that refuses.
+  const ACCOUNT = "0x00000000000000000000000000000000000000a1" as const;
+
+  it("a client that cannot reach the chain yields nulls, never zeros", async () => {
+    const { readGrantBalancesFrom } = await import("./grant-balances");
+    const b = await readGrantBalancesFrom({ getBalance: refuse, multicall: refuse }, ACCOUNT);
+    assert.deepEqual(b, { ethWei: null, cashUsdg: null, vaultUsdg: null });
+  });
+
+  it("asks about the agent's account, and keeps what the chain said", async () => {
+    const { readGrantBalancesFrom } = await import("./grant-balances");
+    const asked: string[] = [];
+    const b = await readGrantBalancesFrom(
+      {
+        getBalance: async ({ address }) => {
+          asked.push(`eth:${address}`);
+          return 0n;
+        },
+        multicall: async ({ contracts }) => {
+          for (const c of contracts) asked.push(`${c.functionName}:${c.args[0]}`);
+          return [ok(0n), failed];
+        },
+      },
+      ACCOUNT,
+    );
+    assert.deepEqual(b, { ethWei: "0", cashUsdg: "0", vaultUsdg: null });
+    assert.deepEqual(asked, [`eth:${ACCOUNT}`, `balanceOf:${ACCOUNT}`, `balanceOf:${ACCOUNT}`]);
+  });
+});

@@ -29,6 +29,7 @@ import {
 import { tenantOf } from "@/lib/auth";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "@/lib/agent-name-rule";
 
 export const dynamic = "force-dynamic";
 
@@ -416,10 +417,11 @@ export async function PUT(req: Request) {
   // ── enums ───────────────────────────────────────────────────────────────
   if ("agentName" in body) {
     const v = body.agentName;
-    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), duplicated
-    // deliberately rather than imported: this runs in the web tier and the soul
-    // module touches the filesystem. If the two ever disagree the worker wins
-    // and silently keeps the old name, so the shapes must match exactly.
+    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), in the web
+    // tier's one copy (lib/agent-name-rule.ts) rather than imported from the
+    // soul: that module touches the filesystem. If the two ever disagree the
+    // worker wins and silently keeps the old name, so the shapes must match
+    // exactly. Partner enrollment writes names through the same copy.
     //
     // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
     // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
@@ -430,12 +432,12 @@ export async function PUT(req: Request) {
     // every tick once it runs unconditionally. Normalise once, at the door.
     // NFC is part of the shape that must match: a decomposed "José" and a
     // precomposed one are the same name, and only one of them is 4 characters.
-    const norm = typeof v === "string" ? v.normalize("NFC").trim().replace(/\s+/g, " ") : v;
+    const norm = typeof v === "string" ? normalizeAgentName(v) : v;
     if (norm === "" || norm === null || norm === undefined) {
       setOrClear("agentName", undefined);
     } else if (
       typeof norm !== "string" ||
-      !/^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u.test(norm)
+      !AGENT_NAME_RE.test(norm)
     ) {
       // The old rule was ASCII-only and the old message said "letters and
       // numbers", which sent anyone called José or Робин round a loop they
@@ -443,7 +445,7 @@ export async function PUT(req: Request) {
       // letter requirement is named in the message for the same reason: "007"
       // starts with a number, so a message that stopped there would be obeyed
       // and refused again.
-      errors.push("name: 1-24 characters, starting with a letter or number and containing at least one letter");
+      errors.push(`name: ${AGENT_NAME_RULE}`);
     } else {
       setOrClear("agentName", norm);
     }

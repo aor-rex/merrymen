@@ -72,10 +72,16 @@ export interface LeaderboardRead {
   source: "sqlite" | "none";
   agents: LeaderRow[];
   /**
-   * How many agents were folded into "Retired agents (N)" rather than listed.
+   * How many ACCOUNTS were folded into "Retired accounts (N)" rather than listed.
    *
-   * NULL WHEN NOBODY COULD TELL — an unreadable ledger, or one too old to say
-   * how its agents are doing. Zero would claim there are none.
+   * Accounts, not agents: an agent re-granted before the identity store existed
+   * left an older account that nothing links to its slug, so that account is
+   * folded and counted while the agent itself is listed. Calling the figure
+   * agents would overstate how many there have been.
+   *
+   * NULL WHEN NOBODY COULD TELL — an unreadable ledger, one too old to say how
+   * its agents are doing, or an identity store that could not be read. Zero
+   * would claim there are none. Nothing is folded when it is null.
    */
   retired: number | null;
 }
@@ -93,12 +99,18 @@ export async function readLeaderboard(
     if (!db) return { source: "none", agents: [], retired: null };
 
     const slugFor = new Map<string, string>();
+    // Whether the slugs were READ. Without them every row looks unlinked, and
+    // the fold below retires an unlinked row that has not beaten in a day — so
+    // a named agent with a good key would leave the board through a quiet
+    // worker, and the count of it would be built from data nobody read.
+    let slugsRead = false;
     try {
       for (const id of await identities()) {
         for (const a of id.accounts) slugFor.set(a.toLowerCase(), id.slug);
       }
+      slugsRead = true;
     } catch {
-      /* rows render unlinked */
+      /* rows render unlinked, and nothing is folded — see below */
     }
 
     let rows: {
@@ -129,16 +141,24 @@ export async function readLeaderboard(
     const seen = new Set<string>();
     rows = rows.filter(r => { const key = slugFor.get(r.smart_account.toLowerCase()) ?? r.smart_account.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
 
-    // RETIRED AGENTS BECOME A COUNT, NOT A ROW EACH. Applied AFTER the slug
+    // RETIRED ACCOUNTS BECOME A COUNT, NOT A ROW EACH. Applied AFTER the slug
     // dedupe, so an identity's older key is one agent re-granted, not a second
-    // retired one.
+    // retired one — for the keys the identity store holds. A key from before
+    // the store existed is linked to no slug, so it is folded and counted
+    // beside the agent it belonged to, which is why the figure is accounts.
     //
     // Read separately and defensively, for the reason `contributions_known`
     // below is: folding these columns into the SELECT above would turn a ledger
     // that lacks one into an EMPTY BOARD. Here a failed read lists everyone, as
     // before, and reports the count as unknown rather than as zero.
+    //
+    // AND ONLY WITH THE SLUGS IN HAND. An unread identity store lists everyone
+    // the same way. Killed and expired rows could be folded without a slug but
+    // not counted: the dedupe above could not collapse an identity's keys
+    // either, so its old ones would be counted as agents of their own. And a
+    // fold with no count is rows leaving the board without a word.
     let retired: number | null = null;
-    try {
+    if (slugsRead) try {
       type Lifecycle = { mode: string | null; status: string | null; beat_at: number | null; expires_at: number | null };
       const life = new Map<string, Lifecycle>();
       for (const l of (await db

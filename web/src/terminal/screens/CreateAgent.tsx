@@ -12,7 +12,7 @@ import {
 import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { requestJson, SignIn, type AccountState } from "../HostedControls";
+import { requestJson, RetryButton, SignIn, type AccountState } from "../HostedControls";
 import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
@@ -53,7 +53,7 @@ const EXAMPLES:Record<string,string>={
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
 };
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
-export function CreateAgent({account,accountFailed=false,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
+export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
   const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
@@ -123,7 +123,7 @@ export function CreateAgent({account,accountFailed=false,onRefresh,onBack,onDone
   // said "Loading your account…" for either — for ever, after a failure, with
   // nothing to press. See AccountEntry.
   if(!account)return accountFailed
-    ? <section className="create-agent"><p role="status">We couldn&apos;t load your account. It will retry on its own.</p><button className="flow-primary" onClick={onRefresh}>Try again</button></section>
+    ? <section className="create-agent"><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
   if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onRefresh}/></section>;
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;

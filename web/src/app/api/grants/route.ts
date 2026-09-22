@@ -7,15 +7,13 @@
  */
 
 import { webChainRead } from "@/lib/chain-read";
-import { readGrantBalances, type GrantBalances } from "@/lib/grant-balances";
+import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
-import { createPublicClient, parseAbi } from "viem";
+import { createPublicClient } from "viem";
 import {
-  CASH,
-  MORPHO,
   accountsMatch,
   carriesOwnerKey,
   chainForId,
@@ -31,15 +29,13 @@ import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
-import { ledgerHasAgent, nameNewAgent } from "@/lib/first-name";
+import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
 const ARCHIVE_DIR = homePaths.grantsArchive();
-
-const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 
 /** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
  * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
@@ -290,7 +286,9 @@ export async function POST(req: Request) {
       }
     } catch {
       return NextResponse.json(
-        { error: "couldn't check this account's ownership — please try again" },
+        // Written for the owner, so it is marked as such: a 5xx body is not
+        // shown to them otherwise (terminal/request-json.ts).
+        { error: "couldn't check this account's ownership — please try again", ownerFacing: true },
         { status: 503 },
       );
     }
@@ -357,42 +355,19 @@ export async function POST(req: Request) {
     // routes are cached and unauthenticated, and an anonymous GET that mints
     // identities is a write nobody asked for.
     //
-    // THE IDENTITY IS READ BEFORE IT IS ENSURED, because what it held before
-    // this grant is the evidence first-name.ts needs: a tenant that has held an
-    // account before is not a new agent, whatever its settings say.
-    let prior: { accounts: readonly string[] } | null | undefined;
-    try {
-      prior = await getIdentityStore().get(tenant);
-    } catch {
-      prior = undefined;
-    }
-    let slug: string | null = null;
-    try {
-      slug = (await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`)).slug;
-    } catch (e) {
-      console.error("[grants] could not mint a public id:", e instanceof Error ? e.message : e);
-    }
-
-    // A NEW AGENT WITH NO NAME GETS ITS SLUG'S NAME, not "Robin". Only when
-    // first-name.ts can prove it is new and unnamed; an existing agent is never
-    // renamed here. Best effort for the same reason as the mint above.
-    if (slug) {
-      try {
-        const out = await nameNewAgent({
-          slug,
-          account: grant.smartAccount,
-          prior,
-          settings: {
-            get: () => getSettingsStore().get(tenant),
-            put: (s) => getSettingsStore().put(tenant, s),
-          },
-          ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
-        });
-        if ("named" in out) console.log(`[grants] a new agent with no name is called ${out.named}`);
-      } catch (e) {
-        console.error("[grants] could not name the new agent:", e instanceof Error ? e.message : e);
-      }
-    }
+    // THE IDENTITY IS READ BEFORE IT IS ENSURED, and a new agent with no name
+    // gets its slug's name — see mintAndNameAgent, which a test runs with a
+    // fake identity store. Best effort: it never throws.
+    await mintAndNameAgent({
+      tenant,
+      account: grant.smartAccount,
+      identities: () => getIdentityStore(),
+      settings: {
+        get: () => getSettingsStore().get(tenant),
+        put: (s) => getSettingsStore().put(tenant, s),
+      },
+      ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
+    });
     return NextResponse.json({ ok: true });
   }
 
@@ -443,17 +418,10 @@ export async function GET(req: Request) {
   const client = createPublicClient({ chain, transport: webChainRead() });
 
   // A READ THAT FAILED IS NULL, NOT ZERO — see grant-balances.ts. Zero here
-  // is what told funded owners to "Add funds" whenever the node was slow.
-  const balances = await readGrantBalances({
-    eth: () => client.getBalance({ address: grant.smartAccount }),
-    tokens: () =>
-      client.multicall({
-        contracts: [
-          { address: CASH.USDG as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-          { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-        ],
-      }),
-  });
+  // is what told funded owners to "Add funds" whenever the node was slow. The
+  // calls themselves live there too, where a test runs them against a client
+  // that refuses.
+  const balances = await readGrantBalancesFrom(client, grant.smartAccount);
 
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;
