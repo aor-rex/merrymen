@@ -29,6 +29,47 @@ type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
 const MARK_TOLERANCE_USDG = 0.00001;
 
 /**
+ * WHAT ONE SPLIT-INVARIANT SHARE IS WORTH IN TRADEABLE UNITS, PER SYMBOL.
+ *
+ * The two numbers a checkpoint carries are in DIFFERENT UNITS and nothing said
+ * so. `paper_book.shares` is split-invariant — shares at multiplier 1.0, which
+ * paper.ts holds deliberately so that a corporate action does not read as a 50%
+ * loss and retire an agent over a stock split. `cost_basis.qty_raw` is a raw
+ * balance, which is tradeable units. They are equal only while the multiplier
+ * is exactly 1.0, and paper.ts said as much in writing:
+ *
+ *   "Every token in the registry currently sits at exactly 1.0, which is why
+ *    existing books carry over unchanged — the two readings only diverge after
+ *    the first real split."
+ *
+ * Production has now outgrown that sentence. Measured 2026-09-22, across seven
+ * blocked agents: NVDA 1.000775 on five of them, AAPL 1.000566, and one holding
+ * at 2.001550 — which is exactly twice NVDA's, a 2:1 split on top. Every ratio
+ * constant per symbol across different agents and different sizes, which is
+ * what a multiplier looks like and what a fee does not.
+ *
+ * ABSENT MEANS 1.0, and that is what makes this safe to roll out. A checkpoint
+ * written before this existed carries no multiplier, and every token that never
+ * split still sits at exactly 1.0, so the old comparison and the new one agree
+ * everywhere except on the rows that were already failing.
+ */
+export type MultiplierOf = (symbol: string) => number;
+
+const ONE: MultiplierOf = () => 1;
+
+/** `ui_multiplier` is an 18-decimal fixed-point integer. Unreadable means 1.0. */
+export function multipliersFrom(rows: readonly Record<string, unknown>[]): MultiplierOf {
+  const bySymbol = new Map<string, number>();
+  for (const r of rows) {
+    const raw = Number(r.ui_multiplier);
+    // A zero or unreadable multiplier is NOT a zero holding — it is a column we
+    // could not use, and the only safe reading of it is the identity.
+    if (Number.isFinite(raw) && raw > 0) bySymbol.set(String(r.symbol), raw / 1e18);
+  }
+  return (symbol) => bySymbol.get(symbol) ?? 1;
+}
+
+/**
  * WHY A CHECKPOINT WAS REJECTED, or null when it was not.
  *
  * This used to be a bare boolean, and the boolean is why eight agents sat dead
@@ -42,7 +83,7 @@ const MARK_TOLERANCE_USDG = 0.00001;
  * The RULES ARE UNCHANGED — every clause accepts and rejects exactly what it
  * did before. Only the answer got wider.
  */
-export function paperCheckpointRejection(row: Checkpoint): string | null {
+export function paperCheckpointRejection(row: Checkpoint, multiplierOf: MultiplierOf = ONE): string | null {
   try {
     for (const [name,v] of [["cash",row.cash_usdg],["vault",row.vault_usdg],["hwm",row.hwm_usdg]] as const) {
       if (!Number.isFinite(Number(v)) || Number(v)<0) return `${name} is ${String(v)}, not a non-negative number`;
@@ -58,7 +99,13 @@ export function paperCheckpointRejection(row: Checkpoint): string | null {
       // A snapshot between cash/book and basis writes must not become a restore point.
       if (!b) return `${symbol} is held with no paper cost basis`;
       if (BigInt(b.cost_usdg)<0n) return `${symbol} has a negative cost basis`;
-      if (Math.abs(Number(b.qty_raw)/1e18-p.shares)>1e-6) return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares`;
+      // LIKE FOR LIKE. `qty_raw` is tradeable, `shares` is split-invariant, so
+      // one of them has to be converted before they can be compared at all —
+      // see MultiplierOf. The multiply adds one rounding step, which is ~1e-16
+      // relative and nowhere near the bound below.
+      const mul = multiplierOf(symbol);
+      const tradeable = p.shares * mul;
+      if (Math.abs(Number(b.qty_raw)/1e18-tradeable)>1e-6) return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${mul}`;
     }
     for (const b of basis) {
       if (BigInt(b.qty_raw)<0n || BigInt(b.cost_usdg)<0n) return `${b.symbol} basis is negative`;
@@ -68,8 +115,23 @@ export function paperCheckpointRejection(row: Checkpoint): string | null {
   } catch (e) { return `unreadable (${e instanceof Error ? e.message : String(e)})`; }
 }
 
-export function validPaperCheckpoint(row: Checkpoint): boolean {
-  return paperCheckpointRejection(row) === null;
+export function validPaperCheckpoint(row: Checkpoint, multiplierOf: MultiplierOf = ONE): boolean {
+  return paperCheckpointRejection(row, multiplierOf) === null;
+}
+
+/**
+ * The multipliers for one agent's holdings, from whichever book is to hand.
+ *
+ * Best-effort: a table that will not answer gives the identity, which is what
+ * every unsplit token is anyway. Recovery must not be blocked by the lookup
+ * that exists to unblock it.
+ */
+async function multipliersFor(db: Db, account: string): Promise<MultiplierOf> {
+  try {
+    return multipliersFrom(await db.prepare(
+      `SELECT symbol, ui_multiplier FROM positions WHERE LOWER(agent_id)=LOWER(?)`,
+    ).all(account) as Record<string, unknown>[]);
+  } catch { return ONE; }
 }
 
 export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<number> {
@@ -82,7 +144,8 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
   });
   let count=0;
   for(const b of snapshots) {
-    const why = paperCheckpointRejection(b);
+    // FROM THE CHILD, which is the book these shares were written against.
+    const why = paperCheckpointRejection(b, await multipliersFor(child, b.agent_id));
     if (why) {
       // SAID OUT LOUD, because this skip is the start of the whole failure
       // chain. No checkpoint written here means every later restore falls to
@@ -107,6 +170,17 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
   await shared.exec(PAPER_CHECKPOINT_SCHEMA);
   let row = await shared.prepare(`SELECT p.* FROM paper_checkpoints p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)
     WHERE LOWER(p.agent_id)=LOWER(?) AND p.epoch=a.epoch`).get(account) as Checkpoint | undefined;
+  /**
+   * READ ONCE, FOR BOTH PATHS, AND FROM THE SHARED BOOK ON PURPOSE.
+   *
+   * A checkpoint written before multipliers were understood carries none, and
+   * the agents that need this most are precisely the ones that are NOT running
+   * — their child was never spawned, so nothing has re-mirrored their book and
+   * their stale row would go on failing for ever. The shared `positions` table
+   * is mirrored and current, so resolving the multiplier HERE fixes the legacy
+   * rows as well as the new ones, which a checkpoint-side field could not.
+   */
+  const multiplierOf = await multipliersFor(shared, account);
   if (!row) {
     // Upgrade path: recover a fully reconciled recorded valuation. Never take
     // today's on-chain cash or a configured seed as the old paper bankroll.
@@ -158,7 +232,20 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     if (!Number.isFinite(value)) throw new Error(`paper positions do not value (positions=${positions.length})`);
     const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
     if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) throw new Error(`the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`);
-    const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>[String(p.symbol),{token:String(p.token),shares:Number(p.raw_balance)/1e18}]));
+    /**
+     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO.
+     *
+     * This used to write `raw_balance/1e18` — a TRADEABLE quantity — into a
+     * field the paper engine reads as shares at multiplier 1.0, so the two
+     * restore paths wrote the same field in different units and only agreed
+     * while nothing had split. Nobody had been bitten yet; a post-split
+     * upgrade-path restore would have mis-stated the book by the multiplier,
+     * silently, in the direction of over-reporting the holding.
+     */
+    const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>{
+      const symbol=String(p.symbol);
+      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18/multiplierOf(symbol)}];
+    }));
     const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
     const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};
     /**
@@ -173,7 +260,7 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
      */
     row={agent_id:account,epoch:Number(mark.epoch),cash_usdg:Number(mark.cash_usdg),vault_usdg:Number(mark.vault_usdg),hwm_usdg:Math.max(Number(mark.equity_usdg),Number(peak.peak),Number(mark.cash_usdg)+Number(mark.vault_usdg)+value),shares:JSON.stringify(shares),basis_json:JSON.stringify(basis.filter(b=>shares[b.symbol])),updated_at:Number(mark.at)};
   }
-  const why = paperCheckpointRejection(row);
+  const why = paperCheckpointRejection(row, multiplierOf);
   if (why) throw new Error(`invalid paper checkpoint: ${why}`);
   await child.tx(async db=>{
     await db.prepare(`INSERT INTO paper_book(agent_id,cash_usdg,vault_usdg,hwm_usdg,shares,updated_at) VALUES(?,?,?,?,?,?)`)
