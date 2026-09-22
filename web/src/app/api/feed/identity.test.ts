@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { GENERATED_NAME_PARTS } from "@merrymen/core";
 
 /**
  * THE NAME MUST BE READ BACK FROM WHERE IT WAS WRITTEN.
@@ -83,7 +84,9 @@ describe("the feed reads identity from the tenant's own store", () => {
  * duplication comment in settings/route.ts warns about.
  */
 function ruleIn(src: string): RegExp {
-  const m = src.match(/\/\^\[\\p\{L\}[^/\n]*\/u/);
+  // Found by the one class no other regex in either file carries, not by how
+  // the rule happens to begin — the letter lookahead moved its first token.
+  const m = src.match(/\/\^[^/\n]*\\p\{Join_Control\}[^/\n]*\/u/);
   assert.ok(m, "the name rule must be present and recognisable");
   return new RegExp(m[0].slice(1, -2), "u");
 }
@@ -151,27 +154,68 @@ describe("the two name normalisers agree", () => {
       }
     }
   });
+
+  it("a name has at least one letter, so it can never be read as a figure", () => {
+    // A name renders beside an agent's return on a page that ranks people.
+    // "99.5" or "1000" there reads as a number nobody measured — the same
+    // failure as showing a figure for data nobody read, arriving by the name
+    // field instead. Digits stay welcome inside a name that has a letter.
+    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+      for (const name of ["007", "2024", "99.5", "1 2 3", "4-20", "١٢٣", "१२३"]) {
+        assert.ok(!re.test(name), `${who} must refuse the letterless "${name}"`);
+      }
+      for (const name of ["R2", "2Pac", "Agent 47", "7 Oaks", "小红2"]) {
+        assert.ok(re.test(name), `${who} must still accept "${name}"`);
+      }
+    }
+  });
+
+  it("the two copies are still byte-identical", () => {
+    // Behaviour above is what matters, but a drift that no listed name happens
+    // to exercise would still split the web tier from the soul, and the worker
+    // then silently keeps the old name. Same source, same rule.
+    assert.equal(ruleIn(SETTINGS).source, ruleIn(SOUL).source);
+  });
+
+  it("every generated name passes both copies", () => {
+    // The grants route writes a generated name into settings, and the worker
+    // reconciles it into the soul. A combination either rule refused would be
+    // stored by one tier and refused by the other: the owner is told the
+    // agent is called one thing while it keeps answering to "Robin".
+    for (const [who, re] of [["settings", ruleIn(SETTINGS)], ["soul", ruleIn(SOUL)]] as const) {
+      for (const a of GENERATED_NAME_PARTS.adjectives) {
+        for (const n of GENERATED_NAME_PARTS.nouns) {
+          assert.ok(re.test(`${a} ${n}`), `${who} refuses the generated "${a} ${n}"`);
+        }
+      }
+    }
+  });
 });
 
-describe("the worker reconciles a rename while it is already armed", () => {
-  it("the reconcile runs BEFORE the unchanged short-circuit", () => {
-    // A name is in neither connectionKey nor strategyKey, so renaming forces no
-    // re-arm; for an already-armed agent `unchanged` is true on every tick
-    // forever, and the reconcile below it never ran again. The owner could save
-    // a name, have it accepted and stored, and the soul would stay "Robin" for
-    // the life of the process.
-    const reconcile = WORKER.indexOf("RECONCILE THE NAME BEFORE THE SHORT-CIRCUIT");
-    const shortCircuit = WORKER.indexOf("if (unchanged) return true;");
-    assert.ok(reconcile > 0, "the reconcile must be present");
-    assert.ok(shortCircuit > 0, "the short-circuit must be present");
-    assert.ok(reconcile < shortCircuit, "the name reconcile must run before the short-circuit returns");
-  });
-
-  it("it is guarded on a real difference, so a normal tick writes nothing", () => {
-    assert.match(WORKER, /if \(want && want !== getName\(\)\)/);
-  });
-
-  it("it normalises the same way the soul does before comparing", () => {
-    assert.match(WORKER, /cfg\.agentName\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/);
+describe("the worker reconciles a rename whatever state the grant is in", () => {
+  it("the reconcile runs BEFORE the kill, expiry and unchanged returns", () => {
+    // PINNED AS SOURCE because index.ts exports nothing, so the ORDER inside
+    // syncGrant cannot be reached any other way — the same reason
+    // grant-expiry.test.ts pins its guard. What the reconcile DOES is executed
+    // in worker/src/name-reconcile.test.ts against the real soul.
+    //
+    // Each return below it is a state in which a rename was lost. Below the
+    // unchanged short-circuit, an armed agent never took one: a name forces no
+    // re-arm, so `unchanged` is true forever. Below the expiry return, an
+    // agent whose key lapsed never took one: the owner renamed it, the store
+    // accepted it, and the leaderboard kept "Robin" for good. The reconcile is
+    // a soul write and one UPDATE, no chain call, so it can run first.
+    const sync = WORKER.slice(WORKER.indexOf("async function syncGrant()"));
+    const reconcile = sync.indexOf("await reconcileName(");
+    assert.ok(reconcile > 0, "syncGrant must reconcile the name");
+    for (const [what, marker] of [
+      ["kill", "if (!grant) {"],
+      ["expiry", "grantExpired("],
+      ["unchanged short-circuit", "if (unchanged) return true;"],
+    ] as const) {
+      const at = sync.indexOf(marker);
+      assert.ok(at > 0, `sanity: the ${what} return still exists`);
+      assert.ok(reconcile < at, `the name reconcile must run before the ${what} return`);
+    }
   });
 });

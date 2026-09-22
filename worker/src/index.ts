@@ -189,6 +189,7 @@ import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { ensureSoul, getName, setName } from "./soul";
+import { createNameReconciler } from "./name-reconcile";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
@@ -5161,12 +5162,38 @@ async function main() {
     await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
   }
 
+  /** One per process: it remembers which refused name the owner was already told about. */
+  const reconcileName = createNameReconciler({ ensureSoul, getName, setName });
+
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
    * armed after the sync. Kill switch = grant file deleted by web's DELETE.
    */
   async function syncGrant(): Promise<boolean> {
     const grant = loadGrantFile();
+
+    // RECONCILE THE NAME BEFORE ANY RETURN, or it never happens.
+    //
+    // It has lost renames at two of the returns below. Under the unchanged
+    // short-circuit: a name is in neither `connectionKey` nor `strategyKey`
+    // (settings.ts), so renaming forces no re-arm, and for an armed agent
+    // `unchanged` is true on every tick forever. Under the expiry return: an
+    // agent whose key lapsed kept its old name on the roster for good, however
+    // many times the owner saved a new one. Settings is the durable SEED and
+    // the soul is the runtime seat; the seed has to reach the seat in every
+    // state the grant can be in.
+    //
+    // Safe to run first because it touches no chain — a soul write and one
+    // UPDATE, both only when the name actually differs (name-reconcile.ts).
+    // The row is keyed on the grant when there is one, expired or not, and on
+    // the armed handle when the grant has just been deleted; with neither, the
+    // soul still moves and the arm path mirrors it onto the row later.
+    await reconcileName(cfg.agentName, {
+      agentId: async () => (grant ? ensureAgent(grant) : (active?.agentId ?? null)),
+      setAgentName,
+      warn: (agentId, message) => addEvent(agentId, "warn", message),
+      log: (line) => console.log(line),
+    });
 
     if (!grant) {
       if (active) {
@@ -5201,31 +5228,6 @@ async function main() {
       active &&
       active.grant.smartAccount === grant.smartAccount &&
       active.grant.grantedAt === grant.grantedAt;
-
-    // RECONCILE THE NAME BEFORE THE SHORT-CIRCUIT, or it never happens.
-    //
-    // The reconcile used to sit below this early return, next to the re-arm. A
-    // name is in neither `connectionKey` nor `strategyKey` (settings.ts), so
-    // renaming changes nothing that forces a re-arm — and for an agent that is
-    // already armed, `unchanged` is true on every tick forever. The owner could
-    // save a name, watch the store accept it, and the soul would stay "Robin"
-    // for the life of the process. Settings is the durable SEED and the soul is
-    // the runtime seat, so the seed has to be able to reach the seat while the
-    // agent is running, not only when its grant changes.
-    //
-    // Guarded on a real difference, so the common tick does no work and writes
-    // nothing. Both sides are normalised the same way — the API stores soul-form
-    // now — which is what lets this converge after one write instead of
-    // rewriting the identity file every tick.
-    if (cfg.agentName) {
-      ensureSoul();
-      const want = cfg.agentName.trim().replace(/\s+/g, " ");
-      if (want && want !== getName()) {
-        const named = setName(want);
-        if (!named.ok) console.log(`[soul] refusing the configured name: ${named.reason}`);
-        else await setAgentName(await ensureAgent(grant), named.name);
-      }
-    }
 
     if (unchanged) return true;
 
@@ -5299,7 +5301,7 @@ async function main() {
     await restoreAnchoredHighWaterMark(agentId);
 
     // The soul's name is the source of truth — mirror it onto the roster. The
-    // configured name was reconciled into the soul above the short-circuit, so
+    // configured name was reconciled into the soul at the top of syncGrant, so
     // by here `getName()` is already what the owner asked for.
     ensureSoul();
     await setAgentName(agentId, getName());

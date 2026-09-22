@@ -10,6 +10,9 @@ export * from "./grant";
 export * from "./holder-proof";
 export * from "./derivation";
 export * from "./explain";
+// A NAME FOR AN AGENT NOBODY NAMED, seeded on the slug so the grants route and
+// the Agent screen offer the same one without a round trip.
+export * from "./agent-name";
 export * from "./hosted";
 export * from "./wall";
 // The per-account vault address the wall pins, resolved from the factory at

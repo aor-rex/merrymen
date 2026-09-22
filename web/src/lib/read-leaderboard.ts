@@ -14,8 +14,10 @@ import { readPaperReturn } from "./paper-return";
  * needs percentages; a balance sheet is nobody else's business. The same split
  * the daily public report already makes.
  *
- * All ledger agents are listed. Only live agents with evidenced returns are
- * ranked; paper and idle agents stay visible and explicitly unranked.
+ * Every agent something is still running is listed. Only live agents with
+ * evidenced returns are ranked; paper and idle agents stay visible and
+ * explicitly unranked. Killed, lapsed and unrun agents are folded into a
+ * count instead of a row each — see retired-agent.ts for which, and why.
  *
  * NULL IS NOT ZERO. An agent with no deposit on record has an UNKNOWN return,
  * not a flat one, and publishing "equity minus nothing" as performance is the
@@ -29,6 +31,7 @@ import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
+import { isRetired } from "@/lib/retired-agent";
 
 export interface LeaderRow {
   /** The public id. Null means no identity yet, and the row renders unlinked. */
@@ -67,15 +70,26 @@ export interface LeaderRow {
 export interface LeaderboardRead {
   source: "sqlite" | "none";
   agents: LeaderRow[];
+  /**
+   * How many agents were folded into "Retired agents (N)" rather than listed.
+   *
+   * NULL WHEN NOBODY COULD TELL — an unreadable ledger, or one too old to say
+   * how its agents are doing. Zero would claim there are none.
+   */
+  retired: number | null;
 }
 
 /** Points in the sparkline. Enough to show a shape, few enough to inline. */
 const CURVE_POINTS = 40;
 
 
-export async function readLeaderboard(readDb = withReadDb, identities = () => getIdentityStore().all()): Promise<LeaderboardRead> {
+export async function readLeaderboard(
+  readDb = withReadDb,
+  identities = () => getIdentityStore().all(),
+  nowSec = () => Math.floor(Date.now() / 1000),
+): Promise<LeaderboardRead> {
   return readDb(async (db): Promise<LeaderboardRead> => {
-    if (!db) return { source: "none", agents: [] };
+    if (!db) return { source: "none", agents: [], retired: null };
 
     const slugFor = new Map<string, string>();
     try {
@@ -107,12 +121,54 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
     } catch {
       // A ledger written by an older worker has no `mode`. An empty board is
       // the honest render of that, never a 500.
-      return { source: "sqlite", agents: [] };
+      return { source: "sqlite", agents: [], retired: null };
     }
 
     // One row per public identity after a re-grant; the newest account wins.
     const seen = new Set<string>();
     rows = rows.filter(r => { const key = slugFor.get(r.smart_account.toLowerCase()) ?? r.smart_account.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+
+    // RETIRED AGENTS BECOME A COUNT, NOT A ROW EACH. Applied AFTER the slug
+    // dedupe, so an identity's older key is one agent re-granted, not a second
+    // retired one.
+    //
+    // Read separately and defensively, for the reason `contributions_known`
+    // below is: folding these columns into the SELECT above would turn a ledger
+    // that lacks one into an EMPTY BOARD. Here a failed read lists everyone, as
+    // before, and reports the count as unknown rather than as zero.
+    let retired: number | null = null;
+    try {
+      type Lifecycle = { mode: string | null; status: string | null; beat_at: number | null; expires_at: number | null };
+      const life = new Map<string, Lifecycle>();
+      for (const l of (await db
+        .prepare(
+          `SELECT smart_account, mode, status, beat_at, expires_at FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
+        )
+        .all()) as (Lifecycle & { smart_account: string })[]) {
+        life.set(l.smart_account, l);
+      }
+      const now = nowSec();
+      const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+      const before = rows.length;
+      rows = rows.filter((r) => {
+        const l = life.get(r.smart_account);
+        return !isRetired(
+          {
+            slug: slugFor.get(r.smart_account.toLowerCase()) ?? null,
+            // RAW, not the COALESCEd `r.mode` above: that reads a newborn that
+            // has never beaten as idle, and would retire it before its first tick.
+            mode: l?.mode ?? null,
+            status: l?.status ?? null,
+            beatAt: num(l?.beat_at),
+            expiresAt: num(l?.expires_at),
+          },
+          now,
+        );
+      });
+      retired = before - rows.length;
+    } catch {
+      /* lifecycle columns arrive with worker migrations; unknown until they do */
+    }
     const agents = await Promise.all(
       rows.map(async (r): Promise<LeaderRow> => {
         const account = r.smart_account;
@@ -236,7 +292,7 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
       return b.pnlBps - a.pnlBps;
     });
 
-    return { source: "sqlite", agents };
+    return { source: "sqlite", agents, retired };
   });
 }
 
