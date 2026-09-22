@@ -31,7 +31,14 @@ export function spentToday(mine: LiveMine, now: number): number {
 }
 
 export function positionsOf(mine: LiveMine) {
-  if(mine.positions) return mine.positions.filter(p=>p.valueUsd>0).map(p=>({symbol:p.symbol,detail:`${money(p.valueUsd)}${p.stale ? " · last mark" : ""}`,pnl:null as number|null}));
+  // THE POSITION'S OWN %, which mineOf computed from the recorded cost and this
+  // mapping threw away as `pnl: null` — so the desk never showed one. Null
+  // stays null and says why: no cost on record is "cost unknown", never 0%.
+  // A stale mark keeps its value and its "last mark" note but not a %, which
+  // would print an old price's return beside nothing that says it is old.
+  if(mine.positions) return mine.positions.filter(p=>p.valueUsd>0).map(p=>({symbol:p.symbol,
+    detail:`${money(p.valueUsd)}${p.stale ? " · last mark" : ""}${p.costUsd === null ? " · cost unknown" : ""}`,
+    pnl:!p.stale && p.pnlPct !== null && Number.isFinite(p.pnlPct) ? p.pnlPct : null}));
   const g = mine.glance;
   return (
     g.legs?.map((l) => ({

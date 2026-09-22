@@ -785,7 +785,17 @@ export function equityDayAgo(
   return best;
 }
 
-function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
+/**
+ * A symbol the ledger recorded, admitted only if it looks like one. An address
+ * is not a symbol, and a guessed one is worse than none: the chat model would
+ * repeat it as fact.
+ */
+function recordedSymbol(raw: unknown): string | null {
+  return typeof raw === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(raw) && !/^0x/i.test(raw) ? raw : null;
+}
+
+/** Exported for its test; loadLive is the only caller. */
+export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
   const name = feed.agent?.name ?? "Your agent";
   const mineTheses = feed.agent?.slug ? theses.filter((t) => t.slug === feed.agent?.slug) : [];
@@ -861,12 +871,26 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
     moves: (feed.trades ?? []).map(t=>{
       const buy=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.buy_token?.toLowerCase());
       const sell=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.sell_token?.toLowerCase());
+      // THE LEDGER'S OWN WORD FIRST. This resolved a side only by matching the
+      // pair against STOCK_TOKENS, so every curve and class trade came back
+      // with no side, the desk dropped it, and an agent that had bought and
+      // sold CASHCAT showed "Trades · 0" while its chat could not say what it
+      // had bought. The fill's side, then the side its decision asked for (a
+      // refusal filled nothing and still had one), then the stock pair as
+      // before. A row none of those can name is KEPT with a null side — the
+      // chat tape still sees that something happened — and never guessed.
+      const recorded = t.fill_side==="buy"||t.fill_side==="sell" ? t.fill_side : t.action==="buy"||t.action==="sell" ? t.action : null;
+      const action = recorded ?? (buy ? "buy" as const : sell ? "sell" as const : null);
+      const stock = action==="buy" ? buy : action==="sell" ? sell : buy ?? sell;
       return {
         slug,name,handle:null,
-        action:buy ? "buy" as const : sell ? "sell" as const : null,
-        symbol:buy?.symbol ?? sell?.symbol ?? null,
+        action,
+        symbol:stock?.symbol ?? recordedSymbol(t.symbol),
         sizeUsdg:t.amount_usdg,
-        reason:null,
+        // Why the agent did it, from the decision that made the trade. It was
+        // hard-coded null, so every row on the owner's desk read "No
+        // explanation available." for a decision that had one.
+        reason:typeof t.reason==="string" && t.reason.trim() ? t.reason : null,
         paper:t.status==="paper",
         head:t.kind,
         at:ledgerSeconds(t.created_at),
@@ -1129,6 +1153,15 @@ interface Feed {
     /** The rule the wall refused it under. Selected by the route, was dropped here. */
     reject_rule?: string | null;
     created_at: string;
+    /** What the fill did, as the executor recorded it. See lib/desk-trades.ts. */
+    fill_side?: string | null;
+    /** The fill's symbol, else its decision's. Not yet vetted — recordedSymbol does that. */
+    symbol?: string | null;
+    display_name?: string | null;
+    /** The side the decision asked for, which is how a refusal has one. */
+    action?: string | null;
+    reason?: string | null;
+    realized_pnl_usdg?: number | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
   positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];

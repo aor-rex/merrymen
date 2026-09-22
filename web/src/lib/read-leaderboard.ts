@@ -1,4 +1,5 @@
 import { readPaperReturn } from "./paper-return";
+import { readOperationCounts } from "./distinct-trades";
 /**
  * WHO IS ACTUALLY ANY GOOD.
  *
@@ -167,19 +168,13 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
         let landed = 0;
         let refused = 0;
         try {
-          const t = (await db
-            .prepare(
-              `SELECT COALESCE(SUM(CASE WHEN status = 'landed' THEN gas_usdg ELSE 0 END), 0) AS gas,
-                      SUM(CASE WHEN status = 'paper' THEN 1 ELSE 0 END) AS paper_filled,
-                      SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
-                      SUM(CASE WHEN status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS refused
-                 FROM trades WHERE agent_id = ? AND epoch = ?`,
-            )
-            .get(account, epoch)) as { paper_filled: number; gas: number; landed: number | null; refused: number | null } | undefined;
-          gasUsdg = Number(t?.gas ?? 0);
-          landed = Number(t?.landed ?? 0);
-          filledPaper = Number(t?.paper_filled ?? 0);
-          refused = Number(t?.refused ?? 0);
+          // Operations, not rows — the same count the agent's own page shows,
+          // so a redeploy's re-recorded copies cannot double a board figure.
+          const t = await readOperationCounts(db, account, epoch, "landed");
+          gasUsdg = t.gasUsdg;
+          landed = t.landed;
+          filledPaper = t.filledPaper;
+          refused = t.refused;
         } catch {
           /* older ledger */
         }
