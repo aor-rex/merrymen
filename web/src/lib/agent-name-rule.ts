@@ -40,3 +40,30 @@ export function normalizeAgentName(raw: string): string {
  * would be obeyed and refused again.
  */
 export const AGENT_NAME_RULE = "1-24 characters, starting with a letter or number and containing at least one letter";
+
+/**
+ * THE RULE A NAME WAS STORED UNDER, before the letter requirement — the
+ * web twin of worker/src/soul.ts STORED_NAME_RE, and it must stay byte-equal
+ * to it for the same reason AGENT_NAME_RE must.
+ */
+export const STORED_AGENT_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+
+/**
+ * WHETHER A SETTINGS SAVE MAY STORE `norm` AS THE AGENT'S NAME.
+ *
+ * The letter rule is for a name somebody is choosing NOW. An agent that was
+ * already called "007" when the rule arrived keeps that name — the owner was
+ * promised no existing agent is renamed, and the worker already honours that
+ * (soul.ts carryStoredName). Without this, the web tier would break the promise
+ * from the other side: the Settings screen sends the whole form back on every
+ * save, so an owner whose agent is "007" could not change ANY setting without
+ * first renaming it — the save would come back refused on a field they never
+ * touched.
+ *
+ * So a name equal to the one already stored is held to the rule it was stored
+ * under, and only a different name has to meet the new one.
+ */
+export function agentNameAccepted(norm: string, stored: unknown): boolean {
+  if (AGENT_NAME_RE.test(norm)) return true;
+  return typeof stored === "string" && normalizeAgentName(stored) === norm && STORED_AGENT_NAME_RE.test(norm);
+}

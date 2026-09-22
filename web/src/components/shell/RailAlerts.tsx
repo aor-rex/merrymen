@@ -107,7 +107,7 @@ export function RailAlerts() {
           const coin = coinName(t);
           const row = (
             <>
-              <AgentAvatar name={t.name} size={22} />
+              <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
               <span className="who">
                 <span className="nm">{t.name}</span>
                 <span className={`mm-chip ${badgeClass(b.kind)}${t.outcome === "pending" ? " unsettled" : ""}`}>

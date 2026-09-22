@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { GENERATED_NAME_PARTS, SETTINGS_DEFAULTS, TRADEABLE_SYMBOLS } from "@merrymen/core";
 import { identityOf, type IdentitySources } from "@/lib/feed-identity";
-import { AGENT_NAME_RE, normalizeAgentName } from "@/lib/agent-name-rule";
+import { AGENT_NAME_RE, STORED_AGENT_NAME_RE, normalizeAgentName } from "@/lib/agent-name-rule";
 
 /**
  * THE NAME MUST BE READ BACK FROM WHERE IT WAS WRITTEN.
@@ -275,6 +275,17 @@ describe("the two name normalisers agree", () => {
     // to exercise would still split the web tier from the soul, and the worker
     // then silently keeps the old name. Same source, same rule.
     assert.equal(AGENT_NAME_RE.source, ruleIn(SOUL).source);
+  });
+
+  it("the STORED-name rule is the same in both tiers too", () => {
+    // A name held before the letter rule is carried under the old rule on both
+    // sides (soul.ts carryStoredName, agent-name-rule.ts agentNameAccepted). If
+    // the web tier grandfathered a name the soul would not, a re-saved "007"
+    // would be accepted here and silently run as Robin there.
+    const rules = SOUL.match(/\/\^[^/\n]*\\p\{Join_Control\}[^/\n]*\/u/g) ?? [];
+    const stored = rules.map((r) => r.slice(1, -2)).filter((r) => !r.startsWith("^(?="));
+    assert.equal(stored.length, 1, "the soul carries exactly one stored-name rule");
+    assert.equal(STORED_AGENT_NAME_RE.source, stored[0]);
   });
 
   it("every generated name passes both copies", () => {

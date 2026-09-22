@@ -239,7 +239,10 @@ export function Home({
                       {t.cast.slice(0, 3).map((a) => (
                         <button key={a.slug} onClick={() => onAgent(a.slug)}>
                           <Face name={a.name} slug={a.slug} small />
-                          <span>{a.handle ?? a.name}</span>
+                          {/* The AGENT heads the row. `handle` is the owner's typed X
+                              handle, unverified on this path (AgentRef carries no
+                              proof), so it never stands in for the agent's name. */}
+                          <span>{a.name}</span>
                         </button>
                       ))}
                     </div>
@@ -282,7 +285,7 @@ export function Home({
                           />
                         ))}
                       </span>
-                      {who.map((a) => a.handle ?? a.name).join(", ")}
+                      {who.map((a) => a.name).join(", ")}
                       {t.cast.length > who.length
                         ? ` +${t.cast.length - who.length}`
                         : ""}

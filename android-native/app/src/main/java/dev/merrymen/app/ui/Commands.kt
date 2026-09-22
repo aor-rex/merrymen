@@ -52,8 +52,9 @@ private val LIST_FIELDS = setOf("basketSymbols")
 /**
  * Settings that are STRINGS even when they look like numbers. `agentName` "007"
  * and a strategy id must not be coerced to a JSON number by settingsPayload, or
- * the validator refuses the wrong-typed value — a rename to an all-digits name
- * would silently fail.
+ * the validator refuses the wrong-typed value. A NEW name now needs a letter
+ * (the server says so), but an agent already called "007" keeps it, and every
+ * save re-sends that name — coerced to a number, it would block the whole save.
  */
 private val STRING_FIELDS = setOf("agentName", "strategy")
 

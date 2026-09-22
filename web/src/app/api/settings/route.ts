@@ -29,7 +29,7 @@ import {
 import { tenantOf } from "@/lib/auth";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
-import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "@/lib/agent-name-rule";
+import { AGENT_NAME_RULE, agentNameAccepted, normalizeAgentName } from "@/lib/agent-name-rule";
 
 export const dynamic = "force-dynamic";
 
@@ -437,7 +437,9 @@ export async function PUT(req: Request) {
       setOrClear("agentName", undefined);
     } else if (
       typeof norm !== "string" ||
-      !AGENT_NAME_RE.test(norm)
+      // `stored.agentName`: a name already held keeps the rule it was stored
+      // under, so re-saving the form never renames or blocks a "007".
+      !agentNameAccepted(norm, stored.agentName)
     ) {
       // The old rule was ASCII-only and the old message said "letters and
       // numbers", which sent anyone called José or Робин round a loop they
