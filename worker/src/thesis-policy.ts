@@ -332,8 +332,17 @@ const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
 export const TRADED_ONLY_SOURCES = ["class-route"] as const;
 const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
+/**
+ * The trade statuses `outcomeOf` calls "landed" — a fill on chain, or on the
+ * paper book. Exported for the SQL half of the gate below; outcomeOf keeps its
+ * own two arms because the two say different sentences, and thesis-policy.test
+ * holds the two in step.
+ */
+export const LANDED_STATUSES = ["landed", "paper"] as const;
+
 /** Actions that move cash between the account and its vault — plumbing, not a thesis. */
-const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withdraw"]);
+export const CASH_ACTIONS = ["vault-deposit", "vault-withdraw"] as const;
+const IS_CASH: ReadonlySet<string> = new Set<string>(CASH_ACTIONS);
 
 /**
  * Wall rules that are about the ACCOUNT rather than the trade — the day's
@@ -344,7 +353,7 @@ const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withd
  * `reject_rule` (core's autonomy.ts). account-refusals.test.ts holds a typed
  * record of that union, so a new rule there fails a test until it is placed.
  */
-const ACCOUNT_STATE_RULES: ReadonlySet<string> = new Set([
+export const ACCOUNT_STATE_RULES = [
   "ops-cap",
   "daily-cap",
   "deposit-cap",
@@ -356,7 +365,8 @@ const ACCOUNT_STATE_RULES: ReadonlySet<string> = new Set([
   "wrong-chain",
   "no-gas",
   "no-cash",
-]);
+] as const;
+const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULES);
 
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
@@ -367,6 +377,56 @@ const ACCOUNT_STATE_RULES: ReadonlySet<string> = new Set([
  * silently becomes the rule for anything the policy later admits.
  */
 export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(SOURCE_POLICY));
+
+/**
+ * THE SQL HALF OF THREE RULES BELOW, for a reader whose scan is bounded.
+ *
+ * A reader takes the newest N groups and only then asks `publishableThesis`
+ * about each. The class route re-proposes a refused entry every tick with
+ * drifting evidence, and a basket blocked on its own account refuses every leg
+ * every tick, so the newest ninety groups could all be posts the gate was
+ * always going to drop — and a buy that landed three hours earlier never
+ * reached the gate at all. The feed had nothing to show, and the alerts rail
+ * said there had been no trades.
+ *
+ * So the three rules that drop a row for its SOURCE, ACTION or RULE rather than
+ * for its words are said in SQL too, built from the same constants, and the
+ * scan spends its budget on rows that can publish. The gate still decides: this
+ * may only ever be WIDER than publishableThesis, never narrower, and every row
+ * it lets through is asked again there.
+ *
+ * EVERY NULLABLE COLUMN IS COALESCED, and that is what keeps it wider. A pure
+ * view has no action and a refusal may carry no rule; `NULL IN (…)` is NULL,
+ * `NOT NULL` is NULL, and WHERE drops a NULL — so without them this would
+ * quietly unpublish every thesis that names nothing.
+ *
+ * `d` is the decisions alias and `t` the joined trade's. Every value travels as
+ * a placeholder, in the order it appears, so the Postgres translator that
+ * renumbers `?` has nothing of ours to misread.
+ */
+export function publicationNarrowing(d: string, t: string): { sql: string; args: string[] } {
+  const holes = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+  const unlanded = `COALESCE(${t}.status, '') NOT IN (${holes(LANDED_STATUSES.length)})`;
+  // The account rule is for STRATEGY sources only, and these are exactly the
+  // ones the policy classifies — not a LIKE, which SQLite matches without case.
+  const strategies = PUBLISHABLE_SOURCES.filter((s) => s.startsWith("strategy:"));
+  return {
+    sql: [
+      `NOT (COALESCE(${d}.source, '') IN (${holes(TRADED_ONLY_SOURCES.length)}) AND ${unlanded})`,
+      `NOT (COALESCE(${d}.action, '') IN (${holes(CASH_ACTIONS.length)}) AND ${unlanded})`,
+      `NOT (COALESCE(${d}.source, '') IN (${holes(strategies.length)}) AND COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_STATE_RULES.length)}))`,
+    ].join(" AND "),
+    args: [
+      ...TRADED_ONLY_SOURCES,
+      ...LANDED_STATUSES,
+      ...CASH_ACTIONS,
+      ...LANDED_STATUSES,
+      ...strategies,
+      "rejected",
+      ...ACCOUNT_STATE_RULES,
+    ],
+  };
+}
 
 /**
  * Anything that looks like an on-chain identifier.
@@ -671,7 +731,12 @@ function nameOf(row: ThesisRow): string | null {
  */
 export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayName">): string {
   if (!t.displayName || !t.symbol) return t.head;
-  return t.head.replace(`${t.displayName} (${t.symbol})`, t.displayName);
+  const name = t.displayName;
+  // A FUNCTION, NEVER THE NAME AS THE REPLACEMENT STRING. `replace` expands
+  // `$$`, `$&`, `` $` `` and `$'` in a string replacement, and the name is
+  // whatever a deployer typed: "$$CASH" printed "$CASH", and "A$`B" spliced
+  // the head into itself. A function's return value is inserted as it is.
+  return t.head.replace(`${name} (${t.symbol})`, () => name);
 }
 
 /** Known operational templates, not a classifier of market sentiment. */
@@ -823,7 +888,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    * and when it does not there is nothing to say. Same shape as the class-route
    * rule above, keyed on the action because these rows ride strategy sources.
    */
-  if (CASH_ACTIONS.has(row.action ?? "") && outcome !== "landed") return null;
+  if (IS_CASH.has(row.action ?? "") && outcome !== "landed") return null;
 
   /**
    * A LIMIT ON THE ACCOUNT IS NOT A VIEW ABOUT THE MARKET.
@@ -849,7 +914,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   if (
     outcome === "refused" &&
     (row.source ?? "").startsWith("strategy:") &&
-    ACCOUNT_STATE_RULES.has(row.reject_rule ?? "")
+    IS_ACCOUNT_STATE.has(row.reject_rule ?? "")
   ) {
     return null;
   }
