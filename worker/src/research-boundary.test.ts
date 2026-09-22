@@ -196,3 +196,65 @@ describe("the builder directory token cannot reach a child", () => {
     assert.ok(!/process\.env/.test(src), "the adapter must not read the environment");
   });
 });
+
+/**
+ * ONE WRITER, AND THE ORDER THAT MAKES IT WORK.
+ *
+ * Two desks now ride research.json. They refresh on different clocks and are
+ * materialised in one atomic rename, which is the only arrangement where a
+ * child cannot observe a news window from one pass beside builder records from
+ * another. The arrangement is invisible at both call sites — nothing in
+ * `runBuilderPass` says "and somebody else will write this" except its own
+ * comment — so it is pinned here instead of trusted.
+ */
+describe("research.json has exactly one writer, and the passes run in the order that needs", () => {
+  const orchestrator = () => readFileSync(path.join(WORKER_SRC, "orchestrator.ts"), "utf8");
+
+  it("only one place writes the file", () => {
+    const calls = orchestrator().match(/writeResearchForChild\(/g) ?? [];
+    assert.equal(
+      calls.length,
+      1,
+      "a second writer would let two passes take turns clobbering each other's half",
+    );
+  });
+
+  it("the builder desk refreshes BEFORE the pass that writes", () => {
+    const src = orchestrator();
+    const builder = src.indexOf("await runBuilderPass();");
+    const news = src.indexOf("await runNewsPass();");
+    assert.ok(builder > 0 && news > 0, "both passes are called");
+    assert.ok(
+      builder < news,
+      "the builder pass writes nothing; reversing these publishes last pass's records",
+    );
+  });
+
+  it("and the builder pass itself writes no file", () => {
+    const src = orchestrator();
+    const start = src.indexOf("async function runBuilderPass()");
+    assert.ok(start > 0);
+    const body = src.slice(start, src.indexOf("\n}", start));
+    assert.ok(!/writeResearchForChild/.test(body));
+  });
+});
+
+describe("the child does the builder lookup nowhere", () => {
+  it("it never imports the adapter or its scheduler", () => {
+    // A child holds no directory token — and unlike the news vendor, this one
+    // would still ANSWER without it. That is exactly what makes the import
+    // dangerous rather than merely useless: a child that called the adapter
+    // would quietly work, one HTTP request per agent per tick, on the trading
+    // path, and nothing would fail to reveal it.
+    const src = readFileSync(path.join(WORKER_SRC, "index.ts"), "utf8");
+    assert.ok(!/from "\.\/research\/hey"/.test(src));
+    assert.ok(!/from "\.\/builder-pass"/.test(src));
+  });
+
+  it("the lens it does import is the pure renderer", () => {
+    const src = readFileSync(path.join(WORKER_SRC, "index.ts"), "utf8");
+    assert.match(src, /from "\.\/research\/coin-builder"/);
+    const renderer = readFileSync(path.join(WORKER_SRC, "research", "coin-builder.ts"), "utf8");
+    assert.ok(!/fetch\(|readBoundedJson/.test(renderer), "the renderer reaches nothing");
+  });
+});

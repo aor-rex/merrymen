@@ -649,7 +649,12 @@ def _lenses_for(instrument_class: str) -> list[str]:
 _DESK: dict[str, list[str]] = {
     "equity-token": ["technical", "news", "news-sentiment", "sentiment", "fundamentals"],
     "crypto-native": ["technical", "onchain", "news", "news-sentiment", "sentiment"],
-    "memecoin": ["technical", "onchain", "social", "liquidity"],
+    # `builder` LAST, and that position is doing work. The pulse tier keeps
+    # only the first three lenses that actually have material, so ordering is
+    # the priority list: on a cheap run the market lenses win, and the builder
+    # reading is the one dropped. It is evidence about the team, which moves on
+    # a scale of days; the tape moves inside the pulse.
+    "memecoin": ["technical", "onchain", "social", "liquidity", "builder"],
     "stablecoin": ["peg", "liquidity", "reserve"],
 }
 _DEFAULT_DESK = ["technical", "news"]

@@ -83,6 +83,7 @@ import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
+import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
@@ -3916,6 +3917,24 @@ let fleetReasonedSymbols: string[] = [];
 let fleetNewsDesk: NewsDesk | null = null;
 
 /**
+ * Coin CONTRACTS each tenant cares about, held first. Refreshed on the mirror.
+ *
+ * ADDRESSES RATHER THAN SYMBOLS, and that is forced rather than chosen. The
+ * builder directory is keyed on a deployed contract, which is the whole reason
+ * it is worth asking: a coin's symbol is text its deployer picked and can
+ * change, and one calling itself after a real project would resolve to that
+ * project's page if we looked names up. An address cannot be borrowed.
+ *
+ * It is also why this list cannot come from the same place the news desk's
+ * does. `tenantWatchSymbols` holds equity tickers from settings; a Trencher's
+ * universe is discovered per tick inside the child and exists only in the
+ * child's own sqlite, which the mirror already opens.
+ */
+const tenantCoinAddresses = new Map<string, string[]>();
+/** Built on first use, like the news desk, so a deployment logs its cadence. */
+let fleetBuilderDesk: BuilderDesk | null = null;
+
+/**
  * The equities among a list of symbols, deduped, order preserved.
  *
  * A MEMECOIN IS FILTERED OUT HERE AND THAT IS DELIBERATE. A news desk asked
@@ -3993,6 +4012,107 @@ async function heldEquitySymbols(db: Db): Promise<string[]> {
 }
 
 /**
+ * The coin contracts this tenant is actually thinking about, held first.
+ *
+ * THREE SOURCES, IN THE ORDER THEIR QUESTIONS MATTER.
+ *
+ *   positions        what the agent owns. "Should I trim this" is a live
+ *                    question with money already behind it.
+ *   class_positions  the class book, which holds coins the ordinary positions
+ *                    table may not carry between a rebuild and the next arm.
+ *   discovered_pools what the discovery pass found. "Is this worth opening" is
+ *                    one of twenty candidates — and it is also the decision the
+ *                    builder lens is most useful for, which is why candidates
+ *                    are here at all rather than only holdings.
+ *
+ * EQUITIES AND CASH ARE FILTERED OUT, the mirror image of `equitySymbols`. A
+ * tokenised equity on this chain is a wrapper; asking a builder directory who
+ * ships Apple would spend a lookup to be told nothing, or worse, be answered.
+ *
+ * Best-effort and never throws. A child whose ledger predates a table simply
+ * contributes fewer addresses, and the lens is absent for the rest — which is
+ * the same outcome as never having asked, and is honest.
+ */
+async function coinAddressesFor(db: Db): Promise<string[]> {
+  const notCoins = new Set<string>([
+    ...STOCK_TOKENS.map((t) => t.address.toLowerCase()),
+    ...Object.values(CASH).map((a) => String(a).toLowerCase()),
+  ]);
+  const pull = async (sql: string, column: string): Promise<string[]> => {
+    try {
+      const rows = (await db.prepare(sql).all()) as Record<string, unknown>[];
+      return rows.map((r) => String(r[column] ?? ""));
+    } catch {
+      return [];
+    }
+  };
+  const held = await pull(
+    "SELECT token FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC",
+    "token",
+  );
+  const classHeld = await pull(
+    "SELECT token FROM class_positions ORDER BY first_seen DESC LIMIT 50",
+    "token",
+  );
+  // BOUNDED. A long-lived child accumulates every pool it has ever seen, and
+  // the desk's per-pass ceiling would then spend every pass on coins nobody has
+  // looked at since March. Newest first is the right slice: discovery surfaced
+  // them because they are trading now.
+  const candidates = await pull(
+    "SELECT address FROM discovered_pools ORDER BY first_seen DESC LIMIT 25",
+    "address",
+  );
+  return addressesOf([...held, ...classHeld, ...candidates]).filter((a) => !notCoins.has(a));
+}
+
+/**
+ * Refresh the fleet's builder records. WRITES NOTHING.
+ *
+ * SPLIT FROM THE WRITE ON PURPOSE, and it is the one structural thing to know
+ * about this pass: `runNewsPass` is the single writer of research.json, and two
+ * passes writing the same file on the same clock would take turns clobbering
+ * each other's half. So this refreshes a fleet-wide cache and the news pass
+ * materialises both halves in one atomic rename. It runs immediately before it.
+ *
+ * NEVER FATAL AND NEVER BLOCKING, the same contract every outside source here
+ * holds: a directory outage must leave the fleet trading exactly as it did
+ * before the feature existed.
+ */
+async function runBuilderPass(): Promise<void> {
+  if (children.size === 0) return;
+  try {
+    if (!fleetBuilderDesk) {
+      fleetBuilderDesk = makeBuilderDesk({
+        // Read here and nowhere else. CHILD_SECRET_STRIP removes it from every
+        // child's environment, so this process is the only one that holds it —
+        // and unlike the news token, an absent one is not a disabled desk.
+        apiKey: process.env.MERRYMEN_HEY_API_KEY || undefined,
+        ttlSec: Number(process.env.MERRYMEN_BUILDER_TTL_SEC) || undefined,
+        perPass: Number(process.env.MERRYMEN_BUILDER_PER_PASS) || undefined,
+      });
+      log(fleetBuilderDesk.plan().why);
+    }
+    // HELD BEFORE CANDIDATES ACROSS THE WHOLE FLEET, not per tenant: the budget
+    // is fleet-wide, so one agent's twenty-five candidates must not be asked
+    // about before another agent's open position.
+    const held: string[] = [];
+    const rest: string[] = [];
+    for (const tenant of children.keys()) {
+      const mine = tenantCoinAddresses.get(tenant.toLowerCase()) ?? [];
+      // `coinAddressesFor` already returns held-first, and the first few are
+      // the positions; splitting on a count would be guesswork, so the whole
+      // list keeps its order and the fleets interleave by tenant.
+      if (mine.length) held.push(mine[0]!);
+      rest.push(...mine.slice(1));
+    }
+    const r = await fleetBuilderDesk.refresh([...held, ...rest], Math.floor(Date.now() / 1000));
+    if (r.log) log(r.log);
+  } catch (e) {
+    log(`builder: pass failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
  * Refresh the fleet's news, then materialise each child's slice of it.
  *
  * NEVER FATAL AND NEVER BLOCKING. External research is additional evidence: a
@@ -4065,6 +4185,16 @@ async function runNewsPass(): Promise<void> {
             failure: state.failure,
             items: state.items.filter((it) => it.symbols.some((s) => mine.has(s))),
           },
+          // THE OTHER HALF, WRITTEN IN THE SAME RENAME. `runBuilderPass` ran
+          // immediately before this and left its answers in a fleet-wide
+          // cache; this is the only writer of the file, which is what keeps
+          // the two desks from clobbering each other. Filtered to this
+          // tenant's own contracts for the same reason the news is filtered to
+          // its own symbols: a coin this agent cannot trade is not evidence
+          // for it.
+          builders: fleetBuilderDesk
+            ? fleetBuilderDesk.recordsFor(tenantCoinAddresses.get(key) ?? [], now)
+            : [],
         });
       } catch (e) {
         log(`news: ${tenant} write failed — ${e instanceof Error ? e.message : String(e)}`);
@@ -4145,6 +4275,10 @@ async function mirrorLedgers(): Promise<void> {
       // asks about what the fleet holds before what it merely may buy, and this
       // is the only place the orchestrator can see the difference.
       tenantHeldSymbols.set(tenant.toLowerCase(), await heldEquitySymbols(handle.db));
+      // The coin side of the same reading, and the only place it is available:
+      // a Trencher's universe is discovered inside the child and lives in this
+      // sqlite, which nothing outside this loop opens.
+      tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
       const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
@@ -4372,6 +4506,11 @@ export async function runOrchestrator(): Promise<void> {
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
       // costs a vendor request; most passes it costs a file write.
+      //
+      // The builder desk runs FIRST and writes nothing — see runBuilderPass.
+      // Its answers are materialised by the news pass, which is the file's one
+      // writer, so the order here is load-bearing rather than cosmetic.
+      await runBuilderPass();
       await runNewsPass();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
