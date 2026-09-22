@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { agentNameForSlug, type MerrymenSettings } from "@merrymen/core";
 import { wrapSqlite } from "../../../worker/src/db";
-import { ledgerHasAgent, nameNewAgent, type FirstNameInputs } from "./first-name";
+import { ledgerHasAgent, mintAndNameAgent, nameNewAgent, type FirstNameInputs } from "./first-name";
 
 const SLUG = "7y2kq0m4c1x9h3tb";
 const ACCOUNT = "0x00000000000000000000000000000000000000a1";
@@ -117,5 +117,73 @@ describe("whether the ledger already knows an account", () => {
   it("no ledger to read is unknown, not 'no row'", async () => {
     assert.equal(await ledgerHasAgent((f) => f(null), ACCOUNT), null);
     assert.equal(await ledgerHasAgent(async () => { throw new Error("pool down"); }, ACCOUNT), null);
+  });
+});
+
+describe("what the grants route does once a grant is stored", () => {
+  // The route reads the identity BEFORE ensure() and names only a tenant that
+  // held no account before. Run here with a fake identity store, because no
+  // test ran the route: deleting the naming, or moving the read after ensure()
+  // (which makes every agent look re-granted and names nobody), kept the whole
+  // suite green.
+  const TENANT = "0x1111111111111111111111111111111111111111" as const;
+  function fakeIdentities() {
+    const accounts = new Map<string, string[]>();
+    return {
+      get: async (tenant: `0x${string}`) => (accounts.has(tenant) ? { slug: SLUG, accounts: accounts.get(tenant)! } : null),
+      ensure: async (tenant: `0x${string}`, account: `0x${string}`) => {
+        const list = accounts.get(tenant) ?? [];
+        if (!list.includes(account)) list.push(account);
+        accounts.set(tenant, list);
+        return { slug: SLUG };
+      },
+    };
+  }
+  function settingsStore() {
+    let stored: MerrymenSettings | null = null;
+    return { get: async () => stored, put: async (s: MerrymenSettings) => void (stored = s), now: () => stored };
+  }
+
+  it("a tenant's first grant mints its id and names the agent; its second names nothing", async () => {
+    const identities = fakeIdentities();
+    const settings = settingsStore();
+    const first = await mintAndNameAgent({
+      tenant: TENANT,
+      account: ACCOUNT,
+      identities: () => identities,
+      settings,
+      ledgerHasAgent: async () => false,
+    });
+    assert.equal(first.slug, SLUG);
+    assert.deepEqual(first.naming, { named: agentNameForSlug(SLUG) });
+    assert.equal(settings.now()?.agentName, agentNameForSlug(SLUG));
+
+    // The owner renames it in chat — a name that lives only in the soul — and
+    // re-grants. Their empty-looking settings must not be read as "unnamed".
+    await settings.put({});
+    const second = await mintAndNameAgent({
+      tenant: TENANT,
+      account: "0x00000000000000000000000000000000000000b2",
+      identities: () => identities,
+      settings,
+      ledgerHasAgent: async () => false,
+    });
+    assert.deepEqual(second.naming, { skipped: "not-new" });
+    assert.equal(settings.now()?.agentName, undefined, "nothing was written over the soul's name");
+  });
+
+  it("an identity store that cannot be reached costs the name and the id, never the grant", async () => {
+    const settings = settingsStore();
+    const out = await mintAndNameAgent({
+      tenant: TENANT,
+      account: ACCOUNT,
+      identities: () => {
+        throw new Error("identity store down");
+      },
+      settings,
+      ledgerHasAgent: async () => false,
+    });
+    assert.deepEqual(out, { slug: null, naming: null });
+    assert.equal(settings.now(), null);
   });
 });

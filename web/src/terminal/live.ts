@@ -263,6 +263,12 @@ export interface LiveMine {
    */
   positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
+  /**
+   * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
+   * could not read one and printed what was left. Null from a feed that does
+   * not say. Only a measured "Robin" is offered a new name — see NameChip.
+   */
+  nameSource?: "settings" | "ledger" | "fallback" | null;
   slug: string | null;
   handle: string | null;
   owner: string | null;
@@ -851,8 +857,10 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   const notice = (feed.events ?? []).find(
     (e) => (e.level === "warn" || e.level === "err" || e.level === "error") && !!e.message,
   );
+  const nameSource = feed.agent?.nameSource;
   return {
     name,
+    nameSource: nameSource === "settings" || nameSource === "ledger" || nameSource === "fallback" ? nameSource : null,
     slug,
     handle: mineTheses[0]?.handle ?? null,
     owner: "you",
@@ -1152,7 +1160,7 @@ interface Feed {
    * and still tracked in mounted.test.ts KNOWN_DEBT; that half has not moved.
    */
   events?: { level?: string; message?: string; created_at?: string }[];
-  agent?: { name?: string; strategy?: string; slug?: string | null } | null;
+  agent?: { name?: string; nameSource?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
     kind: string;
     buy_token: string | null;

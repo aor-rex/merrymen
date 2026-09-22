@@ -470,7 +470,7 @@ export function Agent({
           <p>{strategyName(mine.glance.id)}</p>
           {/* An unnamed agent is one of many "Robin"s; this is where its owner
               finds out, and names it in one tap. Renders nothing otherwise. */}
-          <NameChip name={mine.name} slug={mine.slug} onSettings={onSettings} />
+          <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
         <span className={`desk-status ${stopped ? "paused" : ""}`}>
           <i />

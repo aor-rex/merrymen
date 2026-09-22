@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { GENERATED_NAME_PARTS } from "@merrymen/core";
+import { GENERATED_NAME_PARTS, SETTINGS_DEFAULTS, TRADEABLE_SYMBOLS } from "@merrymen/core";
+import { identityOf, type IdentitySources } from "@/lib/feed-identity";
 
 /**
  * THE NAME MUST BE READ BACK FROM WHERE IT WAS WRITTEN.
@@ -22,7 +23,6 @@ import { GENERATED_NAME_PARTS } from "@merrymen/core";
  * halves agree there and only there.
  */
 
-const FEED = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
 const SETTINGS = readFileSync(new URL("../settings/route.ts", import.meta.url), "utf8");
 const WORKER = readFileSync(new URL("../../../../../worker/src/index.ts", import.meta.url), "utf8");
 const SOUL = readFileSync(new URL("../../../../../worker/src/soul.ts", import.meta.url), "utf8");
@@ -43,36 +43,128 @@ const ZWSP = String.fromCharCode(0x200b); // zero-width space: not a joiner
 const NUL = String.fromCharCode(0x0);
 const ACUTE = String.fromCharCode(0x301); // a combining mark, which cannot lead
 
+/** The sources identity is read from, each one recording that it was asked. */
+function sources(over: Partial<IdentitySources> & { calls?: string[] } = {}) {
+  const calls = over.calls ?? [];
+  const src: IdentitySources = {
+    hosted: over.hosted ?? (() => true),
+    settingsOf:
+      over.settingsOf ??
+      (async (tenant) => {
+        calls.push(`settings:${tenant}`);
+        return { agentName: "Shogun", strategy: "trencher", basketSymbols: ["NVDA"] };
+      }),
+    settingsFile:
+      over.settingsFile ??
+      (() => {
+        calls.push("file");
+        return JSON.stringify({ agentName: "Container Global" });
+      }),
+    slugOf:
+      over.slugOf ??
+      (async (tenant) => {
+        calls.push(`slug:${tenant}`);
+        return "7y2kq0m4c1x9h000";
+      }),
+  };
+  return { src, calls };
+}
+
+const TENANT = "0x1111111111111111111111111111111111111111" as const;
+
 describe("the feed reads identity from the tenant's own store", () => {
-  it("hosted goes to the settings store, never to a file", () => {
-    assert.match(FEED, /import \{ getSettingsStore \} from "@merrymen\/settings-store"/);
-    assert.match(FEED, /if \(isHostedMode\(\)\)[\s\S]{0,300}?getSettingsStore\(\)\.get\(tenant\)/);
+  it("hosted goes to the tenant's settings store, never to a file", async () => {
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Shogun");
+    assert.equal(id.strategy, "trencher");
+    assert.deepEqual(id.basket, ["NVDA"]);
+    assert.ok(calls.includes(`settings:${TENANT}`));
+    assert.ok(!calls.includes("file"), "the container's file holds no tenant's settings");
   });
 
-  it("a signed-out hosted caller does NOT fall through to the file read", () => {
+  it("a signed-out hosted caller does NOT fall through to the file read", async () => {
     // Load-bearing: falling through would show a signed-out visitor whatever
     // container-global config happened to be on disk.
-    assert.match(FEED, /if \(!tenant\) return IDENTITY_FALLBACK;/);
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", null, src);
+    assert.notEqual(id.name, "Container Global");
+    assert.deepEqual(calls, [], "nothing is read for nobody");
+    assert.equal(id.slug, null);
   });
 
-  it("identity is threaded with the tenant at every call site", () => {
+  it("identity is resolved for the tenant who asked", async () => {
     // The whole failure was one function that could not see who was asking.
-    assert.match(FEED, /async function readIdentitySettings\(tenant: `0x\$\{string\}` \| null\)/);
-    assert.match(FEED, /async function identityOf\(fromLedger: string, tenant: `0x\$\{string\}` \| null\)/);
-    for (const m of FEED.matchAll(/identityOf\(([^)]*)\)/g)) {
-      if (m[1]!.includes(":")) continue; // the declaration itself
-      assert.match(m[0], /,\s*tenant\)|,\s*null\)/, `identityOf must be given a tenant: ${m[0]}`);
-    }
+    const { src, calls } = sources();
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.slug, "7y2kq0m4c1x9h000");
+    assert.deepEqual(calls.sort(), [`settings:${TENANT}`, `slug:${TENANT}`]);
   });
 
-  it("the basket falls back to what the WORKER actually trades", () => {
+  it("self-hosted, the file IS the store", async () => {
+    const { src } = sources({ hosted: () => false });
+    assert.equal((await identityOf("Robin", null, src)).name, "Container Global");
+  });
+
+  it("the basket falls back to what the WORKER actually trades", async () => {
     // TRADEABLE_SYMBOLS is the registry of what CAN be traded (14 symbols), not
     // the default holding (3). A tenant on defaults was shown a basket their
     // agent was never going to trade.
-    assert.match(FEED, /const DEFAULT_BASKET = \[\.\.\.SETTINGS_DEFAULTS\.basketSymbols\]/);
-    // Anchored to the IMPORT, not any mention — the comment above the constant
-    // explains what it replaced, and matching prose would fail forever.
-    assert.ok(!/^import[\s\S]*?TRADEABLE_SYMBOLS[\s\S]*?from "@merrymen\/core"/m.test(FEED));
+    const { src } = sources({ settingsOf: async () => ({}) });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.deepEqual(id.basket, [...SETTINGS_DEFAULTS.basketSymbols]);
+    assert.notDeepEqual(id.basket, [...TRADEABLE_SYMBOLS]);
+  });
+});
+
+describe("the feed says where the name came from", () => {
+  // The "Name your agent" chip offers a generated name to a Robin. A Robin the
+  // feed fell back to, because the settings store or the ledger could not be
+  // read, is not one — offering there would overwrite a name the owner chose.
+  it("a configured name is the owner's, whatever the ledger says", async () => {
+    const { src } = sources();
+    assert.deepEqual(
+      { name: (await identityOf("Robin", TENANT, src)).name, from: (await identityOf("Robin", TENANT, src)).nameSource },
+      { name: "Shogun", from: "settings" },
+    );
+  });
+
+  it("with nothing configured, the ledger's Robin is a measured one", async () => {
+    const { src } = sources({ settingsOf: async () => null });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "ledger");
+  });
+
+  it("an unreadable settings store makes every name a fallback", async () => {
+    const { src } = sources({
+      settingsOf: async () => {
+        throw new Error("store down");
+      },
+    });
+    const id = await identityOf("Robin", TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "fallback", "the settings may hold Shogun");
+  });
+
+  it("an unread ledger name is a fallback too", async () => {
+    const { src } = sources({ settingsOf: async () => null });
+    const id = await identityOf(null, TENANT, src);
+    assert.equal(id.name, "Robin");
+    assert.equal(id.nameSource, "fallback");
+  });
+
+  it("a self-hosted install with no settings file has configured nothing, which is not a failed read", async () => {
+    const missing = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    const { src } = sources({
+      hosted: () => false,
+      settingsFile: () => {
+        throw missing;
+      },
+    });
+    assert.equal((await identityOf("Robin", null, src)).nameSource, "ledger");
+    const { src: broken } = sources({ hosted: () => false, settingsFile: () => "{not json" });
+    assert.equal((await identityOf("Robin", null, broken)).nameSource, "fallback");
   });
 });
 

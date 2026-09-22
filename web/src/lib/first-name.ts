@@ -98,3 +98,65 @@ export async function ledgerHasAgent(
     return null;
   }
 }
+
+/** The two identity-store calls the grants route makes. */
+export interface IdentityStoreLike {
+  get(tenant: `0x${string}`): Promise<{ accounts: readonly string[] } | null>;
+  ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<{ slug: string }>;
+}
+
+/**
+ * WHAT THE GRANTS ROUTE DOES ONCE A GRANT IS STORED: mint the public id, and
+ * name the agent if it is new and unnamed.
+ *
+ * THE IDENTITY IS READ BEFORE IT IS ENSURED, because what it held before this
+ * grant is the evidence nameNewAgent needs: a tenant that has held an account
+ * before is not a new agent, whatever its settings say. Read after, every
+ * tenant has one, every agent looks re-granted, and nobody is named.
+ *
+ * BEST EFFORT ON PURPOSE. The grant is already durably stored and the money
+ * path is done; failing the request now would tell the owner their agent was
+ * not created when it was. So nothing here throws: a failure costs the id or
+ * the name, is logged, and the result says which.
+ *
+ * `identities` is a getter so that constructing the store is inside the
+ * best effort too.
+ */
+export async function mintAndNameAgent(i: {
+  tenant: `0x${string}`;
+  account: string;
+  identities: () => IdentityStoreLike;
+  settings: FirstNameInputs["settings"];
+  ledgerHasAgent: FirstNameInputs["ledgerHasAgent"];
+}): Promise<{ slug: string | null; naming: FirstNameOutcome | null }> {
+  let prior: { accounts: readonly string[] } | null | undefined;
+  try {
+    prior = await i.identities().get(i.tenant);
+  } catch {
+    prior = undefined;
+  }
+  let slug: string | null = null;
+  try {
+    slug = (await i.identities().ensure(i.tenant, i.account as `0x${string}`)).slug;
+  } catch (e) {
+    console.error("[grants] could not mint a public id:", e instanceof Error ? e.message : e);
+  }
+  // A NEW AGENT WITH NO NAME GETS ITS SLUG'S NAME, not "Robin". Only when
+  // nameNewAgent can prove it is new and unnamed; an existing agent is never
+  // renamed here.
+  if (!slug) return { slug, naming: null };
+  try {
+    const naming = await nameNewAgent({
+      slug,
+      account: i.account,
+      prior,
+      settings: i.settings,
+      ledgerHasAgent: i.ledgerHasAgent,
+    });
+    if ("named" in naming) console.log(`[grants] a new agent with no name is called ${naming.named}`);
+    return { slug, naming };
+  } catch (e) {
+    console.error("[grants] could not name the new agent:", e instanceof Error ? e.message : e);
+    return { slug, naming: null };
+  }
+}

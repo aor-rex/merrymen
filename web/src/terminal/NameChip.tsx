@@ -32,10 +32,13 @@ function kept(slug: string | null): boolean {
 
 export function NameChip({
   name,
+  nameSource,
   slug,
   onSettings,
 }: {
   name: string;
+  /** Where the feed read the name. See below. */
+  nameSource: "settings" | "ledger" | "fallback" | null;
   slug: string | null;
   onSettings: () => void;
 }) {
@@ -46,7 +49,13 @@ export function NameChip({
 
   // Only the stock name is offered a new one. Once the feed carries the saved
   // name this renders nothing, which is how the chip leaves.
+  //
+  // AND ONLY A STOCK NAME THAT WAS READ. The feed also answers "Robin" when it
+  // could not read the settings store or the ledger, so an agent its owner
+  // named "Shogun" could be offered a generated name here, and one tap would
+  // overwrite Shogun. A fallback, or a feed that does not say, offers nothing.
   if (name !== DEFAULT_AGENT_NAME || keep) return null;
+  if (nameSource !== "settings" && nameSource !== "ledger") return null;
   const suggestion = slug ? agentNameForSlug(slug) : null;
 
   if (state.kind === "saved") {

@@ -31,7 +31,7 @@ import { withReadDb } from "@/lib/ledger";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
-import { ledgerHasAgent, nameNewAgent } from "@/lib/first-name";
+import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 
 const DATA_DIR = merrymenHome();
@@ -357,42 +357,19 @@ export async function POST(req: Request) {
     // routes are cached and unauthenticated, and an anonymous GET that mints
     // identities is a write nobody asked for.
     //
-    // THE IDENTITY IS READ BEFORE IT IS ENSURED, because what it held before
-    // this grant is the evidence first-name.ts needs: a tenant that has held an
-    // account before is not a new agent, whatever its settings say.
-    let prior: { accounts: readonly string[] } | null | undefined;
-    try {
-      prior = await getIdentityStore().get(tenant);
-    } catch {
-      prior = undefined;
-    }
-    let slug: string | null = null;
-    try {
-      slug = (await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`)).slug;
-    } catch (e) {
-      console.error("[grants] could not mint a public id:", e instanceof Error ? e.message : e);
-    }
-
-    // A NEW AGENT WITH NO NAME GETS ITS SLUG'S NAME, not "Robin". Only when
-    // first-name.ts can prove it is new and unnamed; an existing agent is never
-    // renamed here. Best effort for the same reason as the mint above.
-    if (slug) {
-      try {
-        const out = await nameNewAgent({
-          slug,
-          account: grant.smartAccount,
-          prior,
-          settings: {
-            get: () => getSettingsStore().get(tenant),
-            put: (s) => getSettingsStore().put(tenant, s),
-          },
-          ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
-        });
-        if ("named" in out) console.log(`[grants] a new agent with no name is called ${out.named}`);
-      } catch (e) {
-        console.error("[grants] could not name the new agent:", e instanceof Error ? e.message : e);
-      }
-    }
+    // THE IDENTITY IS READ BEFORE IT IS ENSURED, and a new agent with no name
+    // gets its slug's name — see mintAndNameAgent, which a test runs with a
+    // fake identity store. Best effort: it never throws.
+    await mintAndNameAgent({
+      tenant,
+      account: grant.smartAccount,
+      identities: () => getIdentityStore(),
+      settings: {
+        get: () => getSettingsStore().get(tenant),
+        put: (s) => getSettingsStore().put(tenant, s),
+      },
+      ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
+    });
     return NextResponse.json({ ok: true });
   }
 

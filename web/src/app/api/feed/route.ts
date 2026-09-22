@@ -3,23 +3,14 @@
  * shared SQLite file the worker writes (.data/merrymen.db).
  */
 
-import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
-import { homePaths } from "@merrymen/home";
-import { SETTINGS_DEFAULTS, isHostedMode, sameBookAsLatest, type MerrymenSettings } from "@merrymen/core";
-import { getSettingsStore } from "@merrymen/settings-store";
+import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { readDeskPositions } from "@/lib/desk-positions";
 import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
-import { getIdentityStore } from "@merrymen/identity-store";
 import { hostedAgentFor } from "@/lib/agent-for";
-
-// The basket the WORKER actually defaults to when none is configured.
-// TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
-// default holding — so a tenant on defaults was shown 14 symbols while their
-// agent traded three.
-const DEFAULT_BASKET = [...SETTINGS_DEFAULTS.basketSymbols];
+import { identityOf, type FeedIdentity } from "@/lib/feed-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -108,13 +99,9 @@ export interface AgentFinancials {
   accrued_fee_usdg: number;
 }
 /** Live identity: the user-given name (soul, mirrored into the agents table by
- * the worker) + the strategy/basket actually configured in settings.json. */
-export interface AgentIdentity {
-  slug?: string | null;
-  name: string;
-  strategy: string;
-  basket: string[];
-}
+ * the worker) + the strategy/basket actually configured in settings.json, and
+ * where the name was read from. See lib/feed-identity.ts. */
+export type AgentIdentity = FeedIdentity;
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
@@ -146,78 +133,6 @@ export interface FeedResponse {
   contributionsKnown: boolean | null;
 }
 
-type Identity = { strategy: string; basket: string[]; agentName: string | null };
-
-const IDENTITY_FALLBACK: Identity = { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
-
-/** The three identity fields out of a settings blob, whatever store it came from. */
-function pickIdentity(s: MerrymenSettings): Identity {
-  return {
-    strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
-    basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
-    agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
-  };
-}
-
-/**
- * The configured strategy, basket and name — from WHERE THIS TENANT'S SETTINGS
- * ACTUALLY LIVE.
- *
- * THE BUG THIS EXISTS TO FIX, because it made a working feature look broken.
- * Hosted, a tenant's settings are written to the per-tenant sealed store
- * (`getSettingsStore().put(tenant, …)` in api/settings), and NOTHING ever writes
- * the web container's own `~/.merrymen/settings.json`. This function used to
- * read that file unconditionally, so on the hosted deploy the read always threw
- * and every tenant got the fallback below: name null → the console fell back to
- * the ledger's "Robin", and strategy/basket were the defaults no matter what
- * they had configured. An owner could rename their agent, watch the save
- * succeed, reload, and be asked to name it again — four times over, in the
- * report that found this. The write was never the problem; nobody read it back.
- *
- * Self-hosted the file IS the store, which is why this passed local testing.
- * The `!tenant` early return is load-bearing: it must not fall through to the
- * file read, or a signed-out caller would be shown container-global config.
- */
-async function readIdentitySettings(tenant: `0x${string}` | null): Promise<Identity> {
-  if (isHostedMode()) {
-    if (!tenant) return IDENTITY_FALLBACK;
-    try {
-      return pickIdentity((await getSettingsStore().get(tenant)) ?? {});
-    } catch {
-      return IDENTITY_FALLBACK;
-    }
-  }
-  try {
-    // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
-    return pickIdentity(JSON.parse(raw) as MerrymenSettings);
-  } catch {
-    return IDENTITY_FALLBACK;
-  }
-}
-
-/**
- * The agent's name: what the owner CONFIGURED, else what the ledger recorded.
- *
- * The two can disagree for a while, and the settings value has to win. The
- * worker reconciles a configured name into the soul at arm time, so between
- * saving one and the worker's next arm the ledger still holds the old name —
- * and preferring the ledger there makes a rename that genuinely succeeded
- * revert to "Robin" on the next page load, which reads exactly like a failed
- * save. Settings is where the owner's intent lives; the soul is the runtime
- * seat that catches up to it.
- */
-function resolveAgentName(configured: string | null, fromLedger: string): string {
-  return configured || fromLedger;
-}
-
-/** Name + strategy + basket, with the configured name preferred. */
-async function identityOf(fromLedger: string, tenant: `0x${string}` | null): Promise<AgentIdentity> {
-  const { agentName, ...rest } = await readIdentitySettings(tenant);
-  const identity = tenant ? await getIdentityStore().get(tenant).catch(()=>null) : null;
-  return { name: resolveAgentName(agentName, fromLedger), slug: identity?.slug ?? null, ...rest };
-}
-
 /**
  * The empty feed — no ledger, no session, or an unreadable db. Never a leak.
  *
@@ -233,8 +148,9 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     positions: [],
     trades: [],
     financials: null,
-    // Identity still resolves live from settings + default name.
-    agent: await identityOf("Robin", tenant),
+    // Identity still resolves live from settings. No ledger name was read, so
+    // an unconfigured name here is a fallback and says so.
+    agent: await identityOf(null, tenant),
     netContributionsUsdg: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
@@ -277,7 +193,8 @@ export async function GET(req: Request) {
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
-    let name = "Robin";
+    // The ledger's name, or null until it is read — see resolveAgentName.
+    let name: string | null = null;
     let netContributionsUsdg: number | null = null;
     let gasUsdg = 0;
     let gasUnpricedTrades = 0;
