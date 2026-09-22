@@ -243,6 +243,42 @@ export interface MirrorReport {
   skipped?: string;
 }
 
+/** The `copied` keys that count rows read and deliberately NOT inserted. */
+const NOT_COPIED = "_already_mirrored";
+
+/**
+ * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
+ * never inside them, the copies that were refused.
+ *
+ * It summed every key in `copied`, and `trades_already_mirrored` is a key, so a
+ * pass that skipped five re-recorded ops and inserted nothing printed "+5 rows"
+ * where it used to print "idle": the skip read as five rows that came in. The
+ * skip is still printed, because it is what makes a redeploy's re-recorded ops
+ * visible as what they are, but in its own clause.
+ *
+ * Null when there is nothing to say beyond the failure: the caller prints the
+ * STALLED line itself, and "idle" beside it would be false.
+ */
+export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" | "failed">): string | null {
+  const entries = Object.entries(r.copied);
+  const arrived = entries.filter(([k]) => !k.endsWith(NOT_COPIED));
+  const refused = entries.filter(([k]) => k.endsWith(NOT_COPIED));
+  const n = arrived.reduce((a, [, v]) => a + v, 0);
+  const s = refused.reduce((a, [, v]) => a + v, 0);
+  const skip =
+    s > 0
+      ? `skipped ${s} already mirrored (${refused.map(([k, v]) => `${k.slice(0, -NOT_COPIED.length)} ${v}`).join(", ")})`
+      : null;
+  if (n > 0) {
+    const detail = arrived.map(([k, v]) => `${k} ${v}`).join(", ");
+    return `ledger mirror: ${tenant} +${n} rows (${detail})${skip ? ` · ${skip}` : ""}`;
+  }
+  if (skip) return `ledger mirror: ${tenant} no new rows · ${skip}`;
+  // Says "read, nothing new" rather than saying nothing at all, so the absence
+  // of this line means the pass itself did not run.
+  return r.failed ? null : `ledger mirror: ${tenant} idle`;
+}
+
 /**
  * Open a child's ledger READ-ONLY. Its worker is running and writing to it.
  *
@@ -478,16 +514,34 @@ export async function mirrorTenant(args: {
         // that is the row its daily cap is seeded from. Nothing is summed
         // against a cap from the shared ledger.
         //
-        // Read as one set per account per batch rather than asked row by row:
-        // lowercased on both sides, which no index serves, so a per-row probe
-        // would scan the fleet's whole tape five hundred times on the one pass
-        // that matters, the rewind. And a set, not INSERT … WHERE NOT EXISTS, so
-        // the insert stays the statement Postgres already runs. Hashes inserted
-        // in this batch join the set, so a child holding one op twice does not
-        // put it here twice either. A row with no hash — a refusal, a paper
-        // fill — is always inserted.
+        // ASKED OF THE INDEX FIRST. `(agent_id, user_op_hash)` is exactly
+        // trades_agent_userop, so the ordinary question costs one seek per
+        // hashed row. It has to: every new live fill asks it, inside this
+        // transaction, on a fifteen-second clock, and the first version of this
+        // check read `lower(agent_id)`, which no index serves, and so scanned
+        // the whole fleet's tape on every one of those passes. The raw spelling
+        // is the key the resolution pass below already updates by. It also
+        // catches a re-record left for a pass AFTER the rewind (a catch-up
+        // longer than one batch): the reconciler lowercases the hash, a bundler
+        // returns it as lowercase hex, and the same code spells the account in
+        // both incarnations.
+        //
+        // THE lower() SCAN ONLY ON A REWIND, and only when the seek missed. A
+        // rewind is the one pass on which a copy may be spelt differently from
+        // its original — the in-flight reconciler lowercases every hash it
+        // writes, and an account can arrive checksummed from one incarnation
+        // and lowercased from the next. So on that pass alone the account's
+        // held hashes are read once per batch, lowercased on both sides, as a
+        // set rather than asked row by row. And never INSERT … WHERE NOT
+        // EXISTS: the insert stays the statement Postgres already runs.
+        //
+        // Hashes inserted in this batch are remembered, lowercased, so a child
+        // holding one op twice does not put it here twice either. A row with
+        // no hash — a refusal, a paper fill — is always inserted.
+        const rewound = restarted[table] !== undefined;
+        const seek = db.prepare(`SELECT 1 AS ok FROM trades WHERE agent_id = ? AND user_op_hash = ? LIMIT 1`);
         const heldBy = new Map<string, Set<string>>();
-        const holding = async (account: string): Promise<Set<string>> => {
+        const heldAnyCase = async (account: string): Promise<Set<string>> => {
           let set = heldBy.get(account);
           if (!set) {
             const got = (await db
@@ -501,15 +555,22 @@ export async function mirrorTenant(args: {
           }
           return set;
         };
+        const thisBatch = new Set<string>();
         for (const r of rows) {
-          const hash = typeof r.user_op_hash === "string" ? r.user_op_hash.toLowerCase() : "";
-          if (table === "trades" && hash !== "") {
-            const held = await holding(String(r.agent_id ?? "").toLowerCase());
-            if (held.has(hash)) {
+          const raw = typeof r.user_op_hash === "string" ? r.user_op_hash : "";
+          if (table === "trades" && raw !== "") {
+            const account = String(r.agent_id ?? "").toLowerCase();
+            const hash = raw.toLowerCase();
+            const key = `${account} ${hash}`;
+            const held =
+              thisBatch.has(key) ||
+              (await seek.get(r.agent_id ?? null, raw)) !== undefined ||
+              (rewound && (await heldAnyCase(account)).has(hash));
+            if (held) {
               alreadyHeld++;
               continue;
             }
-            held.add(hash);
+            thisBatch.add(key);
           }
           await ins.run(...cols.map((c) => r[c] ?? null));
         }

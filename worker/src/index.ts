@@ -120,7 +120,7 @@ import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeCons
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { publishesAView, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
@@ -189,8 +189,8 @@ import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
-import { ensureSoul, getName, setName } from "./soul";
-import { createNameReconciler } from "./name-reconcile";
+import { getName, nameSeat } from "./soul";
+import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
@@ -5149,7 +5149,7 @@ async function main() {
   }
 
   /** One per process: it remembers which refused name the owner was already told about. */
-  const reconcileName = createNameReconciler({ ensureSoul, getName, setName });
+  const reconcileName = createNameReconciler(nameSeat);
 
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
@@ -5288,9 +5288,9 @@ async function main() {
 
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul at the top of syncGrant, so
-    // by here `getName()` is already what the owner asked for.
-    ensureSoul();
-    await setAgentName(agentId, getName());
+    // by here `getName()` is already what the owner asked for — and an agent
+    // named before the letter rule reads back as that name, not as the default.
+    await mirrorNameOnArm(nameSeat, agentId, setAgentName);
     // No soul and no reconcile for the handle: unlike the name it has no
     // in-character meaning and nothing at runtime reads it, so there is no second
     // place for it to be true in a different version. Straight from settings.
@@ -10520,7 +10520,9 @@ async function main() {
           // analysts must not read as a considered view of thin evidence.
           if (outcome.ran && outcome.result.ok) {
             const dd = outcome.result.decision;
-            if (publishableThesis({ name: cfg.agentName || "Merryman", source: inputs.decisionSource, action: dd.action, symbol: dd.symbol, reason: dd.thesis, hold_kind: dd.hold_kind })) {
+            // The kind the ledger recorded, not the Brain's: a hold on a stale
+            // mark is kept private, so it must not defer the public review.
+            if (publishesAView(dd, { name: cfg.agentName || "Merryman", source: inputs.decisionSource }, inputs.market)) {
               reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
             }
             const answered = (dd.analyst_views ?? [])

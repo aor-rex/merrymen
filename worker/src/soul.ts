@@ -24,6 +24,7 @@ import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
 import { fnv1a } from "./memory/tokens";
 import { DEFAULT_AGENT_NAME } from "../../packages/core/src/agent-name";
+import type { NameSeat } from "./name-reconcile";
 
 /** The stock name, defined once in core — the Agent screen's name chip compares against it. */
 export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
@@ -50,15 +51,34 @@ export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
  * AT LEAST ONE LETTER, which is the lookahead. A name renders beside an
  * agent's return on a page that ranks people, and "99.5" or "1000" there reads
  * as a figure nobody measured. Digits are still welcome inside a name that has
- * a letter — "R2", "Agent 47". A stored name that fails this reads back as the
- * default; when it is the name in settings, the worker's reconcile tells the
- * owner why on their event feed (name-reconcile.ts).
+ * a letter — "R2", "Agent 47". This is the rule for a name somebody is
+ * CHOOSING NOW (chat /name here; the settings form and the wizard in the web
+ * tier). A name already stored is held to STORED_NAME_RE below instead.
  *
  * DUPLICATED, DELIBERATELY, at web/src/app/api/settings/route.ts. The two must
  * stay byte-identical INCLUDING the normalisation below; see the comment there
  * for what happens when they drift.
  */
 const NAME_RE = /^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+/**
+ * THE RULE A NAME WAS STORED UNDER — everything above except the letter.
+ *
+ * Agents were named "007" before the letter rule existed, and the owner's rule
+ * is that an existing agent is not renamed. Read back through NAME_RE, "007"
+ * comes out as the default: the reconcile would refuse the configured "007" and
+ * tell the owner the agent "is still called Robin", which is false, and the
+ * first re-arm — every restart is one — would write "Robin" onto the roster
+ * while the owner's own feed and the Brain persona still said 007. So reading the
+ * identity file, and carrying a name settings already holds into it, use this;
+ * only a name typed now meets the letter rule.
+ *
+ * Everything else still applies to a stored name: a bidi override, a leading
+ * mark or twenty-five characters are refused however they were stored.
+ *
+ * Declared AFTER NAME_RE on purpose: web/src/app/api/feed/identity.test.ts
+ * compiles the first rule in this file as the one the settings form must match.
+ */
+const STORED_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
 const MAX_OWNER_FACTS = 60;
 const MAX_NOTES = 120;
 const MAX_JOURNAL_CHARS = 40_000;
@@ -156,7 +176,9 @@ export function ensureSoul(nowSec?: number): void {
 export function getName(): string {
   const m = readSafe(identityFile()).match(/^#\s+(.+?)\s+of the merrymen\s*$/m);
   const name = m?.[1]?.trim() ?? "";
-  return NAME_RE.test(name) ? name : DEFAULT_NAME;
+  // The stored rule, not the rule for a new name: this file holds a name that
+  // was already given, and reading "007" back as the default is a rename.
+  return STORED_NAME_RE.test(name) ? name : DEFAULT_NAME;
 }
 
 export function getBornDate(): string {
@@ -173,20 +195,36 @@ export function ageDays(nowSec?: number): number {
   return Math.max(0, Math.floor((nowMs - bornMs) / 86_400_000));
 }
 
-/** Validate + apply a new name. Returns the applied name or an error reason. */
-export function setName(raw: string): { ok: true; name: string } | { ok: false; reason: string } {
+type NameResult = { ok: true; name: string } | { ok: false; reason: string };
+
+const STORED_RULE =
+  "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number";
+
+/**
+ * Validate + apply a name somebody is choosing NOW (chat /name). Returns the
+ * applied name or an error reason.
+ */
+export function setName(raw: string): NameResult {
+  return writeName(raw, NAME_RE, `${STORED_RULE} and containing at least one letter`);
+}
+
+/**
+ * Carry a name that settings ALREADY holds into the soul — the reconcile's
+ * write, not a new choice. Held to the rule it was stored under, so an agent
+ * named "007" before the letter rule is not renamed by a restart, or by a
+ * hosted redeploy that rebuilds the soul empty. The reason, when it refuses,
+ * names only that rule: the owner is told what the name actually failed.
+ */
+export function carryStoredName(raw: string): NameResult {
+  return writeName(raw, STORED_NAME_RE, STORED_RULE);
+}
+
+function writeName(raw: string, rule: RegExp, reason: string): NameResult {
   // NFC first, so "José" typed as e + combining acute and "José" typed as the
   // precomposed é are the same name, spend the same number of the 24
   // characters, and compare equal to whatever the web tier stored.
   const name = raw.normalize("NFC").trim().replace(/\s+/g, " ");
-  if (!NAME_RE.test(name)) {
-    return {
-      ok: false,
-      reason:
-        "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number " +
-        "and containing at least one letter",
-    };
-  }
+  if (!rule.test(name)) return { ok: false, reason };
   ensureSoul();
   const current = readSafe(identityFile());
   const old = getName();
@@ -197,6 +235,17 @@ export function setName(raw: string): { ok: true; name: string } | { ok: false; 
   writeSafe(identityFile(), next);
   return { ok: true, name };
 }
+
+/**
+ * THE SOUL AS THE NAME RECONCILE AND THE ARM SEE IT — built once, here.
+ *
+ * Which writer the reconcile gets is the whole difference between carrying a
+ * stored "007" and renaming it to "Robin", and index.ts exports nothing a test
+ * can reach. So the worker and name-reconcile.test.ts wire this one object
+ * rather than each assembling their own, and a test run is a run of the seat
+ * the worker actually uses.
+ */
+export const nameSeat: NameSeat = { ensureSoul, getName, carryName: carryStoredName };
 
 // ── owner memory ────────────────────────────────────────────────────────────
 

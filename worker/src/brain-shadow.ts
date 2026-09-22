@@ -38,6 +38,7 @@ import {
   type TriggerConfig,
 } from "./brain-trigger";
 import { addDecision, addEvent, loadTriggerState, newDecisionId, saveTriggerState } from "./store";
+import { publishableThesis } from "./thesis-policy";
 
 /**
  * The worker already staggers startup by tenant. Review on its first tick;
@@ -188,6 +189,35 @@ export function recordedHoldKind(
 ): string | undefined {
   if (d.action === "hold" && market.priceStale && d.hold_kind !== "GATE_FORCED_HOLD") return "STALE_MARK_HOLD";
   return d.hold_kind ?? undefined;
+}
+
+/**
+ * DID THIS DECISION PUT A VIEW ON THE PUBLIC FEED? Asked before the quiet
+ * review is pushed back, because that review exists so a quiet agent still
+ * says something in public.
+ *
+ * Asked about the kind the ledger RECORDS (recordedHoldKind), not the one the
+ * Brain reported. The worker used to pass the Brain's raw kind: a model hold on
+ * a stale mark is recorded as STALE_MARK_HOLD and kept private, but the clock
+ * was told it was published, so the review was deferred on the strength of a
+ * post nobody saw, and the agent went silent on the feed.
+ */
+export function publishesAView(
+  d: { action: string; symbol: string; thesis: string; hold_kind?: string | null },
+  /** `source` as ShadowInputs carries it; absent is filed as brain-shadow, so it is asked as that. */
+  who: { name: string; source?: string },
+  market: { priceStale: boolean },
+): boolean {
+  return (
+    publishableThesis({
+      name: who.name,
+      source: who.source ?? "brain-shadow",
+      action: d.action,
+      symbol: d.symbol,
+      reason: d.thesis,
+      hold_kind: recordedHoldKind(d, market),
+    }) !== null
+  );
 }
 
 /**
