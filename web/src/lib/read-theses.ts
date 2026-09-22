@@ -25,6 +25,18 @@
  * for taste: the group key includes the OUTCOME, which does not exist until
  * decisions are joined to trades. It cannot be computed any earlier.
  *
+ * TWO LANES, TWO BUDGETS. Actions and views arrive at rates three orders of
+ * magnitude apart: a Trencher reviews a coin every 30 seconds and every quiet
+ * agent files a market review every five minutes, while a real buy is a few a
+ * day. One LIMIT over both, ordered by the newest row in each group, meant a
+ * re-proposed hold jumped back to the top on every tick — measured on
+ * production, 37 of 40 posts were holds covering the last ten minutes, and a
+ * buy that landed three hours earlier was simply not in the response. So a
+ * buy or sell is read by its own query with its own budget, and a view is read
+ * as the LATEST word per (agent, name), which is bounded by how many names an
+ * agent watches rather than by how often its clock fires. Nothing is hidden by
+ * this — every row still passes the same gate — it is re-ranked.
+ *
  * WHY THE JOIN TO `trades` IS NOT OPTIONAL. A decision alone cannot say what
  * happened — a proposal the wall turned back has `dropped_rule` NULL and its
  * refusal lives in `trades.reject_rule`. Reading decisions on their own would
@@ -44,9 +56,19 @@ import { getSettingsStore } from "@merrymen/settings-store";
 
 /** How far back a post can be and still be news. */
 export const WINDOW_SEC = 24 * 3600;
-/** Rows to group over, before the guard trims to what may be shown. */
-const SCAN = 90;
+/** Trade groups to read, before the guard trims to what may be shown. */
+const ACTION_SCAN = 90;
+/**
+ * (agent, name) pairs to read. Not ticks: by the time this LIMIT applies each
+ * pair is already one row, so a busy clock cannot spend it.
+ */
+const VIEW_SCAN = 120;
+/** Per lane — a busy view lane cannot take a slot a trade needed. */
 const SHOW = 40;
+
+/** A buy or a sell. Everything else — a hold, a pure view, a vault move — is a view. */
+const IS_ACTION = "d.action IN ('buy', 'sell')";
+const IS_VIEW = "(d.action IS NULL OR d.action NOT IN ('buy', 'sell'))";
 
 // DERIVED, never listed again here. The SQL narrowing is an optimisation and
 // `publishableThesis` is the rule — but a second hand-maintained list makes the
@@ -87,6 +109,7 @@ export interface ReadThesesOptions {
   agentSlug?: string;
   /** Only posts naming this symbol. */
   symbol?: string;
+  /** Per lane: at most this many trades AND at most this many views. */
   limit?: number;
 }
 
@@ -136,9 +159,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       where.push("d.symbol = ?");
       args.push(opts.symbol);
     }
-    args.push(Math.max(SCAN, limit));
-
-    let rows: ThesisRow[] = [];
+    let rows: { actions: ThesisRow[]; views: ThesisRow[] } = { actions: [], views: [] };
     // ── THE NAME IS OPTIONAL TO READ, ON PURPOSE ─────────────────────────
     //
     // `decisions.display_name` is created by the WRITER's migration, and the
@@ -150,44 +171,78 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // So it is attempted, and dropped if the column is not there yet. A feed
     // without the coin's name is a worse feed; a blank one is a broken
     // product, and the blankness would be silent.
-    const run = async (named: boolean): Promise<ThesisRow[]> =>
-      (await db
+    //
+    // ONE SELECT, TWO QUERIES. The column list, the joins and the group key are
+    // shared text, so the two lanes cannot drift into two ideas of what a post
+    // is; only the lane predicate and the budget differ.
+    const selectFrom = (named: boolean) =>
+      `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
+              d.action AS action, d.symbol AS symbol, ${named ? "d.display_name AS display_name," : ""}
+              d.size_usdg AS size_usdg,
+              d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
+              d.hold_kind AS hold_kind,
+              p.body AS post,
+              t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
+              COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
+         FROM decisions d
+         JOIN agents a ON a.smart_account = d.agent_id
+         -- The LAST trade for this decision. A correlated MAX(id) rather than
+         -- a window function: the scoreboard already hedges against a SQLite
+         -- build without them, and this needs to run on both backends.
+         LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+         -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
+         -- almost no decision has a post: one is written only for a class
+         -- trade that actually filled and whose writer cleared its gate,
+         -- so absent is the overwhelmingly common case and must not drop
+         -- the row. It is a separate column all the way to
+         -- the renderer, because the two carry different trust: the reason
+         -- column is ours and the post column is a model's.
+         LEFT JOIN posts p ON p.decision_id = d.id
+        -- Paper agents post too, labelled. Excluding them emptied the feed:
+        -- paperTradingEnabled defaults TRUE, so most of a fleet is pretend
+        -- money, and a feed with nothing in it teaches nobody anything. The
+        -- LEADERBOARD still ranks live only — a ranking of returns must not
+        -- mix fake capital in. 'idle' stays out: an agent that has never
+        -- heartbeat has not said anything.
+        `;
+    const groupBy = (named: boolean) =>
+      `GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
+                d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body`;
+    const actionWhere = [...where, IS_ACTION].join(" AND ");
+    const viewWhere = [...where, IS_VIEW].join(" AND ");
+    const run = async (named: boolean) => ({
+      actions: (await db
         .prepare(
-          `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
-                  d.action AS action, d.symbol AS symbol, ${named ? "d.display_name AS display_name," : ""}
-                  d.size_usdg AS size_usdg,
-                  d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
-                  d.hold_kind AS hold_kind,
-                  p.body AS post,
-                  t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
-                  COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
-             FROM decisions d
-             JOIN agents a ON a.smart_account = d.agent_id
-             -- The LAST trade for this decision. A correlated MAX(id) rather than
-             -- a window function: the scoreboard already hedges against a SQLite
-             -- build without them, and this needs to run on both backends.
-             LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
-             -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
-             -- almost no decision has a post: one is written only for a class
-             -- trade that actually filled and whose writer cleared its gate,
-             -- so absent is the overwhelmingly common case and must not drop
-             -- the row. It is a separate column all the way to
-             -- the renderer, because the two carry different trust: the reason
-             -- column is ours and the post column is a model's.
-             LEFT JOIN posts p ON p.decision_id = d.id
-            -- Paper agents post too, labelled. Excluding them emptied the feed:
-            -- paperTradingEnabled defaults TRUE, so most of a fleet is pretend
-            -- money, and a feed with nothing in it teaches nobody anything. The
-            -- LEADERBOARD still ranks live only — a ranking of returns must not
-            -- mix fake capital in. 'idle' stays out: an agent that has never
-            -- heartbeat has not said anything.
-            WHERE ${where.join(" AND ")}
-            GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
-                     d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body
+          `${selectFrom(named)}
+            WHERE ${actionWhere}
+            ${groupBy(named)}
             ORDER BY MAX(d.at) DESC
             LIMIT ?`,
         )
-        .all(...args)) as ThesisRow[];
+        .all(...args, Math.max(ACTION_SCAN, limit))) as ThesisRow[],
+      // THE LATEST WORD PER (agent, name), and the count and first time of
+      // exactly that sentence. `latest` finds each pair's newest row; HAVING
+      // keeps the one group containing it, so `said` and `first_at` describe
+      // the view as it stands now rather than everything the agent ever said
+      // about the name. A derived table and HAVING rather than a window
+      // function, for the same two-backend reason as the trade join above.
+      views: (await db
+        .prepare(
+          `${selectFrom(named)}
+             JOIN (SELECT d.agent_id AS agent_id, COALESCE(d.symbol, '') AS sym, MAX(d.at) AS at
+                     FROM decisions d
+                     JOIN agents a ON a.smart_account = d.agent_id
+                    WHERE ${viewWhere}
+                    GROUP BY d.agent_id, COALESCE(d.symbol, '')) latest
+               ON latest.agent_id = d.agent_id AND latest.sym = COALESCE(d.symbol, '')
+            WHERE ${viewWhere}
+            ${groupBy(named)}
+           HAVING MAX(d.at) = MAX(latest.at)
+            ORDER BY MAX(d.at) DESC
+            LIMIT ?`,
+        )
+        .all(...args, ...args, Math.max(VIEW_SCAN, limit))) as ThesisRow[],
+    });
     try {
       rows = await run(true);
     } catch {
@@ -209,7 +264,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // Resolve only authors in this response, once per tenant. Only this public
     // mode bit leaves the server; never spread settings (which contain secrets).
     const modeFor = new Map<string, boolean>();
-    const slugs = [...new Set(rows.map(r => slugFor.get(String(r.agent_id).toLowerCase())).filter((s): s is string => !!s))];
+    const slugs = [...new Set([...rows.actions, ...rows.views].map(r => slugFor.get(String(r.agent_id).toLowerCase())).filter((s): s is string => !!s))];
     await Promise.all(slugs.map(async slug => {
       const tenant = tenantFor.get(slug);
       if (!tenant) return;
@@ -218,26 +273,42 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         modeFor.set(slug, config?.strategy === "trencher");
       } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
     }));
-    const theses = rows
-      .map((r): FeedThesis | null => {
-        const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
-        const post = publishableThesis({ ...r, slug });
-        if (!post) return null;
-        return {
-          ...post,
-          trencher: slug ? modeFor.get(slug) === true : false,
-          postId: postIdOf({
-            slug: post.slug,
-            action: post.action,
-            symbol: post.symbol,
-            sizeUsdg: post.sizeUsdg,
-            reason: post.reason,
-            shadow: post.shadow,
-          }),
-        } satisfies FeedThesis;
+    const gated = (r: ThesisRow): FeedThesis | null => {
+      const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
+      const post = publishableThesis({ ...r, slug });
+      if (!post) return null;
+      return {
+        ...post,
+        trencher: slug ? modeFor.get(slug) === true : false,
+        postId: postIdOf({
+          slug: post.slug,
+          action: post.action,
+          symbol: post.symbol,
+          sizeUsdg: post.sizeUsdg,
+          reason: post.reason,
+          shadow: post.shadow,
+        }),
+      } satisfies FeedThesis;
+    };
+    const actions = rows.actions.map(gated).filter((t): t is FeedThesis => t !== null).slice(0, limit);
+    // One view per agent and name. Keyed on the SLUG, not the account: a
+    // re-granted agent holds several accounts and is still one author. Two
+    // groups can share a pair's newest second; the first to pass the gate wins,
+    // and the rest are the same moment said twice.
+    const pairs = new Set<string>();
+    const views = rows.views
+      .map(gated)
+      .filter((t): t is FeedThesis => {
+        if (!t) return false;
+        const pair = `${t.slug ?? t.name}|${t.symbol ?? ""}`;
+        if (pairs.has(pair)) return false;
+        pairs.add(pair);
+        return true;
       })
-      .filter((t): t is FeedThesis => t !== null)
       .slice(0, limit);
+    // Newest first, as it always was: callers that take "the agent's latest
+    // post" off the front of this list must still get the latest of both.
+    const theses = [...actions, ...views].sort((a, b) => b.at - a.at);
 
     return { source: "sqlite", theses };
   });

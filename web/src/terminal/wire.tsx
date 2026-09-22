@@ -1,5 +1,5 @@
-import { verbOf, whoOf, type Beat, type Lane } from "./beat";
-import { elapsed, useNow, whenOf } from "./clock";
+import { verbOf, whenLabel, whoOf, type Lane, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
+import { useNow } from "./clock";
 import { money, type LiveToken } from "./live";
 import { Coin, Delta, FaceOn } from "./ui";
 
@@ -53,6 +53,11 @@ export function Wire({
           case "lull":
             return <div key={lane.id} className="wire-lull" aria-hidden />;
           case "beat": {
+            if (lane.beat.kind === "watch") {
+              return (
+                <WatchRow key={lane.id} beat={lane.beat} tokens={tokens} now={now} onAgent={onAgent} />
+              );
+            }
             return (
               <BeatRow
                 key={lane.id}
@@ -76,6 +81,50 @@ export function Wire({
   );
 }
 
+/**
+ * ONE AGENT'S HOLDS, AS ONE LINE — "watching 12 tokens · latest: hold X".
+ *
+ * The latest hold is carried in full, reason and all, so the line still says
+ * what the agent concluded most recently; the rest are a count, and the Holds
+ * pill lays them out. No like control: a summary is not a post.
+ */
+function WatchRow({
+  beat,
+  tokens,
+  now,
+  onAgent,
+}: {
+  beat: WatchBeat;
+  tokens: LiveToken[];
+  now: number;
+  onAgent?: (slug: string) => void;
+}) {
+  const latest = beat.latest;
+  const tok = logoOf(tokens, latest.symbol);
+  const actor = beat.actor;
+  const open = () => onAgent?.(actor.slug);
+  return (
+    <div className="wire-beat view watch">
+      <button type="button" className="wire-mark" onClick={open}>
+        <FaceOn name={actor.name} slug={actor.slug} symbol={latest.symbol ?? ""} logo={tok?.logo ?? ""} />
+      </button>
+      <div className="wire-body">
+        <button type="button" className="wire-hit" onClick={open}>
+          <span className="wire-said">
+            <span className="wire-line">
+              <strong>{whoOf(beat)}</strong> is watching {beat.count} {beat.count === 1 ? "token" : "tokens"} · latest:{" "}
+              {latest.head}{" "}
+              {latest.paper && <i className="tag unsettled">paper</i>}{" "}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
+            </span>
+          </span>
+        </button>
+        {latest.reason && latest.reason !== latest.head ? <p className="wire-why">{latest.reason}</p> : null}
+      </div>
+    </div>
+  );
+}
+
 function BeatRow({
   beat,
   tokens,
@@ -85,7 +134,7 @@ function BeatRow({
   likes,
   mentions,
 }: {
-  beat: Beat;
+  beat: TradeBeat | ViewBeat;
   tokens: LiveToken[];
   now: number;
   onToken?: (id: string) => void;
@@ -165,7 +214,10 @@ function BeatRow({
                   beat.outcome === "dropped") && (
                   <i className="wire-refused">— {beat.outcomeText}</i>
                 )}{" "}
-              <em className="wire-when">{whenOf(beat.atMs, now)}</em>
+              {/* "×24 · since 2h" for a view that has only been repeated: its
+                  newest copy is not news, and printing its age as "now" is
+                  what kept a scheduled hold looking like fresh activity. */}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
             </span>
           </span>
         </button>

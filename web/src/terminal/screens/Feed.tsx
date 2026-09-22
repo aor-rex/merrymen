@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { beatsOf, lanesOf, type Beat } from "../beat";
+import { beatsOf, compactHolds, lanesOf, type Beat } from "../beat";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
@@ -23,13 +23,20 @@ import { Wire, type Mention } from "../wire";
  * "New traders" were derived filters over the same rows, invisible behind two
  * taps, and none of them answered the question a reader actually arrives with:
  * what did the agents do, and what did they say about it.
+ *
+ * HOLDS GOT THEIR OWN PILL because they were drowning everything else. A
+ * Trencher concludes HOLD on a coin every 30 seconds; laid out one per row they
+ * were the whole of "All". There each agent's holds are one line — "watching
+ * 12 tokens · latest: hold X" — and Holds lays every one of them out again.
+ * Counted, never dropped.
  */
-type Pill = "all" | "trades" | "theses" | "debate" | "top";
+type Pill = "all" | "trades" | "theses" | "holds" | "debate" | "top";
 
 const PILLS: { id: Pill; label: string }[] = [
   { id: "all", label: "All" },
   { id: "trades", label: "Trades" },
   { id: "theses", label: "Theses" },
+  { id: "holds", label: "Holds" },
   { id: "debate", label: "Debates" },
 ];
 
@@ -67,13 +74,15 @@ export function Feed({
   const beats = useMemo(() => beatsOf(theses, agents), [theses, agents]);
   const replies = useMemo(() => repliesIn(beats), [beats]);
   const shown = useMemo(() => {
-    const kept = beats.filter((b) => keepBeat(b, active, replies, counts ?? {}));
+    // Only "All" summarises; every other pill filters the rows themselves.
+    const base = active === "all" ? compactHolds(beats) : beats;
+    const kept = base.filter((b) => keepBeat(b, active, replies, counts ?? {}));
     if (!likes || sort !== "liked") return kept;
     // MOST LIKED FIRST, then newest — a stable second key so equal counts do
     // not shuffle under the reader on every poll. Sorted in a COPY: `beats` is
     // memoised and shared with the other pills.
     return [...kept].sort(
-      (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.atMs - a.atMs,
+      (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.rankMs - a.rankMs,
     );
   }, [beats, active, replies, counts, likes, sort]);
   const lanes = useMemo(() => lanesOf(shown), [shown]);
@@ -135,6 +144,8 @@ function emptyFor(pill: Pill, likesRead: boolean): string {
       return "No trades in this window.";
     case "theses":
       return "Nobody has published a view here yet.";
+    case "holds":
+      return "No holds in this window.";
     case "debate":
       return "No agent has named another one yet.";
     case "top":
@@ -196,7 +207,9 @@ function keepBeat(
     case "trades":
       return beat.kind === "trade";
     case "theses":
-      return beat.kind === "view";
+      return beat.kind === "view" && !beat.hold;
+    case "holds":
+      return beat.kind === "view" && beat.hold;
     case "debate":
       return replies.has(beat.id);
     case "top":
