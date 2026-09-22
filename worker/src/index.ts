@@ -189,8 +189,8 @@ import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
-import { ensureSoul, getName, setName } from "./soul";
-import { createNameReconciler } from "./name-reconcile";
+import { getName, nameSeat } from "./soul";
+import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
@@ -5149,7 +5149,7 @@ async function main() {
   }
 
   /** One per process: it remembers which refused name the owner was already told about. */
-  const reconcileName = createNameReconciler({ ensureSoul, getName, setName });
+  const reconcileName = createNameReconciler(nameSeat);
 
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
@@ -5288,9 +5288,9 @@ async function main() {
 
     // The soul's name is the source of truth — mirror it onto the roster. The
     // configured name was reconciled into the soul at the top of syncGrant, so
-    // by here `getName()` is already what the owner asked for.
-    ensureSoul();
-    await setAgentName(agentId, getName());
+    // by here `getName()` is already what the owner asked for — and an agent
+    // named before the letter rule reads back as that name, not as the default.
+    await mirrorNameOnArm(nameSeat, agentId, setAgentName);
     // No soul and no reconcile for the handle: unlike the name it has no
     // in-character meaning and nothing at runtime reads it, so there is no second
     // place for it to be true in a different version. Straight from settings.

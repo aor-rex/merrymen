@@ -21,7 +21,13 @@
 export interface NameSeat {
   ensureSoul(): void;
   getName(): string;
-  setName(raw: string): { ok: true; name: string } | { ok: false; reason: string };
+  /**
+   * Write a name settings ALREADY holds — soul.ts `carryStoredName`, never
+   * `setName`. The configured name was accepted when it was saved; this step
+   * only carries it. Holding it to the rule for a name typed now renamed every
+   * agent called "007" before the letter rule to "Robin", at the first restart.
+   */
+  carryName(raw: string): { ok: true; name: string } | { ok: false; reason: string };
 }
 
 export interface NameRoster {
@@ -67,7 +73,7 @@ export function createNameReconciler(seat: NameSeat) {
       return "unchanged";
     }
 
-    const named = seat.setName(want);
+    const named = seat.carryName(want);
     if (named.ok) {
       announced = null;
       const id = await roster.agentId();
@@ -97,4 +103,25 @@ export function createNameReconciler(seat: NameSeat) {
     }
     return "refused";
   };
+}
+
+/**
+ * THE NAME AN ARM PUTS ON THE ROSTER: the soul's, exactly as it reads back.
+ *
+ * Every restart is a re-arm, so this runs on every deploy for every agent. It
+ * was two inline lines in index.ts, and it is out here because it is where a
+ * name the soul reads back wrongly becomes public: when "007" read back as the
+ * default, this is the call that wrote "Robin" onto the row the leaderboard,
+ * the public feed and the profile all read. A test can now run the arm's own
+ * step instead of trusting it.
+ */
+export async function mirrorNameOnArm(
+  seat: Pick<NameSeat, "ensureSoul" | "getName">,
+  agentId: string,
+  setAgentName: (agentId: string, name: string) => Promise<void>,
+): Promise<string> {
+  seat.ensureSoul();
+  const name = seat.getName();
+  await setAgentName(agentId, name);
+  return name;
 }
