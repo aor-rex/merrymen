@@ -15,7 +15,7 @@ import {
   curveGraduated,
   curveMinOut,
 } from "../venues/pons-price";
-import type { Snapshot, Tick } from "./types";
+import { opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 /**
@@ -103,10 +103,20 @@ export interface SteadyBasketConfig {
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick {
   if (!snap.sequencerUp) return { intents: [], why: [] };
 
+  // ── THE DAY'S TRADE COUNT, READ BEFORE ANYTHING THAT SPENDS ONE ─────────
+  //
+  // The budget clamp below fixed "refused again" for the MONEY and left the
+  // COUNT exactly as it was: with `maxOpsPerDay` used up and budget to spare,
+  // this proposed the same legs every tick and the wall refused every one with
+  // `ops-cap`. So a buy, a park and an unpark are all withheld here — each is
+  // one operation, and none is an exit the wall exempts. The take-profit sell
+  // is untouched: the count does not bind it, so neither may this.
+  const countSpent = opsSpent(snap);
+
   // Cash can't cover a buy but the vault can: pull enough back to fund the next
   // tick's buy plus the liquidity floor. Withdraw-only tick — buys resume next
   // tick once the cash has actually landed.
-  if (snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
+  if (!countSpent && snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
     const need = cfg.buyPerTickUsdg + cfg.idleFloorUsdg - snap.cashUsdg;
     const amountUsdg = need > snap.vaultUsdg ? snap.vaultUsdg : need;
     return {
@@ -187,7 +197,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   const budgetSpent = budgetToday <= 0n;
   const buyBudget = cfg.buyPerTickUsdg < snap.cashUsdg ? cfg.buyPerTickUsdg : snap.cashUsdg;
 
-  if (!budgetSpent && buyBudget > 0n) {
+  if (!budgetSpent && !countSpent && buyBudget > 0n) {
     for (const leg of cfg.legs) {
       if (snap.pausedTokens.has(leg.token.toLowerCase())) {
         skippedPaused += 1;
@@ -235,7 +245,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   const cashSpent = intents.reduce((sum, i) => sum +
     (i.kind === "swap" && i.sellToken === cfg.usdg ? i.sellAmountRaw : 0n), 0n);
   const idleAfterBuys = snap.cashUsdg - cashSpent;
-  if (idleAfterBuys > cfg.idleFloorUsdg) {
+  // A deposit is an operation too, and the wall counts it like a buy.
+  if (!countSpent && idleAfterBuys > cfg.idleFloorUsdg) {
     const excess = idleAfterBuys - cfg.idleFloorUsdg;
     // Size the sweep to what the wall will actually take. A deposit is capped at
     // the DAILY limit (policy.ts), and this tick's buys have already eaten into
@@ -348,6 +359,11 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // moment. Behind `shut`, because a closed market is the more fundamental fact
   // — there would be nothing to buy either way.
   const spent = !bought && cfg.legs.length > 0 && budgetSpent;
+  // The count's version of the same silence, ranked just behind it: when both
+  // are spent both sentences are true, and the money one is the sentence owners
+  // already know. Ahead of `short` for the reason `spent` is — cash is not what
+  // is stopping a buy the count forbids.
+  const counted = !bought && cfg.legs.length > 0 && countSpent;
   const idle: Why | undefined =
     shut && !boughtCurve
       ? {
@@ -360,6 +376,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
         }
       : spent
         ? { code: "budget-spent", capRaw: cfg.buyPerTickUsdg }
+        : counted
+        ? { code: "ops-spent" }
         : short
         ? {
             code: "under-one-buy",

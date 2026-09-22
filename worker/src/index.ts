@@ -112,9 +112,10 @@ import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-ev
 import { coinDisplayName } from "./coin-name";
 import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
-import { takeTick } from "./strategies/types";
+import { opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
+import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
@@ -768,26 +769,11 @@ async function main() {
    * The `trades` ROW is still written every time. The tape must stay complete —
    * it is what the wall-tape screen and every audit count — and it is only the
    * human-facing line that benefits from being said once.
+   *
+   * The keying and the rule list live in owner-refusal.ts, so the owner's half
+   * can be executed by a test beside the public gate that drops the same refusal.
    */
   let lastPolicyRefusal: string | null = null;
-  /**
-   * Rules that are about the account's own state, not about an asset.
-   *
-   * Everything not listed here is treated as token-specific, which is the safe
-   * direction: the cost of over-reporting is a repeated line, and the cost of
-   * under-reporting is an owner never hearing about the second broken token.
-   */
-  const ACCOUNT_WIDE_RULES = new Set([
-    "expiry",
-    "ops-cap",
-    "per-trade-cap",
-    "daily-cap",
-    "deposit-cap",
-    "drawdown-breaker",
-    "scout-budget",
-    "transfer-not-permitted",
-    "non-positive",
-  ]);
   /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
   let lastUncoveredBasisKey: string | null = null;
   /**
@@ -6657,14 +6643,9 @@ async function main() {
       // suppressed log line is a suppressed measurement.
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
       // The OWNER line fires on change only. See lastPolicyRefusal.
-      const legs = tokenLegs(intent);
-      const refusalKey = ACCOUNT_WIDE_RULES.has(verdict.rule)
-        ? `${verdict.rule}|${intent.kind}`
-        : `${verdict.rule}|${intent.kind}|${legs.sell_token ?? ""}|${legs.buy_token ?? ""}`;
-      if (refusalKey !== lastPolicyRefusal) {
-        lastPolicyRefusal = refusalKey;
-        await addEvent(agentId, "warn", `policy rejected ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
-      }
+      const notice = ownerRefusalNotice(lastPolicyRefusal, verdict, intent.kind, tokenLegs(intent));
+      lastPolicyRefusal = notice.key;
+      if (notice.line) await addEvent(agentId, "warn", notice.line);
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -10644,6 +10625,11 @@ async function main() {
       // instead of re-proposing oversized intents every tick.
       spendHeadroomUsdg:
         active.limits.dailyUsdg > spentToday() ? active.limits.dailyUsdg - spentToday() : 0n,
+      // And what it will still accept by COUNT, from the same counters checkPolicy
+      // judges `ops-cap` against — so a strategy stops proposing at the same
+      // moment the wall would start refusing, rather than a tick in either
+      // direction. A grant with no finite count is "not read", never zero.
+      opsHeadroom: opsHeadroomOf(active.limits.maxOpsPerDay, opsTodayCount()),
       perTradeCapUsdg: active.limits.perTradeUsdg,
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
