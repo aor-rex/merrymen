@@ -121,8 +121,12 @@ export async function readCostFromQuote(
   const marks = want.map(() => "?").join(", ");
   const rows = (await db
     .prepare(
+      // Scoped inside the collapse to rows that could have booked a cost: every
+      // hashed row (so a copy still finds its original), and any row carrying
+      // fill or basis columns. A refusal carries none of those and cannot
+      // collide with anything, and this runs on every feed poll.
       `SELECT t.fill_side, t.fill_qty_raw, t.basis_source, LOWER(t.buy_token) AS buy_token, LOWER(t.sell_token) AS sell_token
-         FROM ${distinctTrades("t.agent_id = ?")}
+         FROM ${distinctTrades("t.agent_id = ? AND (t.user_op_hash IS NOT NULL OR t.fill_side IS NOT NULL OR t.basis_source IS NOT NULL)")}
         WHERE t.status = ?
           AND (t.fill_side IN ('buy','sell') OR t.basis_source IS NOT NULL)
           AND (LOWER(t.buy_token) IN (${marks}) OR LOWER(t.sell_token) IN (${marks}))
