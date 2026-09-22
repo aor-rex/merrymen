@@ -360,7 +360,7 @@ class BrainGraph:
             # Reserve one of the four calls for the decision. Previously four
             # analysts consumed the entire pulse budget before it could decide.
             # Prefer lenses with actual evidence; missing material costs no call.
-            lenses = [lens for lens in lenses if req.market.signals.get(lens)][:3]
+            lenses = _pulse_lenses(lenses, req.market.signals)
         reports: list[NodeOutput] = []
         views: list[AnalystView] = []
         for lens in lenses:
@@ -645,6 +645,68 @@ def _lenses_for(instrument_class: str) -> list[str]:
     # published; those are also different things and are also not merged.
     return _DESK.get(instrument_class, _DEFAULT_DESK)
 
+
+def _pulse_lenses(lenses: list[str], signals: dict[str, str]) -> list[str]:
+    """
+    WHICH ANALYSTS A PULSE RUN CAN AFFORD, AND WHICH ONE GETS A HELD SLOT.
+
+    Pulse has four calls and one is the decision, so three analysts. A lens
+    with no material costs nothing and is dropped first — that much is
+    unchanged.
+
+    WHAT CHANGED, AND THE BUG IT FIXES. Taking the first three fed lenses is a
+    STRICT PREFIX of the desk order, which quietly made the TAIL of a desk
+    unreachable. The memecoin desk ends in `builder`, and `pulse` is the only
+    tier the memecoin path ever asks for — so in production that lens was never
+    consulted once, however good its evidence, because technical, social and
+    liquidity filled all three slots between them.
+
+    WHAT IS BEING TRADED, said plainly rather than buried in a sort. This does
+    NOT raise the budget: `max_calls` stays 4, so admitting a reserved lens
+    DISPLACES a market lens. That is the right trade precisely when it fires —
+    the market lenses are three readings of one tape and correlated with each
+    other, while a reserved lens is on the list because it is the uncorrelated
+    one. Trading one of three correlated views for the only independent one is
+    a gain even when the displaced view was good.
+
+    AND IT FIRES RARELY BY CONSTRUCTION, which is what makes it cheap.
+    `builder` is fed only when a public directory actually holds a page for the
+    contract, which for a launchpad coin is the exception. A desk whose
+    reserved lens has nothing behaves exactly as it did before, to the call.
+
+    PURE. Given a desk and its material, returns the lenses to run.
+    """
+    fed = [lens for lens in lenses if signals.get(lens)]
+    reserved = [lens for lens in fed if lens in PULSE_RESERVED_LENSES]
+    ordinary = [lens for lens in fed if lens not in PULSE_RESERVED_LENSES]
+    chosen = set((reserved + ordinary)[:PULSE_ANALYSTS])
+    # Returned in DESK ORDER, not selection order, so the reports read the same
+    # way whether or not a reserved lens was admitted.
+    return [lens for lens in lenses if lens in chosen]
+
+
+#: How many analysts a pulse run may call, out of `TIERS["pulse"].max_calls`.
+#:
+#: Four calls, one of them reserved for the decision itself. Stated here rather
+#: than inline so the arithmetic is visible next to the thing that spends it.
+PULSE_ANALYSTS = 3
+
+#: Lenses that take one of those slots WHENEVER THEY HAVE MATERIAL, ahead of
+#: the desk order.
+#:
+#: Membership is not about importance — it is about SCARCITY plus
+#: INDEPENDENCE. A lens belongs here when it is fed rarely (so reserving a slot
+#: costs almost nothing in practice) and when what it sees is uncorrelated with
+#: the rest of its desk (so the slot it takes is worth what it displaces).
+#:
+#: `builder` is both: it is fed only when a public directory holds a page for
+#: the contract, and it is the one memecoin lens that is not a reading of the
+#: tape. Without this it sat last on its desk and was never consulted once.
+#:
+#: A lens that is usually fed must NOT be added here. It would displace a
+#: market lens on nearly every run, which is a different decision entirely and
+#: should be made by reordering the desk where it can be seen.
+PULSE_RESERVED_LENSES = frozenset({"builder"})
 
 _DESK: dict[str, list[str]] = {
     "equity-token": ["technical", "news", "news-sentiment", "sentiment", "fundamentals"],
