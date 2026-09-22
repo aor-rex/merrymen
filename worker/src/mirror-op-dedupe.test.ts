@@ -208,5 +208,127 @@ for (const [label, destination] of [
       first.raw.close();
       rebuilt.raw.close();
     });
+
+    it("a rebuild bigger than one batch is deduped on the passes AFTER the rewind too", async () => {
+      // Only the first pass after a rebuild is a rewind. A child that re-records
+      // more ops than one batch holds finishes the catch-up on ordinary passes,
+      // where the lower() scan does not run, and those are where the exact
+      // (agent_id, user_op_hash) probe has to catch the copy by itself.
+      const shared = dest();
+      const first = ledger([
+        { hash: "0xop1", side: "buy", decision: "d1", at: 1000 },
+        { hash: "0xop2", side: "buy", decision: "d2", at: 1001 },
+      ]);
+      await mirrorTenant({ tenant: "t1", child: first.db, shared, nowSec: 2000 });
+      const rebuilt = ledger([
+        { hash: "0xop1", kind: "swap", at: 5000 },
+        { hash: "0xop2", kind: "swap", at: 5001 },
+        { hash: "0xop3", side: "sell", decision: "d3", at: 5002 },
+      ]);
+      const a = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, batch: 1, nowSec: 6000 });
+      assert.ok(a.restarted?.trades, "the first pass rewinds");
+      assert.equal(a.copied.trades_already_mirrored, 1);
+      const b = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, batch: 1, nowSec: 6015 });
+      assert.equal(b.restarted, undefined, "the second pass is an ordinary one");
+      assert.equal(b.copied.trades, 0);
+      assert.equal(b.copied.trades_already_mirrored, 1, "and still skips the copy");
+      const c = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, batch: 1, nowSec: 6030 });
+      assert.equal(c.copied.trades, 1, "the genuinely new op arrives");
+      const rows = await tape(shared);
+      assert.deepEqual(
+        rows.map((r) => [r.user_op_hash, r.fill_side]),
+        [["0xop1", "buy"], ["0xop2", "buy"], ["0xop3", "sell"]],
+        "one row per op, and the evidenced ones",
+      );
+      first.raw.close();
+      rebuilt.raw.close();
+    });
+
+    it("an ordinary pass skips an op the account already holds, and inserts a new one", async () => {
+      const shared = dest();
+      const c = ledger([{ hash: "0xop1", side: "buy", decision: "d1", at: 1000 }]);
+      await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 2000 });
+      c.raw
+        .prepare(
+          `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+           VALUES ('0xAgent', 'swap', '0xvault', 5.0, ?, 'landed', 1, ?)`,
+        )
+        .run("0xop1", 3000);
+      c.raw
+        .prepare(
+          `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, fill_side, epoch, created_at)
+           VALUES ('0xAgent', 'curve-trade', '0xvault', 5.0, ?, 'landed', 'sell', 1, ?)`,
+        )
+        .run("0xop2", 3001);
+      const r = await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 4000 });
+      assert.equal(r.restarted, undefined);
+      assert.equal(r.copied.trades, 1);
+      assert.equal(r.copied.trades_already_mirrored, 1);
+      assert.deepEqual((await tape(shared)).map((x) => x.user_op_hash), ["0xop1", "0xop2"]);
+      c.raw.close();
+    });
   });
 }
+
+/**
+ * AN ORDINARY PASS READS THE SHARED TAPE ONLY THROUGH ITS INDEX.
+ *
+ * The held-hash read was `lower(agent_id) = ?`, which trades_agent_userop (on
+ * the raw column) cannot serve, so it scanned the whole fleet's trades inside
+ * the mirror transaction on every batch that carried a hashed trade: every new
+ * live fill, on a fifteen-second clock. The plan is asked of SQLite for every
+ * statement the pass actually sent to the destination, with the parameters it
+ * actually bound, so this is the query that ran and not the one somebody meant.
+ */
+describe("the duplicate check costs an index seek on an ordinary pass", () => {
+  type Sent = { sql: string; params: unknown[] };
+  /** The destination, recording every statement and its parameters as run. */
+  const recording = (db: Db, sent: Sent[]): Db => {
+    const wrap = (inner: Db): Db => ({
+      prepare(sql: string) {
+        const st = inner.prepare(sql);
+        return {
+          run: async (...p: unknown[]) => (sent.push({ sql, params: p }), st.run(...p)),
+          get: async (...p: unknown[]) => (sent.push({ sql, params: p }), st.get(...p)),
+          all: async (...p: unknown[]) => (sent.push({ sql, params: p }), st.all(...p)),
+        };
+      },
+      exec: (sql: string) => inner.exec(sql),
+      tx: (fn) => inner.tx((d) => fn(wrap(d))),
+    });
+    return wrap(db);
+  };
+  const scansOfTrades = (raw: DatabaseSync, sent: Sent[]) =>
+    sent
+      .filter((s) => /^\s*(SELECT|UPDATE)\b/i.test(s.sql) && /\btrades\b/.test(s.sql))
+      .flatMap((s) =>
+        (raw.prepare(`EXPLAIN QUERY PLAN ${s.sql}`).all(...(s.params as never[])) as { detail: string }[])
+          .map((p) => p.detail)
+          .filter((d) => /^SCAN trades\b/.test(d))
+          .map((d) => `${d} <- ${s.sql.replace(/\s+/g, " ").trim()}`),
+      );
+
+  it("a new live fill beside a fleet's tape is checked by (agent_id, user_op_hash), not by a scan", async () => {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(LOGS + MIRROR_STATE_DDL);
+    // The index the shared database carries (store.ts), and nothing else.
+    raw.exec("CREATE INDEX trades_agent_userop ON trades (agent_id, user_op_hash)");
+    const shared = wrapSqlite(raw);
+    const c = ledger([{ hash: "0xop1", side: "buy", decision: "d1", at: 1000 }]);
+    await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 2000 });
+    c.raw
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, fill_side, epoch, created_at)
+         VALUES ('0xAgent', 'curve-trade', '0xvault', 5.0, '0xop2', 'landed', 'buy', 1, 3000)`,
+      )
+      .run();
+    const sent: Sent[] = [];
+    const r = await mirrorTenant({ tenant: "t1", child: c.db, shared: recording(shared, sent), nowSec: 4000 });
+    assert.equal(r.restarted, undefined, "an ordinary pass");
+    assert.equal(r.copied.trades, 1);
+    assert.ok(sent.some((s) => /FROM trades/.test(s.sql)), "sanity: the pass did ask the destination about the op");
+    assert.deepEqual(scansOfTrades(raw, sent), []);
+    c.raw.close();
+    raw.close();
+  });
+});
