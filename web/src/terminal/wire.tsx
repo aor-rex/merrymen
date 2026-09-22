@@ -1,7 +1,7 @@
-import { verbOf, whenLabel, whoOf, type Lane, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
+import { verbOf, whenLabel, whoOf, type ChorusBeat, type Lane, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
 import { useNow } from "./clock";
 import { money, type LiveToken } from "./live";
-import { Coin, Delta, FaceOn } from "./ui";
+import { Coin, Delta, Face, FaceOn } from "./ui";
 
 function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefined {
   if (!symbol) return undefined;
@@ -56,6 +56,11 @@ export function Wire({
             if (lane.beat.kind === "watch") {
               return (
                 <WatchRow key={lane.id} beat={lane.beat} tokens={tokens} now={now} onAgent={onAgent} />
+              );
+            }
+            if (lane.beat.kind === "chorus") {
+              return (
+                <ChorusRow key={lane.id} beat={lane.beat} tokens={tokens} now={now} onToken={onToken} onAgent={onAgent} />
               );
             }
             return (
@@ -120,6 +125,88 @@ function WatchRow({
           </span>
         </button>
         {latest.reason && latest.reason !== latest.head ? <p className="wire-why">{latest.reason}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A stack of the faces in a chorus, the coin on top. Lives here rather than in
+ * ui.tsx because this row is its only caller; the `.stack .faces` rules it
+ * draws with never left the sheet.
+ */
+function FacesOn({ actors, symbol, logo }: { actors: ChorusBeat["actors"]; symbol: string; logo: string }) {
+  return (
+    <span className="stack">
+      <span className="faces">
+        {actors.slice(0, 3).map((a) => (
+          <Face key={a.slug} name={a.name} slug={a.slug} />
+        ))}
+      </span>
+      <span className="stack-badge">
+        <Coin symbol={symbol} logo={logo} />
+      </span>
+    </span>
+  );
+}
+
+/**
+ * SEVERAL AGENTS, ONE HOLD — "TSLA · 5 agents holding".
+ *
+ * Every agent in it is named and clickable, because a count nobody can check
+ * is just a number. The words shown are the latest member's own, attributed to
+ * them: the others said the same thing with different figures, and printing
+ * one sentence as everybody's would put numbers in mouths that did not say them.
+ */
+function ChorusRow({
+  beat,
+  tokens,
+  now,
+  onToken,
+  onAgent,
+}: {
+  beat: ChorusBeat;
+  tokens: LiveToken[];
+  now: number;
+  onToken?: (id: string) => void;
+  onAgent?: (slug: string) => void;
+}) {
+  const tok = logoOf(tokens, beat.symbol);
+  const open = () => {
+    if (tok && onToken) onToken(tok.id);
+    else onAgent?.(beat.latest.actor.slug);
+  };
+  const paper = beat.members.filter((m) => m.paper).length;
+  return (
+    <div className="wire-beat view chorus">
+      <button type="button" className="wire-mark" onClick={open}>
+        <FacesOn actors={beat.actors} symbol={beat.symbol} logo={tok?.logo ?? ""} />
+      </button>
+      <div className="wire-body">
+        <button type="button" className="wire-hit" onClick={open}>
+          <span className="wire-said">
+            <span className="wire-line">
+              <strong>{beat.symbol}</strong> · {beat.actors.length} agents holding{" "}
+              {paper > 0 && <i className="tag unsettled">{paper} on paper</i>}{" "}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
+            </span>
+          </span>
+        </button>
+        {beat.latest.reason ? (
+          <p className="wire-why">
+            <b>{beat.latest.actor.handle}</b>: {beat.latest.reason}
+          </p>
+        ) : null}
+        <p className="wire-mentions">
+          {beat.actors.map((a, i) => (
+            <span key={a.slug}>
+              {i > 0 ? ", " : ""}
+              <button type="button" onClick={() => onAgent?.(a.slug)}>
+                {a.handle}
+              </button>
+            </span>
+          ))}
+        </p>
       </div>
     </div>
   );

@@ -231,6 +231,8 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
   // Deterministic review of observed public quotes, without execution authority.
+  // Filed under this key only when the review CHANGED — a flipped bias or a
+  // confirmed breakout. An unchanged one is `market-review-private`, below.
   "market-review": "strategy",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   /**
@@ -260,7 +262,23 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself
   //   strategy:<a tenant's own file> — a string we did not write
+  //   market-review-private — an unchanged review of one shared oracle series.
+  //              Every quiet agent writes it every five minutes, and when one
+  //              feed was fresh they all wrote the SAME line; published, it was
+  //              one paragraph under five names. The owner's record keeps it.
 });
+
+/**
+ * HOLDS THAT ARE NOT A MARKET VIEW.
+ *
+ * GATE_FORCED_HOLD: a risk gate turned the action into a hold — the agent was
+ * not allowed to decide. STALE_MARK_HOLD: the Brain held on a price the tick
+ * already knew was stale, so what it "saw" was the absence of a market ("price
+ * feed stale, no volume…"), and published that read as a view about the coin.
+ * Both stay in the owner's record, where they explain the silence; neither is
+ * something to say in public.
+ */
+const PRIVATE_HOLD_KINDS: ReadonlySet<string> = new Set(["GATE_FORCED_HOLD", "STALE_MARK_HOLD"]);
 
 /**
  * SOURCES WHOSE DECISIONS CANNOT REACH A TRADE.
@@ -625,7 +643,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;
   if (!policy) return null;
-  if (row.hold_kind === "GATE_FORCED_HOLD") return null;
+  if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;

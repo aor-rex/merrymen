@@ -209,7 +209,7 @@ function keepBeat(
     case "theses":
       return beat.kind === "view" && !beat.hold;
     case "holds":
-      return beat.kind === "view" && beat.hold;
+      return (beat.kind === "view" && beat.hold) || beat.kind === "chorus";
     case "debate":
       return replies.has(beat.id);
     case "top":

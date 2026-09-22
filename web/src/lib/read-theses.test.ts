@@ -32,6 +32,7 @@ type Row = {
   reason: string;
   at: number;
   display?: string | null;
+  holdKind?: string | null;
 };
 
 async function ledger(rows: Row[], trades: { decision: string; status: string }[] = []) {
@@ -43,9 +44,9 @@ async function ledger(rows: Row[], trades: { decision: string; status: string }[
     CREATE TABLE posts(decision_id TEXT, body TEXT);
     INSERT INTO agents VALUES ('0xabc','Shogun',NULL,'live');
     INSERT INTO agents VALUES ('0xdef','SirSendIt',NULL,'live');`);
-  const insert = db.prepare("INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?)");
+  const insert = db.prepare("INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?,NULL,?,?)");
   for (const r of rows) {
-    await insert.run(r.id, r.agent ?? "0xabc", r.action, r.symbol, r.display ?? null, r.size ?? null, r.source ?? "brain", r.reason, r.at);
+    await insert.run(r.id, r.agent ?? "0xabc", r.action, r.symbol, r.display ?? null, r.size ?? null, r.source ?? "brain", r.reason, r.holdKind ?? null, r.at);
   }
   for (const t of trades) {
     await db.prepare("INSERT INTO trades (decision_id, status, reject_rule) VALUES (?,?,NULL)").run(t.decision, t.status);
@@ -192,6 +193,23 @@ describe("what the gate refuses stays refused", () => {
     try {
       const read = await readTheses({}, (fn) => fn(db), identities, settings);
       assert.deepEqual(read.theses, []);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("a private hold does not take the last real view of its coin down with it", async () => {
+    // A view is the latest row per (agent, name). A stale-mark or gate-forced
+    // hold left in that query would BECOME the latest row, fail the gate, and
+    // leave the coin with nothing — so the owner's private row would silently
+    // erase the agent's public one.
+    const real: Row = { id: "v-real", action: "hold", symbol: "TSLA", reason: "Buyers thinned into the close; nothing to add here.", at: NOW - 600 };
+    const stale: Row = { id: "v-stale", action: "hold", symbol: "TSLA", reason: "Price feed stale, no volume to read.", holdKind: "STALE_MARK_HOLD", at: NOW };
+    const gated: Row = { id: "v-gated", action: "hold", symbol: "NVDA", reason: "Held.", holdKind: "GATE_FORCED_HOLD", at: NOW };
+    const { raw, db } = await ledger([real, stale, gated]);
+    try {
+      const read = await readTheses({}, (fn) => fn(db), identities, settings);
+      assert.deepEqual(read.theses.map((t) => t.reason), ["Buyers thinned into the close; nothing to add here."]);
     } finally {
       raw.close();
     }

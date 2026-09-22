@@ -147,7 +147,10 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       "d.agent_id NOT LIKE 'rh:%'",
       "d.at > ?",
       `d.source IN (${SOURCES.map(() => "?").join(", ")})`,
-      "(d.hold_kind IS NULL OR d.hold_kind <> 'GATE_FORCED_HOLD')",
+      // In the SQL as well as the gate, because a view is the LATEST row per
+      // name: a private hold left in here would become that latest row, fail
+      // the gate, and take the last real view of the name down with it.
+      "(d.hold_kind IS NULL OR d.hold_kind NOT IN ('GATE_FORCED_HOLD', 'STALE_MARK_HOLD'))",
       "(d.dropped_rule IS NULL OR d.dropped_rule NOT LIKE 'brain-%')",
     ];
     const args: unknown[] = [since, ...SOURCES];

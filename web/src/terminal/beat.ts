@@ -6,13 +6,13 @@ import { takeFor } from "./why";
 export type Action = "buy" | "sell" | "hold";
 
 /**
- * A published row as `/api/theses` serves it, including the two fields the
+ * A published row as `/api/theses` serves it, including the fields the
  * terminal's `Thesis` does not declare.
  *
  * Widened HERE rather than on `Thesis`, because the feed is the one reader that
- * needs them and `Thesis` is shared by every screen. Both are optional: a
- * response from before they existed must still render, just without the claim
- * they make.
+ * needs them and `Thesis` is shared by every screen. Each is optional: a
+ * response from before it existed must still render, just without the claim
+ * it makes.
  */
 export type FeedRow = Thesis & {
   /** Epoch SECONDS this exact thesis was first said in the window. */
@@ -150,11 +150,11 @@ interface Core {
  * `action` and letting the rail conjugate it is how "@robin bought TSLA"
  * appears under a decision that bought nothing.
  *
- * `chorus` is gone. It was declared, rendered and never constructed —
- * `beatsOf` only ever emitted `trade` — so the branch in wire.tsx, the parts
- * list and `FacesOn` were all dead weight standing in the way of this change.
+ * `chorus` went once, because it was declared, rendered and never constructed.
+ * It is back because there is now something true to build it from: several
+ * agents publishing the same hold on the same name. See `ChorusBeat`.
  */
-export type Beat = TradeBeat | ViewBeat | WatchBeat;
+export type Beat = TradeBeat | ViewBeat | WatchBeat | ChorusBeat;
 
 export type TradeBeat = Core & { kind: "trade"; action: Action; symbol: string };
 
@@ -194,6 +194,36 @@ export type WatchBeat = Core & {
   head: string;
   symbol: string | null;
 };
+
+/**
+ * SEVERAL AGENTS, ONE HOLD: "TSLA · 5 agents holding", faces stacked.
+ *
+ * When one oracle feed was the only fresh one, every quiet agent reviewed it
+ * and published the same sentence, so the feed printed one paragraph five
+ * times under five names — each reading as that agent's own conviction. Said
+ * once, with everybody who said it, it is honest social proof: built only from
+ * rows actually read, never padded, and never formed from one agent. `Core` is
+ * the latest member's; `postId` is null because a crowd is not one post.
+ */
+export type ChorusBeat = Core & {
+  kind: "chorus";
+  /** Each agent in it, once, newest first. Never fewer than two. */
+  actors: Actor[];
+  latest: ViewBeat;
+  members: ViewBeat[];
+  head: string;
+  symbol: string;
+};
+
+/**
+ * THE SAME SENTENCE, WHOEVER SAID IT AND WHENEVER. Figures are folded out —
+ * "TSLA +1.1% over 20h" and "TSLA +1.2% over 21h" are one observation read at
+ * two moments — and case and spacing with them. Only for grouping: nothing
+ * rendered is ever built from this.
+ */
+export function crowdKey(text: string): string {
+  return text.toLowerCase().replace(/[-+]?\$?\d[\d,]*(?:\.\d+)?%?/g, "#").replace(/\s+/g, " ").trim();
+}
 
 /** What the rail draws, top to bottom. Presentation, not domain. */
 export type Lane =
@@ -369,7 +399,60 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     });
   }
 
-  out.sort((a, b) => b.rankMs - a.rankMs);
+  const beats = chorusOf(out);
+  beats.sort((a, b) => b.rankMs - a.rankMs);
+  return beats;
+}
+
+/**
+ * Fold holds that several agents said about one name into one chorus beat.
+ *
+ * Only HOLDS WITH A NAME, and only across two or more distinct agents: a
+ * crowd of one is a post, and a pure view about the book is not "holding"
+ * anything. A shared sentence that differs only in its figures counts as the
+ * same one (see `crowdKey`); the chorus still shows the latest member's own
+ * words, attributed to them, rather than a sentence nobody wrote.
+ */
+function chorusOf(beats: Beat[]): Beat[] {
+  const groups = new Map<string, ViewBeat[]>();
+  for (const b of beats) {
+    if (b.kind !== "view" || !b.hold || !b.symbol) continue;
+    const key = `${b.symbol}|${crowdKey(b.reason || b.head)}`;
+    const list = groups.get(key) ?? [];
+    list.push(b);
+    groups.set(key, list);
+  }
+  const folded = new Map<ViewBeat, ChorusBeat | null>();
+  for (const members of groups.values()) {
+    const slugs = new Set(members.map((m) => m.actor.slug));
+    if (slugs.size < 2) continue;
+    const ordered = [...members].sort((a, b) => b.atMs - a.atMs);
+    const latest = ordered[0]!;
+    const actors: Actor[] = [];
+    for (const m of ordered) if (!actors.some((a) => a.slug === m.actor.slug)) actors.push(m.actor);
+    const chorus: ChorusBeat = {
+      ...latest,
+      kind: "chorus",
+      id: `chorus-${latest.symbol}-${actors.map((a) => a.slug).join("-")}`,
+      postId: null,
+      rankMs: Math.max(...members.map((m) => m.rankMs)),
+      actors,
+      latest,
+      members: ordered,
+      symbol: latest.symbol!,
+    };
+    // The chorus takes the place of its newest member; the rest are in it.
+    for (const m of members) folded.set(m, m === latest ? chorus : null);
+  }
+  const out: Beat[] = [];
+  for (const b of beats) {
+    if (b.kind === "view" && folded.has(b)) {
+      const chorus = folded.get(b);
+      if (chorus) out.push(chorus);
+      continue;
+    }
+    out.push(b);
+  }
   return out;
 }
 
@@ -423,7 +506,7 @@ export function compactHolds(beats: Beat[]): Beat[] {
  * news and its first one is.
  */
 export function whenLabel(b: Beat, nowMs: number): string {
-  const view = b.kind === "watch" ? b.latest : b;
+  const view = b.kind === "watch" || b.kind === "chorus" ? b.latest : b;
   if (view.sinceMs !== null) return `×${view.said} · since ${elapsed(view.sinceMs, nowMs).text}`;
   return whenOf(view.atMs, nowMs);
 }

@@ -125,6 +125,49 @@ describe("All says each agent's holds once", () => {
   });
 });
 
+describe("five agents saying one shared line is one crowd, not five convictions", () => {
+  const fleet = ["shogun", "sirsendit", "tuck", "marian", "scarlet"];
+  const crowdAgents = fleet.map((slug) => ({ ...agents[0]!, slug, name: slug, handle: `@${slug}` }) as LiveAgent);
+  const review = (slug: string, i: number, reason: string) =>
+    row({ slug, name: slug, handle: `@${slug}`, reason, head: "hold TSLA", at: NOW - i * 40, firstAt: NOW - i * 40 });
+
+  it("the same hold from five agents — figures drifting — is one chorus naming all five", () => {
+    const rows = fleet.map((s, i) => review(s, i, `TSLA +1.${i}% over 2${i}h, above its mean.`));
+    const beats = beatsOf(rows, crowdAgents);
+    assert.equal(beats.length, 1);
+    const [chorus] = beats;
+    assert.ok(chorus && chorus.kind === "chorus");
+    assert.equal(chorus.symbol, "TSLA");
+    assert.deepEqual(chorus.actors.map((a) => a.slug), fleet, "everybody in it, newest first");
+    // The words are ONE member's, attributed to that member.
+    assert.equal(chorus.latest.actor.slug, "shogun");
+    assert.equal(chorus.reason, "TSLA +1.0% over 20h, above its mean.");
+    assert.equal(chorus.postId, null, "a crowd is not one post");
+  });
+
+  it("a crowd is never formed from one agent", () => {
+    const beats = beatsOf([review("shogun", 0, "TSLA +1.0% over 20h, above its mean.")], crowdAgents);
+    assert.equal(beats[0]!.kind, "view");
+  });
+
+  it("different views stay apart, and so do trades", () => {
+    const rows = [
+      review("shogun", 0, "TSLA +1.0% over 20h, above its mean."),
+      review("sirsendit", 1, "TSLA -1.0% over 20h, below its mean."),
+      buy({ slug: "tuck", name: "tuck", handle: "@tuck", symbol: "TSLA" }),
+      buy({ slug: "marian", name: "marian", handle: "@marian", symbol: "TSLA" }),
+    ];
+    const kinds = beatsOf(rows, crowdAgents).map((b) => b.kind).sort();
+    assert.deepEqual(kinds, ["trade", "trade", "view", "view"]);
+  });
+
+  it("and the Holds summary leaves a chorus alone", () => {
+    const rows = fleet.map((s, i) => review(s, i, "TSLA +1.0% over 20h, above its mean."));
+    const all = compactHolds(beatsOf(rows, crowdAgents));
+    assert.deepEqual(all.map((b) => b.kind), ["chorus"]);
+  });
+});
+
 describe("the alerts rail is trades", () => {
   it("holds are left to the feed; a refusal is still an alert", () => {
     const rows = [

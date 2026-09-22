@@ -126,7 +126,7 @@ import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
-import { MarketReviewClock } from "./market-review";
+import { MarketReviewClock, reviewSource } from "./market-review";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -9938,9 +9938,10 @@ async function main() {
     lastEquityKnown = !bookIncomplete;
     if (!paper) lastGasWei = balances.ethWei;
 
-    // A quiet strategy still forms a public market view. Run this after the
-    // tick so an actual published decision takes precedence over a fallback.
-    // Only fresh public quotes are used; failures stay in the owner's events.
+    // A quiet strategy still forms a market view, and publishes it when it
+    // changes. Run this after the tick so an actual published decision takes
+    // precedence over a fallback. Only fresh public quotes are used; failures
+    // stay in the owner's events.
     quietReview = async () => {
       if (isPaused()) return;
       const now = Math.floor(Date.now() / 1000);
@@ -9963,15 +9964,18 @@ async function main() {
       const review = quote && fresh ? clock.prepare(quote, reviewPreparationMs,
         history?.read ? history.points.map(p => ({ at: p.at, priceUsd: p.px })) : [], now) : null;
       const id = newDecisionId();
+      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED. An unchanged review is
+      // one shared oracle series restated, and filing it publicly put the same
+      // line under every quiet agent every five minutes; see reviewSource.
       await addDecision({ id, agent_id: agentId,
-        source: review ? "market-review" : "research-unavailable", provenance: "deterministic-strategy",
+        source: review ? reviewSource(review) : "research-unavailable", provenance: "deterministic-strategy",
         ...(review ?? { action: "hold", symbol: focus?.symbol,
           reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
           evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
       });
       // Failed persistence leaves this decision due for the next tick.
       if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
-        if (quote) clock.recorded(quote);
+        if (quote) clock.recorded(quote, review);
         clock.noteDecision(now);
       }
       nextMarketReviewAt = clock.nextAt;

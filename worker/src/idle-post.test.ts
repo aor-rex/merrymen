@@ -54,15 +54,17 @@ describe("a public view needs market reasoning, not an idle notice", () => {
     assert.match(row.reason, /all 3 legs' price feeds are stale/);
   });
 
-  it("publishes a grounded quiet-market review as a view with an explicit follow-up", () => {
+  it("publishes a grounded quiet-market review as a view, in one observed line", () => {
+    // Filed under `market-review`, which quietReview does only when the review
+    // CHANGED (see market-review.test.ts); an unchanged one goes to an
+    // unclassified source and never reaches this gate as publishable.
     const post = publishableThesis(reviewRow())!;
     assert.ok(post);
     assert.equal(post.outcome, "view");
     assert.equal(post.action, "hold");
     assert.equal(post.symbol, "NVDA");
     assert.equal(post.shadow, false, "a real agent really decided this");
-    assert.match(post.reason!, /\$100\.00/);
-    assert.match(post.reason!, /next hour/);
+    assert.equal(post.reason, "NVDA +1.0% over 1h, at its mean.");
   });
 
   it("classifies both strategy reasoning and deterministic market reviews", () => {
