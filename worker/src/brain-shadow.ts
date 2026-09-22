@@ -163,8 +163,31 @@ export function buildShadowSnapshot(i: ShadowInputs): PortfolioSnapshot {
 function holdKindTag(d: { action: string; hold_kind?: string | null }): string {
   if (d.action !== "hold") return "";
   if (d.hold_kind === "GATE_FORCED_HOLD") return "[GATE_FORCED]";
+  if (d.hold_kind === "STALE_MARK_HOLD") return "[STALE_MARK]";
   if (d.hold_kind === "MODEL_HOLD") return "[MODEL]";
   return "[kind-unreported]";
+}
+
+/**
+ * THE HOLD KIND THE LEDGER RECORDS — the Brain's, unless the mark was stale.
+ *
+ * A hold made against a price the tick already knew was stale is the model
+ * describing the ABSENCE of a market ("price feed stale, no volume…"), and it
+ * was published as a view about the coin, because the staleness lived only in
+ * the private `signals_json`. Stamped here, where the decision and its mark
+ * meet, so the publication gate can treat it the way it treats a gate-forced
+ * hold: kept for the owner, not said in public.
+ *
+ * A gate-forced hold keeps its kind — that is the stronger fact and already
+ * private. A buy or sell is left alone: this only reclassifies a HOLD, and
+ * cannot turn anything into or out of a trade.
+ */
+export function recordedHoldKind(
+  d: { action: string; hold_kind?: string | null },
+  market: { priceStale: boolean },
+): string | undefined {
+  if (d.action === "hold" && market.priceStale && d.hold_kind !== "GATE_FORCED_HOLD") return "STALE_MARK_HOLD";
+  return d.hold_kind ?? undefined;
 }
 
 /**
@@ -432,8 +455,9 @@ export async function persistBrainDecision(
         : `${v.lens}:${v.direction}/${v.confidence.toFixed(2)}~${(v.evidence_strength ?? 0).toFixed(2)}`,
     )
     .join(" ");
+  const holdKind = recordedHoldKind(d, market);
   log(
-    `[brain] ${d.action.toUpperCase()}${holdKindTag(d)} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
+    `[brain] ${d.action.toUpperCase()}${holdKindTag({ action: d.action, hold_kind: holdKind })} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
@@ -481,8 +505,9 @@ export async function persistBrainDecision(
     // ledger rather than from logs. Carried from the Brain, never inferred:
     // absent on a non-hold and on any build that does not report it, and absent
     // must stay absent — counting unknown holds as model holds would report a
-    // healthy fleet while it was being gated.
-    hold_kind: d.hold_kind ?? undefined,
+    // healthy fleet while it was being gated. A hold on a stale mark is
+    // stamped as such; see recordedHoldKind.
+    hold_kind: holdKind,
     signals_json: JSON.stringify({
       brain_run_id: runId,
       decision_id: d.decision_id,

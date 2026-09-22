@@ -124,6 +124,18 @@ export interface PublicThesis {
    */
   action: "buy" | "sell" | "hold" | null;
   symbol: string | null;
+  /**
+   * THE COIN'S OWN NAME, when the tape gave one that is not the id itself.
+   *
+   * `symbol` for an autonomous Trencher coin is address-derived — `T` plus
+   * eleven hex — and every surface that lays the facts out itself had only
+   * that to print, so it printed "T3139F043B88" at a reader. This is the name
+   * on its own; `symbol` stays the id everything prices and settles against.
+   * Null, never a placeholder, when there is none. Optional only so older
+   * constructions of this shape still type; the publisher always sets it.
+   * Deployer-chosen text, so it passes the same address backstop as the rest.
+   */
+  displayName?: string | null;
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -231,6 +243,8 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
   // Deterministic review of observed public quotes, without execution authority.
+  // Filed under this key only when the review CHANGED — a flipped bias or a
+  // confirmed breakout. An unchanged one is `market-review-private`, below.
   "market-review": "strategy",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   /**
@@ -260,7 +274,23 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself
   //   strategy:<a tenant's own file> — a string we did not write
+  //   market-review-private — an unchanged review of one shared oracle series.
+  //              Every quiet agent writes it every five minutes, and when one
+  //              feed was fresh they all wrote the SAME line; published, it was
+  //              one paragraph under five names. The owner's record keeps it.
 });
+
+/**
+ * HOLDS THAT ARE NOT A MARKET VIEW.
+ *
+ * GATE_FORCED_HOLD: a risk gate turned the action into a hold — the agent was
+ * not allowed to decide. STALE_MARK_HOLD: the Brain held on a price the tick
+ * already knew was stale, so what it "saw" was the absence of a market ("price
+ * feed stale, no volume…"), and published that read as a view about the coin.
+ * Both stay in the owner's record, where they explain the silence; neither is
+ * something to say in public.
+ */
+const PRIVATE_HOLD_KINDS: ReadonlySet<string> = new Set(["GATE_FORCED_HOLD", "STALE_MARK_HOLD"]);
 
 /**
  * SOURCES WHOSE DECISIONS CANNOT REACH A TRADE.
@@ -596,11 +626,29 @@ function headOf(row: ThesisRow, shadow: boolean): string {
   // Absent name, absent parenthesis: never a placeholder. And never the
   // name alone, because dropping the id would make the feed the one
   // surface that cannot be reconciled against the ledger.
-  const named =
-    row.display_name && row.display_name !== row.symbol
-      ? `${row.display_name} (${row.symbol})`
-      : row.symbol;
+  const shown = nameOf(row);
+  const named = shown ? `${shown} (${row.symbol})` : row.symbol;
   return [verb, named, size].filter(Boolean).join(" ");
+}
+
+/** The coin's name, or null when there is none worth printing beside the id. */
+function nameOf(row: ThesisRow): string | null {
+  const name = (row.display_name ?? "").trim();
+  return name && name !== row.symbol ? name : null;
+}
+
+/**
+ * THE HEAD A READER SEES: the name, with the id left to a tooltip.
+ *
+ * `head` keeps "JUGGERNAUT (T3139F043B88)" because /why and the peer files are
+ * where the post is reconciled against the ledger, and the id is the only key
+ * that survives two coins calling themselves the same thing. A feed row is not
+ * that place. Built here, beside `headOf`, because it undoes exactly the one
+ * thing `headOf` adds and must not drift from it.
+ */
+export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayName">): string {
+  if (!t.displayName || !t.symbol) return t.head;
+  return t.head.replace(`${t.displayName} (${t.symbol})`, t.displayName);
 }
 
 /** Known operational templates, not a classifier of market sentiment. */
@@ -625,7 +673,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;
   if (!policy) return null;
-  if (row.hold_kind === "GATE_FORCED_HOLD") return null;
+  if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
@@ -761,7 +809,8 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // the handle, which are user-typed. A strategy reason cannot contain an
   // address by construction; this exists so the guarantee does not depend on
   // that staying true.
-  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null]) {
+  const displayName = nameOf(row);
+  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null, displayName]) {
     if (s && ADDRESSY.test(s)) return null;
   }
 
@@ -782,6 +831,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     head,
     action,
     symbol,
+    displayName,
     paper: row.mode === "paper",
     sizeUsdg:
       typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,

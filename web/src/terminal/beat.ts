@@ -1,8 +1,33 @@
+import { readerHead } from "@merrymen/thesis";
+import { elapsed, whenOf } from "./clock";
 import { sizeOf, type LiveAgent, type Thesis } from "./live";
 import { strategyForSlug, type StrategyId } from "./strategy";
 import { takeFor } from "./why";
 
 export type Action = "buy" | "sell" | "hold";
+
+/**
+ * A published row as `/api/theses` serves it, including the fields the
+ * terminal's `Thesis` does not declare.
+ *
+ * Widened HERE rather than on `Thesis`, because the feed is the one reader that
+ * needs them and `Thesis` is shared by every screen. Each is optional: a
+ * response from before it existed must still render, just without the claim
+ * it makes.
+ */
+export type FeedRow = Thesis & {
+  /** Epoch SECONDS this exact thesis was first said in the window. */
+  firstAt?: number;
+  /** The coin's own name when it has one that is not its id — see PublicThesis. */
+  displayName?: string | null;
+};
+
+/**
+ * AN ADDRESS-DERIVED ID: `T` plus the last eleven hex of the contract, as
+ * trencher-discovery.ts mints it. That shape IS the row's trench provenance —
+ * only the Trencher's discovery names a coin this way.
+ */
+const TRENCH_ID = /^T[0-9A-F]{11}$/;
 
 export interface Actor {
   trencher?: boolean;
@@ -103,6 +128,39 @@ interface Core {
   outcome: NonNullable<Thesis["outcome"]> | null;
   /** The publisher's own sentence for that outcome — "past today's spending cap". */
   outcomeText: string | null;
+  /** How many times this exact thesis was said in the window. Never below 1. */
+  said: number;
+  /**
+   * WHEN AN UNCHANGED VIEW WAS FIRST SAID, milliseconds — null unless it was
+   * said more than once.
+   *
+   * A view re-proposed every five minutes is one view that has stood for two
+   * hours, not a new post every five minutes. Its `atMs` still moves on every
+   * tick, which is what put a scheduled hold back on top of the feed each time
+   * a clock fired; this is the time it actually arrived.
+   */
+  sinceMs: number | null;
+  /**
+   * WHERE IT SITS ON THE FEED, milliseconds. `atMs` for a trade and a fresh
+   * view, `sinceMs` for a view that has only been repeated. Kept apart from
+   * `atMs` so an age is never quietly computed from a sort key.
+   */
+  rankMs: number;
+  /**
+   * WHAT TO CALL THE COIN: its name when it has one, else the symbol. The id
+   * stays in `symbol` for logos, links and the tooltip; this is only what a
+   * reader reads. Null when the row names nothing.
+   */
+  label: string | null;
+  /**
+   * WAS THIS ROW A TRENCH ROW — read off the row, never off the author.
+   *
+   * The byline said "Trench thesis" on a TSLA hold because it was keyed on the
+   * author's CURRENT strategy, which says nothing about an older row or about
+   * a stock the agent also holds. The address-derived id is the row's own
+   * evidence of where the coin came from.
+   */
+  trench: boolean;
 }
 
 /**
@@ -117,26 +175,80 @@ interface Core {
  * `action` and letting the rail conjugate it is how "@robin bought TSLA"
  * appears under a decision that bought nothing.
  *
- * `chorus` is gone. It was declared, rendered and never constructed —
- * `beatsOf` only ever emitted `trade` — so the branch in wire.tsx, the parts
- * list and `FacesOn` were all dead weight standing in the way of this change.
+ * `chorus` went once, because it was declared, rendered and never constructed.
+ * It is back because there is now something true to build it from: several
+ * agents publishing the same hold on the same name. See `ChorusBeat`.
  */
-export type Beat =
-  | (Core & { kind: "trade"; action: Action; symbol: string })
-  | (Core & {
-      kind: "view";
-      /**
-       * The publisher's own sentence, rendered verbatim.
-       *
-       * Never rebuilt from `action`: `head` is where the conditional lives
-       * ("would buy TSLA 5.00 USDG"), and honesty.test.ts pins that no
-       * terminal module conjugates a past-tense verb without consulting
-       * `shadow`. A view has no verb of its own, so it borrows none.
-       */
-      head: string;
-      /** Present when the view is about something, absent when it is not. */
-      symbol: string | null;
-    });
+export type Beat = TradeBeat | ViewBeat | WatchBeat | ChorusBeat;
+
+export type TradeBeat = Core & { kind: "trade"; action: Action; symbol: string };
+
+export type ViewBeat = Core & {
+  kind: "view";
+  /**
+   * The publisher's own sentence, rendered verbatim.
+   *
+   * Never rebuilt from `action`: `head` is where the conditional lives
+   * ("would buy TSLA 5.00 USDG"), and honesty.test.ts pins that no
+   * terminal module conjugates a past-tense verb without consulting
+   * `shadow`. A view has no verb of its own, so it borrows none.
+   */
+  head: string;
+  /** Present when the view is about something, absent when it is not. */
+  symbol: string | null;
+  /** An explicit hold on a name — the kind a review clock produces by the hundred. */
+  hold: boolean;
+};
+
+/**
+ * ONE AGENT'S HOLDS, SAID ONCE: "watching 12 tokens · latest: hold X".
+ *
+ * A Trencher reviews a coin every 30 seconds and concludes HOLD on almost all
+ * of them; printed one per row they were the whole feed. This is those rows,
+ * counted rather than dropped — the latest is carried in full, and the Holds
+ * pill still lays every one of them out. Everything on `Core` is the latest
+ * member's, so every surface that reads a beat reads a real row; `postId` is
+ * null because a summary is not a post and cannot be liked.
+ */
+export type WatchBeat = Core & {
+  kind: "watch";
+  /** Distinct names this agent is holding a view on. */
+  count: number;
+  latest: ViewBeat;
+  members: ViewBeat[];
+  head: string;
+  symbol: string | null;
+};
+
+/**
+ * SEVERAL AGENTS, ONE HOLD: "TSLA · 5 agents holding", faces stacked.
+ *
+ * When one oracle feed was the only fresh one, every quiet agent reviewed it
+ * and published the same sentence, so the feed printed one paragraph five
+ * times under five names — each reading as that agent's own conviction. Said
+ * once, with everybody who said it, it is honest social proof: built only from
+ * rows actually read, never padded, and never formed from one agent. `Core` is
+ * the latest member's; `postId` is null because a crowd is not one post.
+ */
+export type ChorusBeat = Core & {
+  kind: "chorus";
+  /** Each agent in it, once, newest first. Never fewer than two. */
+  actors: Actor[];
+  latest: ViewBeat;
+  members: ViewBeat[];
+  head: string;
+  symbol: string;
+};
+
+/**
+ * THE SAME SENTENCE, WHOEVER SAID IT AND WHENEVER. Figures are folded out —
+ * "TSLA +1.1% over 20h" and "TSLA +1.2% over 21h" are one observation read at
+ * two moments — and case and spacing with them. Only for grouping: nothing
+ * rendered is ever built from this.
+ */
+export function crowdKey(text: string): string {
+  return text.toLowerCase().replace(/[-+]?\$?\d[\d,]*(?:\.\d+)?%?/g, "#").replace(/\s+/g, " ").trim();
+}
 
 /** What the rail draws, top to bottom. Presentation, not domain. */
 export type Lane =
@@ -156,7 +268,7 @@ export type Lane =
  * signature that accepted one would invite exactly the fallback this function
  * exists to prevent.
  */
-export function verbOf(b: Extract<Beat, { kind: "trade" }>): string {
+export function verbOf(b: TradeBeat): string {
   if (b.shadow) return `would ${b.action}`;
   /**
    * ONLY A LANDED TRADE EARNS THE PAST TENSE.
@@ -224,7 +336,7 @@ function actorOf(t: Thesis, agents: Map<string, LiveAgent>): Actor | null {
  * Widening it roughly doubles the feed on its own, before any change to how
  * often agents post.
  */
-export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
+export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
   const bySlug = new Map(agents.map((a) => [a.slug, a]));
   const out: Beat[] = [];
 
@@ -252,6 +364,10 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
     // it, including a `source` the published post does not carry.
     const postId = t.postId ?? null;
     const action = t.action;
+    const said = Math.max(1, Number(t.said ?? 1) || 1);
+    const named = (t.displayName ?? "").trim() || null;
+    const label = named ?? (t.symbol ? t.symbol.toUpperCase() : null);
+    const trench = !!t.symbol && TRENCH_ID.test(t.symbol.toUpperCase());
 
     if ((action === "buy" || action === "sell") && t.symbol) {
       const symbol = t.symbol.toUpperCase();
@@ -270,6 +386,12 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
         paper,
         outcome,
         outcomeText,
+        said,
+        // A trade is an event, not a standing view: it sits where it happened.
+        sinceMs: null,
+        rankMs: atMs,
+        label,
+        trench,
         action,
         symbol,
       });
@@ -278,10 +400,15 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
 
     // A VIEW NEEDS WORDS OR IT IS NOTHING. `head` is the publisher's sentence
     // and the only thing a view is rendered from; with neither it nor a reason
-    // there is no post, just a row.
-    const head = t.head.trim();
+    // there is no post, just a row. The READER's head: the publisher's
+    // sentence with the id it adds for reconciliation left to the tooltip.
+    const head = readerHead({ head: t.head, symbol: t.symbol, displayName: named }).trim();
     if (!head && !reason) continue;
     const symbol = t.symbol ? t.symbol.toUpperCase() : null;
+    // ONLY A REPEAT HAS A "SINCE". A first-time view, or a row from before the
+    // publisher sent `firstAt`, sits at its own time — never at a guessed one.
+    const firstSec = typeof t.firstAt === "number" && Number.isFinite(t.firstAt) ? t.firstAt : null;
+    const sinceMs = said > 1 && firstSec !== null && firstSec < atSec ? firstSec * 1000 : null;
     out.push({
       kind: "view",
       id: `view-${actor.slug}-${atSec}-${symbol ?? ""}`,
@@ -294,13 +421,127 @@ export function beatsOf(theses: Thesis[], agents: LiveAgent[]): Beat[] {
       paper,
       outcome,
       outcomeText,
+      said,
+      sinceMs,
+      rankMs: sinceMs ?? atMs,
+      label,
+      trench,
       head,
       symbol,
+      hold: action === "hold",
     });
   }
 
-  out.sort((a, b) => b.atMs - a.atMs);
+  const beats = chorusOf(out);
+  beats.sort((a, b) => b.rankMs - a.rankMs);
+  return beats;
+}
+
+/**
+ * Fold holds that several agents said about one name into one chorus beat.
+ *
+ * Only HOLDS WITH A NAME, and only across two or more distinct agents: a
+ * crowd of one is a post, and a pure view about the book is not "holding"
+ * anything. A shared sentence that differs only in its figures counts as the
+ * same one (see `crowdKey`); the chorus still shows the latest member's own
+ * words, attributed to them, rather than a sentence nobody wrote.
+ */
+function chorusOf(beats: Beat[]): Beat[] {
+  const groups = new Map<string, ViewBeat[]>();
+  for (const b of beats) {
+    if (b.kind !== "view" || !b.hold || !b.symbol) continue;
+    const key = `${b.symbol}|${crowdKey(b.reason || b.head)}`;
+    const list = groups.get(key) ?? [];
+    list.push(b);
+    groups.set(key, list);
+  }
+  const folded = new Map<ViewBeat, ChorusBeat | null>();
+  for (const members of groups.values()) {
+    const slugs = new Set(members.map((m) => m.actor.slug));
+    if (slugs.size < 2) continue;
+    const ordered = [...members].sort((a, b) => b.atMs - a.atMs);
+    const latest = ordered[0]!;
+    const actors: Actor[] = [];
+    for (const m of ordered) if (!actors.some((a) => a.slug === m.actor.slug)) actors.push(m.actor);
+    const chorus: ChorusBeat = {
+      ...latest,
+      kind: "chorus",
+      id: `chorus-${latest.symbol}-${actors.map((a) => a.slug).join("-")}`,
+      postId: null,
+      rankMs: Math.max(...members.map((m) => m.rankMs)),
+      actors,
+      latest,
+      members: ordered,
+      symbol: latest.symbol!,
+    };
+    // The chorus takes the place of its newest member; the rest are in it.
+    for (const m of members) folded.set(m, m === latest ? chorus : null);
+  }
+  const out: Beat[] = [];
+  for (const b of beats) {
+    if (b.kind === "view" && folded.has(b)) {
+      const chorus = folded.get(b);
+      if (chorus) out.push(chorus);
+      continue;
+    }
+    out.push(b);
+  }
   return out;
+}
+
+/**
+ * WHAT "ALL" SHOWS: every trade and every view, with each agent's holds said once.
+ *
+ * An agent with two or more hold views becomes one `watch` beat carrying the
+ * latest in full. One hold stays a normal row — a summary of one thing is the
+ * thing. Nothing is removed from the read: the Holds pill lays every member
+ * out, and the count on the summary says how many there are.
+ */
+export function compactHolds(beats: Beat[]): Beat[] {
+  const holds = new Map<string, ViewBeat[]>();
+  for (const b of beats) {
+    if (b.kind !== "view" || !b.hold) continue;
+    const list = holds.get(b.actor.slug) ?? [];
+    list.push(b);
+    holds.set(b.actor.slug, list);
+  }
+  const out: Beat[] = [];
+  const summarised = new Set<string>();
+  for (const b of beats) {
+    const members = b.kind === "view" && b.hold ? holds.get(b.actor.slug) : undefined;
+    if (!members || members.length < 2) {
+      out.push(b);
+      continue;
+    }
+    if (summarised.has(b.actor.slug)) continue;
+    summarised.add(b.actor.slug);
+    // The newest thing the agent actually said, by when it said it — not by
+    // where a repeat is ranked.
+    const latest = members.reduce((a, m) => (m.atMs > a.atMs ? m : a));
+    out.push({
+      ...latest,
+      kind: "watch",
+      id: `watch-${b.actor.slug}`,
+      postId: null,
+      rankMs: Math.max(...members.map((m) => m.rankMs)),
+      count: new Set(members.map((m) => m.symbol ?? "")).size,
+      latest,
+      members,
+    });
+  }
+  out.sort((a, b) => b.rankMs - a.rankMs);
+  return out;
+}
+
+/**
+ * THE TIME A ROW SHOWS. "2m" for something that just happened; "×24 · since
+ * 2h" for a view that has only been repeated, because its newest copy is not
+ * news and its first one is.
+ */
+export function whenLabel(b: Beat, nowMs: number): string {
+  const view = b.kind === "watch" || b.kind === "chorus" ? b.latest : b;
+  if (view.sinceMs !== null) return `×${view.said} · since ${elapsed(view.sinceMs, nowMs).text}`;
+  return whenOf(view.atMs, nowMs);
 }
 
 const LULL_MS = 3 * 3_600_000;
@@ -310,7 +551,8 @@ export function lanesOf(beats: Beat[]): Lane[] {
 
   beats.forEach((beat, i) => {
     const prev = beats[i - 1];
-    const gap = prev ? prev.atMs - beat.atMs : 0;
+    // Gaps between where rows SIT, so a lull is never drawn inside the order.
+    const gap = prev ? prev.rankMs - beat.rankMs : 0;
     if (gap >= LULL_MS) out.push({ kind: "lull", id: `lull-${beat.id}`, ms: gap });
     out.push({ kind: "beat", id: beat.id, beat });
   });

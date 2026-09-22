@@ -1,7 +1,7 @@
-import { verbOf, whoOf, type Beat, type Lane } from "./beat";
-import { elapsed, useNow, whenOf } from "./clock";
+import { verbOf, whenLabel, whoOf, type ChorusBeat, type Lane, type TradeBeat, type ViewBeat, type WatchBeat } from "./beat";
+import { useNow } from "./clock";
 import { money, type LiveToken } from "./live";
-import { Coin, Delta, FaceOn } from "./ui";
+import { Coin, Delta, Face, FaceOn } from "./ui";
 
 function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefined {
   if (!symbol) return undefined;
@@ -53,6 +53,16 @@ export function Wire({
           case "lull":
             return <div key={lane.id} className="wire-lull" aria-hidden />;
           case "beat": {
+            if (lane.beat.kind === "watch") {
+              return (
+                <WatchRow key={lane.id} beat={lane.beat} tokens={tokens} now={now} onAgent={onAgent} />
+              );
+            }
+            if (lane.beat.kind === "chorus") {
+              return (
+                <ChorusRow key={lane.id} beat={lane.beat} tokens={tokens} now={now} onToken={onToken} onAgent={onAgent} />
+              );
+            }
             return (
               <BeatRow
                 key={lane.id}
@@ -76,6 +86,145 @@ export function Wire({
   );
 }
 
+/**
+ * ONE AGENT'S HOLDS, AS ONE LINE — "watching 12 tokens · latest: hold X".
+ *
+ * The latest hold is carried in full, reason and all, so the line still says
+ * what the agent concluded most recently; the rest are a count, and the Holds
+ * pill lays them out. No like control: a summary is not a post.
+ */
+function WatchRow({
+  beat,
+  tokens,
+  now,
+  onAgent,
+}: {
+  beat: WatchBeat;
+  tokens: LiveToken[];
+  now: number;
+  onAgent?: (slug: string) => void;
+}) {
+  const latest = beat.latest;
+  const tok = logoOf(tokens, latest.symbol);
+  const actor = beat.actor;
+  const open = () => onAgent?.(actor.slug);
+  return (
+    <div className="wire-beat view watch">
+      <button type="button" className="wire-mark" onClick={open}>
+        <FaceOn name={actor.name} slug={actor.slug} symbol={latest.symbol ?? ""} logo={tok?.logo ?? ""} />
+      </button>
+      <div className="wire-body">
+        <button type="button" className="wire-hit" onClick={open}>
+          <span className="wire-said">
+            <span className="wire-line">
+              <strong>{whoOf(beat)}</strong> is watching {beat.count} {beat.count === 1 ? "token" : "tokens"} · latest:{" "}
+              {latest.head}{" "}
+              {latest.paper && <i className="tag unsettled">paper</i>}{" "}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
+            </span>
+          </span>
+        </button>
+        {latest.reason && latest.reason !== latest.head ? <p className="wire-why">{latest.reason}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * THE COIN, BY NAME — the id in the tooltip.
+ *
+ * "T3139F043B88" is `T` plus eleven hex of the contract: what everything
+ * prices and settles against, and nothing a reader can use. The name is what
+ * is printed; the id is one hover away for anybody reconciling against the
+ * ledger, and it is the only thing printed when there is no name.
+ */
+function Named({ beat }: { beat: { label: string | null; symbol: string | null } }) {
+  const shown = beat.label ?? beat.symbol ?? "";
+  return <span title={beat.symbol && beat.symbol !== shown ? beat.symbol : undefined}>{shown}</span>;
+}
+
+/**
+ * A stack of the faces in a chorus, the coin on top. Lives here rather than in
+ * ui.tsx because this row is its only caller; the `.stack .faces` rules it
+ * draws with never left the sheet.
+ */
+function FacesOn({ actors, symbol, logo }: { actors: ChorusBeat["actors"]; symbol: string; logo: string }) {
+  return (
+    <span className="stack">
+      <span className="faces">
+        {actors.slice(0, 3).map((a) => (
+          <Face key={a.slug} name={a.name} slug={a.slug} />
+        ))}
+      </span>
+      <span className="stack-badge">
+        <Coin symbol={symbol} logo={logo} />
+      </span>
+    </span>
+  );
+}
+
+/**
+ * SEVERAL AGENTS, ONE HOLD — "TSLA · 5 agents holding".
+ *
+ * Every agent in it is named and clickable, because a count nobody can check
+ * is just a number. The words shown are the latest member's own, attributed to
+ * them: the others said the same thing with different figures, and printing
+ * one sentence as everybody's would put numbers in mouths that did not say them.
+ */
+function ChorusRow({
+  beat,
+  tokens,
+  now,
+  onToken,
+  onAgent,
+}: {
+  beat: ChorusBeat;
+  tokens: LiveToken[];
+  now: number;
+  onToken?: (id: string) => void;
+  onAgent?: (slug: string) => void;
+}) {
+  const tok = logoOf(tokens, beat.symbol);
+  const open = () => {
+    if (tok && onToken) onToken(tok.id);
+    else onAgent?.(beat.latest.actor.slug);
+  };
+  const paper = beat.members.filter((m) => m.paper).length;
+  return (
+    <div className="wire-beat view chorus">
+      <button type="button" className="wire-mark" onClick={open}>
+        <FacesOn actors={beat.actors} symbol={beat.symbol} logo={tok?.logo ?? ""} />
+      </button>
+      <div className="wire-body">
+        <button type="button" className="wire-hit" onClick={open}>
+          <span className="wire-said">
+            <span className="wire-line">
+              <strong><Named beat={beat} /></strong> · {beat.actors.length} agents holding{" "}
+              {paper > 0 && <i className="tag unsettled">{paper} on paper</i>}{" "}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
+            </span>
+          </span>
+        </button>
+        {beat.latest.reason ? (
+          <p className="wire-why">
+            <b>{beat.latest.actor.handle}</b>: {beat.latest.reason}
+          </p>
+        ) : null}
+        <p className="wire-mentions">
+          {beat.actors.map((a, i) => (
+            <span key={a.slug}>
+              {i > 0 ? ", " : ""}
+              <button type="button" onClick={() => onAgent?.(a.slug)}>
+                {a.handle}
+              </button>
+            </span>
+          ))}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function BeatRow({
   beat,
   tokens,
@@ -85,7 +234,7 @@ function BeatRow({
   likes,
   mentions,
 }: {
-  beat: Beat;
+  beat: TradeBeat | ViewBeat;
   tokens: LiveToken[];
   now: number;
   onToken?: (id: string) => void;
@@ -115,7 +264,11 @@ function BeatRow({
   const turned =
     beat.kind === "trade" &&
     (beat.outcome === "refused" || beat.outcome === "reverted" || beat.outcome === "dropped");
-  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : "", actor.trencher ? "is-trencher" : ""]
+  // THE AMBER AND THE BYLINE COME FROM THE ROW. They were keyed on the
+  // author's current strategy, so a TSLA hold from an agent that has since
+  // switched to Trencher read "Trench thesis". The badge alone still speaks
+  // for the agent's current mode, and its title says that is what it means.
+  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : "", beat.trench ? "is-trencher" : ""]
     .filter(Boolean)
     .join(" ");
 
@@ -125,7 +278,7 @@ function BeatRow({
         <FaceOn name={actor.name} slug={actor.slug} symbol={beat.symbol ?? ""} logo={tok?.logo ?? ""} />
       </button>
       <div className="wire-body">
-        {actor.trencher && <div className="trench-byline"><span className="trench-badge" title="This agent currently uses Trencher mode">Trencher</span><span>{beat.kind === "view" ? "Trench thesis" : "Trade activity"}</span></div>}
+        {beat.trench && <div className="trench-byline">{actor.trencher && <span className="trench-badge" title="This agent currently uses Trencher mode">Trencher</span>}<span>{beat.kind === "view" ? "Trench thesis" : "Trench trade"}</span></div>}
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">
@@ -137,7 +290,7 @@ function BeatRow({
               <strong>{whoOf(beat)}</strong>{" "}
               {beat.kind === "trade" ? (
                 <>
-                  {verbOf(beat)} {beat.symbol}{" "}
+                  {verbOf(beat)} <Named beat={beat} />{" "}
                 </>
               ) : (
                 <>{beat.head} </>
@@ -165,7 +318,10 @@ function BeatRow({
                   beat.outcome === "dropped") && (
                   <i className="wire-refused">— {beat.outcomeText}</i>
                 )}{" "}
-              <em className="wire-when">{whenOf(beat.atMs, now)}</em>
+              {/* "×24 · since 2h" for a view that has only been repeated: its
+                  newest copy is not news, and printing its age as "now" is
+                  what kept a scheduled hold looking like fresh activity. */}
+              <em className="wire-when">{whenLabel(beat, now)}</em>
             </span>
           </span>
         </button>
@@ -181,7 +337,7 @@ function BeatRow({
             <button type="button" className="wire-part" onClick={open}>
               <span className="wire-seat">
                 <Coin symbol={beat.symbol} logo={tok?.logo ?? ""} />
-                {beat.symbol}
+                <Named beat={beat} />
               </span>
               <span className="wire-part-fig">
                 {beat.sizeUsd != null ? <b>{money(beat.sizeUsd)}</b> : null}

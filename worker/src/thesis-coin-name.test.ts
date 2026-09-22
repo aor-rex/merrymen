@@ -17,7 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { publishableThesis } from "./thesis-policy";
+import { publishableThesis, readerHead } from "./thesis-policy";
 
 const row = (over: Record<string, unknown> = {}) => ({
   agent_id: "0xabc",
@@ -83,5 +83,49 @@ describe("the id is never dropped", () => {
       publishableThesis(row({ display_name: "CASHCAT", reason: "error: provider unavailable" }) as never),
       null,
     );
+  });
+});
+
+/**
+ * THE NAME TRAVELS AS A FIELD, NOT ONLY INSIDE A SENTENCE.
+ *
+ * The head carries "(T3139F043B88)" because /why and the peer files reconcile
+ * against the ledger by it. Every surface that lays the facts out itself — the
+ * rail, the alerts column, a trade line — had only `symbol` to print, so it
+ * printed the machine id at a reader. `displayName` is the name on its own;
+ * `readerHead` is the head a reader sees, with the id left to a tooltip.
+ */
+describe("a reader sees the coin's name, and the ledger keeps its id", () => {
+  it("publishes the name beside the id, not instead of it", () => {
+    const post = publishableThesis(row({ display_name: "JUGGERNAUT" }) as never)!;
+    assert.equal(post.displayName, "JUGGERNAUT");
+    assert.equal(post.symbol, "T7631DACC21B", "the id is still the symbol");
+    assert.equal(post.head, "hold JUGGERNAUT (T7631DACC21B)", "and still in the head /why and peers read");
+    assert.equal(readerHead(post), "hold JUGGERNAUT");
+  });
+
+  it("names it on a trade with the size kept", () => {
+    const post = publishableThesis(row({ action: "buy", size_usdg: 5, display_name: "CHUMP" }) as never)!;
+    assert.equal(readerHead(post), "buy CHUMP 5.00 USDG");
+  });
+
+  it("no name, or a name that IS the id, is null — never a placeholder", () => {
+    for (const display_name of [null, "", "   ", "T7631DACC21B"]) {
+      const post = publishableThesis(row({ display_name }) as never)!;
+      assert.equal(post.displayName, null);
+      assert.equal(readerHead(post), "hold T7631DACC21B", "the id alone is what there is to say");
+    }
+  });
+
+  it("a stock ticker is left exactly as it was", () => {
+    const post = publishableThesis(row({ symbol: "TSLA", action: "buy", size_usdg: 5 }) as never)!;
+    assert.equal(post.displayName, null);
+    assert.equal(readerHead(post), post.head);
+  });
+
+  it("the name is user-supplied text and passes the address backstop like everything else", () => {
+    // Deployer-chosen, so it is treated as hostile: an address in it costs the
+    // whole post, exactly as it would in the head.
+    assert.equal(publishableThesis(row({ display_name: "send to 0xdeadbeefcafe1234" }) as never), null);
   });
 });
