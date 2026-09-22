@@ -139,6 +139,22 @@ export type Why =
    */
   | { code: "budget-spent"; capRaw: bigint }
   /**
+   * TODAY'S TRADE COUNT IS GONE — `budget-spent`'s sibling, for the count
+   * rather than the money.
+   *
+   * Before the snapshot carried the count, this was the loudest way for an
+   * agent to do nothing: the strategy proposed the same legs every tick and the
+   * wall refused each one with `ops-cap`, which reached the public feed as
+   * "tried to buy TSLA · past today's number of trades" once a tick until the
+   * window rolled. Now the strategy stops proposing and says this once.
+   *
+   * NO FIGURE, deliberately. The snapshot carries the headroom, which is zero
+   * whenever this fires, and not the ceiling; a sentence that printed "0" would
+   * be a number that says nothing, and inventing the ceiling here would be a
+   * figure nobody read on this tick.
+   */
+  | { code: "ops-spent" }
+  /**
    * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
    *
    * The default strategy could only ever buy — every intent it emitted had cash
@@ -371,6 +387,16 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
           ? `Lower the size per tick in settings to spread it across the day, ` +
             `or raise the cap at /grant — that one needs a re-sign. `
           : ``) +
+        `Selling is never blocked by this`
+      );
+    case "ops-spent":
+      // "The last 24 hours", not "today": the count is a trailing window, so it
+      // frees up as the oldest trades age out rather than at midnight, and an
+      // owner told "today" would wait for a rollover that is not coming.
+      return (
+        `nothing bought — the number of trades the signed key allows in ` +
+        `24 hours is used up, and it frees up as the oldest ones age out. ` +
+        (audience === "owner" ? `Raise it at /grant — that one needs a re-sign. ` : ``) +
         `Selling is never blocked by this`
       );
     case "under-one-buy":

@@ -4,6 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
+import { followOrder as followOrderAnswer } from "../order-follow";
 import {
   ArrowDown,
   ArrowUp,
@@ -315,39 +316,17 @@ export function Agent({
    * infers an outcome — a browser guessing at what a trade did is exactly the
    * claim this codebase refuses to make.
    *
-   * Bounded and best-effort: it stops when the answer lands, when the order
-   * outlives its own five-minute window, or when the screen goes away. A poll
-   * that cannot end is a worse bug than a missing sentence.
+   * Bounded and best-effort: it stops when the server answers, when the order
+   * outlives its OWN window and grace — carried back from the POST, never a
+   * constant here — or when the screen goes away. A poll that cannot end is a
+   * worse bug than a missing sentence. See order-follow.ts for why a fixed seven
+   * minutes told owners "nothing was sent" about orders that went on to fill.
    */
-  const followOrder = async (id: string) => {
-    const started = Date.now();
-    while (Date.now() - started < 7 * 60_000) {
-      await new Promise((r) => setTimeout(r, 5_000));
-      if (!alive.current) return;
-      let data: { state?: string; result?: string | null } | null = null;
-      try {
-        const r = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(8_000) });
-        data = r.ok ? await r.json() : null;
-      } catch {
-        continue; // a dropped poll is not an outcome
-      }
-      if (data?.state === "done" && data.result) {
-        onTurn({ question: "", answer: data.result });
-        return;
-      }
-    }
-    // NOT SILENCE. Seven minutes without an answer means the worker never took
-    // it — which is a real thing an owner needs told, and the state they were
-    // left in before was an unexplained absence.
-    if (alive.current) {
-      onTurn({
-        question: "",
-        answer:
-          "I never got to that order — my worker did not pick it up in time, so nothing was sent. " +
-          "Ask again and I will try once more.",
-      });
-    }
-  };
+  const followOrder = (id: string, expiresAt: number | null) =>
+    followOrderAnswer(id, expiresAt, {
+      alive: () => alive.current,
+      say: (answer) => onTurn({ question: "", answer }),
+    });
 
   /**
    * DO THE THING THE OWNER JUST CONFIRMED.
@@ -435,7 +414,7 @@ export function Agent({
           body: JSON.stringify(commandPayload(cmd, pending!.args)),
         });
         const body = (await placed.json().catch(() => null)) as
-          | { error?: string; id?: string; duplicate?: boolean }
+          | { error?: string; id?: string; duplicate?: boolean; expiresAt?: number }
           | null;
         if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
         // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
@@ -455,7 +434,7 @@ export function Agent({
             : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         });
         setPending(null);
-        if (body?.id) void followOrder(body.id);
+        if (body?.id) void followOrder(body.id, typeof body.expiresAt === "number" ? body.expiresAt : null);
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.

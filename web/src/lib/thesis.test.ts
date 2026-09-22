@@ -218,7 +218,10 @@ describe("refusals are classified, never quoted", () => {
   });
 
   it("a known rule reads as a sentence", () => {
-    const t = publishableThesis(ok({ status: "rejected", reject_rule: "daily-cap" }))!;
+    // On a MODEL source: a deterministic strategy's refusal on an account-wide
+    // rule is the owner's fact and no longer a post (account-refusals.test.ts),
+    // while a model's refused thesis still publishes with the rule in words.
+    const t = publishableThesis(ok({ source: "strategist", status: "rejected", reject_rule: "daily-cap" }))!;
     assert.equal(t.outcomeText, "past today's spending cap");
   });
 });

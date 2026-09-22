@@ -336,6 +336,29 @@ const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withdraw"]);
 
 /**
+ * Wall rules that are about the ACCOUNT rather than the trade — the day's
+ * allowance, and whether the key can act at all. A strategy's refusal on one of
+ * these is the owner's fact and not a post; see the rule in publishableThesis.
+ *
+ * The arming half is every RefuseRule the execution fork writes into
+ * `reject_rule` (core's autonomy.ts). account-refusals.test.ts holds a typed
+ * record of that union, so a new rule there fails a test until it is placed.
+ */
+const ACCOUNT_STATE_RULES: ReadonlySet<string> = new Set([
+  "ops-cap",
+  "daily-cap",
+  "deposit-cap",
+  "not-armed",
+  "dead-policy",
+  "grant-too-wide",
+  "no-executor",
+  "live-not-enabled",
+  "wrong-chain",
+  "no-gas",
+  "no-cash",
+]);
+
+/**
  * Every source a reader may put in a `WHERE source IN (…)`.
  *
  * Exported so the two SQL callers derive their list from the policy instead of
@@ -801,6 +824,35 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    * rule above, keyed on the action because these rows ride strategy sources.
    */
   if (CASH_ACTIONS.has(row.action ?? "") && outcome !== "landed") return null;
+
+  /**
+   * A LIMIT ON THE ACCOUNT IS NOT A VIEW ABOUT THE MARKET.
+   *
+   * "Robin tried to buy TSLA · past today's number of trades" was on the feed
+   * once a tick, all day. A deterministic strategy re-proposes its legs on a
+   * schedule, so once the account's own trade count, money or arming stops it,
+   * every tick writes a fresh decision the wall refuses for the same reason —
+   * true each time, and about nothing a stranger can read as a thesis. It says
+   * the agent is stuck, in public, in the agent's name.
+   *
+   * THE OWNER'S FACT, and they still get it: the event log is told once per
+   * change (owner-refusal.ts, and the live-blocker line for the arming rules),
+   * the trade row keeps its `reject_rule` for their desk and the wall tape, and
+   * the decision stays in the ledger. Only the post goes.
+   *
+   * STRATEGY SOURCES ONLY. A model's refused thesis is still its view — "I
+   * wanted X because Y, and the wall said no" — and the TRADED_ONLY rule above
+   * says so. And only these rules: a refusal about the TRADE (an asset the key
+   * does not cover, a price that moved, a curve that graduated) says something
+   * true about the market and keeps publishing.
+   */
+  if (
+    outcome === "refused" &&
+    (row.source ?? "").startsWith("strategy:") &&
+    ACCOUNT_STATE_RULES.has(row.reject_rule ?? "")
+  ) {
+    return null;
+  }
 
   const handle = (row.x_handle ?? "").trim() || null;
 

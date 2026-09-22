@@ -54,12 +54,15 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { hasPendingCommand, readCommandState, writeCommand } from "@merrymen/command-files";
+import { commandDir, hasPendingCommand, readCommandState, writeCommand } from "@merrymen/command-files";
 import { resolveConfig } from "@merrymen/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { ORDER_STALE_GRACE_MS, hostedOrderReply, orderExpiresAt, orderStateOf } from "@/lib/order-state";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,14 +105,11 @@ async function orderTtlMs(req: Request): Promise<number> {
 
 /**
  * How long after its expiry a row may still hold the one-at-a-time slot.
- *
- * The expiry is enforced in the CHILD, at the claim, so a row can legitimately
- * be a ferry pass and a tick behind its own deadline while it is genuinely
- * being decided. Past that it either answered or never will, and either way it
- * must stop blocking — an owner locked out of ordering by a row nothing can
- * finish is the worse failure.
+ * Defined in lib/order-state.ts beside the rule that says "expired", because
+ * the slot and that answer must agree: the slot is released at the same moment
+ * GET is first allowed to tell the owner nothing was sent.
  */
-const STALE_GRACE_MS = 2 * 60_000;
+const STALE_GRACE_MS = ORDER_STALE_GRACE_MS;
 
 /**
  * Was this write refused because the row already exists?
@@ -237,6 +237,9 @@ export async function POST(req: Request) {
 
   const now = Date.now();
   const ttlMs = await orderTtlMs(req);
+  // ONE DEADLINE, stamped on the order and handed back to the card, so the
+  // worker that enforces it and the card that waits for it read the same number.
+  const expiresAt = now + ttlMs;
   const id = orderId(agent, order, now);
   const args = { ...order };
 
@@ -249,8 +252,8 @@ export async function POST(req: Request) {
       if (hasPendingCommand(merrymenHome())) {
         return NextResponse.json({ error: "you already have an order waiting. Let that one finish first." }, { status: 409 });
       }
-      writeCommand(merrymenHome(), { id, kind: "trade", at: now, args, expiresAt: now + ttlMs });
-      return NextResponse.json({ id, queued: true });
+      writeCommand(merrymenHome(), { id, kind: "trade", at: now, args, expiresAt });
+      return NextResponse.json({ id, queued: true, expiresAt });
     } catch (e) {
       return NextResponse.json({ error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` }, { status: 503 });
     }
@@ -289,7 +292,7 @@ export async function POST(req: Request) {
         .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, ?, ?, ?)")
         // Milliseconds — the column has no default, so forgetting it is a write
         // error rather than a silently-wrong unit.
-        .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt: now + ttlMs }), now);
+        .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt }), now);
       return { ok: true as const };
     } catch (e) {
       if (!isDuplicateKey(e)) return { ok: false as const, why: "unreachable" as const };
@@ -313,59 +316,91 @@ export async function POST(req: Request) {
       { status: result.why === "in-flight" ? 409 : 503 },
     );
   }
-  return NextResponse.json({ id, queued: true, ...(result.duplicate ? { duplicate: true } : {}) });
+  // THE DEADLINE GOES BACK WITH THE ID, so the card waits out this order's own
+  // window instead of a constant of its own — a fixed seven minutes told owners
+  // "nothing was sent" about orders the 240 s tick could still fill. For a
+  // duplicate it is this request's figure, at most a minute past the queued
+  // row's (same minute bucket), which can only lengthen the wait, never cut it.
+  return NextResponse.json({ id, queued: true, expiresAt, ...(result.duplicate ? { duplicate: true } : {}) });
 }
 
 /**
- * What happened to the most recent order. Polled by the card that placed it.
+ * What happened to an order. Polled by the card that placed it.
  *
- * FOUR STATES, NOT TWO. "queued" and "running" look the same to somebody
+ * FIVE STATES, NOT TWO. "queued" and "running" look the same to somebody
  * watching a spinner and mean different things when it stops changing:
  * queued-forever is a worker that is not draining, running-forever is an order
  * that hung. "none" is neither — it is the honest answer when nothing was ever
  * asked for, and it must never be returned for an order that ran.
+ *
+ * "expired" is the fifth, and the only one that means NOTHING WAS SENT. It used
+ * to be the card's own guess, made on a fixed seven-minute timer that ran
+ * shorter than the order's real window at the hosted tick; now it is said here,
+ * from the order's own `expiresAt`, and only for an order nobody claimed — see
+ * lib/order-state.ts for why a claimed one is never called expired.
+ *
+ * BY ID when the card names one. The latest row is the wrong answer to "what
+ * happened to MY order" the moment there are two — and there can be two, because
+ * the one-at-a-time slot is released at a deadline even when nothing answered.
+ *
+ * An unreadable ledger is a 503, not "none": a read that failed is not a
+ * record of nothing, and the card treats a failed poll as no answer yet.
  */
 export async function GET(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+  const id = new URL(req.url).searchParams.get("id") ?? "";
 
   if (!isHostedMode()) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a
     // result into a table, so reading the table would answer "none" for an
     // order that had already filled.
-    const id = new URL(req.url).searchParams.get("id") ?? "";
     const st = id ? readCommandState(merrymenHome(), id) : null;
     if (!st) return NextResponse.json({ state: "none" });
+    // A file still in the queue carries its own deadline. `readCommandState`
+    // has already refused an id that is not a plain id, so this path is safe to
+    // build; a file claimed between the two reads is simply "running".
+    let expiresAt: number | null = null;
+    if (st.state === "queued") {
+      try {
+        expiresAt = orderExpiresAt(readFileSync(path.join(commandDir(merrymenHome()), `${id}.json`), "utf8"));
+      } catch {
+        return NextResponse.json({ id, state: "running", result: null, ok: null, at: null, expiresAt: null });
+      }
+    }
     return NextResponse.json({
       id,
-      state: st.state,
+      state: orderStateOf({ done: st.state === "done", claimed: st.state === "running", expiresAt }, Date.now()),
       result: st.result?.line ?? null,
       ok: st.result?.ok ?? null,
       at: st.result?.at ?? null,
+      expiresAt,
     });
   }
 
-  const row = await withReadDb(async (db) => {
-    if (!db) return null;
+  const read = await withReadDb(async (db) => {
+    if (!db) return { ok: false as const };
     try {
-      return ((await db
-        .prepare(
-          `SELECT id, created_at, claimed_at, done_at, result FROM agent_commands
-            WHERE agent_id = ? AND kind = 'trade' ORDER BY created_at DESC, id DESC LIMIT 1`,
-        )
-        .get(agent)) ?? null) as Record<string, unknown> | null;
+      const row = (await (id
+        ? db
+            .prepare(
+              `SELECT id, created_at, claimed_at, done_at, result, args FROM agent_commands
+                WHERE agent_id = ? AND kind = 'trade' AND id = ? LIMIT 1`,
+            )
+            .get(agent, id)
+        : db
+            .prepare(
+              `SELECT id, created_at, claimed_at, done_at, result, args FROM agent_commands
+                WHERE agent_id = ? AND kind = 'trade' ORDER BY created_at DESC, id DESC LIMIT 1`,
+            )
+            .get(agent))) as Record<string, unknown> | undefined;
+      return { ok: true as const, row: row ?? null };
     } catch {
-      return null;
+      return { ok: false as const };
     }
   });
 
-  if (!row) return NextResponse.json({ state: "none" });
-  const done = row.done_at !== null && row.done_at !== undefined;
-  const claimed = row.claimed_at !== null && row.claimed_at !== undefined;
-  return NextResponse.json({
-    id: String(row.id),
-    state: done ? "done" : claimed ? "running" : "queued",
-    result: row.result === null || row.result === undefined ? null : String(row.result),
-    at: Number(row.created_at),
-  });
+  if (!read.ok) return NextResponse.json({ error: "the ledger could not be read" }, { status: 503 });
+  if (!read.row) return NextResponse.json({ state: "none" });
+  return NextResponse.json(hostedOrderReply(read.row, Date.now()));
 }
