@@ -435,12 +435,15 @@ export async function PUT(req: Request) {
       setOrClear("agentName", undefined);
     } else if (
       typeof norm !== "string" ||
-      !/^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u.test(norm)
+      !/^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u.test(norm)
     ) {
       // The old rule was ASCII-only and the old message said "letters and
       // numbers", which sent anyone called José or Робин round a loop they
-      // could not escape by complying. See worker/src/soul.ts NAME_RE.
-      errors.push("name: 1-24 characters, starting with a letter or number");
+      // could not escape by complying. See worker/src/soul.ts NAME_RE. The
+      // letter requirement is named in the message for the same reason: "007"
+      // starts with a number, so a message that stopped there would be obeyed
+      // and refused again.
+      errors.push("name: 1-24 characters, starting with a letter or number and containing at least one letter");
     } else {
       setOrClear("agentName", norm);
     }

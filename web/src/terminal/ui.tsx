@@ -4,24 +4,10 @@ import { useAgentImageSrc } from "./agent-image-state";
 import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
-
-function hueOf(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
-  return h;
-}
-
-function initialsOf(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "??";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
-}
-
-function gradient(seed: string): string {
-  const h = hueOf(seed);
-  return `linear-gradient(145deg, hsl(${h} 62% 62%), hsl(${(h + 42) % 360} 58% 44%))`;
-}
+// The one face recipe. This file used to carry its own copy of these, so the
+// terminal's faces and components/AgentAvatar's could drift with nothing to
+// notice — and changing the seed would have meant changing both.
+import { avatarGradient, faceSeed, initialsOf } from "@/lib/agent-avatar";
 
 export function Face({
   name,
@@ -63,7 +49,11 @@ export function Face({
   const on = slug != null && wired.includes(slug);
   const cls = `${large ? "face lg" : pin ? "face pin" : small ? "face sm" : "face"}${on ? " wired" : ""}`;
   return (
-    <span className={cls} style={{ background: gradient(name) }} aria-hidden>
+    // THE GRADIENT FOLLOWS THE SLUG, THE INITIALS FOLLOW THE NAME. Seeded on the
+    // name, every "Robin" was one colour with one "RO", and a feed of different
+    // agents read as one agent talking to itself. The slug is minted once and
+    // never changes, so a rename keeps the face too.
+    <span className={cls} style={{ background: avatarGradient(faceSeed(name, slug)) }} aria-hidden>
       {initialsOf(name)}
       {src && !failed && <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />}
     </span>
@@ -284,7 +274,7 @@ export function Coin({ symbol, logo }: { symbol: string; logo: string }) {
   const initials =
     symbol.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
   return (
-    <span className="coin" style={!logo || failed ? { background: gradient(symbol) } : undefined}>
+    <span className="coin" style={!logo || failed ? { background: avatarGradient(symbol) } : undefined}>
       {!logo || failed ? (
         initials
       ) : (

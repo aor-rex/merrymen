@@ -23,8 +23,10 @@ import path from "node:path";
 import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
 import { fnv1a } from "./memory/tokens";
+import { DEFAULT_AGENT_NAME } from "../../packages/core/src/agent-name";
 
-export const DEFAULT_NAME = "Robin";
+/** The stock name, defined once in core — the Agent screen's name chip compares against it. */
+export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
 /**
  * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET.
  *
@@ -45,11 +47,18 @@ export const DEFAULT_NAME = "Robin";
  * matters — `\p{Cf}` bidi overrides, whose whole purpose is to make text
  * display as something other than what it is.
  *
+ * AT LEAST ONE LETTER, which is the lookahead. A name renders beside an
+ * agent's return on a page that ranks people, and "99.5" or "1000" there reads
+ * as a figure nobody measured. Digits are still welcome inside a name that has
+ * a letter — "R2", "Agent 47". A stored name that fails this reads back as the
+ * default; when it is the name in settings, the worker's reconcile tells the
+ * owner why on their event feed (name-reconcile.ts).
+ *
  * DUPLICATED, DELIBERATELY, at web/src/app/api/settings/route.ts. The two must
  * stay byte-identical INCLUDING the normalisation below; see the comment there
  * for what happens when they drift.
  */
-const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+const NAME_RE = /^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
 const MAX_OWNER_FACTS = 60;
 const MAX_NOTES = 120;
 const MAX_JOURNAL_CHARS = 40_000;
@@ -171,7 +180,12 @@ export function setName(raw: string): { ok: true; name: string } | { ok: false; 
   // characters, and compare equal to whatever the web tier stored.
   const name = raw.normalize("NFC").trim().replace(/\s+/g, " ");
   if (!NAME_RE.test(name)) {
-    return { ok: false, reason: "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number" };
+    return {
+      ok: false,
+      reason:
+        "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number " +
+        "and containing at least one letter",
+    };
   }
   ensureSoul();
   const current = readSafe(identityFile());
