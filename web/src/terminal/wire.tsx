@@ -131,6 +131,19 @@ function WatchRow({
 }
 
 /**
+ * THE COIN, BY NAME — the id in the tooltip.
+ *
+ * "T3139F043B88" is `T` plus eleven hex of the contract: what everything
+ * prices and settles against, and nothing a reader can use. The name is what
+ * is printed; the id is one hover away for anybody reconciling against the
+ * ledger, and it is the only thing printed when there is no name.
+ */
+function Named({ beat }: { beat: { label: string | null; symbol: string | null } }) {
+  const shown = beat.label ?? beat.symbol ?? "";
+  return <span title={beat.symbol && beat.symbol !== shown ? beat.symbol : undefined}>{shown}</span>;
+}
+
+/**
  * A stack of the faces in a chorus, the coin on top. Lives here rather than in
  * ui.tsx because this row is its only caller; the `.stack .faces` rules it
  * draws with never left the sheet.
@@ -186,7 +199,7 @@ function ChorusRow({
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">
-              <strong>{beat.symbol}</strong> · {beat.actors.length} agents holding{" "}
+              <strong><Named beat={beat} /></strong> · {beat.actors.length} agents holding{" "}
               {paper > 0 && <i className="tag unsettled">{paper} on paper</i>}{" "}
               <em className="wire-when">{whenLabel(beat, now)}</em>
             </span>
@@ -251,7 +264,11 @@ function BeatRow({
   const turned =
     beat.kind === "trade" &&
     (beat.outcome === "refused" || beat.outcome === "reverted" || beat.outcome === "dropped");
-  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : "", actor.trencher ? "is-trencher" : ""]
+  // THE AMBER AND THE BYLINE COME FROM THE ROW. They were keyed on the
+  // author's current strategy, so a TSLA hold from an agent that has since
+  // switched to Trencher read "Trench thesis". The badge alone still speaks
+  // for the agent's current mode, and its title says that is what it means.
+  const cls = ["wire-beat", beat.kind === "trade" ? beat.action : "view", turned ? "turned" : "", beat.trench ? "is-trencher" : ""]
     .filter(Boolean)
     .join(" ");
 
@@ -261,7 +278,7 @@ function BeatRow({
         <FaceOn name={actor.name} slug={actor.slug} symbol={beat.symbol ?? ""} logo={tok?.logo ?? ""} />
       </button>
       <div className="wire-body">
-        {actor.trencher && <div className="trench-byline"><span className="trench-badge" title="This agent currently uses Trencher mode">Trencher</span><span>{beat.kind === "view" ? "Trench thesis" : "Trade activity"}</span></div>}
+        {beat.trench && <div className="trench-byline">{actor.trencher && <span className="trench-badge" title="This agent currently uses Trencher mode">Trencher</span>}<span>{beat.kind === "view" ? "Trench thesis" : "Trench trade"}</span></div>}
         <button type="button" className="wire-hit" onClick={open}>
           <span className="wire-said">
             <span className="wire-line">
@@ -273,7 +290,7 @@ function BeatRow({
               <strong>{whoOf(beat)}</strong>{" "}
               {beat.kind === "trade" ? (
                 <>
-                  {verbOf(beat)} {beat.symbol}{" "}
+                  {verbOf(beat)} <Named beat={beat} />{" "}
                 </>
               ) : (
                 <>{beat.head} </>
@@ -320,7 +337,7 @@ function BeatRow({
             <button type="button" className="wire-part" onClick={open}>
               <span className="wire-seat">
                 <Coin symbol={beat.symbol} logo={tok?.logo ?? ""} />
-                {beat.symbol}
+                <Named beat={beat} />
               </span>
               <span className="wire-part-fig">
                 {beat.sizeUsd != null ? <b>{money(beat.sizeUsd)}</b> : null}

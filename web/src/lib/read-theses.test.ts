@@ -215,6 +215,18 @@ describe("what the gate refuses stays refused", () => {
     }
   });
 
+  it("the coin's name reaches the post as a field, with the id kept as the symbol", async () => {
+    const named: Row = { id: "n-1", action: "buy", symbol: "T3139F043B88", size: 5, display: "JUGGERNAUT", reason: "Two-sided flow into a deep enough book.", at: NOW };
+    const { raw, db } = await ledger([named], [{ decision: "n-1", status: "landed" }]);
+    try {
+      const [post] = (await readTheses({}, (fn) => fn(db), identities, settings)).theses;
+      assert.equal(post!.displayName, "JUGGERNAUT");
+      assert.equal(post!.symbol, "T3139F043B88");
+    } finally {
+      raw.close();
+    }
+  });
+
   it("an unreadable ledger is reported as one, not as a quiet fleet", async () => {
     const read = await readTheses({}, (fn) => fn(null), identities, settings);
     assert.equal(read.source, "none");

@@ -124,6 +124,18 @@ export interface PublicThesis {
    */
   action: "buy" | "sell" | "hold" | null;
   symbol: string | null;
+  /**
+   * THE COIN'S OWN NAME, when the tape gave one that is not the id itself.
+   *
+   * `symbol` for an autonomous Trencher coin is address-derived — `T` plus
+   * eleven hex — and every surface that lays the facts out itself had only
+   * that to print, so it printed "T3139F043B88" at a reader. This is the name
+   * on its own; `symbol` stays the id everything prices and settles against.
+   * Null, never a placeholder, when there is none. Optional only so older
+   * constructions of this shape still type; the publisher always sets it.
+   * Deployer-chosen text, so it passes the same address backstop as the rest.
+   */
+  displayName?: string | null;
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -614,11 +626,29 @@ function headOf(row: ThesisRow, shadow: boolean): string {
   // Absent name, absent parenthesis: never a placeholder. And never the
   // name alone, because dropping the id would make the feed the one
   // surface that cannot be reconciled against the ledger.
-  const named =
-    row.display_name && row.display_name !== row.symbol
-      ? `${row.display_name} (${row.symbol})`
-      : row.symbol;
+  const shown = nameOf(row);
+  const named = shown ? `${shown} (${row.symbol})` : row.symbol;
   return [verb, named, size].filter(Boolean).join(" ");
+}
+
+/** The coin's name, or null when there is none worth printing beside the id. */
+function nameOf(row: ThesisRow): string | null {
+  const name = (row.display_name ?? "").trim();
+  return name && name !== row.symbol ? name : null;
+}
+
+/**
+ * THE HEAD A READER SEES: the name, with the id left to a tooltip.
+ *
+ * `head` keeps "JUGGERNAUT (T3139F043B88)" because /why and the peer files are
+ * where the post is reconciled against the ledger, and the id is the only key
+ * that survives two coins calling themselves the same thing. A feed row is not
+ * that place. Built here, beside `headOf`, because it undoes exactly the one
+ * thing `headOf` adds and must not drift from it.
+ */
+export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayName">): string {
+  if (!t.displayName || !t.symbol) return t.head;
+  return t.head.replace(`${t.displayName} (${t.symbol})`, t.displayName);
 }
 
 /** Known operational templates, not a classifier of market sentiment. */
@@ -779,7 +809,8 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // the handle, which are user-typed. A strategy reason cannot contain an
   // address by construction; this exists so the guarantee does not depend on
   // that staying true.
-  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null]) {
+  const displayName = nameOf(row);
+  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null, displayName]) {
     if (s && ADDRESSY.test(s)) return null;
   }
 
@@ -800,6 +831,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     head,
     action,
     symbol,
+    displayName,
     paper: row.mode === "paper",
     sizeUsdg:
       typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,

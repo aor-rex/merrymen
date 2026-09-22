@@ -1,3 +1,4 @@
+import { readerHead } from "@merrymen/thesis";
 import { elapsed, whenOf } from "./clock";
 import { sizeOf, type LiveAgent, type Thesis } from "./live";
 import { strategyForSlug, type StrategyId } from "./strategy";
@@ -17,7 +18,16 @@ export type Action = "buy" | "sell" | "hold";
 export type FeedRow = Thesis & {
   /** Epoch SECONDS this exact thesis was first said in the window. */
   firstAt?: number;
+  /** The coin's own name when it has one that is not its id — see PublicThesis. */
+  displayName?: string | null;
 };
+
+/**
+ * AN ADDRESS-DERIVED ID: `T` plus the last eleven hex of the contract, as
+ * trencher-discovery.ts mints it. That shape IS the row's trench provenance —
+ * only the Trencher's discovery names a coin this way.
+ */
+const TRENCH_ID = /^T[0-9A-F]{11}$/;
 
 export interface Actor {
   trencher?: boolean;
@@ -136,6 +146,21 @@ interface Core {
    * `atMs` so an age is never quietly computed from a sort key.
    */
   rankMs: number;
+  /**
+   * WHAT TO CALL THE COIN: its name when it has one, else the symbol. The id
+   * stays in `symbol` for logos, links and the tooltip; this is only what a
+   * reader reads. Null when the row names nothing.
+   */
+  label: string | null;
+  /**
+   * WAS THIS ROW A TRENCH ROW — read off the row, never off the author.
+   *
+   * The byline said "Trench thesis" on a TSLA hold because it was keyed on the
+   * author's CURRENT strategy, which says nothing about an older row or about
+   * a stock the agent also holds. The address-derived id is the row's own
+   * evidence of where the coin came from.
+   */
+  trench: boolean;
 }
 
 /**
@@ -340,6 +365,9 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     const postId = t.postId ?? null;
     const action = t.action;
     const said = Math.max(1, Number(t.said ?? 1) || 1);
+    const named = (t.displayName ?? "").trim() || null;
+    const label = named ?? (t.symbol ? t.symbol.toUpperCase() : null);
+    const trench = !!t.symbol && TRENCH_ID.test(t.symbol.toUpperCase());
 
     if ((action === "buy" || action === "sell") && t.symbol) {
       const symbol = t.symbol.toUpperCase();
@@ -362,6 +390,8 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
         // A trade is an event, not a standing view: it sits where it happened.
         sinceMs: null,
         rankMs: atMs,
+        label,
+        trench,
         action,
         symbol,
       });
@@ -370,8 +400,9 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
 
     // A VIEW NEEDS WORDS OR IT IS NOTHING. `head` is the publisher's sentence
     // and the only thing a view is rendered from; with neither it nor a reason
-    // there is no post, just a row.
-    const head = t.head.trim();
+    // there is no post, just a row. The READER's head: the publisher's
+    // sentence with the id it adds for reconciliation left to the tooltip.
+    const head = readerHead({ head: t.head, symbol: t.symbol, displayName: named }).trim();
     if (!head && !reason) continue;
     const symbol = t.symbol ? t.symbol.toUpperCase() : null;
     // ONLY A REPEAT HAS A "SINCE". A first-time view, or a row from before the
@@ -393,6 +424,8 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
       said,
       sinceMs,
       rankMs: sinceMs ?? atMs,
+      label,
+      trench,
       head,
       symbol,
       hold: action === "hold",

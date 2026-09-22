@@ -24,6 +24,19 @@ export function alertsOf<T extends Pick<PublicThesis, "action">>(theses: readonl
 }
 
 /**
+ * WHAT A ROW CALLS ITS COIN, and the id to put in the tooltip when that differs.
+ *
+ * `symbol` for a Trencher coin is `T` plus eleven hex of its contract, and the
+ * rail printed exactly that. The name is what a reader can use; the id is kept
+ * one hover away for whoever is reconciling against the ledger.
+ */
+export function coinName(t: Pick<PublicThesis, "symbol" | "displayName">): { shown: string; id: string | null } | null {
+  if (!t.symbol) return null;
+  const name = (t.displayName ?? "").trim();
+  return name && name !== t.symbol ? { shown: name, id: t.symbol } : { shown: t.symbol, id: null };
+}
+
+/**
  * WHETHER THE READ HAPPENED, apart from what it returned. `source: "none"` is
  * the reader saying it could not open the ledger — an empty list from it is not
  * a quiet fleet, and the rail must not say "no trades" off it.

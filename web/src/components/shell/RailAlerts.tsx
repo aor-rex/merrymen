@@ -7,7 +7,7 @@ import { badgeOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
-import { alertsOf, alertsRead } from "@/lib/rail-alerts";
+import { alertsOf, alertsRead, coinName } from "@/lib/rail-alerts";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -104,6 +104,7 @@ export function RailAlerts() {
         {theses.map((t, i) => {
           const b = badgeOf(t);
           const size = money(t.sizeUsdg);
+          const coin = coinName(t);
           const row = (
             <>
               <AgentAvatar name={t.name} size={22} />
@@ -116,7 +117,7 @@ export function RailAlerts() {
               </span>
               {(t.symbol || size) && (
                 <span className="did mono">
-                  {t.symbol && <b>{t.symbol}</b>}
+                  {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
                   {size && <span className="amt">{size}</span>}
                   {t.paper && <span className="pp">paper</span>}
                 </span>
