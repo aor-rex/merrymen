@@ -3,7 +3,7 @@
  *
  * A child home has no volume, so a redeploy rebuilds its ledger from nothing.
  * At the next arm the in-flight reconciler reads that empty ledger's op hashes,
- * finds every successful op of the last 26 hours missing, and writes each one
+ * finds every successful op in its lookback missing, and writes each one
  * again as a bare 'swap' — no decision, no fill side, stamped at the restart.
  * The mirror rewound onto the rebuilt ledger and carried those rows up beside
  * the evidenced originals, because `trades` has no unique key on user_op_hash
@@ -22,7 +22,9 @@
  * carries all of that and the reconciler's carries none of it.
  *
  * A row with no hash — a refusal, a paper fill — is its own operation. `row:<id>`
- * can never equal a lowercased hex hash, so two refusals are never one.
+ * can never equal a lowercased hex hash, so two refusals are never one. An
+ * empty hash is no hash: the mirror already treats it that way, and read as a
+ * key it would make every such row of an account one operation.
  */
 import type { Db } from "../../../worker/src/db";
 
@@ -32,7 +34,7 @@ import type { Db } from "../../../worker/src/db";
  * returned it, and an account has been written under more than one spelling.
  */
 export function tradeOpKey(alias: string): string {
-  return `lower(${alias}.agent_id) || '|' || COALESCE(lower(${alias}.user_op_hash), 'row:' || CAST(${alias}.id AS TEXT))`;
+  return `lower(${alias}.agent_id) || '|' || COALESCE(lower(NULLIF(${alias}.user_op_hash, '')), 'row:' || CAST(${alias}.id AS TEXT))`;
 }
 
 /**
@@ -46,26 +48,49 @@ export function tradeOpKey(alias: string): string {
  *
  * A time window may go inside only if it reaches back past the window the
  * caller publishes by OP_COPY_REACH_SEC, for the same reason.
+ *
+ * ONLY ROWS WITH A HASH ARE RANKED. A row without one cannot collide with
+ * anything, so it goes straight through, and the window sort covers the
+ * fills rather than every refusal an account has ever had — which on the
+ * wall band is the whole fleet's day. `where` is written once, in the CTE, so
+ * a caller binds its arguments once whichever half a row lands in.
  */
 export function distinctTrades(where: string, alias = "t"): string {
   const a = alias;
-  return `(SELECT * FROM (
-      SELECT ${a}.*, ROW_NUMBER() OVER (
-        PARTITION BY ${tradeOpKey(a)}
-        ORDER BY (${a}.status = 'submitted'), (${a}.fill_side IS NULL), (${a}.decision_id IS NULL), ${a}.created_at, ${a}.id
+  return `(WITH scoped AS (SELECT * FROM trades ${a} WHERE ${where})
+    SELECT * FROM (
+      SELECT s.*, ROW_NUMBER() OVER (
+        PARTITION BY lower(s.agent_id), lower(s.user_op_hash)
+        ORDER BY (s.status = 'submitted'), (s.fill_side IS NULL), (s.decision_id IS NULL), s.created_at, s.id
       ) AS op_rank
-      FROM trades ${a} WHERE ${where}
-    ) ranked WHERE ranked.op_rank = 1) ${a}`;
+      FROM scoped s WHERE s.user_op_hash IS NOT NULL AND s.user_op_hash <> ''
+    ) ranked WHERE ranked.op_rank = 1
+    UNION ALL
+    SELECT s.*, 1 AS op_rank FROM scoped s WHERE s.user_op_hash IS NULL OR s.user_op_hash = '') ${a}`;
 }
 
 /**
  * How much younger than the operation a re-recorded copy can be.
  *
- * The reconciler looks back 26 hours (index.ts, `WINDOW_SEC`) and stamps its
- * copy at the restart, so a copy is at most that much newer than the row it
- * repeats. Two days covers it with room for a slow block estimate.
+ * NOT 26 HOURS, though the reconciler says it looks back that far. Its reach
+ * is a BLOCK count: 26h divided by the pace of the last 2,000 blocks, clamped
+ * at 200,000 blocks (index.ts, `MAX_LOOKBACK`). At this chain's measured 0.101
+ * s/block the clamp binds, and 200,000 blocks is under six hours. But the
+ * wall-clock span of 200,000 blocks is whatever they took, so a chain that
+ * paused inside them stretches the reach by the pause, and nothing bounds it.
+ *
+ * Seven days is 200,000 blocks at an average of three seconds each — thirty
+ * times the measured pace, or a halt of about six and a half days inside the
+ * span.
+ * Past that a copy would stand alone and read as a fresh fill, so this is a
+ * bound on a display, not a guarantee. It is also a closing one: the mirror no
+ * longer writes a hash the shared ledger holds (ledger-mirror.ts), so the
+ * copies it reaches for are only the ones already written, and they age out.
+ *
+ * Only hashed rows are ranked (distinctTrades), so the reach costs a window
+ * sort over fills, not over refusals.
  */
-export const OP_COPY_REACH_SEC = 2 * 86_400;
+export const OP_COPY_REACH_SEC = 7 * 86_400;
 
 export interface OperationCounts {
   gasUsdg: number;

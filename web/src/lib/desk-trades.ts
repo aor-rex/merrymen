@@ -75,8 +75,9 @@ export async function readDeskTrades(
           ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
       )
       // The collapse reaches further back than the tape: a copy is stamped at
-      // the restart, up to a day after the op it repeats, and must still find
-      // that op to collapse into when the op itself is just outside the window.
+      // the restart, long after the op it repeats (see OP_COPY_REACH_SEC), and
+      // must still find that op to collapse into when the op itself is outside
+      // the window.
       .all(account, ...runArg, sinceSec - OP_COPY_REACH_SEC, sinceSec, limit)) as unknown as DeskTradeRow[];
   } catch {
     return (await db
