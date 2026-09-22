@@ -256,7 +256,12 @@ export interface LiveMine {
    */
   notice?: { level: string; message: string; at: string } | null;
   history?: number[];
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  /**
+   * `costFromQuote` is whether a fill booked from the pre-trade quote, rather
+   * than its receipt, may still be in `costUsd` — false only when the ledger
+   * said so, and null when that could not be read. See positionsOf.
+   */
+  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
   slug: string | null;
   handle: string | null;
@@ -857,6 +862,9 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         valueUsd:p.value_usdg,
         stale:!!p.price_stale,
         costUsd,
+        // THE LEDGER'S WORD ON WHERE THAT COST CAME FROM, carried and not inferred:
+        // true or false only as /api/feed replayed it, null when it could not.
+        costFromQuote: typeof p.cost_from_quote === "boolean" ? p.cost_from_quote : null,
         pnlPct: costUsd === null ? null : ((p.value_usdg - costUsd) / costUsd) * 100,
         // THIS position's own floor, when it carries one. Null means the
         // owner's single setting applies — what the whole book did before a
@@ -1164,5 +1172,5 @@ interface Feed {
     realized_pnl_usdg?: number | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

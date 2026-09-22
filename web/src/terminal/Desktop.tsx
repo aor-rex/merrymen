@@ -26,7 +26,7 @@ import {
   deltaClass,
   type LiveState,
 } from "./live";
-import { positionsOf } from "./account";
+import { positionFigures, positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
@@ -512,6 +512,8 @@ export function DesktopPortfolio({
         </div>
         {positionsOf(mine).map((p) => {
           const t = tokens.find((t) => t.symbol === p.symbol);
+          // The value AND the %, never one standing in for the other — see positionFigures.
+          const f = positionFigures(p);
           return (
             <button
               key={p.symbol}
@@ -521,8 +523,9 @@ export function DesktopPortfolio({
             >
               <Coin symbol={p.symbol} logo={t?.logo ?? ""} />
               <strong>{p.symbol}</strong>
-              <span className={p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"}>
-                {p.pnl == null ? p.detail : pctPts(p.pnl)}
+              <span>
+                {f.value}
+                {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
               </span>
             </button>
           );

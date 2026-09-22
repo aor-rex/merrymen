@@ -76,12 +76,17 @@ describe("the model list falls back to the house key", () => {
 });
 
 describe("the agent can see its own basket", () => {
-  it("THE BASKET REACHES THE MODEL", () => {
+  it("THE BASKET REACHES THE MODEL", async () => {
     // Settings is already fetched in this exact function for `strategy` and
     // `paperTradingEnabled`; the basket was the field beside them that never
-    // travelled.
-    const agent = read("../terminal/screens/Agent.tsx");
-    assert.match(agent, /basketSymbols:\(settings\?\.values\?\.basketSymbols \?\? settings\?\.defaults\?\.basketSymbols \?\? null\)/);
+    // travelled. Run through the builder the chat screen sends.
+    const { chatStateOf } = await import("../terminal/chat-payload");
+    const mine = { name: "Robin", equity: 1, moves: [], glance: { id: "steady-basket" } } as never;
+    const state = (settings: Parameters<typeof chatStateOf>[0]["settings"]) =>
+      chatStateOf({ mine, settings, liveBlocker: null, perTrade: null, perDay: null, stopped: false });
+    assert.deepEqual(state({ values: { basketSymbols: ["NVDA"] }, defaults: { basketSymbols: ["QQQ"] } }).basketSymbols, ["NVDA"]);
+    assert.deepEqual(state({ values: {}, defaults: { basketSymbols: ["QQQ"] } }).basketSymbols, ["QQQ"], "the default when the owner set none");
+    assert.equal(state(null).basketSymbols, null, "an unread settings store is null, never an empty basket");
   });
 
   it("AND NULL IS NOT READ AS EMPTY", () => {

@@ -156,9 +156,9 @@ describe("the desk's positions carry the % the terminal already computed", () =>
       {
         agent: { name: "Shogun", strategy: "trencher", slug: null },
         positions: [
-          { symbol: "CASHCAT", value_usdg: 12, price_stale: 0, cost_usdg: 10 },
+          { symbol: "CASHCAT", value_usdg: 12, price_stale: 0, cost_usdg: 10, cost_from_quote: false },
           { symbol: "CHUMP", value_usdg: 5, price_stale: 0, cost_usdg: null },
-          { symbol: "OLD", value_usdg: 5, price_stale: 1, cost_usdg: 4 },
+          { symbol: "OLD", value_usdg: 5, price_stale: 1, cost_usdg: 4, cost_from_quote: false },
         ],
       },
       [],

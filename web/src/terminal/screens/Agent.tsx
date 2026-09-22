@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   dailyChange,
+  positionFigures,
   positionsOf,
   spentToday,
   type ChatTurn,
@@ -30,53 +31,10 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-
-/**
- * How many recent moves the agent is shown.
- *
- * The whole tape used to go, which on its own overran the prompt's state
- * budget before the positions were even added — so the clamp downstream cut it
- * mid-object. Eight is what fits comfortably and is what a person means by
- * "recently".
- */
-const TAPE_SHOWN = 8;
+import { chatStateOf } from "../chat-payload";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
-
-/**
- * The newest moves, reduced to what the model can actually use.
- *
- * `at` travels so the agent can tell last month's refusal from this morning's.
- * Without it, a tape of stale rejections reads as the present tense — which is
- * exactly how a tester's agent came to report a months-old `no-gas` as its
- * current state. `movesShown`/`movesTotal` go beside it so the agent can say
- * "the last 8 of 30" rather than implying it saw everything.
- *
- * IT WAS HANDING OVER THE OLDEST EIGHT AND CALLING THEM THE LAST EIGHT.
- * `slice(-TAPE_SHOWN)` takes the TAIL, and the tape arrives newest-first —
- * /api/feed selects `ORDER BY created_at DESC` — so the model got the eight
- * stalest rows of the window while `movesShown` told it these were the recent
- * ones. That is the same present-tense-stale-refusal failure this comment was
- * written about, rebuilt one line below it; the 7-day window bounded how old
- * the lie could be and did not stop it being told.
- *
- * Sorted here rather than trusting the caller. The order is a fact about a SQL
- * clause two services away, and reading the tape backwards is silent — nothing
- * throws, nothing looks empty, the agent simply narrates the wrong week.
- */
-const tapeFor = (moves: LiveMine["moves"]) =>
-  [...moves]
-    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
-    .slice(0, TAPE_SHOWN)
-    .map((m) => ({
-      at: m.at,
-      action: m.action,
-      symbol: m.symbol,
-      sizeUsdg: m.sizeUsdg,
-      outcome: m.outcome,
-      outcomeText: m.outcomeText,
-    }));
 
 const ASKS = [
   { label: "My strategy", question: "Explain your trading strategy." },
@@ -263,35 +221,10 @@ export function Agent({
     follow.current = true;
     try {
       const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      // WHAT IT ACTUALLY HOLDS, under the key the system prompt names.
-      //
-      // `positions` used to be `mine.glance` — a STRATEGY descriptor whose
-      // `legs` are percentage weights. So an owner asked their agent what NVDA
-      // and QQQ had cost and when it would sell, and it answered that it held
-      // nothing but cash, while the panel eighteen inches to its right listed
-      // both. It was not hallucinating; it was reading the payload it was given.
-      //
-      // Cost and P&L travel with each holding, because "should I take this
-      // profit" cannot be answered from a value alone. NULL, never 0, when the
-      // ledger has no basis — the difference between not knowing what something
-      // cost and believing it was free.
-      const sizeOf = (settings?.values ?? {}) as Record<string, unknown>;
-      const num = (k: string) => {
-        const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
-        return typeof v === "number" ? v : null;
-      };
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,basketSymbols:(settings?.values?.basketSymbols ?? settings?.defaults?.basketSymbols ?? null) as string[]|null,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,liveTradingEnabled:settings?.values?.liveTradingEnabled ?? settings?.defaults?.liveTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
-        // THIS holding's own stop, graded when it was bought. Null means it
-        // carries no grade and the book-wide `stopLossBps` below applies — the
-        // distinction matters because "what would make you sell THIS" is the
-        // question owners actually ask, and one number for a whole book was
-        // never the honest answer to it.
-        stopLossBps:p.floorBps,stopWhy:p.floorWhy})),cashUsd:mine.glance.cashUsd ?? null,vaultUsd:mine.glance.vaultUsd ?? null,
-        // The two rules that answer "what would make you get out" — the levels
-        // that sell WITHOUT asking the model. Null means none is armed, which
-        // is a different answer from a level at zero.
-        stopLossBps:num("strategistStopLossBps"),takeProfitBps:num("takeProfitBps"),
-        moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
+      // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
+      // chat-payload.ts, where a test can run it.
+      const state = chatStateOf({mine,settings,liveBlocker,perTrade,perDay,stopped});
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify(state),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
       const data = await response.json();
       if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
       onTurn({question:question.trim(),answer:data.reply});
@@ -640,6 +573,10 @@ export function Agent({
                   const token = tokens.find(
                     (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
                   );
+                  // The value AND the %, never one standing in for the other:
+                  // the small line prints the coin's name when it is listed, so
+                  // this is the only place on the row the money figure can be.
+                  const f = positionFigures(p);
                   return (
                     <button
                       type="button"
@@ -651,14 +588,13 @@ export function Agent({
                       <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
                       <span>
                         <strong>{p.symbol}</strong>
-                        <small>{token?.name ?? p.detail}</small>
+                        {/* The coin's name when it is listed. Not the detail: that is
+                            printed on the right now, and would read twice. */}
+                        {token?.name ? <small>{token.name}</small> : null}
                       </span>
-                      <span
-                        className={
-                          p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"
-                        }
-                      >
-                        {p.pnl == null ? p.detail : pctPts(p.pnl)}
+                      <span>
+                        {f.value}
+                        {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
                       </span>
                     </button>
                   );
