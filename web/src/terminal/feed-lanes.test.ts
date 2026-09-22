@@ -12,7 +12,7 @@ import { describe, it } from "node:test";
 
 import { beatsOf, compactHolds, lanesOf, whenLabel, type FeedRow } from "./beat";
 import type { LiveAgent } from "./live";
-import { alertsOf, alertsRead, RAIL_ALERTS } from "../lib/rail-alerts";
+import { alertsOf, alertsRead, emptyAlerts, RAIL_ALERTS } from "../lib/rail-alerts";
 
 const NOW_MS = Date.UTC(2026, 8, 22, 12, 0, 0);
 const NOW = Math.floor(NOW_MS / 1000);
@@ -187,6 +187,21 @@ describe("the alerts rail is trades", () => {
   it("an unreadable read is not a quiet day", () => {
     assert.equal(alertsRead({ source: "none" }), "unreadable");
     assert.equal(alertsRead(null), "unreadable");
-    assert.equal(alertsRead({ source: "sqlite" }), "ok");
+    assert.equal(emptyAlerts(alertsRead(null)), "Alerts unavailable.");
+  });
+
+  it("A READ OF PART OF THE DAY DOES NOT CLAIM THE DAY", () => {
+    // The rail shows PUBLISHED trades from a bounded scan. "No trades in the
+    // last day" was printed off any read that answered — while a landed buy
+    // sat past the end of the scan, and while an owner's chat trade, which is
+    // never published, was the day's only trade.
+    assert.equal(alertsRead({ source: "sqlite", tradesComplete: true }), "complete");
+    assert.equal(alertsRead({ source: "sqlite", tradesComplete: false }), "partial");
+    assert.equal(alertsRead({ source: "sqlite" }), "partial", "a server that predates the flag proved nothing");
+    assert.equal(emptyAlerts("complete"), "No published trades in the last day.");
+    assert.equal(emptyAlerts("partial"), "No published trades among the latest posts.");
+    for (const state of ["complete", "partial", "unreadable"] as const) {
+      assert.doesNotMatch(emptyAlerts(state), /^No trades/, "never a claim about trades that were not published");
+    }
   });
 });
