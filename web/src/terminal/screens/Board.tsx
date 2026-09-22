@@ -35,11 +35,17 @@ export function Board({
   onProfile,
   onDesk,
   read = "ok",
+  retired = null,
 }: {
   compact?: boolean;
   preview?: boolean;
   /** Whether the leaderboard read happened at all — see ReadEmpty. */
   read?: ReadState;
+  /**
+   * Accounts the leaderboard folded into a count instead of a row. Null when it
+   * could not tell, and then nothing was folded and nothing is said.
+   */
+  retired?: number | null;
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
@@ -54,6 +60,7 @@ export function Board({
   );
 
   const mineSlug = mine?.slug;
+  const folded = typeof retired === "number" && Number.isFinite(retired) ? retired : 0;
 
   return (
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
@@ -90,7 +97,9 @@ export function Board({
         <ReadEmpty
           kind="board" compact={preview}
           state={read}
-          title="Nobody has traded yet."
+          // Not "nobody" when accounts were folded away: they ran, and the line
+          // below counts them.
+          title={folded > 0 ? "No agent is running right now." : "Nobody has traded yet."}
           action={preview ? undefined : { label: "Fund an agent", onClick: onDesk }}
         />
       ) : (
@@ -111,6 +120,19 @@ export function Board({
             />
           ))}
         </div>
+      )}
+      {/* THE ROWS THIS BOARD DOES NOT SHOW, counted. Killed, lapsed and
+          unlinked accounts nothing is running are folded out of the list, and
+          hiding them without a word would misstate how many there have been.
+          Only a number is printed: null means the server could not tell, and
+          then it folded nothing. Zero folded nothing either. */}
+      {folded > 0 && (
+        <p
+          className="board-retired"
+          title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one."
+        >
+          Retired accounts ({folded})
+        </p>
       )}
     </div>
   );

@@ -6,8 +6,10 @@
  * the identity store existed was the only thing the feed route sent that could
  * seed anything at all — and which made every "Robin" the same colour with the
  * same "RO", so a feed of clones could not be told apart even by eye. It is
- * seeded on the SLUG now wherever there is one (see `faceSeed`); the initials
- * stay the name's, because the name is what a reader reads beside them.
+ * seeded on the SLUG now wherever the caller passes one (see `faceSeed`) — the
+ * terminal Face and AgentAvatar both do; a caller that passes only a name still
+ * gets the name's colour. The initials stay the name's, because the name is
+ * what a reader reads beside them.
  *
  * DETERMINISTIC IS THE POINT. A feed where faces move between refreshes is a
  * feed nobody learns to read, and recognising an agent at a glance is most of

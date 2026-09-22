@@ -293,6 +293,12 @@ export interface LiveState {
   theses: Thesis[];
   mine: FeedMine | null;
   /**
+   * How many accounts the leaderboard folded into a count instead of a row, or
+   * null when it could not tell (or did not say). The board prints the count
+   * only when it is a number — see read-leaderboard.ts.
+   */
+  retired: number | null;
+  /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
    *
@@ -456,6 +462,7 @@ export function seedLive(): LiveState {
     agents: [],
     theses: [],
     mine: null,
+    retired: null,
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
@@ -526,7 +533,7 @@ export function readStateOf(body: { source?: string } | null | undefined): ReadS
 export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promise<LiveState> {
   const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
     getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
-    getJson<{ agents: BoardRow[]; source?: string }>("/api/leaderboard"),
+    getJson<{ agents: BoardRow[]; source?: string; retired?: unknown }>("/api/leaderboard"),
     getJson<{ theses: Thesis[]; source?: string }>("/api/theses"),
     getJson<Feed>("/api/feed").then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
     loadTokenQuotes(),
@@ -677,6 +684,10 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
     agents,
     theses,
     mine,
+    // THE ROWS THE BOARD FOLDED, which this dropped: the fold shipped, the
+    // count did not reach a screen, and folded agents left the board without
+    // a word. A number only when the server sent one.
+    retired: typeof board?.retired === "number" && Number.isFinite(board.retired) ? board.retired : null,
     // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
     // that arrived with `source: "none"` counts as unreadable even though the
     // request succeeded: that shape IS the reader telling us it could not open

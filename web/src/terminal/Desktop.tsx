@@ -116,9 +116,12 @@ export function DesktopSidebar({
   onScreen,
   onTab,
   reads,
+  retired = null,
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
+  /** Accounts the board folded into a count. See Board. */
+  retired?: number | null;
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -353,6 +356,7 @@ export function DesktopSidebar({
         {section === "board" && <Board
           compact
           read={reads.board}
+          retired={retired}
           agents={agents}
           theses={theses}
           mine={mine}
