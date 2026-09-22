@@ -80,7 +80,7 @@ import { replayLines, scoreDecision, type Observation, type PricedDecision } fro
 import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
-import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
@@ -4434,7 +4434,6 @@ async function mirrorLedgers(): Promise<void> {
       // a Trencher's universe is discovered inside the child and lives in this
       // sqlite, which nothing outside this loop opens.
       tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
-      const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
       // This used to print only when n > 0, which made a stalled table and an
@@ -4458,16 +4457,10 @@ async function mirrorLedgers(): Promise<void> {
           .join(" | ");
         log(`ledger mirror: ${tenant} STALLED — ${why}`);
       }
-      if (n > 0) {
-        const detail = Object.entries(r.copied)
-          .map(([k, v]) => `${k} ${v}`)
-          .join(", ");
-        log(`ledger mirror: ${tenant} +${n} rows (${detail})`);
-      } else if (!r.failed) {
-        // Says "read, nothing new" rather than saying nothing at all, so the
-        // absence of this line means the pass itself did not run.
-        log(`ledger mirror: ${tenant} idle`);
-      }
+      // What arrived, and apart from it what was deliberately not copied; see
+      // mirrorCountsLine for why the two are never summed.
+      const counts = mirrorCountsLine(tenant, r);
+      if (counts) log(counts);
     } catch (e) {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
     } finally {

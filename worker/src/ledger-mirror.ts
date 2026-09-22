@@ -243,6 +243,42 @@ export interface MirrorReport {
   skipped?: string;
 }
 
+/** The `copied` keys that count rows read and deliberately NOT inserted. */
+const NOT_COPIED = "_already_mirrored";
+
+/**
+ * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
+ * never inside them, the copies that were refused.
+ *
+ * It summed every key in `copied`, and `trades_already_mirrored` is a key, so a
+ * pass that skipped five re-recorded ops and inserted nothing printed "+5 rows"
+ * where it used to print "idle": the skip read as five rows that came in. The
+ * skip is still printed, because it is what makes a redeploy's re-recorded ops
+ * visible as what they are, but in its own clause.
+ *
+ * Null when there is nothing to say beyond the failure: the caller prints the
+ * STALLED line itself, and "idle" beside it would be false.
+ */
+export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" | "failed">): string | null {
+  const entries = Object.entries(r.copied);
+  const arrived = entries.filter(([k]) => !k.endsWith(NOT_COPIED));
+  const refused = entries.filter(([k]) => k.endsWith(NOT_COPIED));
+  const n = arrived.reduce((a, [, v]) => a + v, 0);
+  const s = refused.reduce((a, [, v]) => a + v, 0);
+  const skip =
+    s > 0
+      ? `skipped ${s} already mirrored (${refused.map(([k, v]) => `${k.slice(0, -NOT_COPIED.length)} ${v}`).join(", ")})`
+      : null;
+  if (n > 0) {
+    const detail = arrived.map(([k, v]) => `${k} ${v}`).join(", ");
+    return `ledger mirror: ${tenant} +${n} rows (${detail})${skip ? ` · ${skip}` : ""}`;
+  }
+  if (skip) return `ledger mirror: ${tenant} no new rows · ${skip}`;
+  // Says "read, nothing new" rather than saying nothing at all, so the absence
+  // of this line means the pass itself did not run.
+  return r.failed ? null : `ledger mirror: ${tenant} idle`;
+}
+
 /**
  * Open a child's ledger READ-ONLY. Its worker is running and writing to it.
  *
