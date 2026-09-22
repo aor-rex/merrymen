@@ -141,6 +141,47 @@ never calls the provider and never holds the token.
 > stories means five symbols come back empty, and a symbol we could not hear
 > about must be reported as *not asked*, never as *quiet*.
 
+### The builder desk (optional, and it works without a key)
+
+Whether anybody is still shipping the project a memecoin is named after, read
+from a public directory of Robinhood Chain projects and keyed on the contract
+address. The orchestrator looks up the coins each tenant holds and has
+discovered, and materialises the answers into the same `research.json` the news
+desk rides. Memecoins only — an equity token on this chain is a wrapper, and
+"who ships Apple" is not a question this directory is being asked.
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_HEY_API_KEY` *(optional)* | the directory token — **orchestrator only** |
+| `MERRYMEN_BUILDER_TTL_SEC` *(optional)* | how long a listed record is quoted, default `21600` (6h) |
+| `MERRYMEN_BUILDER_PER_PASS` *(optional)* | lookups one pass may spend, default `12` |
+
+> **Unset is a working desk, not a disabled one.** This is the difference from
+> the news desk and the reason the key is marked optional: the directory answers
+> anonymously at 120 requests a minute, and a key raises that ceiling rather
+> than unlocking the data. Set it if you have one; a deployment without one gets
+> the same records more slowly, and says so in its startup line.
+>
+> The key is still stripped at fork like every other credential. It costs
+> nothing to strip precisely because an unkeyed child would still get answers —
+> so there is never a "but then it stops working" argument for putting it
+> anywhere else.
+>
+> **A coin the directory does not list produces no lens at all.** Not a hedge
+> and not an empty section — the block is omitted and Brain answers NO DATA
+> AVAILABLE. Most launchpad coins are unlisted, and a directory's coverage gap
+> rendered as a sentence would be read by an analyst as a finding about the
+> token. If you are watching the logs expecting a reading for every coin, that
+> is the reason you will not get one.
+>
+> `MERRYMEN_BUILDER_PER_PASS` is a rate as much as a budget: the pass runs on a
+> fifteen-second clock, so the default of `12` is well inside the anonymous
+> limit and drains a fresh two-hundred-contract universe in about four minutes.
+> Unlisted answers are cached for 24h regardless of the TTL above, because
+> somebody submitting a project to a directory is not a daily event and
+> re-asking about every unlisted coin every pass is how a generous rate limit
+> becomes a problem of our own making.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no

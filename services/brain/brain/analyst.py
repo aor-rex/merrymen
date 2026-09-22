@@ -246,4 +246,31 @@ LENS_DIRECTION_SEMANTICS: dict[str, str] = {
         "entry limit is a portfolio constraint, not a fact about the pool, and a\n"
         "small entry into a deep pool is a reason to say so plainly."
     ),
+    #: THE SAME PROBLEM, CAUGHT BEFORE IT COST 173 OBSERVATIONS.
+    #:
+    #: The liquidity entry above was written after measuring a lens that had no
+    #: truthful arm available to it. This one is handed the identical shape of
+    #: evidence — a level with no time dimension, no price and no flow — and
+    #: would reach the identical dead end: it cannot claim the price will rise
+    #: because a team ships, `no-data` is false when the record is plainly
+    #: readable, and the Trencher persona closes `sell`. So the arms are given
+    #: a meaning this lens can actually evaluate, from the start.
+    #:
+    #: AND THE `no-data` LINE IS THE LOAD-BEARING ONE. This lens is only ever
+    #: given material when a directory HAS a page; when it has none, no block
+    #: is supplied at all and the analyst is told NO DATA AVAILABLE by the
+    #: graph. So an analyst that sees material and dislikes it must say so with
+    #: `sell`, never with `no-data` — otherwise an unlisted coin and a coin
+    #: with a dead team become the same answer, which is the one confusion this
+    #: whole lens was built to prevent.
+    "builder": (
+        "\n\nFor YOUR lens the arms mean this, and nothing about price:\n"
+        '  "buy"     — there is credible, current evidence somebody is still building this.\n'
+        '  "sell"    — the record you were shown is weak, stale or contradicts the pitch.\n'
+        '  "hold"    — real but thin, or adequate with a reservation worth naming.\n'
+        '  "no-data" — you were shown no record. Never use this for a record you dislike.\n'
+        "Shipping is not safety and you must not treat it as such: a diligent rug also\n"
+        "commits. Judge only whether somebody is building, and say plainly when a strong\n"
+        "record still tells you nothing about whether this token is worth owning."
+    ),
 }

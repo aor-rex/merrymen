@@ -136,6 +136,8 @@ import { scanToken } from "./research/onchain-reader";
 import { buildTechnical, renderTechnical } from "./research/technical";
 import { newsDesk } from "./research/news";
 import { readResearch } from "./research-files";
+import type { ResearchFile } from "./research-files";
+import { renderBuilder } from "./research/coin-builder";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
@@ -2471,6 +2473,38 @@ async function main() {
     }
     onchainLens.set(symbol, { text, at: now, ttl });
     return text;
+  }
+
+  /**
+   * THE `builder` LENS — who, if anyone, is still shipping this thing.
+   *
+   * The first lens on this desk that is not a reading of the tape. The other
+   * four — technical, liquidity, onchain, social — are price, depth, the float
+   * and what other Merrymen published, and none of them can answer the
+   * question a human asks first.
+   *
+   * COSTS THIS PROCESS NO I/O AND NO CREDENTIAL. The orchestrator did the
+   * lookup, for the four reasons research-files.ts gives; the child reads a
+   * file it was handed, exactly as it does for the news desk. A child holds no
+   * directory token — CHILD_SECRET_STRIP sees to it — and needs none, because
+   * it never asks anybody anything.
+   *
+   * CURVE TOKENS ONLY, for the reason the two lenses above give in full: an
+   * equity token on this chain is a wrapper, and the builder behind Apple is
+   * not a question this directory is being asked.
+   *
+   * ABSENT IS THE COMMON CASE AND IS CORRECT. No record means nobody has
+   * looked up this contract yet, or the lookup failed, or the directory holds
+   * no page for it — and `renderBuilder` refuses to speak on the last of those
+   * as well. Brain answers NO DATA AVAILABLE, which is the truthful input.
+   */
+  function builderLensFor(symbol: string, research: ResearchFile): string | null {
+    if (!lastCurveLegs.has(symbol)) return null;
+    const token = watchTokens.find((t) => t.symbol === symbol)?.address?.toLowerCase();
+    if (!token) return null;
+    const record = research.builders.find((b) => b.address === token);
+    if (!record) return null;
+    return renderBuilder({ symbol, record, now: Math.floor(Date.now() / 1000) });
   }
 
   /**
@@ -10116,6 +10150,10 @@ async function main() {
           // this is the one lens that reads the chain, and it does so at most
           // once per token every fifteen minutes.
           const curveOnchain = fastTrencher ? null : await onchainLensFor(focus.symbol);
+          // Costs nothing: `research` was already read above for the news desk,
+          // and this is a lookup in an array the orchestrator filtered to this
+          // tenant's own contracts. No await, no credential, no chain read.
+          const curveBuilder = builderLensFor(focus.symbol, research);
           const inputs: ShadowInputs = {
             agentId,
             // A brain-live agent CAN reach a trade, so its thinking must not be
@@ -10324,6 +10362,21 @@ async function main() {
                 // Brain answers NO DATA AVAILABLE, which is the truthful
                 // input rather than a plausible sentence.
                 ...(curveOnchain ? { onchain: curveOnchain } : {}),
+                // AND A FIFTH, which is not a reading of the tape at all.
+                //
+                // The four above are price, depth, the float and what other
+                // Merrymen published — four lenses on one market. This one
+                // asks whether anybody is still building the thing the ticker
+                // is named after, which is the first question a human asks and
+                // the only one on this desk that is not downstream of price.
+                //
+                // Omitted for anything not on a curve, omitted when nobody has
+                // looked the contract up, and omitted when the directory holds
+                // no page for it — that last one being the case that matters,
+                // because most launchpad coins are unlisted and a coverage gap
+                // rendered as a sentence would be read as a finding about the
+                // token. See research/coin-builder.ts, which refuses.
+                ...(curveBuilder ? { builder: curveBuilder } : {}),
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
