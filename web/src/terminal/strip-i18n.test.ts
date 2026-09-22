@@ -1,17 +1,28 @@
 /**
- * THE STRIP SPEAKS EVERY LANGUAGE THE PRODUCT DOES, OR NONE.
+ * THE CONNECTION STRIP IS KEYED, AND DELIBERATELY NOT SHIPPED.
  *
- * `strip.*` is complete in all ten shipped locales, which is the only reason
- * the card renders translated at all: a namespace missing ONE key falls back
- * whole, so a single forgotten line would quietly turn the entire strip back
- * into English in that language. Nothing on screen would say so — the reader
- * would simply get English, and the person who added the key would never find
- * out.
+ * ── WHY IT IS HELD BACK ──────────────────────────────────────────────────
  *
- * That is the failure this file exists to make loud. It is the mirror of the
- * Settings guard in i18n.test.ts, which pins a namespace deliberately held
- * BACK; this one pins a namespace deliberately shipped FORWARD, and they are
- * the two halves of the same rule.
+ * The strip was translated into all ten languages and then withdrawn, for the
+ * reason i18n.tsx opens with: a half-translated SCREEN is worse than an English
+ * one. The card sits on Home and in the desktop portfolio rail, and both are
+ * still English around it — "Portfolio balance", "Deposit", "Leaderboard",
+ * "Your agent", "Add funds". Shipping it produced a Spanish status card under
+ * an English heading, which is the exact shape the namespace rule exists to
+ * prevent: a reader cannot tell whether the English line is untranslated or a
+ * term they do not know, and the second reads as their own failure.
+ *
+ * So this follows the precedent `settings.*` already set — the English keys
+ * stay, because the screen renders from them today, and no locale file carries
+ * a translation. The namespace is therefore incomplete everywhere and falls
+ * back whole, which is the mechanism doing the work rather than any flag.
+ *
+ * ── WHERE THE TRANSLATIONS WENT ──────────────────────────────────────────
+ *
+ * Not lost, and not rewritten from scratch when this ships: all ten are in
+ * commit 0cf6a485, and `git show 0cf6a485 -- web/src/lib/messages` restores
+ * them verbatim. This test comes off in the same change that puts them back,
+ * and not before — which is when Home and the desktop rail are extracted.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -22,109 +33,93 @@ import { DEFAULT_LOCALE, SUPPORTED } from "@/lib/locale";
 
 const STRIP_KEYS = (Object.keys(EN) as MessageKey[]).filter((k) => k.startsWith("strip."));
 
-describe("every shipped locale carries the whole strip", () => {
-  it("has strip keys in English to begin with", () => {
+describe("the strip is keyed in English", () => {
+  it("has its keys, because the card renders from them", () => {
     assert.ok(STRIP_KEYS.length >= 20, `only ${STRIP_KEYS.length} strip keys`);
   });
 
-  it("TRANSLATES EVERY ONE, IN EVERY LANGUAGE", () => {
-    for (const [tag, table] of Object.entries(CATALOGUES)) {
-      const missing = STRIP_KEYS.filter((k) => {
-        const v = table?.[k];
-        return typeof v !== "string" || v.trim() === "";
-      });
-      assert.deepEqual(
-        missing,
-        [],
-        `${tag} is missing ${missing.length} strip key(s) — the WHOLE strip falls back to English there: ${missing.join(", ")}`,
-      );
-    }
-  });
-
-  it("and so the namespace actually ships", () => {
-    // The end the checks above exist for. A key could be present and the
-    // namespace still withheld — `REQUIRES` withdraws one whose vocabulary is
-    // not ready — so the conclusion is asserted directly rather than inferred.
-    for (const { tag } of SUPPORTED) {
-      assert.ok(
-        translatedNamespaces(tag).includes("strip"),
-        `${tag} would render the connection strip in English`,
-      );
+  it("renders English for the default locale", () => {
+    for (const key of STRIP_KEYS) {
+      assert.equal(translate(DEFAULT_LOCALE, key), EN[key]);
     }
   });
 });
 
-describe("what the words may not be", () => {
-  it("does not leave a translation as the English it came from", () => {
-    // Per-namespace, which the catalogue-wide 50% check in i18n.test.ts cannot
-    // see: twenty English strings hiding inside a thousand translated ones
-    // stays comfortably under its threshold.
+describe("and deliberately does not ship", () => {
+  it("IS WITHHELD FROM EVERY LOCALE FILE", () => {
+    // The same assertion the Settings guard makes, for the same reason. If a
+    // translation reappears here before Home and the rail are extracted, it
+    // will render a Spanish card under an English heading.
     for (const [tag, table] of Object.entries(CATALOGUES)) {
-      const copied = STRIP_KEYS.filter((k) => table?.[k] === EN[k]);
-      assert.deepEqual(copied, [], `${tag} left ${copied.length} strip string(s) in English`);
-    }
-  });
-
-  it("keeps the {bot} placeholder in every language", () => {
-    // A translator who drops the placeholder produces a sentence that renders
-    // with the bot's name missing rather than one that fails — the worst shape
-    // of bug, because it reads as a product that forgot who you connected.
-    for (const { tag } of SUPPORTED) {
-      assert.match(
-        translate(tag, "strip.tg.connectedAs", { bot: "merrybot" }),
-        /merrybot/,
-        `${tag} drops the bot name from the connected message`,
+      const shipped = Object.keys(table ?? {}).filter((k) => k.startsWith("strip."));
+      assert.deepEqual(
+        shipped,
+        [],
+        `${tag} ships ${shipped.length} strip key(s) while Home and the desktop rail are still English`,
       );
     }
   });
 
-  it("never renders a raw key or an empty string", () => {
+  it("so no locale claims the strip is translated", () => {
+    // Asserted directly rather than inferred from the keys: a namespace can be
+    // complete and still withdrawn by `REQUIRES`, so the conclusion a reader
+    // actually gets is the thing worth pinning.
+    for (const { tag } of SUPPORTED) {
+      if (tag === DEFAULT_LOCALE) continue;
+      assert.ok(
+        !translatedNamespaces(tag).includes("strip"),
+        `${tag} would render a Spanish-style card on an English screen`,
+      );
+    }
+  });
+
+  it("and every reader therefore gets the English words", () => {
+    // The behaviour, not the bookkeeping. This is what the fallback is FOR.
     for (const { tag } of SUPPORTED) {
       for (const key of STRIP_KEYS) {
-        const out = translate(tag, key, { bot: "x" });
-        assert.notEqual(out.trim(), "", `${tag}/${key} is empty`);
-        assert.notEqual(out, key, `${tag}/${key} rendered its own key`);
+        assert.equal(translate(tag, key), EN[key], `${tag}/${key}`);
       }
     }
   });
+});
+
+describe("what the English words may not be", () => {
+  it("never renders a raw key or an empty string", () => {
+    for (const key of STRIP_KEYS) {
+      const out = translate(DEFAULT_LOCALE, key, { bot: "x" });
+      assert.notEqual(out.trim(), "", `${key} is empty`);
+      assert.notEqual(out, key, `${key} rendered its own key`);
+    }
+  });
+
+  it("keeps the {bot} placeholder, so the bot's name survives", () => {
+    // A dropped placeholder renders a sentence with the name missing rather
+    // than one that fails — the worst shape, because it reads as a product
+    // that forgot who you connected.
+    assert.match(translate(DEFAULT_LOCALE, "strip.tg.connectedAs", { bot: "merrybot" }), /merrybot/);
+  });
 
   it("leaves the product names out of the catalogue entirely", () => {
-    // `Telegram` and `Trencher` are identifiers a reader matches against a
-    // chat app and a settings heading. A key for either would invite a
-    // translation, and a translated product name is a product nobody can find.
+    // `Telegram` and `Trencher` are identifiers a reader matches against a chat
+    // app and a settings heading. A key for either would invite a translation,
+    // and a translated product name is a product nobody can find.
+    //
+    // WIDENED TO `string` ON PURPOSE: `EN[key]` is a union of literal types, so
+    // comparing it against a name no key currently holds is something
+    // TypeScript can prove is always true and rejects (TS2367). The check is
+    // about what a FUTURE key might contain, which is a runtime question.
     for (const key of STRIP_KEYS) {
-      // WIDENED TO `string` ON PURPOSE. `EN[key]` is a union of literal types,
-      // so comparing it against a name no key currently holds is a comparison
-      // TypeScript can prove is always true — and it rejects it (TS2367) rather
-      // than let a tautology sit in a test. The check is about what a FUTURE
-      // key might contain, which is a runtime question, not a type-level one.
       const english: string = EN[key];
-      assert.ok(
-        english !== "Telegram" && english !== "Trencher",
-        `${key} keys a product name`,
-      );
+      assert.ok(english !== "Telegram" && english !== "Trencher", `${key} keys a product name`);
     }
   });
 
   it("keeps the link command out of the copy", () => {
-    // The `/link CODE` command is retyped verbatim into a chat. It renders as
-    // its own element precisely so no message carries it — a message that did
-    // would put an identifier where a translator can edit it.
-    for (const { tag } of SUPPORTED) {
-      for (const key of STRIP_KEYS) {
-        assert.ok(
-          !translate(tag, key).includes("/link"),
-          `${tag}/${key} embeds the link command in translatable copy`,
-        );
-      }
-    }
-  });
-});
-
-describe("English stays the source", () => {
-  it("renders English for the default locale without consulting a catalogue", () => {
+    // `/link CODE` is retyped verbatim into a chat. It renders as its own
+    // element precisely so no message carries it — a message that did would put
+    // an identifier where a translator can edit it.
     for (const key of STRIP_KEYS) {
-      assert.equal(translate(DEFAULT_LOCALE, key), EN[key]);
+      assert.ok(!EN[key].includes("/link"), `${key} embeds the link command in translatable copy`);
     }
   });
 });
