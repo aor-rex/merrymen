@@ -19,28 +19,38 @@ export function LoadFailure({
   nextAt,
   lastOkAt,
   onRetry,
+  inFlight = false,
+  failed,
+  unreachable,
 }: {
   nextAt: number;
+  /** When the half that failed was last read — see staleSince. */
   lastOkAt: number | null;
   onRetry: () => void;
+  /** A pass is running now, so the line says so instead of counting down. */
+  inFlight?: boolean;
+  /** Which half failed on the last pass. */
+  failed?: { account: boolean; market: boolean };
+  /** Nothing answered at all — the one case "Can't reach merrymen" is true. */
+  unreachable?: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
-  const copy = failureCopy({ nextAt, lastOkAt, now });
+  const copy = failureCopy({ nextAt, lastOkAt, now, inFlight, failed, unreachable });
   return (
     <div className="load-failure" role="alert">
       <span className="sr-only">
-        Can&apos;t reach merrymen. Retrying automatically.{copy.stale ? ` ${copy.stale}` : ""}
+        {copy.lead}. Retrying automatically.{copy.stale ? ` ${copy.stale}` : ""}
       </span>
       <span aria-hidden="true">
         <strong>{copy.line}</strong>
         {copy.stale && <> {copy.stale}</>}
       </span>
-      <button type="button" onClick={onRetry}>
-        Retry now
+      <button type="button" onClick={onRetry} disabled={inFlight}>
+        {inFlight ? "Retrying…" : "Retry now"}
       </button>
     </div>
   );

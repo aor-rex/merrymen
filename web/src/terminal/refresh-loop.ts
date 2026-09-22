@@ -63,6 +63,13 @@ const WINDOW_TIMERS: LoopTimers = {
 export function startRefreshLoop(opts: {
   pass: () => Promise<boolean>;
   report: (state: LoopState) => void;
+  /**
+   * Told when a pass starts and when it ends. `report` speaks only when a pass
+   * has ended, so without this a Retry pressed during an outage left the line
+   * counting down to a retry that was already running, and the button looked
+   * like it had done nothing.
+   */
+  onFlight?: (inFlight: boolean) => void;
   paused?: () => boolean;
   timers?: LoopTimers;
 }): { retryNow(): void; stop(): void } {
@@ -84,6 +91,7 @@ export function startRefreshLoop(opts: {
     inFlight = true;
     if (handle !== null) t.clearTimeout(handle);
     handle = null;
+    opts.onFlight?.(true);
     let ok: boolean;
     try {
       ok = await opts.pass();
@@ -92,6 +100,7 @@ export function startRefreshLoop(opts: {
     }
     inFlight = false;
     if (stopped) return;
+    opts.onFlight?.(false);
     failuresInARow = ok ? 0 : failuresInARow + 1;
     if (ok) lastOkAt = t.now();
     const nextAt = book(nextRefreshIn(failuresInARow));
@@ -122,17 +131,44 @@ export function startRefreshLoop(opts: {
 }
 
 /**
- * THE SENTENCE, NOT THE STACK. The reader needs three facts: we could not
- * reach the service, we are already trying again, and whether what is on screen
- * is old. The error's own message answers none of them.
+ * THE SENTENCE, NOT THE STACK. The reader needs three facts: what failed, that
+ * we are already trying again, and whether what is on screen is old. The
+ * error's own message answers none of them.
+ *
+ * AND ONLY WHAT IS TRUE OF THIS FAILURE. It said "Can't reach merrymen" for
+ * every one, including a 500 from a route that answered, and "Showing what we
+ * last read" over the whole screen when one half had been refreshed this very
+ * pass. `unreachable` is for the case where nothing answered at all; otherwise
+ * the line names what could not be loaded (`failed`, which half), and the
+ * stale line speaks for that half. Both are optional so a caller that knows
+ * nothing more gets the old sentence.
+ *
+ * `inFlight` is a retry already running: the countdown is to a pass that has
+ * started, so it says so rather than counting on.
  */
-export function failureCopy(p: { nextAt: number; lastOkAt: number | null; now: number }): {
+export function failureCopy(p: {
+  nextAt: number;
+  lastOkAt: number | null;
+  now: number;
+  inFlight?: boolean;
+  failed?: { account: boolean; market: boolean };
+  unreachable?: boolean;
+}): {
+  /** What went wrong, alone — for a screen reader, which is not read the countdown. */
+  lead: string;
   line: string;
   stale: string | null;
 } {
   const secs = Math.ceil((p.nextAt - p.now) / 1000);
+  const onlyAccount = !!p.failed && p.failed.account && !p.failed.market;
+  const onlyMarket = !!p.failed && p.failed.market && !p.failed.account;
+  const what = onlyAccount ? "your account" : onlyMarket ? "market data" : "your account or market data";
+  const lead = p.unreachable === false ? `Couldn't load ${what}` : "Can't reach merrymen";
+  const when = p.inFlight || secs <= 0 ? "retrying now…" : `retrying in ${secs}s.`;
+  const shown = onlyAccount ? "your account as" : onlyMarket ? "market data as" : "what";
   return {
-    line: secs > 0 ? `Can't reach merrymen, retrying in ${secs}s.` : "Can't reach merrymen, retrying now…",
-    stale: p.lastOkAt === null ? null : `Showing what we last read ${timeAgo(p.lastOkAt / 1000)}.`,
+    lead,
+    line: `${lead}, ${when}`,
+    stale: p.lastOkAt === null ? null : `Showing ${shown} we last read ${timeAgo(p.lastOkAt / 1000)}.`,
   };
 }

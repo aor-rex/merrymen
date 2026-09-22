@@ -154,3 +154,70 @@ describe("the profile screen while its read is in flight", () => {
     assert.equal(profileShown(full, "Couldn't load this agent.", listed), full);
   });
 });
+
+describe("the token page's verdict on a token it cannot find", () => {
+  it("a finished load that never read the market is our outage, not an unlisted token", async () => {
+    const { tokenPageUnreadable } = await import("./account-read");
+    // loadLive threw: the reads are still the seed's, and the loop has not
+    // reported yet because the account half is still out.
+    assert.equal(tokenPageUnreadable({ failing: false, market: "unread", discoveries: "unread", liveLoaded: true }), true);
+    // Each arm on its own: a market nobody read is enough, whatever the index said.
+    assert.equal(tokenPageUnreadable({ failing: false, market: "unread", discoveries: "ok", liveLoaded: true }), true);
+    assert.equal(tokenPageUnreadable({ failing: false, market: "unread", discoveries: "unread", liveLoaded: false }), false, "still loading is not a verdict");
+    assert.equal(tokenPageUnreadable({ failing: false, market: "ok", discoveries: "ok", liveLoaded: true }), false, "read, and not there");
+    assert.equal(tokenPageUnreadable({ failing: false, market: "ok", discoveries: "unreadable", liveLoaded: true }), true);
+    assert.equal(tokenPageUnreadable({ failing: true, market: "ok", discoveries: "ok", liveLoaded: true }), true);
+  });
+});
+
+describe("whether a refresh pass read what it needed", () => {
+  const ok = { market: "ok", board: "ok", theses: "ok", discoveries: "ok" } as const;
+  it("a market read that half landed is not a healthy one", async () => {
+    const { liveReadsOk } = await import("./account-read");
+    assert.equal(liveReadsOk(ok), true);
+    for (const k of ["market", "board", "theses", "discoveries"] as const) {
+      assert.equal(liveReadsOk({ ...ok, [k]: "unreadable" }), false, `${k} unreadable`);
+    }
+  });
+
+  it("names which half failed, and calls it unreachable only when nothing answered", async () => {
+    const { passOutcome } = await import("./account-read");
+    const { RequestError } = await import("./request-json");
+    const { LiveLoadError } = await import("./live");
+    const fine = { status: "fulfilled", value: true } as const;
+    assert.equal(passOutcome({ status: "fulfilled", value: undefined }, fine), null);
+    assert.deepEqual(passOutcome({ status: "fulfilled", value: undefined }, { status: "fulfilled", value: false }), {
+      account: false,
+      market: true,
+      unreachable: false,
+    });
+    const silentAccount = { status: "rejected", reason: new RequestError("x", 0) } as const;
+    const silentMarket = { status: "rejected", reason: new LiveLoadError(false) } as const;
+    assert.equal(passOutcome(silentAccount, silentMarket)!.unreachable, true);
+    assert.equal(passOutcome(silentAccount, fine)!.unreachable, false, "the market answered, so merrymen was reached");
+    assert.equal(passOutcome({ status: "rejected", reason: new RequestError("x", 500) }, silentMarket)!.unreachable, false);
+    assert.equal(passOutcome(silentAccount, { status: "rejected", reason: new LiveLoadError(true) })!.unreachable, false);
+  });
+
+  it("dates what is on screen by the half that failed, the older when both did", async () => {
+    const { staleSince } = await import("./account-read");
+    const okAt = { account: 2_000, market: 1_000 };
+    assert.equal(staleSince({ account: true, market: false, unreachable: false }, okAt), 2_000);
+    assert.equal(staleSince({ account: false, market: true, unreachable: false }, okAt), 1_000);
+    assert.equal(staleSince({ account: true, market: true, unreachable: true }, okAt), 1_000);
+    assert.equal(staleSince({ account: true, market: false, unreachable: false }, { account: null, market: 5 }), null);
+  });
+});
+
+describe("the real cash the verdict is decided from", () => {
+  it("is the chain read, null when there was none — never the zero Number(null) makes", async () => {
+    const { realCashOf } = await import("./account-read");
+    const with_ = (cashUsdg: string | null) =>
+      ({ session: { hosted: true }, status: { exists: true, balances: { ethWei: "1", cashUsdg, vaultUsdg: null } } }) as never;
+    assert.equal(realCashOf(with_(null)), null);
+    assert.equal(realCashOf(with_("0")), 0);
+    assert.equal(realCashOf(with_("12500000")), 12.5);
+    assert.equal(realCashOf({ session: { hosted: true }, status: { exists: true } } as never), null, "a status with no balances");
+    assert.equal(realCashOf(null), null);
+  });
+});

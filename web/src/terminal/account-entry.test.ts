@@ -90,3 +90,20 @@ describe("the create screen", () => {
     assert.match(html, /aria-busy="true"/);
   });
 });
+
+describe("a retry the reader asked for", () => {
+  // The failure stays true until a read succeeds, so "We couldn't load your
+  // account" stood unchanged through the retry just pressed, and the button
+  // looked like it had done nothing.
+  it("says it is trying again, and cannot be pressed twice", async () => {
+    for (const html of [
+      await entry({ account: null, accountFailed: true, retrying: true }),
+      await entry({ account: withAgent, portfolio: "unreadable", retrying: true }),
+      await create({ account: null, accountFailed: true, retrying: true }),
+    ]) {
+      assert.match(text(html), /Trying to load your (account|portfolio) again/);
+      assert.match(html, /<button[^>]*disabled=""[^>]*>Trying again…<\/button>/);
+      assert.doesNotMatch(text(html), /couldn.t load/i);
+    }
+  });
+});

@@ -7,15 +7,13 @@
  */
 
 import { webChainRead } from "@/lib/chain-read";
-import { readGrantBalances, type GrantBalances } from "@/lib/grant-balances";
+import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
-import { createPublicClient, parseAbi } from "viem";
+import { createPublicClient } from "viem";
 import {
-  CASH,
-  MORPHO,
   accountsMatch,
   carriesOwnerKey,
   chainForId,
@@ -38,8 +36,6 @@ const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
 const ARCHIVE_DIR = homePaths.grantsArchive();
-
-const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
 
 /** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
  * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
@@ -290,7 +286,9 @@ export async function POST(req: Request) {
       }
     } catch {
       return NextResponse.json(
-        { error: "couldn't check this account's ownership — please try again" },
+        // Written for the owner, so it is marked as such: a 5xx body is not
+        // shown to them otherwise (terminal/request-json.ts).
+        { error: "couldn't check this account's ownership — please try again", ownerFacing: true },
         { status: 503 },
       );
     }
@@ -420,17 +418,10 @@ export async function GET(req: Request) {
   const client = createPublicClient({ chain, transport: webChainRead() });
 
   // A READ THAT FAILED IS NULL, NOT ZERO — see grant-balances.ts. Zero here
-  // is what told funded owners to "Add funds" whenever the node was slow.
-  const balances = await readGrantBalances({
-    eth: () => client.getBalance({ address: grant.smartAccount }),
-    tokens: () =>
-      client.multicall({
-        contracts: [
-          { address: CASH.USDG as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-          { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-        ],
-      }),
-  });
+  // is what told funded owners to "Add funds" whenever the node was slow. The
+  // calls themselves live there too, where a test runs them against a client
+  // that refuses.
+  const balances = await readGrantBalancesFrom(client, grant.smartAccount);
 
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;

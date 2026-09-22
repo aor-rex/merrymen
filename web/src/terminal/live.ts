@@ -516,9 +516,15 @@ function robinhoodFallback(): LiveToken[] {
  */
 export type ReadState = "unread" | "unreadable" | "ok";
 
-async function getJson<T>(url: string): Promise<T | null> {
+/**
+ * `onAnswer` is told when the server answered at all, whatever it said — the
+ * difference between "merrymen could not load this" and "nothing reached
+ * merrymen", which the outage line must not blur (see LiveLoadError).
+ */
+async function getJson<T>(url: string, onAnswer?: () => void): Promise<T | null> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    onAnswer?.();
     if (!r.ok) return null;
     return (await r.json()) as T;
   } catch {
@@ -536,18 +542,36 @@ export function readStateOf(body: { source?: string } | null | undefined): ReadS
   return body.source === "none" ? "unreadable" : "ok";
 }
 
+/**
+ * A market load that came back with nothing to draw — and whether anything
+ * answered at all. `answered` false means no merrymen route replied, which is
+ * the only case the shell may call "can't reach merrymen"; true means it
+ * replied and could not load the data, which is a different sentence.
+ */
+export class LiveLoadError extends Error {
+  readonly answered: boolean;
+  constructor(answered: boolean) {
+    super("Market and agent data could not be loaded.");
+    this.name = "LiveLoadError";
+    this.answered = answered;
+  }
+}
+
 export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promise<LiveState> {
+  let answered = false;
+  const heard = () => {
+    answered = true;
+  };
   const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
-    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
-    getJson<{ agents: BoardRow[]; source?: string; retired?: unknown }>("/api/leaderboard"),
-    getJson<{ theses: Thesis[]; source?: string }>("/api/theses"),
-    getJson<Feed>("/api/feed").then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
+    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market", heard),
+    getJson<{ agents: BoardRow[]; source?: string; retired?: unknown }>("/api/leaderboard", heard),
+    getJson<{ theses: Thesis[]; source?: string }>("/api/theses", heard),
+    getJson<Feed>("/api/feed", heard).then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
     loadTokenQuotes(),
-    getJson<Disc>("/api/discoveries"),
+    getJson<Disc>("/api/discoveries", heard),
   ]);
 
-
-  if(!market && !board && !thesesRes) throw new Error("Market and agent data could not be loaded.");
+  if(!market && !board && !thesesRes) throw new LiveLoadError(answered);
   const theses = (thesesRes?.theses ?? []).filter((t) => t.slug || t.name);
   const bySymbol = new Map<string, Thesis[]>();
   for (const t of theses) {

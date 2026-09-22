@@ -85,3 +85,39 @@ describe("requestJson", () => {
     assert.match(e.message, /reach merrymen/);
   });
 });
+
+describe("what a server error may say to the owner", () => {
+  // Several routes on this path fill `error` with the raw exception on a 500 —
+  // the grants store's own message among them — and requestJson passed it
+  // through word for word, into the sign-in and create-agent screens. A 4xx is
+  // a route telling the owner something; a 5xx is our failure, and its text is
+  // ours to read, not theirs.
+  it("a 500 carrying a driver's message is shown the plain sentence, and the body goes to the console", async () => {
+    const warned: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    try {
+      answer(500, JSON.stringify({ error: "connect ECONNREFUSED 127.0.0.1:5432" }), "application/json");
+      const e = await failure();
+      assert.equal(e.status, 500);
+      assert.doesNotMatch(e.message, /ECONNREFUSED|127\.0\.0\.1|5432/);
+      assert.match(e.message, /merrymen answered with an error \(500\)/);
+      assert.ok(warned.some((args) => JSON.stringify(args).includes("ECONNREFUSED")), "the cause is kept where a developer looks");
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it("nor does a 502 whose body reads like a transport error", async () => {
+    answer(502, JSON.stringify({ error: "fetch failed" }), "application/json");
+    const e = await failure();
+    assert.doesNotMatch(e.message, RAW);
+  });
+});
+
+describe("a 5xx a route wrote for the owner", () => {
+  it("keeps its words when the route marked them as the owner's", async () => {
+    answer(503, JSON.stringify({ error: "couldn't check this account's ownership — please try again", ownerFacing: true }), "application/json");
+    assert.equal((await failure()).message, "couldn't check this account's ownership — please try again");
+  });
+});

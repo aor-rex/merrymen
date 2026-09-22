@@ -91,15 +91,19 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
  * succeeded may say what it found.
  *
  * `portfolio` is `live.reads.mine` — the feed read that carries the book.
+ *
+ * `retrying` is a pass already running. The failure stays true until a read
+ * succeeds, so without it "We couldn't load your account" stood unchanged
+ * through the retry the reader had just asked for, and Try again looked broken.
  */
-export function AccountEntry({account,accountFailed=false,portfolio="ok",onRefresh}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;onRefresh:()=>void}) {
+export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void}) {
   if(account?.status.exists) {
     if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
-    if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">We couldn&apos;t load your portfolio. It will retry on its own.</p><button className="flow-primary" onClick={onRefresh}>Try again</button></section>;
+    if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your portfolio again…" : <>We couldn&apos;t load your portfolio. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
   }
   if(!account) return accountFailed
-    ? <section className="hosted-entry"><h2>Your agent</h2><p role="status">We couldn&apos;t load your account. It will retry on its own.</p><button className="flow-primary" onClick={onRefresh}>Try again</button></section>
+    ? <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="hosted-entry"><SkeletonRows rows={2} label="Loading your account"/></section>;
   return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onRefresh}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
 }
@@ -217,4 +221,9 @@ function RiskBar({ onDone }: { onDone: () => void }) {
 export function LimitsPanel({account,onClose}:{account:AccountState|null;onClose:()=>void}) {
   const caps=account?.status.grant?.caps;
   return <section className="hosted-entry money-flow"><header className="flow-top"><h2>Trading limits</h2><button aria-label="Close limits" onClick={onClose}><X size={18}/></button></header><RiskBar onDone={()=>{}}/><dl className="fund-breakdown"><div><dt>Per trade</dt><dd>{caps ? usd(caps.perTradeUsdg) : "—"}</dd></div><div><dt>Per day</dt><dd>{caps ? usd(caps.dailyUsdg) : "—"}</dd></div></dl><p>Changing these limits requires a new signature for your agent’s trading permission.</p><a className="flow-primary" href="/grant">Edit signed limits</a><a className="flow-secondary" href="/settings">Strategy and account settings</a></section>;
+}
+
+/** Try again — and, while that retry is running, a button that says so and cannot be pressed twice. */
+export function RetryButton({retrying,onRetry}:{retrying:boolean;onRetry:()=>void}) {
+  return <button className="flow-primary" onClick={onRetry} disabled={retrying}>{retrying ? "Trying again…" : "Try again"}</button>;
 }

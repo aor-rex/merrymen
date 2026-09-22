@@ -167,3 +167,58 @@ describe("what the shell says while it retries", () => {
     assert.equal(failureCopy({ nextAt: 1_000_000, lastOkAt: null, now: 1_000_400 }).line, "Can't reach merrymen, retrying now…");
   });
 });
+
+describe("a pass already running", () => {
+  it("is announced when it starts and when it ends, so Retry does not look dead", async () => {
+    let release!: (v: boolean) => void;
+    const clock = fakeClock();
+    const flights: boolean[] = [];
+    let calls = 0;
+    const handle = startRefreshLoop({
+      pass: async () => (calls++ === 0 ? false : new Promise<boolean>((r) => (release = r))),
+      report: () => {},
+      onFlight: (f) => flights.push(f),
+      timers: clock.timers,
+    });
+    await settle();
+    assert.deepEqual(flights, [true, false], "the first pass");
+    handle.retryNow();
+    assert.deepEqual(flights, [true, false, true], "a retry is in flight the moment it is pressed");
+    release(true);
+    await settle();
+    assert.deepEqual(flights, [true, false, true, false]);
+    handle.stop();
+  });
+
+  it("the line says it is retrying now rather than counting down to it", () => {
+    assert.equal(
+      failureCopy({ nextAt: 1_038_000, lastOkAt: null, now: 1_000_000, inFlight: true, unreachable: true }).line,
+      "Can't reach merrymen, retrying now…",
+    );
+  });
+});
+
+describe("what the line may claim about this failure", () => {
+  const now = Date.now();
+  it("'Can't reach merrymen' only when nothing answered", () => {
+    assert.equal(
+      failureCopy({ nextAt: now + 12_000, lastOkAt: null, now, unreachable: true, failed: { account: true, market: true } }).line,
+      "Can't reach merrymen, retrying in 12s.",
+    );
+    assert.equal(
+      failureCopy({ nextAt: now + 12_000, lastOkAt: null, now, unreachable: false, failed: { account: true, market: true } }).line,
+      "Couldn't load your account or market data, retrying in 12s.",
+      "a 500 is merrymen answering",
+    );
+  });
+
+  it("names the half that failed, and dates only that half", () => {
+    const account = failureCopy({ nextAt: now + 5_000, lastOkAt: now - 4 * 60_000, now, unreachable: false, failed: { account: true, market: false } });
+    assert.equal(account.line, "Couldn't load your account, retrying in 5s.");
+    assert.equal(account.stale, "Showing your account as we last read 4m ago.");
+    assert.equal(account.lead, "Couldn't load your account");
+    const market = failureCopy({ nextAt: now + 5_000, lastOkAt: now - 4 * 60_000, now, unreachable: false, failed: { account: false, market: true } });
+    assert.equal(market.line, "Couldn't load market data, retrying in 5s.");
+    assert.equal(market.stale, "Showing market data as we last read 4m ago.");
+  });
+});
