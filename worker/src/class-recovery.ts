@@ -299,8 +299,40 @@ export type ClassContents =
  * is then shown, and what the sweep then moves.
  *
  * Measured: Shogun's vault holds 1,063,408.141815 DOGGOS and 5.785344 USDG. The
- * DOGGOS came from a ClassBuy; the USDG from a refund leg that did not land.
- * Only the first was ever disclosed.
+ * DOGGOS came from a ClassBuy. Only the first was ever disclosed.
+ *
+ * WHERE THE QUOTE ACTUALLY COMES FROM — read off the chain 2026-09-22, because
+ * this comment used to say "a refund leg that did not land" and that is not what
+ * happened. The multi-quote design then carried the claim forward as an open
+ * probe blocking a whole route, so the wrong explanation cost more than the
+ * money it described.
+ *
+ * The vault's own refunds land. `buy` sweeps its WHOLE quote balance to the
+ * owner before returning (PonsClassVault.sol:278-279) and `_push` reverts on
+ * failure, so a buy cannot end with quote inside. What the chain shows instead
+ * is UNSOLICITED inbound transfers between buys, from a 291-byte companion
+ * contract per class token (`token()` equal to the curve's), paying the vault
+ * as the holder of record:
+ *
+ *   b64070702  in  5.000000 from the account      (the _pull)
+ *              out 5.000000 to the curve          (the buy)
+ *              out 9.268223 to the account        (residue sweep, whole balance)
+ *   b64087466  in  0.321146 from 0x09a5D0Cf…      (companion of curve 0xc7C859…)
+ *   b64117829  in  0.825926 from 0x09a5D0Cf…
+ *   b64184218  in  5.000000 from the account      (second buy)
+ *              out 1.147072 to the account        = 0.321146 + 0.825926, exactly
+ *   b64200310  in  0.951487 from 0x29475C29…      (companion of curve 0x332F63E1…)
+ *
+ * So the sweep is not merely working, it is the mechanism that returns these:
+ * pushing the WHOLE balance means whatever arrived since the last buy goes home
+ * with the next one. The 0.951487 sitting there today is simply waiting for a
+ * buy that has not happened — and `sweep(token)` moves it on demand meanwhile.
+ *
+ * IT IS STILL OUTSIDE EQUITY. `equity.ts`'s `vaultUsdg` is the savings vault,
+ * not this one, so quote parked here is the agent's money in no total it
+ * reports — and it reappears as an unattributed credit whenever the next buy
+ * sweeps it. Small today; the reason to write it down is that it is income the
+ * ledger does not source.
  *
  * The registry list is the same one the ACCOUNT sweep enumerates, which is right
  * twice over: it certainly contains the quote asset, and "the assets we already
