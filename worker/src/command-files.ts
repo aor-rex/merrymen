@@ -129,14 +129,41 @@ export function writeCommand(home: string, cmd: FileCommand): void {
  */
 export function claimCommandFile(home: string): FileCommand | null {
   const dir = commandDir(home);
-  if (!existsSync(dir)) return null;
+  for (const { n, cmd } of pendingCommands(dir)) {
+    if (!claimFile(dir, n)) continue;
+    // WE DELETED IT, SO IT IS OURS — and an expired one is ours to DROP.
+    // Returned as an expiry rather than swallowed: a silently-vanished order
+    // and a never-delivered one must not look the same to the person who
+    // clicked, so the caller writes a result saying which.
+    return cmd;
+  }
+  return null;
+}
+
+/**
+ * The unlink that is the claim. False when somebody else got there first —
+ * the caller tries the next one rather than giving up, because "the queue is
+ * empty" and "one entry was taken" are different.
+ */
+function claimFile(dir: string, n: string): boolean {
+  try {
+    unlinkSync(path.join(dir, n));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every pending command in a queue directory, oldest first, with the filename it was read from. */
+function pendingCommands(dir: string): { n: string; cmd: FileCommand }[] {
+  if (!existsSync(dir)) return [];
   let names: string[];
   try {
     names = readdirSync(dir).filter((n) => n.endsWith(".json") && !n.endsWith(".done.json"));
   } catch {
-    return null;
+    return [];
   }
-  if (names.length === 0) return null;
+  if (names.length === 0) return [];
 
   // Oldest first, by the timestamp inside rather than by mtime: a file copied
   // between homes keeps its meaning, and mtime does not survive that.
@@ -178,28 +205,95 @@ export function claimCommandFile(home: string): FileCommand | null {
       }
       return false;
     });
-  if (parsed.length === 0) return null;
   // (time, id) — never time alone. Two commands really do land in the same
   // millisecond; store.ts argues this at length for the queue nothing calls,
   // and it matters more here, because for two ORDERS "which one first" is a
   // question about somebody's money.
-  parsed.sort((a, b) => (a.cmd.at ?? 0) - (b.cmd.at ?? 0) || a.n.localeCompare(b.n));
+  return parsed.sort((a, b) => (a.cmd.at ?? 0) - (b.cmd.at ?? 0) || a.n.localeCompare(b.n));
+}
 
-  for (const { n, cmd } of parsed) {
-    try {
-      unlinkSync(path.join(dir, n));
-    } catch {
-      // Somebody else got there first — try the next one rather than giving up,
-      // because "the queue is empty" and "one entry was taken" are different.
+/** What running one command came to, as the receipt and the owner's event feed say it. */
+export interface CommandOutcome {
+  ok: boolean;
+  line: string;
+}
+
+/**
+ * THIS TICK'S COMMAND: every expired one on the way is answered, and at most
+ * one live one is run.
+ *
+ * AN EXPIRED COMMAND USED TO COST A WHOLE TICK. The worker claimed one command
+ * per tick and wrote the expiry for it, so stale files were paid off one tick
+ * at a time, oldest first — and they pile up in exactly the two cases nobody is
+ * watching: an owner queueing every seven minutes while the worker is unarmed,
+ * and a hosted down-leg delivering rows after an orchestrator outage. With five
+ * of them ahead of it, a fresh order expired before it was reached; the owner
+ * was told the truth about an order that was lost for no reason of its own.
+ *
+ * So the drain claims on through the expired ones, writing each one's receipt
+ * as it goes. Nothing about the live half changes: the claim is still the
+ * unlink, a file somebody else took is skipped rather than run here too, and
+ * the FIRST live command ends the drain — run, answered, and nothing claimed
+ * after it, so a tick still runs at most one. An expired command is never
+ * handed to `run`; its receipt is written here, from the same deadline the
+ * claim judged, so no later reading of the clock can turn it back into an order.
+ *
+ * `told` is the owner's event feed. A failure there stops the drain with the
+ * receipt already on disk, and the next tick carries on from the next file.
+ */
+export async function runTickCommand(
+  home: string,
+  deps: {
+    now: () => number;
+    run: (cmd: FileCommand) => Promise<CommandOutcome>;
+    told: (cmd: FileCommand, outcome: CommandOutcome) => Promise<void>;
+  },
+): Promise<void> {
+  const dir = commandDir(home);
+  for (const { n, cmd } of pendingCommands(dir)) {
+    if (!claimFile(dir, n)) continue;
+    const now = deps.now();
+    if (isExpired(cmd, now)) {
+      const dead: CommandOutcome = { ok: false, line: expiredLine(cmd.expiresAt as number, now, "claim") };
+      writeCommandResult(home, { id: cmd.id, ok: dead.ok, line: dead.line, at: now });
+      await deps.told(cmd, dead);
       continue;
     }
-    // WE DELETED IT, SO IT IS OURS — and an expired one is ours to DROP.
-    // Returned as an expiry rather than swallowed: a silently-vanished order
-    // and a never-delivered one must not look the same to the person who
-    // clicked, so the caller writes a result saying which.
-    return cmd;
+    // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
+    // gone from here until the receipt lands. Without this marker an owner
+    // who asked again mid-trade got a second fill.
+    markRunning(home, cmd.id);
+    const outcome = await deps.run(cmd);
+    writeCommandResult(home, { id: cmd.id, ok: outcome.ok, line: outcome.line, at: deps.now() });
+    await deps.told(cmd, outcome);
+    return;
   }
-  return null;
+}
+
+/** A lateness as an owner reads it: seconds while it is short, then minutes, then hours. */
+function howLate(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 120) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 120) return `${m} min`;
+  return `${Math.round(m / 60)} h`;
+}
+
+/**
+ * The receipt for an order that is refused because its own window closed.
+ *
+ * "claim": the worker picked it up too late. "queue": it was picked up in
+ * time, then waited behind other trades and reached the front of the queue
+ * too late. Either way nothing went to the chain, and the sentence says so —
+ * and says WHEN, rather than implying the order itself is that old.
+ */
+export function expiredLine(expiresAt: number, nowMs: number, where: "claim" | "queue"): string {
+  const late = howLate(nowMs - expiresAt);
+  const when =
+    where === "claim"
+      ? `I picked this order up ${late} after its window closed`
+      : `this order reached the front of my trade queue ${late} after its window closed`;
+  return `expired — ${when}, and I will not fill it into a different market than the one it was placed for. Nothing was sent. Ask again if you still want it.`;
 }
 
 /**

@@ -114,7 +114,7 @@ import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from 
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
+import { isExpired, runTickCommand, type FileCommand } from "./command-files";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -4648,9 +4648,14 @@ async function main() {
    * gas. claimCommand takes the row before anything runs, so a crash mid-probe
    * leaves it claimed rather than replayed. At-most-once, never at-least-once.
    *
-   * ONE COMMAND PER TICK, and only when armed. There is no batch drain and no
-   * catch-up: an operator who queued three probes wants three ticks' worth of
-   * evidence, not three UserOps racing the same nonce.
+   * ONE LIVE COMMAND PER TICK, and only when armed. There is no batch run and
+   * no catch-up: an operator who queued three probes wants three ticks' worth
+   * of evidence, not three UserOps racing the same nonce.
+   *
+   * BUT AN EXPIRED ONE NO LONGER COSTS A TICK. It is answered and the drain
+   * moves on in the same tick, so a fresh order behind a pile of stale ones is
+   * reached while it can still fill. Nothing expired is ever run, and nothing
+   * is drained anywhere but here, on the tick. See runTickCommand.
    */
   let commandInFlight = false;
   async function runQueuedCommand(agentId: string, marketUnreadable = false): Promise<void> {
@@ -4664,22 +4669,20 @@ async function main() {
       // different databases, and nothing would ever have been claimed. The
       // orchestrator ferries commands in as files, exactly as it already does
       // for grants and settings. See command-files.ts.
-      const cmd = claimCommandFile(merrymenHome());
-      if (!cmd) return;
-      // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
-      // gone from here until the receipt lands. Without this marker an owner
-      // who asked again mid-trade got a second fill.
-      markRunning(merrymenHome(), cmd.id);
-      // The unlink above WAS the claim, so from here the command is ours and
-      // will not be replayed — a lost probe is a button pressed again, a
-      // replayed one is gas nobody asked to spend twice.
-      const outcome = await runCommand(cmd, marketUnreadable);
-      writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
-      // LABELLED BY WHAT IT WAS. Every result used to be written into the
-      // owner's event feed as `selftest: …` regardless of kind, which for an
-      // order is a wrong claim about what the agent did, in the one log an
-      // operator reads to work out what a fleet is doing.
-      await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+      await runTickCommand(merrymenHome(), {
+        now: Date.now,
+        // The unlink WAS the claim, so a command reaching here is ours and
+        // will not be replayed — a lost probe is a button pressed again, a
+        // replayed one is gas nobody asked to spend twice.
+        run: (cmd) => runCommand(cmd, marketUnreadable),
+        // LABELLED BY WHAT IT WAS. Every result used to be written into the
+        // owner's event feed as `selftest: …` regardless of kind, which for an
+        // order is a wrong claim about what the agent did, in the one log an
+        // operator reads to work out what a fleet is doing.
+        told: async (cmd, outcome) => {
+          await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+        },
+      });
     } catch (e) {
       console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

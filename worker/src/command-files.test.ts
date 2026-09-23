@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
   markRunning,
   openCommands,
   readCommandState,
+  runTickCommand,
   writeCommand,
   writeCommandResult,
 } from "./command-files";
@@ -422,4 +423,156 @@ test("WHERE AN ORDER IS, as the orchestrator's sweep must know it before it spea
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
+});
+
+/**
+ * ONE TICK DRAINS THE DEAD AND RUNS AT MOST ONE LIVE ORDER.
+ *
+ * The worker took one command per tick and an expired one cost that tick, so a
+ * queue of stale files — an owner queueing every seven minutes while unarmed,
+ * or a hosted down-leg delivering rows after an orchestrator outage — was paid
+ * off one tick at a time, oldest first. With five of them ahead of it a fresh
+ * order expired before it was reached: a true message about a lost order.
+ *
+ * Driven through the drain the worker's tick calls, against a real home.
+ */
+describe("the tick's drain", () => {
+  const NOW = 1_800_000_000_000;
+  const order = (id: string, at: number, expiresAt: number) =>
+    ({ id, kind: "trade", at, args: { side: "buy", symbol: "TSLA", usdgAmount: 25 }, expiresAt }) as const;
+  const receipt = (home: string, id: string) => readCommandState(home, id);
+
+  /** A tick: a fixed clock, and a record of everything run and told. */
+  const tick = (home: string, over: { run?: (cmd: { id: string }) => Promise<{ ok: boolean; line: string }>; told?: (id: string) => void } = {}) => {
+    const ran: string[] = [];
+    const told: string[] = [];
+    const done = runTickCommand(home, {
+      now: () => NOW,
+      run: async (cmd) => {
+        ran.push(cmd.id);
+        // The marker is down while the order is being decided, as before.
+        assert.equal(commandWhereabouts(home, cmd.id), "running");
+        return over.run ? over.run(cmd) : { ok: true, line: `bought 25.00 USDG of TSLA (${cmd.id})` };
+      },
+      told: async (cmd, outcome) => {
+        told.push(`${cmd.id}:${outcome.ok ? "ok" : "err"}`);
+        over.told?.(cmd.id);
+      },
+    });
+    return { done, ran, told };
+  };
+
+  it("FIVE EXPIRED ORDERS AHEAD OF A FRESH ONE: the fresh one runs THIS tick, and each expired one is answered", async () => {
+    const home = tmpHome();
+    try {
+      for (let i = 0; i < 5; i += 1) writeCommand(home, order(`stale${i}`, NOW - 60 * 60_000 + i, NOW - 50 * 60_000 + i));
+      writeCommand(home, order("fresh", NOW - 1_000, NOW + 8 * 60_000));
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, ["fresh"], "the one live order ran, and nothing else did");
+      for (let i = 0; i < 5; i += 1) {
+        const r = receipt(home, `stale${i}`);
+        assert.equal(r?.state, "done", `stale${i} has its receipt`);
+        assert.equal(r?.result?.ok, false);
+        assert.match(r?.result?.line ?? "", /^expired/);
+        assert.match(r?.result?.line ?? "", /Nothing was sent/);
+      }
+      assert.equal(receipt(home, "fresh")?.result?.line, "bought 25.00 USDG of TSLA (fresh)");
+      assert.deepEqual(t.told, ["stale0:err", "stale1:err", "stale2:err", "stale3:err", "stale4:err", "fresh:ok"], "the owner is told about every one, oldest first");
+      assert.deepEqual(openCommands(home), [], "nothing is left waiting");
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("AT MOST ONE LIVE ORDER A TICK — the next one waits, queued, for the next tick", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, order("dead", NOW - 20 * 60_000, NOW - 10 * 60_000));
+      writeCommand(home, order("first", NOW - 2_000, NOW + 8 * 60_000));
+      writeCommand(home, order("second", NOW - 1_000, NOW + 8 * 60_000));
+      const a = tick(home);
+      await a.done;
+      assert.deepEqual(a.ran, ["first"]);
+      assert.equal(receipt(home, "dead")?.state, "done");
+      assert.equal(receipt(home, "second")?.state, "queued", "untouched: still the owner's, still claimable");
+      const b = tick(home);
+      await b.done;
+      assert.deepEqual(b.ran, ["second"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("an expired order is never handed to run, not even when it is the only one", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, order("dead", NOW - 20 * 60_000, NOW - 1));
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, []);
+      assert.match(receipt(home, "dead")?.result?.line ?? "", /Nothing was sent/);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("A LIVE ORDER THAT COMES FIRST IS THE TICK'S — expired ones behind it wait rather than be claimed beside it", async () => {
+    // Nothing after the live order is touched: the drain stops at it.
+    const home = tmpHome();
+    try {
+      writeCommand(home, order("live", NOW - 5_000, NOW + 8 * 60_000));
+      writeCommand(home, order("dead", NOW - 1_000, NOW - 1));
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, ["live"]);
+      assert.equal(receipt(home, "dead")?.state, "queued");
+      await tick(home).done;
+      assert.equal(receipt(home, "dead")?.state, "done", "and it is answered on the next one");
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("THE CLAIM IS STILL THE UNLINK: an order another reader took mid-drain is not run here", async () => {
+    // The drain lists once and claims as it goes, so a file can vanish between
+    // the listing and its turn. It is somebody else's then, never ours too.
+    const home = tmpHome();
+    try {
+      writeCommand(home, order("dead", NOW - 20 * 60_000, NOW - 1));
+      writeCommand(home, order("live", NOW - 1_000, NOW + 8 * 60_000));
+      const t = tick(home, {
+        told: (id) => {
+          if (id === "dead") assert.ok(claimCommandFile(home)?.id === "live", "the other reader takes it");
+        },
+      });
+      await t.done;
+      assert.deepEqual(t.ran, [], "taken elsewhere, so not run here as well");
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a command with no deadline is live, however old — as isExpired has always said", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "probe", kind: "selftest", at: 1 });
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, ["probe"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("an empty or missing queue is a quiet tick", async () => {
+    const home = tmpHome();
+    try {
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual([t.ran, t.told], [[], []]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
 });
