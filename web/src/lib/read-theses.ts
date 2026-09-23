@@ -52,7 +52,7 @@
  * owner's entire balance sheet — is not in the SELECT at all: absent, rather
  * than filtered.
  */
-import { DERIVED_ID, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
+import { DERIVED_ID, basisJoin, basisScope, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -265,6 +265,13 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       where.push("d.symbol = ?");
       args.push(opts.symbol);
     }
+    // THE QUOTE-BOOKED BUYS THIS READ'S SELLS COULD HAVE CLOSED, read once in
+    // front of each statement that asks for figures (thesis-policy.ts
+    // `basisScope`) rather than once per sell copy, which walked an account's
+    // whole history for every one. Scoped to the read's own window and, for one
+    // agent's read, to its accounts.
+    const basis = basisScope({ since, accounts: only });
+    const scoped = (cols: Columns) => (cols.fills ? basis : { sql: "", args: [] as unknown[] });
     // ── THE NAME IS OPTIONAL TO READ, ON PURPOSE ─────────────────────────
     //
     // `decisions.display_name` and `agents.x_verified` are created by the
@@ -304,6 +311,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
          -- The LAST trade for this decision. A correlated MAX(id) keeps this
          -- join to one row per decision on both backends.
          LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+         ${cols.fills ? basisJoin("t") : ""}
          -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
          -- almost no decision has a post: one is written only for a class
          -- trade that actually filled and whose writer cleared its gate,
@@ -362,11 +370,11 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const actionPage = (cols: Columns, offset: number) =>
       db
         .prepare(
-          `SELECT r.* FROM (${placed(cols, IS_ACTION)}) r
+          `${scoped(cols).sql}SELECT r.* FROM (${placed(cols, IS_ACTION)}) r
             ORDER BY r.last_at DESC, r.last_id DESC
             LIMIT ? OFFSET ?`,
         )
-        .all(...args, ACTION_PAGE, offset) as Promise<Group[]>;
+        .all(...scoped(cols).args, ...args, ACTION_PAGE, offset) as Promise<Group[]>;
 
     // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
     // re-said every tick always had the freshest time, so any agent with forty
@@ -393,7 +401,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const viewRead = (cols: Columns) =>
       db
         .prepare(
-          `SELECT s.* FROM (
+          `${scoped(cols).sql}SELECT s.* FROM (
              SELECT q.*,
                     MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
                     DENSE_RANK() OVER (ORDER BY q.agent_turn, q.changed_at DESC, q.agent_id, q.sym) AS turn
@@ -411,7 +419,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
            WHERE s.turn <= ?
            ORDER BY s.turn, s.in_pair`,
         )
-        .all(...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+        .all(...scoped(cols).args, ...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
 
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.

@@ -27,6 +27,8 @@ import { getSettingsStore } from "./settings-store";
 import {
   LANDED_STATUSES,
   PUBLISHABLE_SOURCES,
+  basisJoin,
+  basisScope,
   fillFigures,
   publicationNarrowing,
   publishableThesis,
@@ -125,13 +127,16 @@ export async function readPeerTheses(
   // THE LANDED LANE's extra predicate. Only a buy or a sell whose trade filled
   // — on chain or on the paper book — is a trade worth remembering.
   const landed = `AND d.action IN ('buy', 'sell') AND COALESCE(t.status, '') IN (${LANDED_STATUSES.map(() => "?").join(", ")})`;
+  // The quote-booked buys these accounts' sells could have closed, read once
+  // per statement in front of it (thesis-policy.ts `basisScope`), not per sell.
+  const basis = basisScope({ since, accounts });
   // `fills` asks for the trade's own figures, so a closed trade is remembered
   // with its result. The columns are the mirror's and long-standing, but a
   // ledger without them still yields every post, only without figures.
   const query = (fills: boolean, landedOnly: boolean) =>
     shared
       .prepare(
-        `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
+        `${fills ? basis.sql : ""}SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
                 d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
                 d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
                 d.hold_kind AS hold_kind,
@@ -142,6 +147,7 @@ export async function readPeerTheses(
            FROM decisions d
            JOIN agents a ON a.smart_account = d.agent_id
            LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+           ${fills ? basisJoin("t") : ""}
              -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
              -- almost no decision has a post: one is written only for a class
              -- trade that actually filled and whose writer cleared its gate,
@@ -164,7 +170,8 @@ export async function readPeerTheses(
           ORDER BY MAX(d.at) DESC, MAX(d.id) DESC
           LIMIT ? OFFSET ?`,
       );
-  const binds = (landedOnly: boolean) => [
+  const binds = (fills: boolean, landedOnly: boolean) => [
+    ...(fills ? basis.args : []),
     ...accounts.map((a) => a.toLowerCase()),
     since,
     ...SOURCES,
@@ -198,13 +205,13 @@ export async function readPeerTheses(
     // Filter before applying the prompt limit. Otherwise 24 newer operational
     // rows hide every real thesis behind them and a followed desk looks silent.
     for (let offset = 0; offset < MAX_SCAN; offset += SCAN_BATCH) {
-      const rows = (await newest.all(...binds(false), SCAN_BATCH, offset)) as ThesisRow[];
+      const rows = (await newest.all(...binds(fills, false), SCAN_BATCH, offset)) as ThesisRow[];
       published.push(...gate(rows));
       if (published.length >= PEER_THESIS_LIMIT || rows.length < SCAN_BATCH) break;
     }
     // THE LANDED LANE: the newest trades that filled, whatever was said since.
     // A group the newest scan also returned is the same post, and is kept once.
-    const kept = gate((await query(fills, true).all(...binds(true), PEER_LANDED, 0)) as ThesisRow[]);
+    const kept = gate((await query(fills, true).all(...binds(fills, true), PEER_LANDED, 0)) as ThesisRow[]);
     const same = (t: PublicThesis) => JSON.stringify([t.name, t.slug, t.head, t.reason, t.post, t.outcome, t.at, t.firstAt]);
     const held = new Set(kept.map(same));
     const rest = published.filter((t) => !held.has(same(t)));

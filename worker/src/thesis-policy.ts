@@ -559,6 +559,11 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
  * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
  * it sold" is the cash, which no figure here reads: only a sell's P&L is
  * published.) See `estimatedBasis`.
+ *
+ * SO A READER THAT SELECTS THESE puts `basisScope` in front of its statement
+ * and `basisJoin(t)` among its joins. One that forgets gets a missing-column
+ * error, which every reader here already answers by retrying without figures
+ * — a post loses its figures, never the feed its posts, and no guess is shown.
  */
 export function fillFigures(t: string): string {
   const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
@@ -584,17 +589,68 @@ export function fillFigures(t: string): string {
  * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
  * later round trip its figure — nothing is shown — and never shows a guess.
  * A paper fill closes the paper book, which no quote ever priced, so it is
- * never estimated here. No index is added for this: `trades_agent_time`
- * already leads with the account. Every column is one the base schema or the
- * fill migration created, on both engines.
+ * never estimated here. Every column is one the base schema or the fill
+ * migration created, on both engines.
+ *
+ * READ ONCE PER STATEMENT, NOT ONCE PER ROW. This was a correlated EXISTS, and
+ * with no quote buy to find — the common case — it walked the account's whole
+ * earlier history for every receipt copy in the read: refusals are trade rows,
+ * a basket writes hundreds a day, and 40 sells over 200k rows took five
+ * seconds a read on the feed, the profile and every tenant's peer file. It now
+ * reads the joins `basisJoin` adds, over the set `basisScope` builds once, in
+ * front of the statement. A row whose account is not in that set is counted an
+ * ESTIMATE: the scope is a bound on the work, and a bound that could publish a
+ * guess would be the wrong way round.
  */
 export function estimatedBasis(t: string): string {
-  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
-      SELECT 1 FROM trades q
-       WHERE q.agent_id = ${t}.agent_id
-         AND q.basis_source = 'quote'
-         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
-         AND q.created_at <= ${t}.created_at))`;
+  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND (basis_r.agent_id IS NULL OR (
+      basis_q.first_at IS NOT NULL AND basis_q.first_at <= ${t}.created_at)))`;
+}
+
+/**
+ * THE QUOTE-BOOKED BUYS A READ'S SELLS COULD HAVE CLOSED, as a WITH clause the
+ * reader puts in front of its statement, with its arguments first.
+ *
+ * `basis_read` is every account with a receipt-read sell in the read's window —
+ * the only accounts whose figures `estimatedBasis` is asked about. `basis_quote`
+ * is, for each of those accounts and each coin, its FIRST quote-booked buy: a
+ * sell is estimated exactly when that first one is at or before it, which is
+ * the EXISTS this replaced. One pass over those accounts' histories, through
+ * `trades_agent_time`, per statement — no index is added (the rule on
+ * `trades`), and none is needed.
+ *
+ * `since` is the read's own window, widened by a day so a trade written a
+ * moment before its decision's clock is still in scope (and one that is not
+ * reads as an estimate, never as a figure). `accounts`, when the read is for
+ * known agents, narrows it through `agents` — the ledger may spell an account
+ * in either case, and the index needs the spelling it holds.
+ */
+const BASIS_MARGIN_SEC = 24 * 3600;
+export function basisScope(opts: { since: number; accounts?: readonly string[] | null }): { sql: string; args: unknown[] } {
+  const since = Math.floor(Number(opts.since)) - BASIS_MARGIN_SEC;
+  const accounts = (opts.accounts ?? []).map((a) => a.toLowerCase());
+  const only = accounts.length
+    ? `AND br.agent_id IN (SELECT ba.smart_account FROM agents ba WHERE LOWER(ba.smart_account) IN (${accounts.map(() => "?").join(", ")}))`
+    : "";
+  return {
+    sql: `WITH basis_read AS (
+        SELECT DISTINCT br.agent_id AS agent_id FROM trades br
+         WHERE br.basis_source = 'receipt' AND COALESCE(br.fill_side, 'sell') <> 'buy' AND br.created_at > ?
+           ${only}
+      ), basis_quote AS (
+        SELECT bq.agent_id AS agent_id, LOWER(bq.buy_token) AS tok, MIN(bq.created_at) AS first_at
+          FROM trades bq
+         WHERE bq.basis_source = 'quote' AND bq.agent_id IN (SELECT agent_id FROM basis_read)
+         GROUP BY bq.agent_id, LOWER(bq.buy_token)
+      ) `,
+    args: [Number.isFinite(since) ? since : 0, ...accounts],
+  };
+}
+
+/** The two joins `estimatedBasis` reads, for the trades alias `t`. At most one row each. */
+export function basisJoin(t: string): string {
+  return `LEFT JOIN basis_read basis_r ON basis_r.agent_id = ${t}.agent_id
+         LEFT JOIN basis_quote basis_q ON basis_q.agent_id = ${t}.agent_id AND basis_q.tok = LOWER(${t}.sell_token)`;
 }
 
 /**
