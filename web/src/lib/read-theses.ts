@@ -211,6 +211,27 @@ type Group = ThesisRow & {
   agent_names?: number;
 };
 
+/**
+ * EACH (ACCOUNT, COIN)'S NEWEST NAME — and at a tie, the first by name.
+ *
+ * Two names for one coin written in the same second (a deployer who changed
+ * `symbol()`, a tape that relabelled it) left the pick to whichever row the
+ * engine returned first, which SQLite and Postgres need not agree on and
+ * Postgres need not repeat. The tie is broken the way the writer's own lookup
+ * breaks it (store.ts `displayNameFor`: newest, then by name), so the feed
+ * names a coin the same on both engines, read after read.
+ */
+export function newestNames(found: readonly { agent_id: string; symbol: string; display_name: string; at: number }[]): Map<string, string> {
+  const newest = new Map<string, { name: string; at: number }>();
+  for (const f of found) {
+    const key = `${f.agent_id}|${f.symbol}`;
+    const at = Number(f.at);
+    const had = newest.get(key);
+    if (!had || at > had.at || (at === had.at && f.display_name < had.name)) newest.set(key, { name: f.display_name, at });
+  }
+  return new Map([...newest].map(([key, v]) => [key, v.name]));
+}
+
 export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore().get(tenant)): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
@@ -495,17 +516,14 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
                   AND d.symbol IN (${symbols.map(() => "?").join(", ")})
                   AND d.display_name IS NOT NULL AND d.display_name <> ''
                   AND d.at > ?
-                GROUP BY d.agent_id, d.symbol, d.display_name`,
+                GROUP BY d.agent_id, d.symbol, d.display_name
+                ORDER BY MAX(d.at) DESC, d.display_name`,
             )
             .all(...accounts, ...symbols, since)) as { agent_id: string; symbol: string; display_name: string; at: number }[];
-          const newest = new Map<string, { name: string; at: number }>();
-          for (const f of found) {
-            const key = `${f.agent_id}|${f.symbol}`;
-            if (Number(f.at) > (newest.get(key)?.at ?? -1)) newest.set(key, { name: f.display_name, at: Number(f.at) });
-          }
+          const newest = newestNames(found);
           for (const r of unnamed) {
             const hit = newest.get(`${String(r.agent_id)}|${String(r.symbol)}`);
-            if (hit) r.display_name = hit.name;
+            if (hit) r.display_name = hit;
           }
         } catch {
           /* the rows keep their ids: a post without its coin's name is a worse post, not a missing one */
