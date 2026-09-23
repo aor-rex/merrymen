@@ -36,7 +36,7 @@ const HISTORY = 6_000;
  * the coin at that time. `sellWrittenAt` moves the sells' trade rows (not
  * their decisions) to another time.
  */
-async function ledger(o: { history: number; sells: number; quoteAt?: number; sellWrittenAt?: number }) {
+async function ledger(o: { history: number; sells: number; quoteAt?: number; sellWrittenAt?: number; holds?: number }) {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await applyLedgerSchema(db);
@@ -70,6 +70,9 @@ async function ledger(o: { history: number; sells: number; quoteAt?: number; sel
     decide.run(`s${i}`, A, `Selling TSLA, reason ${i}.`, at);
     sell.run(A, TSLA, USDG, `s${i}`, o.sellWrittenAt ?? at);
   }
+  // Views: a hold on each of `holds` names, which never carries a fill.
+  const hold = raw.prepare(`INSERT INTO decisions (id, agent_id, source, action, symbol, reason, at) VALUES (?, ?, 'brain', 'hold', ?, ?, ?)`);
+  for (let i = 0; i < (o.holds ?? 0); i++) hold.run(`h${i}`, A, `NAME${i}`, `Holding NAME${i}: nothing has changed.`, NOW - 600 - i);
   raw.exec("COMMIT");
   // Every trade row the engine reads from here on is counted.
   const count = { visits: 0 };
@@ -156,3 +159,58 @@ describe("and it answers what the EXISTS answered", () => {
     assert.deepEqual(r.pct, [null, null]);
   });
 });
+
+/**
+ * THE VIEW LANE PAYS NOTHING FOR IT (R3F-3). The view statement reads holds
+ * and pure theses, and a view publishes no entry or realized figure
+ * (publishableThesis gives both only to a filled buy or sell). It used to cost
+ * almost nothing, then the basis scope was put in front of it too: a full pass
+ * over each selling account's history per read, for figures nothing there can
+ * publish. Counted per statement here, with every trade row the engine visits.
+ */
+describe("the view lane never reads the basis scope", () => {
+  async function perStatement(o: Parameters<typeof ledger>[0]) {
+    const { raw, db, count } = await ledger(o);
+    const per: { sql: string; visits: number }[] = [];
+    const counted = new Proxy(db, {
+      get(target, prop) {
+        if (prop !== "prepare") {
+          const v = Reflect.get(target, prop, target);
+          return typeof v === "function" ? v.bind(target) : v;
+        }
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          return {
+            ...stmt,
+            all: async (...params: unknown[]) => {
+              const before = count.visits;
+              const out = await stmt.all(...params);
+              per.push({ sql, visits: count.visits - before });
+              return out;
+            },
+          };
+        };
+      },
+    });
+    try {
+      const r = await readTheses({}, (fn) => fn(counted), identities, privateBook);
+      const views = per.filter((s) => s.sql.includes("agent_turn"));
+      assert.equal(views.length, 1, "one view statement");
+      return { view: views[0]!, theses: r.theses };
+    } finally {
+      raw.close();
+    }
+  }
+
+  it("A HOLD'S READ COSTS THE SAME ON AN ACCOUNT WITH A LONG HISTORY AS ON A SHORT ONE — and says the same", async () => {
+    const short = await perStatement({ history: 100, sells: 1, holds: 3 });
+    const long = await perStatement({ history: HISTORY, sells: 1, holds: 3 });
+    assert.equal(long.view.visits, short.view.visits, `the view statement visited ${long.view.visits} trade rows over ${HISTORY} of history, ${short.view.visits} over 100`);
+    assert.doesNotMatch(long.view.sql, /basis_read|basis_quote/, "and it does not name the scope at all");
+    const holds = (t: typeof long.theses) => t.filter((x) => x.action === "hold").map((x) => [x.symbol, x.reason, x.entryPriceUsd, x.realizedPct]);
+    assert.equal(holds(long.theses).length, 3, "the holds are read and published");
+    assert.deepEqual(holds(long.theses), holds(short.theses));
+    assert.deepEqual(long.theses.find((x) => x.action === "sell")?.realizedPct, 25, "the sell keeps its checked figure");
+  });
+});
+

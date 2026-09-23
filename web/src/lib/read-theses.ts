@@ -419,10 +419,18 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // — picks the word that is published. `agent_names` is the account's whole
     // count of names, read before the lane is cut, so a count cut by the lane
     // can say so.
-    const viewRead = (cols: Columns) =>
-      db
+    //
+    // NO FILL FIGURES, SO NO BASIS SCOPE. A view is a hold or a pure thesis,
+    // and publishableThesis gives an entry price only to a filled buy and a
+    // realized figure only to a filled sell, so a view's fill columns publish
+    // nothing. Asked for anyway, they put the basis scope in front of this
+    // statement — a pass over every selling account's history on every read,
+    // for nothing (R3F-3).
+    const viewRead = (all: Columns) => {
+      const cols: Columns = { ...all, fills: false };
+      return db
         .prepare(
-          `${scoped(cols).sql}SELECT s.* FROM (
+          `SELECT s.* FROM (
              SELECT q.*,
                     MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
                     DENSE_RANK() OVER (ORDER BY q.agent_turn, q.changed_at DESC, q.agent_id, q.sym) AS turn
@@ -440,7 +448,8 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
            WHERE s.turn <= ?
            ORDER BY s.turn, s.in_pair`,
         )
-        .all(...scoped(cols).args, ...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+        .all(...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+    };
 
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.
