@@ -558,25 +558,11 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
  * read one. So a live fill counts as booked only when no quote-sourced trade
  * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
  * it sold" is the cash, which no figure here reads: only a sell's P&L is
- * published.)
- *
- * "Before it", not "since the position was last flat", on purpose: an average
- * cost carries every buy since the last time the book was empty, and the
- * ledger has no column a reader can trust to say when that was (the quantities
- * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
- * later round trip its figure — nothing is shown — and never shows a guess.
- * A paper sell closes the paper book, which no quote ever priced. No index is
- * added for this: `trades_agent_time` already leads with the account.
+ * published.) See `estimatedBasis`.
  */
 export function fillFigures(t: string): string {
   const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
-  const estimatedBasis = `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
-      SELECT 1 FROM trades q
-       WHERE q.agent_id = ${t}.agent_id
-         AND q.basis_source = 'quote'
-         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
-         AND q.created_at <= ${t}.created_at))`;
-  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL AND NOT ${estimatedBasis}`;
+  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL AND NOT ${estimatedBasis(t)}`;
   const every = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
   return `
     CASE WHEN ${every(evidenced)} AND MIN(${t}.fill_price_usd) = MAX(${t}.fill_price_usd) THEN MIN(${t}.fill_price_usd)
@@ -584,6 +570,31 @@ export function fillFigures(t: string): string {
          THEN SUM(${t}.fill_cash_usdg) / SUM(CASE WHEN ${evidenced} THEN ${t}.fill_cash_usdg / ${t}.fill_price_usd END) END AS entry_price_usd,
     CASE WHEN ${every(booked)} THEN SUM(${t}.realized_pnl_usdg) END AS realized_pnl_usdg,
     CASE WHEN ${every(booked)} THEN SUM(${t}.fill_cash_usdg) END AS closed_cash_usdg,`;
+}
+
+/**
+ * WHETHER THE COST A LIVE FILL CLOSED WAS AN ESTIMATE — a SQL predicate over the
+ * trades alias `t`, true when a quote-sourced trade by the same account bought
+ * the coin `t` sold, at or before it. Exported for any reader of a realized
+ * P&L, because "when is a realized figure read" must have one answer.
+ *
+ * "Before it", not "since the position was last flat", on purpose: an average
+ * cost carries every buy since the last time the book was empty, and the
+ * ledger has no column a reader can trust to say when that was (the quantities
+ * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
+ * later round trip its figure — nothing is shown — and never shows a guess.
+ * A paper fill closes the paper book, which no quote ever priced, so it is
+ * never estimated here. No index is added for this: `trades_agent_time`
+ * already leads with the account. Every column is one the base schema or the
+ * fill migration created, on both engines.
+ */
+export function estimatedBasis(t: string): string {
+  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
+      SELECT 1 FROM trades q
+       WHERE q.agent_id = ${t}.agent_id
+         AND q.basis_source = 'quote'
+         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
+         AND q.created_at <= ${t}.created_at))`;
 }
 
 /**
