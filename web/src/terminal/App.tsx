@@ -3,7 +3,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
 import {
-  applyTokenQuotes,
   loadTokenQuotes,
   loadSessionChanges,
 } from "./quotes";
@@ -25,14 +24,16 @@ import { autonomyOf } from "@merrymen/core";
 import type { ChatTurn } from "./account";
 import { chatKeyFor, clearTurns, loadTurns, saveTurns } from "./chat-store";
 import {
-  loadLive,
-  seedLive,
+  fetchRead,
+  liveOf,
+  seedSources,
   tokenById,
-  type LiveState,
+  type LiveSources,
   type Screen,
   type Tab,
   type TokenTab,
 } from "./live";
+import { liveClocks, type LiveClockKey } from "./live-clocks";
 
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
@@ -59,19 +60,19 @@ import { useDesktopDetail } from "./desktop-detail";
 import { ChatDock } from "./ChatDock";
 import {
   capsOf,
-  liveReadsOk,
-  passOutcome,
-  portfolioReadOf,
   profileShown,
   realCashOf,
-  staleSince,
   tokenPageUnreadable,
-  type PassFailure,
 } from "./account-read";
-import { startRefreshLoop, type LoopState } from "./refresh-loop";
+import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
+import { useLiveNews, useSoundPref } from "./live-news";
+import { SoundToggle } from "./SoundToggle";
+import { ticksOf } from "./ticker";
+import { TickerStrip } from "@/components/shell/Ticker";
+import "./live-motion.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -83,7 +84,16 @@ function subscribeDesktop(onChange: () => void) {
 
 export function App() {
   const bodyRef = useRef<HTMLDivElement>(null);
-  const [live, setLive] = useState<LiveState>(seedLive);
+  /**
+   * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
+   *
+   * Each read runs on its own clock and applies its answer the moment it
+   * arrives (live-clocks.ts); `live` is derived from all of them, so the feed
+   * no longer waits for the launchpad sweep to be drawn, and no read's answer
+   * overwrites another's.
+   */
+  const [sources, setSources] = useState<LiveSources>(seedSources);
+  const live = useMemo(() => liveOf(sources), [sources]);
   /**
    * HAS THE MARKET LIST COME BACK YET?
    *
@@ -98,8 +108,13 @@ export function App() {
    * succeeded and this address is not on the list. They have different remedies
    * — wait, retry, and check the address — and a screen that renders one of them
    * for all three is guessing on the user's behalf.
+   *
+   * BOTH READS THAT LIST TOKENS, now that they arrive apart. Every stock is on
+   * the market read and every coin on the launchpad sweep, which is the slower
+   * of the two by ten seconds; "loaded" on the market alone would tell a coin's
+   * link "Token not listed" while the read that lists it was still in flight.
    */
-  const [liveLoaded, setLiveLoaded] = useState(false);
+  const liveLoaded = live.reads.market !== "unread" && live.reads.discoveries !== "unread";
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
@@ -111,18 +126,36 @@ export function App() {
    * "Loading your account…" for both — for ever, after a failure.
    */
   const [accountFailed, setAccountFailed] = useState(false);
-  /** Where the refresh loop stands — see refresh-loop.ts. Null until its first pass reports. */
-  const [loop, setLoop] = useState<LoopState | null>(null);
-  const failing = loop !== null && loop.failuresInARow > 0;
-  /** A pass is running now — a retry the reader asked for, or the timer's. */
-  const [inFlight, setInFlight] = useState(false);
-  /** Which half the last pass failed, and whether anything answered. Null when it read both. */
-  const [failure, setFailure] = useState<PassFailure | null>(null);
-  /** When each half last read, so the outage line dates the half that is stale. */
-  const [okAt, setOkAt] = useState<{ account: number | null; market: number | null }>({ account: null, market: null });
-  const retryNow = useRef<() => void>(() => {});
-  const [refreshKey,setRefreshKey]=useState(0);
-  const refreshAccount=()=>setRefreshKey(k=>k+1);
+  /** Where every read's clock stands — see refresh-loop.ts. Empty until they start. */
+  const [clockViews, setClockViews] = useState<ClockView[]>([]);
+  /** The one outage line over all of them; null while every read on it is healthy. */
+  const banner = bannerOf(clockViews);
+  const failing = banner !== null;
+  /** The account or the owner's book is being read right now — a retry asked for, or the timer's. */
+  const accountBusy = clockViews.some((v) => (v.key === "account" || v.key === "feed") && v.inFlight);
+  const clocks = useRef<ReturnType<typeof startClocks> | null>(null);
+  /** Bumped by sign-out, which starts every clock again from nothing — see resetLive. */
+  const [epoch, setEpoch] = useState(0);
+  /** Ask these reads again now; every other clock stays on its own schedule. */
+  const refreshReads = (...keys: LiveClockKey[]) => {
+    for (const key of keys) clocks.current?.retryNow(key);
+  };
+  /**
+   * THE ACCOUNT AND THE OWNER'S BOOK, AGAIN, NOW — for a retry the owner
+   * pressed, a sign-in, an agent just created, or anything that knows the
+   * owner's position just changed. It used to restart every read, the
+   * two-minute launchpad sweep included, to refresh one account.
+   */
+  const refreshAccount = () => refreshReads("account", "feed");
+  /**
+   * EVERYTHING, FROM NOTHING — for a sign-out. The reads in flight belong to
+   * the owner leaving, so restarting the clocks (the effect below is keyed on
+   * `epoch`) drops their answers rather than letting one land after the reset.
+   */
+  const resetLive = () => {
+    setSources(seedSources());
+    setEpoch((e) => e + 1);
+  };
   const [sidebarSection, setSidebarSection] =
     useState<SidebarSection>("markets");
   /**
@@ -204,41 +237,33 @@ export function App() {
   }, [chatKey, turns]);
 
   /**
-   * ONE LOOP FOR THE ACCOUNT AND THE MARKET — see refresh-loop.ts.
+   * EVERY READ ON ITS OWN CLOCK — see live-clocks.ts and refresh-loop.ts.
    *
-   * This was a first load plus a 60s interval that returned early until that
-   * first load had succeeded, so a first load that failed was never retried;
-   * and it set an error on failure that no success ever cleared. Every pass now
-   * books the next (backing off 5s, 15s, 60s while failing), and the loop's own
-   * report is the only thing that says whether we are failing — so the first
-   * pass that succeeds takes the banner down.
+   * This was one pass a minute over quotes, six reads in a Promise.all and the
+   * account, and nothing rendered until the slowest — the launchpad sweep, at
+   * 10-12s cold — had come back. Now the feed reads every ten seconds while
+   * the tab is visible (a minute while hidden, so the title can count what
+   * arrived), the market and its quotes every thirty, the board every minute,
+   * the sweep every two, and the account and the owner's book every minute as
+   * before; each applies its answer as it lands.
    *
-   * THE TWO READS ARE INDEPENDENT. A market outage no longer stops the account
-   * refreshing, nor the reverse; either failing makes the pass a failure.
-   * Whatever was already on screen stays there, and the banner says which half
-   * failed and how old that half is.
+   * THE WAVE 1 HONESTY IS KEPT, per read. Every clock books its next pass
+   * whatever happened (backing off 5s, 15s, then its own cadence), the first
+   * success takes its failure off the line, whatever was on screen stays there,
+   * and the one outage line (bannerOf) names the half that failed, dates the
+   * oldest figure it is apologising for, and says "Can't reach merrymen" only
+   * when nothing answered anywhere. A read that half landed is still a failure:
+   * each public read's clock fails on its own unreadable answer.
    *
-   * A MARKET READ THAT HALF LANDED IS A FAILURE TOO. loadLive throws only when
-   * the market, the board and the theses all failed, so a lost /api/market
-   * alone used to count as a healthy pass: the backoff reset, the last-read
-   * time was stamped as now, and old prices were carried forward under no
-   * banner. readLive answers whether the public reads came back (liveReadsOk).
+   * A TAB COMING BACK INTO VIEW runs what went stale while it was hidden, and
+   * nothing that ran seconds ago (wake), rather than every read at once.
    */
   useEffect(() => {
     let alive = true;
-    let firstPass = true;
-    let loaded: LiveState | undefined;
-    const refreshChanges = async (tokens: LiveState["tokens"]) => {
-      const changes = await loadSessionChanges(tokens);
-      if (alive && changes.size)
-        setLive((previous) => ({
-          ...previous,
-          tokens: previous.tokens.map((t) =>
-            changes.has(t.id) ? { ...t, change24hPct: changes.get(t.id)! } : t,
-          ),
-        }));
-    };
-    const readAccount = async (first: boolean) => {
+    let firstAccount = true;
+    const readAccount = async () => {
+      const first = firstAccount;
+      firstAccount = false;
       try {
         const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
         if(!alive) return;
@@ -248,73 +273,50 @@ export function App() {
         // clear yet, and a draft typed while the page loaded is the owner's.
         if(!first && session.hosted && !session.address){setTurns([]);setChatDraft("");}
       } catch (error) {
+        // The reader gets one plain sentence (LoadFailure); the cause goes here.
+        console.warn("[merrymen] account read failed:", error);
         if (alive) setAccountFailed(true);
         throw error;
       }
     };
-    const readLive = async (): Promise<boolean> => {
-      if (!loaded) {
-        try {
-          const data = await loadLive(mine=>{if(alive)setLive(previous=>({...previous,mine}));});
-          if (!alive) return true;
-          loaded = data;
-          setLive(data);
-          void refreshChanges(data.tokens);
-          return liveReadsOk(data.reads);
-        } finally {
-          // SET ON BOTH ARMS, deliberately. "The fetch finished" is what the
-          // screens need to know; whether it finished well is the loop's job.
-          // Setting it only on success would leave a failed load looking
-          // identical to one that is still running, which is the same
-          // conflation one level down.
-          if (alive) setLiveLoaded(true);
-        }
-      }
-      const quotes = await loadTokenQuotes();
-      if (alive && quotes.size)
-        setLive((previous) => ({
-          ...previous,
-          tokens: applyTokenQuotes(previous.tokens, quotes),
-        }));
-      const next = await loadLive();
-      if(alive) setLive(previous=>({...next,tokens:next.tokens.map(t=>{const old=previous.tokens.find(p=>p.id===t.id);return {...t,priceUsd:t.priceUsd ?? old?.priceUsd ?? null,change24hPct:t.change24hPct ?? old?.change24hPct ?? null};})}));
-      await refreshChanges(next.tokens);
-      return liveReadsOk(next.reads);
-    };
-    const pass = async () => {
-      const first = firstPass;
-      firstPass = false;
-      const [accountRead, marketRead] = await Promise.allSettled([readAccount(first), readLive()]);
-      // The reader gets one plain sentence (LoadFailure); the cause goes here.
-      for (const r of [accountRead, marketRead]) if (r.status === "rejected") console.warn("[merrymen] refresh failed:", r.reason);
-      const outcome = passOutcome(accountRead, marketRead);
-      if (alive) {
-        const now = Date.now();
-        setOkAt((prev) => ({
-          account: accountRead.status === "fulfilled" ? now : prev.account,
-          market: outcome?.market ? prev.market : now,
-        }));
-        setFailure(outcome);
-      }
-      return outcome === null;
-    };
-    const refresh = startRefreshLoop({
-      pass,
-      report: (state) => { if (alive) setLoop(state); },
-      onFlight: (running) => { if (alive) setInFlight(running); },
-      paused: () => document.hidden,
-    });
-    retryNow.current = refresh.retryNow;
+    const running = startClocks(
+      liveClocks({
+        fetchRead,
+        loadQuotes: loadTokenQuotes,
+        loadChanges: loadSessionChanges,
+        update: (change) => {
+          if (alive) setSources(change);
+        },
+        readAccount,
+        hidden: () => document.hidden,
+      }),
+      (views) => {
+        if (alive) setClockViews(views);
+      },
+    );
+    clocks.current = running;
     const onVisible = () => {
-      if (!document.hidden) refresh.retryNow();
+      if (!document.hidden) running.wake();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
-      refresh.stop();
+      running.stop();
+      if (clocks.current === running) clocks.current = null;
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [refreshKey]);
+  }, [epoch]);
+
+  /**
+   * A REAL-MONEY TRADE LANDING, SAID — see live-news.ts.
+   *
+   * A short tone if the reader turned sound on (off by default), and "(3)
+   * merrymen" in the tab title while the tab is hidden, both from the feed
+   * reads above and nothing else: no request of their own, never on the first
+   * read, and never for a hold, a paper fill or a refusal.
+   */
+  const [soundOn, toggleSound] = useSoundPref();
+  useLiveNews({ theses: live.theses, read: live.reads.theses, soundOn });
 
   const openScreen = (next: Screen) => {
     // There is nothing to fund before an agent exists, and the deposit panel
@@ -466,11 +468,15 @@ export function App() {
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
-  const portfolioRead = portfolioReadOf(live.reads.mine, liveLoaded);
+  // THE BOOK'S OWN READ, as it stands. It is on its own clock now, so "unread"
+  // means its first answer has not come back and nothing else — see live-clocks.ts.
+  const portfolioRead = live.reads.mine;
+  /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
+  const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
-      className="app"
+      className={ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
@@ -499,7 +505,7 @@ export function App() {
         ref={bodyRef}
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
-        {failing && <LoadFailure nextAt={loop.nextAt} lastOkAt={failure ? staleSince(failure, okAt) : loop.lastOkAt} inFlight={inFlight} failed={failure ?? undefined} unreachable={failure?.unreachable} onRetry={() => retryNow.current()}/>}
+        {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={() => clocks.current?.retryNow()}/>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -525,8 +531,8 @@ export function App() {
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
-        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={inFlight} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={inFlight} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
+        {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
+        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
@@ -598,6 +604,14 @@ export function App() {
             mine={mine}
           />
         )}
+        {/* The trade chime's switch on every device; desktop also has it on
+            the tape. Its own row, not one of the session actions below: those
+            are drawn in the sign-out's red, and a preference is not a way out. */}
+        {screen.kind === "tab" && screen.tab === "you" && (
+          <div className="profile-sound">
+            <SoundToggle on={soundOn} onToggle={toggleSound} />
+          </div>
+        )}
         {/* WHO YOU ARE SIGNED IN AS, next to the way out.
             "I don't know my tenant/login wallet address offhand" — and nothing
             in the product showed it. It is a public address and the one thing
@@ -613,11 +627,10 @@ export function App() {
                 </span>
                 <SignOut
                   after={() => {
-                    setLive(seedLive());
+                    resetLive();
                     setAccount(null);
                     setTurns([]);
                     setChatDraft("");
-                    refreshAccount();
                   }}
                 />
               </>
@@ -655,7 +668,10 @@ export function App() {
                   ? "Could not load this token. Try again."
                   : "Token not found. Check the address."}
               </p>
-              {unreadable && <button onClick={refreshAccount}>Try again</button>}
+              {/* The two reads that list tokens — not the account, which is
+                  what this button used to refresh while the page said the
+                  token could not be loaded. */}
+              {unreadable && <button onClick={() => refreshReads("market", "discoveries")}>Try again</button>}
               <button onClick={()=>goTab("home")}>Back to markets</button>
             </section>
           );
@@ -744,7 +760,7 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={inFlight} onRefresh={refreshAccount}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (
@@ -794,6 +810,26 @@ export function App() {
             staleBlocker={autonomy.state === "checking"}
           />
         </ChatDock>
+      )}
+      {/* THE TAPE, which was built and mounted by nothing. Desktop only, and
+          gated here rather than hidden in CSS, for the reason the header and
+          rail are. Fed from the market read the shell already makes, so it
+          costs no request and moves when the market read does. */}
+      {ticks.length > 0 && (
+        <TickerStrip
+          className="terminal-tape"
+          items={ticks.map((t) => ({
+            key: t.id,
+            href: pathForScreen({ kind: "token", id: t.id }),
+            symbol: t.symbol,
+            priceUsd: t.priceUsd,
+            volume24hUsd: t.volume24hUsd,
+            halted: t.halted,
+            stale: t.stale,
+          }))}
+        >
+          <SoundToggle on={soundOn} onToggle={toggleSound} />
+        </TickerStrip>
       )}
     </div></div></WiredProvider>
   );

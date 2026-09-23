@@ -1,0 +1,104 @@
+/**
+ * WHAT COUNTS AS NEWS: a real-money trade that landed, seen for the first time.
+ *
+ * The chime and the tab title both count these, and both would be worse than
+ * silence if they counted wrong — a chime on every page load, a title that
+ * climbs on the feed's scheduled holds, a paper fill announced like money.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import { outcomeOf } from "../../../worker/src/thesis-policy";
+import type { Thesis } from "./live";
+import { createArrivals, isLandedTrade } from "./arrivals";
+
+const NOW = 1_800_000_000;
+let n = 0;
+const row = (over: Partial<Thesis> = {}): Thesis =>
+  ({
+    name: "Shogun",
+    slug: "shogun",
+    handle: null,
+    action: "buy",
+    symbol: "CASHCAT",
+    sizeUsdg: 5,
+    reason: "r",
+    paper: false,
+    head: "bought CASHCAT",
+    outcome: "landed",
+    at: NOW - 30,
+    postId: (++n).toString(16).padStart(32, "0"),
+    ...over,
+  }) as Thesis;
+
+describe("a landed trade", () => {
+  it("is a real-money buy or sell that landed, with an id to remember it by", () => {
+    assert.equal(isLandedTrade(row()), true);
+    assert.equal(isLandedTrade(row({ action: "sell" })), true);
+  });
+
+  it("is not a hold, a refusal, a pending order, a paper fill, a shadow, or a post with no id", () => {
+    assert.equal(isLandedTrade(row({ action: "hold" })), false);
+    assert.equal(isLandedTrade(row({ outcome: "refused" })), false);
+    assert.equal(isLandedTrade(row({ outcome: "pending" })), false);
+    assert.equal(isLandedTrade(row({ paper: true })), false, "a paper fill is simulated money");
+    assert.equal(isLandedTrade(row({ shadow: true })), false);
+    assert.equal(isLandedTrade(row({ outcome: "shadow" })), false);
+    assert.equal(isLandedTrade(row({ postId: null })), false, "nothing stable to diff it by");
+  });
+
+  it("a paper fill is not money even after its agent has gone live", () => {
+    // `paper` on a post is the AUTHOR'S mode at its last heartbeat
+    // (thesis-policy.ts), not the fill's. A fill booked on paper minutes before
+    // the owner switched the agent to live arrives with paper:false — and was
+    // never announced while it was paper, so the first read after the switch
+    // would chime it as a real trade. The fill's own status still says it.
+    // Pinned to the producer's own words, so a rephrasing there fails here.
+    assert.equal(isLandedTrade(row({ paper: false, outcomeText: outcomeOf("paper", null).text })), false);
+    assert.equal(isLandedTrade(row({ paper: false, outcomeText: outcomeOf("landed", null).text })), true);
+  });
+});
+
+describe("arrivals, read by read", () => {
+  it("NEVER ON FIRST LOAD: everything already on the feed is what the reader walked in on", () => {
+    const a = createArrivals();
+    assert.deepEqual(a.take([row(), row()], NOW), []);
+  });
+
+  it("a landed trade that was not there before is news, once", () => {
+    const a = createArrivals();
+    const old = row();
+    a.take([old], NOW);
+    const fresh = row({ action: "sell" });
+    assert.deepEqual(a.take([fresh, old], NOW).map((t) => t.postId), [fresh.postId]);
+    assert.deepEqual(a.take([fresh, old], NOW + 10), [], "the next read has nothing new");
+  });
+
+  it("a pending trade that lands is news when it lands — the id is the same, the outcome is not", () => {
+    const a = createArrivals();
+    const pending = row({ outcome: "pending" });
+    a.take([pending], NOW);
+    assert.deepEqual(a.take([{ ...pending, outcome: "landed" }], NOW).length, 1);
+  });
+
+  it("a fill first seen long after it happened is not news — a reader re-ranking old rows must not chime", () => {
+    const a = createArrivals();
+    a.take([], NOW);
+    assert.deepEqual(a.take([row({ at: NOW - 3 * 3600 })], NOW), []);
+    assert.deepEqual(a.take([row({ at: undefined })], NOW), [], "and one with no time has no age to judge");
+  });
+
+  it("several at once come back oldest first", () => {
+    const a = createArrivals();
+    a.take([], NOW);
+    const later = row({ at: NOW - 5 });
+    const earlier = row({ at: NOW - 50 });
+    assert.deepEqual(a.take([later, earlier], NOW).map((t) => t.at), [NOW - 50, NOW - 5]);
+  });
+
+  it("remembers a bounded number of ids", () => {
+    const a = createArrivals({ cap: 3 });
+    a.take([row(), row(), row(), row(), row()], NOW);
+    assert.equal(a.size(), 3);
+  });
+});
