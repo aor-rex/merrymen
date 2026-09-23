@@ -67,6 +67,7 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { ceilingFor } from "@/lib/order-ceiling";
+import { OWNER_CHANGED, ownerMismatch } from "@/lib/order-owner";
 import {
   LEDGER_UNREADABLE,
   orderTtlMs,
@@ -145,6 +146,13 @@ export async function POST(req: Request) {
     body = (await req.json()) as OrderBody;
   } catch {
     return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
+  }
+  // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL. The session is whatever
+  // this browser held when the request left; the chat card names the owner who
+  // tapped, and another wallet signed in since (another tab can do it unseen)
+  // places nothing — before the ceiling, which would be the other wallet's.
+  if (isHostedMode() && ownerMismatch((body as { owner?: unknown }).owner, tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
   const read = readOrder(body);
   if ("error" in read) return NextResponse.json({ error: read.error }, { status: 400 });

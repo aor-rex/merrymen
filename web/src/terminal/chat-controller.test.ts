@@ -21,7 +21,8 @@ import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
-import { useChatController, type ChatController } from "./chat-controller";
+import { ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
+import { chatKeyFor } from "./chat-store";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
 import { deferred, json, testDom } from "./test-dom";
 
@@ -34,7 +35,7 @@ const originalFetch = globalThis.fetch;
 const originalRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
 type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
 let routes: Record<string, Handler>;
-let calls: { method: string; url: string; body: Record<string, unknown> | null }[];
+let calls: { method: string; url: string; body: Record<string, unknown> | null; deadline: boolean }[];
 let chat: ChatController;
 /** How far this browser's clock runs ahead of the true one (the server's, the ledger's). */
 let clockAhead = 0;
@@ -58,7 +59,7 @@ beforeEach(() => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    calls.push({ method, url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null });
+    calls.push({ method, url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null, deadline: !!init?.signal });
     const handler = routes[`${method} ${url.split("?")[0]}`];
     return handler ? handler(url, init) : json({ error: "not scripted" }, 404);
   }) as typeof fetch;
@@ -901,6 +902,137 @@ describe("whose thread", () => {
     assert.equal(count("POST", "/api/orders"), 2, "one order each, nothing twice");
     assert.match(text(), /WIF/);
     assert.doesNotMatch(text(), /TSLA/, "and still nothing of A's");
+  });
+});
+
+describe("a confirm places its order for the owner who tapped it, or not at all", () => {
+  // The scope above bound what a confirm SAYS to the owner who tapped it, but
+  // not the order it places. A snipe's lookup answered with no deadline, and
+  // then POST /api/orders went out carrying whichever session this browser
+  // held by then: B signing in while A's lookup was out got a real order B
+  // never confirmed, with no line in B's thread and nothing following it.
+  const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const keyOf = (owner: string) => `merrymen.chat.${owner}`;
+  const RESOLVED = { outcome: "resolved", say: "PEPE is the one you mean.", target: { symbol: "PEPE" }, usdgAmount: 5 };
+  const sentOrders = () => count("POST", "/api/orders");
+
+  /** Owner A asks for a snipe and taps Yes; the lookup is held until the test lets it answer. */
+  async function snipeHeldAfterTap() {
+    const held = deferred<Response>();
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => held.promise;
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await settle();
+    assert.equal(count("POST", "/api/snipe"), 1, "the lookup is out");
+    return held;
+  }
+
+  it("A LOOKUP THAT ANSWERS AFTER ANOTHER OWNER SIGNED IN PLACES NOTHING — and tells the new owner nothing", async () => {
+    const held = await snipeHeldAfterTap();
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    held.resolve(json(RESOLVED));
+    await settle(20);
+    assert.equal(count("POST", "/api/orders"), 0, "no order goes out under B's session");
+    assert.deepEqual(chat.messages.map((m) => m.text), [], "and B's thread holds nothing of A's");
+    assert.equal(count("GET", "/api/orders"), 0, "nothing is followed or looked for under B's session");
+  });
+
+  it("AN OWNER WHO LEFT AND CAME BACK MID-LOOKUP IS TOLD IT WAS NOT PLACED — the owner changed while it was in flight", async () => {
+    const held = await snipeHeldAfterTap();
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    held.resolve(json(RESOLVED));
+    await until(() => /I didn't place that/.test(text()), "A is told");
+    assert.equal(count("POST", "/api/orders"), 0, "nothing was placed, not even for the owner who came back");
+    assert.match(text(), /nothing was sent/);
+    assert.doesNotMatch(text(), /Placed, not filled/);
+  });
+
+  it("EVERY REQUEST THAT ACTS NAMES THE OWNER WHO TAPPED, so the route can refuse another session — and the refusal is said", async () => {
+    // Another TAB signing in changes the cookie this tab sends without
+    // changing its key, which no check in this browser can see. So the card
+    // says whose confirm it is, and the route refuses a session that is not
+    // that owner's (orders/owner.test.ts, snipe/route.test.ts).
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json(RESOLVED);
+    routes["POST /api/orders"] = () =>
+      json({ error: "this browser is signed in with a different wallet now than the one that confirmed this, so nothing was placed." }, 409);
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /didn't go through/.test(text()), "the refusal");
+    const sent = (path: string) => calls.find((c) => c.method === "POST" && c.url === path)!;
+    assert.equal(sent("/api/snipe").body!.owner, A, "the lookup names A");
+    assert.equal(sent("/api/orders").body!.owner, A, "and so does the order");
+    assert.equal(sent("/api/orders").body!.symbol, "PEPE", "beside the order it always carried");
+    assert.match(text(), /different wallet now than the one that confirmed this/, "said in A's thread, in the route's words");
+    assert.equal(count("POST", "/api/orders"), 1);
+    assert.equal(buttons("Yes, do it").length, 1, "nothing was placed, so the card stays");
+  });
+
+  it("AN ORDER WHOSE ANSWER WAS LOST AFTER THE OWNER CHANGED IS NOT LOOKED FOR under the next owner's session", async () => {
+    // "What is open on the key" is asked with the session the browser holds
+    // NOW — the next owner's — and would find, and follow, their order.
+    const held = deferred<Response>();
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => held.promise;
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await settle();
+    assert.equal(sentOrders(), 1, "A's order went out while A was the owner");
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    held.resolve(new Response("bad gateway", { status: 502 }));
+    await settle(20);
+    assert.equal(count("GET", "/api/orders"), 0, "nothing of B's is looked for on A's behalf");
+    assert.deepEqual(chat.messages.map((m) => m.text), []);
+  });
+
+  it("THE OWNER NAMED IS THE WALLET THE THREAD IS KEPT FOR — and self-hosted, nobody", () => {
+    const mixed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+    assert.equal(ownerOfChatKey(chatKeyFor({ hosted: true, address: mixed })), mixed.toLowerCase());
+    assert.equal(ownerOfChatKey(`merrymen.chat.${mixed}`), mixed.toLowerCase(), "one wallet, however its key was cased");
+    assert.equal(ownerOfChatKey(chatKeyFor({ hosted: false, address: null })), null);
+    assert.equal(ownerOfChatKey(chatKeyFor(null)), null);
+    assert.equal(ownerOfChatKey("merrymen.chat.0xnot-an-address"), null);
+  });
+
+  it("A SNIPE'S LOOKUP HAS A DEADLINE; the order itself is never cut short by one", async () => {
+    // Bounding the lookup bounds the time between a tap and its order. The
+    // order's own POST is not bounded here: an order whose answer is lost is
+    // looked for (orderLost), and a deadline would only manufacture that.
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json(RESOLVED);
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed, not filled/.test(text()), "placed");
+    const sent = (path: string) => calls.find((c) => c.method === "POST" && c.url === path)!;
+    assert.equal(sent("/api/snipe").deadline, true, "the lookup carries a deadline");
+    assert.equal(sent("/api/orders").deadline, false);
+    // Self-hosted there is one operator and no sign-in: nobody to name.
+    assert.equal("owner" in sent("/api/snipe").body!, false);
+    assert.equal("owner" in sent("/api/orders").body!, false);
   });
 });
 

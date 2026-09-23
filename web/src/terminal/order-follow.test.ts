@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { ORDER_STALE_GRACE_MS } from "@/lib/order-state";
-import { followDeadline, followOrder, followOrderUntil, followWindowMs, serverPlacedAt, type OrderPoll } from "./order-follow";
+import { followDeadline, followOrder, followOrderUntil, followWindowMs, routeAnswer, serverPlacedAt, type OrderPoll } from "./order-follow";
 
 const MIN = 60_000;
 const T = 1_800_000_000_000;
@@ -245,5 +245,32 @@ describe("AN ORDER OUTLIVES THE SCREEN THAT PLACED IT", () => {
     const h = harness(() => ({ state: "running" }));
     await followOrder("a1", WINDOW_MS, { ...h.deps, say: (_line, poll) => heard.push(poll) });
     assert.deepEqual(heard, [null]);
+  });
+});
+describe("A LOOKUP GIVEN A DEADLINE", () => {
+  it("IS GIVEN UP ON AT IT, and said as an answer that never came back", async () => {
+    // A snipe's lookup had no deadline, and the order it resolved to went out
+    // whenever it answered — however long after the owner tapped.
+    const original = globalThis.fetch;
+    let signalled = false;
+    globalThis.fetch = ((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        // With nothing to stop it, it answers a second later: too late to be the deadline.
+        if (!signal) return void setTimeout(() => _resolve(new Response("{}", { headers: { "content-type": "application/json" } })), 1_000);
+        signalled = true;
+        signal.addEventListener("abort", () => reject(signal.reason));
+      })) as typeof fetch;
+    // AbortSignal.timeout does not hold the process open; this does, for the wait.
+    const awake = setTimeout(() => {}, 10_000);
+    try {
+      const started = Date.now();
+      assert.equal(await routeAnswer("/api/snipe", { method: "POST" }, 20), null);
+      assert.ok(signalled, "the request carried the deadline");
+      assert.ok(Date.now() - started < 5_000, "and was given up on at it");
+    } finally {
+      clearTimeout(awake);
+      globalThis.fetch = original;
+    }
   });
 });

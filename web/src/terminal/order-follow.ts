@@ -122,14 +122,18 @@ export function unansweredLine(last: OrderPoll): string {
  * refusal: for an order, the row may exist. The card used to say "That didn't
  * go through: Failed to fetch" — raw exception text, and a claim nobody could
  * make — and leave itself ready to place the same order again.
+ *
+ * `timeoutMs`, when given, is how long the answer may take before it is given
+ * up on — and then it is null, like any answer that never came back.
  */
 export async function routeAnswer<T>(
   url: string,
   init: RequestInit,
+  timeoutMs?: number,
 ): Promise<{ ok: boolean; status: number; body: T | null } | null> {
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await fetch(url, timeoutMs === undefined ? init : { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch {
     return null;
   }
@@ -139,6 +143,17 @@ export async function routeAnswer<T>(
   if (!res.ok && body === null) return null;
   return { ok: res.ok, status: res.status, body };
 }
+
+/**
+ * HOW LONG A SNIPE'S LOOKUP MAY TAKE before the card gives up on it.
+ *
+ * The lookup places nothing, but the order it resolves to is placed after it
+ * answers — so an unbounded lookup was an unbounded wait between the owner's
+ * tap and an order going out, in which the owner could leave, another could
+ * sign in, and the price could move. Past this, it is an answer that never
+ * came back: nothing was placed, and the card stays for another tap.
+ */
+export const SNIPE_LOOKUP_MS = 15_000;
 
 /**
  * THE ORDER OPEN ON THIS OWNER'S KEY RIGHT NOW, by id — or null when there is

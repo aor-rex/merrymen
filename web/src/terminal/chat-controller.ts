@@ -119,6 +119,32 @@ export interface ConfirmScope {
   followOrder(id: string, expiresInMs: number | null): void;
   setProposal(p: Proposal | null): void;
   refreshSettings(): void;
+  /**
+   * May a request that ACTS still go out for this confirm? Only while the
+   * owner who tapped has been the owner on this browser the whole time: false
+   * from the moment it changes, and still false if they come back — the
+   * owner changed while the confirm was in flight. A request carries the
+   * session the browser holds when it LEAVES, not the one it held at the tap,
+   * so this is asked after every wait and before anything is sent that acts.
+   */
+  alive(): boolean;
+  /**
+   * The wallet this confirm acts for — sent with each request that acts, so
+   * the route can refuse a session that is not this owner's (another tab can
+   * sign in without this one's key changing). Null self-hosted: one operator,
+   * no sign-in, nobody to name.
+   */
+  owner: string | null;
+}
+
+/**
+ * The wallet a chat key belongs to — chat-store.ts chatKeyFor keys a hosted
+ * owner's thread by their address — or null for the self-hosted key and
+ * anything else that names no wallet.
+ */
+export function ownerOfChatKey(key: string | null): string | null {
+  const m = key === null ? null : /^merrymen\.chat\.(0x[0-9a-f]{40})$/i.exec(key);
+  return m ? m[1]!.toLowerCase() : null;
 }
 
 /** Test seams: time, and the pause between order polls. */
@@ -229,6 +255,14 @@ export function useChatController(o: {
   depsRef.current = o.deps;
   const clock = useCallback(() => (depsRef.current?.now ?? Date.now)(), []);
   const keyRef = useRef(o.chatKey);
+  /**
+   * Moves on every change of owner on this browser, there and back included,
+   * so a confirm can tell "the same owner throughout" from "the same owner
+   * again" (ConfirmScope.alive). Moved where the key is, in the render that
+   * brings the new owner, so nothing can run between the two.
+   */
+  const ownerTurn = useRef(0);
+  if (keyRef.current !== o.chatKey) ownerTurn.current += 1;
   keyRef.current = o.chatKey;
   const openRef = useRef(o.open);
   openRef.current = o.open;
@@ -597,16 +631,27 @@ export function useChatController(o: {
   // change it makes does nothing once that owner has gone. The guard is let go
   // when the owner changes, and a confirm that ends later lets go only its OWN
   // hold — never the next owner's order in flight.
+  //
+  // AND SO IS WHAT IT PLACES. Binding the words was not binding the order: a
+  // snipe's order goes out only after its lookup answers, carrying whatever
+  // session the browser holds by then, so an owner signing in meanwhile got an
+  // order they never confirmed, with no line and no follow. `alive` says
+  // whether anything that acts may still go out (the same owner, throughout),
+  // and `owner` goes with it so the route can refuse a session another tab
+  // changed unseen (lib/order-owner.ts).
   const confirm = useCallback(
     async (run: (p: Proposal, on: ConfirmScope) => Promise<void>) => {
       const p = proposalRef.current;
       if (!p || confirmingRef.current) return;
       const key = keyRef.current;
+      const turn = ownerTurn.current;
       const hold = {};
       confirmingRef.current = hold;
       setConfirming(true);
       const theirs = () => keyRef.current === key;
       const on: ConfirmScope = {
+        owner: ownerOfChatKey(key),
+        alive: () => ownerTurn.current === turn,
         say: (line) => {
           if (theirs()) say(line);
         },
