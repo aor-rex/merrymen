@@ -617,6 +617,131 @@ describe("an order's answer reaches the owner wherever they are", () => {
   });
 });
 
+describe("an answer that never came back is not a refusal", () => {
+  /** The card for a buy, confirmed, with POST /api/orders answered by `placing`. */
+  async function confirmBuy(placing: Handler) {
+    routes["POST /api/chat"] = () => json({ reply: "Placing.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = placing;
+    await ui.render(h());
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+  }
+  const asksWhatIsOpen = () => calls.filter((c) => c.method === "GET" && c.url === "/api/orders").length;
+  const dropped: Handler = () => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  it("A PLACEMENT WHOSE ANSWER WAS LOST IS SAID AS UNKNOWN — and the card cannot place it again", async () => {
+    // The connection can drop after the server wrote the order. "That didn't
+    // go through: Failed to fetch" was raw exception text AND a claim nobody
+    // could make, persisted, with the card left ready for a one-tap repeat.
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(dropped);
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|TypeError|didn't go through/);
+    assert.match(text(), /Check your trades before asking again/);
+    assert.equal(buttons("Yes, do it").length, 0, "no one-tap repeat of an order that may exist");
+    assert.equal(asksWhatIsOpen(), 1, "it asked once what is open on the key");
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+
+  it("AND WHEN AN ORDER IS OPEN ON THE KEY, IT IS FOLLOWED to its answer", async () => {
+    routes["GET /api/orders"] = (url) =>
+      url.includes("?id=")
+        ? json({ id: ORDER_ID, state: "done", result: "bought 5.00 USDG of TSLA", receipt: FILLED })
+        : json({ id: ORDER_ID, state: "queued", expiresAt: Date.now() + 300_000 });
+    await confirmBuy(dropped);
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the order's own answer");
+    assert.match(text(), /there is an order open on my key/);
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through/);
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+
+  it("A PLACEMENT THAT SUCCEEDED UNREADABLY IS LOOKED FOR, not guessed at", async () => {
+    // A 200 is a row that exists; without its id it can only be found.
+    routes["GET /api/orders"] = (url) =>
+      url.includes("?id=")
+        ? json({ id: ORDER_ID, state: "done", result: "bought 5.00 USDG of TSLA", receipt: FILLED })
+        : json({ id: ORDER_ID, state: "running" });
+    await confirmBuy(() => new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }));
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the order's own answer");
+    assert.doesNotMatch(text(), /didn't go through|Cannot read/);
+  });
+
+  it("AN ORDER ALREADY ANSWERED IS NOT TAKEN FOR THIS ONE", async () => {
+    // The newest order being done says nothing about whether this placing
+    // made it — so it is not followed, and the owner is sent to look.
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "done", result: "sold 2.00 USDG of WIF" });
+    await confirmBuy(dropped);
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    await settle(10);
+    assert.doesNotMatch(text(), /order open on my key|sold 2\.00 USDG of WIF/);
+    assert.equal(calls.filter((c) => c.url.startsWith("/api/orders?id=")).length, 0, "nothing followed");
+  });
+
+  it("A GATEWAY PAGE FOR A PLACEMENT IS NOT THE ROUTE'S REFUSAL either", async () => {
+    // A 502 from a proxy says nothing about whether the row was written
+    // behind it; only a body the route wrote is its answer.
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(() => new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } }));
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /refused \(502\)|didn't go through/);
+    assert.equal(buttons("Yes, do it").length, 0);
+  });
+
+  it("a refusal the route DID write is still said with its reason, and the card stays", async () => {
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(() => json({ error: "12 USDG is over your 10 USDG limit for a chat order." }, 400));
+    await until(() => /That didn't go through: 12 USDG is over your 10 USDG limit/.test(text()), "the refusal");
+    assert.equal(buttons("Yes, do it").length, 1);
+    assert.equal(asksWhatIsOpen(), 0, "a refusal is an answer: nothing to go and look for");
+  });
+
+  it("A SETTING WHOSE ANSWER WAS LOST IS SAID AS UNKNOWN, never as a raw error", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25 } } });
+    routes["PUT /api/settings"] = dropped;
+    await ui.render(h());
+    await settle();
+    const before = count("GET", "/api/settings");
+    await typeAndSend("trade bigger");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't tell whether that change was saved/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through|Done —/);
+    await until(() => count("GET", "/api/settings") > before, "and the settings are read again, to find out");
+  });
+
+  it("A SNIPE LOOKUP WHOSE ANSWER WAS LOST PLACED NOTHING, and says so", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = dropped;
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't look that coin up/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through/);
+    assert.equal(count("POST", "/api/orders"), 0);
+    assert.equal(buttons("Yes, do it").length, 1, "a lookup places nothing, so asking again is one tap");
+  });
+
+  it("A SNIPE'S ORDER WHOSE ANSWER WAS LOST is an order like any other", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json({ outcome: "resolved", say: "PEPE is the one you mean.", target: { symbol: "PEPE" }, usdgAmount: 5 });
+    routes["POST /api/orders"] = dropped;
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.equal(buttons("Yes, do it").length, 0);
+  });
+});
+
 describe("a proposal never outlives the conversation on screen", () => {
   it("IT IS NEVER STORED, SO A RELOAD SHOWS NO CARD", async () => {
     routes["POST /api/chat"] = () => json({ reply: "Shall I?", command: { id: "go-live", args: {} } });
