@@ -17,10 +17,10 @@
  * sqlite through the ledger's own driver, and against real command files.
  *
  * What is still read from the source is what is still only in the route: who
- * the caller is, the id's hash, the tick lookup, that POST applies the shared
- * ceiling, and the words the route must never contain. The ceiling's own rules
- * run here (chatOrderCeiling), and the resolution end to end in
- * ceiling/route.test.ts.
+ * the caller is, the id's hash, the tick lookup, and the words the route must
+ * never contain. The ceiling's own rules run here (chatOrderCeiling); POST
+ * refusing at it, and GET /api/orders/ceiling reporting it, run end to end
+ * through the real handlers in ceiling/route.test.ts.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -224,10 +224,9 @@ describe("what a size is allowed to be", () => {
     // The setting predates this surface and is named for the other one; it
     // means the same thing in both. Applying it is the point — a new surface
     // that bounded nothing would claim more than the owner's configured limit.
-    // The resolution runs in chatOrderCeiling, which the chips' ceiling route
-    // runs too (ceiling/route.test.ts executes it end to end).
-    assert.match(CODE, /const ceiling = await ceilingFor\(req, isHostedMode\(\)\);/);
-    assert.match(CODE, /over your \$\{ceiling\} USDG limit/);
+    // The rule runs here; POST applying it, and the chips' GET reporting the
+    // same figure, run end to end against one fixture in
+    // ceiling/route.test.ts — no longer read off this route's source.
     assert.equal(await chatOrderCeiling({ hosted: false, tenant: null, fallback: 10, stored: async () => ({ telegramMaxActionUsdg: 99 }) }), 10);
   });
 
