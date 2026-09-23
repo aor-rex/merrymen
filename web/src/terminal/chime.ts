@@ -8,8 +8,9 @@
  * WebAudio, synthesised, so there is no sound file to fetch. Browsers start an
  * AudioContext suspended until the reader has interacted with the page, so the
  * context is created and resumed from the toggle's own click (`unlockAudio`),
- * and after a reload with the sound already on, from the first click or key
- * anywhere — until then nothing plays, and nothing fails loudly either.
+ * and after a reload with the sound already on, from the page's gestures
+ * (live-news.ts useSoundPref) — until then nothing plays, and nothing fails
+ * loudly either.
  */
 import type { Thesis } from "./live";
 
@@ -111,10 +112,25 @@ export function unlockAudio(): Promise<boolean> {
  * trade, as if one had just landed, and on top of every other one queued behind
  * it. After a reload with the sound on, a fill before the first click is
  * therefore silent; the tab title still counts it.
+ *
+ * BUT A STOPPED CONTEXT IS ASKED TO START AGAIN, for the fill after this one.
+ * The browser suspends or interrupts a context that was running (iOS
+ * backgrounding the page, an output device changing), and a reader who is only
+ * watching makes no gesture to restart it. Once the page has had activation a
+ * resume needs no gesture, so the next fill sounds; this one, missed, stays
+ * missed. Nothing is scheduled here, so nothing can play late.
  */
 export function playChime(side: "buy" | "sell"): boolean {
   const ctx = context;
-  if (!ctx || (ctx.state as string) !== "running") return false;
+  if (!ctx) return false;
+  if ((ctx.state as string) !== "running") {
+    try {
+      void ctx.resume().catch(() => {});
+    } catch {
+      /* A context that cannot resume is simply not running. */
+    }
+    return false;
+  }
   try {
     blip(ctx, side);
     return true;

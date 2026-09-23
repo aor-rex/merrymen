@@ -57,6 +57,14 @@ export function useLiveNews(opts: {
 }
 
 /**
+ * THE GESTURES A PAGE'S AUDIO CAN START FROM — the HTML spec's
+ * activation-triggering input events. A touch's pointerdown is NOT one: on a
+ * phone, activation arrives with the pointerup, touchend or click after it. A
+ * mouse's pointerdown and a key press are.
+ */
+export const UNLOCK_GESTURES = ["pointerdown", "pointerup", "touchend", "click", "keydown"] as const;
+
+/**
  * The reader's sound choice: off until they turn it on, remembered in this
  * browser when storage allows (chime.ts). Turning it on plays one tone — from
  * the click itself, which is the moment a browser lets audio start, and so the
@@ -73,15 +81,22 @@ export function useSoundPref(
     setOn(readSoundOn(() => source.current()));
   }, []);
   // Remembered as on from an earlier visit: the context can only start from a
-  // gesture, so the first click or key press on the page starts it.
+  // gesture, so the page's gestures start it — EVERY one while the sound is on,
+  // not the first. A one-shot pointerdown listener was the only unlock after a
+  // reload, and on a touch screen that pointerdown comes before the page has
+  // activation: the context was made, the browser kept it suspended, and no
+  // later tap tried again, so a phone stayed silent all session. Nor did
+  // anything start a context the browser suspended afterwards (iOS
+  // backgrounding, an output device changing). On a running context
+  // unlockAudio does nothing, so listening on costs a state check. Capture, so
+  // a control that stops its click's propagation still counts.
   useEffect(() => {
     if (!on) return;
     const unlock = () => void unlockAudio();
-    document.addEventListener("pointerdown", unlock, { once: true });
-    document.addEventListener("keydown", unlock, { once: true });
+    const listen = { capture: true, passive: true } as const;
+    for (const type of UNLOCK_GESTURES) document.addEventListener(type, unlock, listen);
     return () => {
-      document.removeEventListener("pointerdown", unlock);
-      document.removeEventListener("keydown", unlock);
+      for (const type of UNLOCK_GESTURES) document.removeEventListener(type, unlock, listen);
     };
   }, [on]);
   const toggle = () => {
