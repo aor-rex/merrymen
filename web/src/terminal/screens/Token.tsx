@@ -1,6 +1,4 @@
 import { TokenActivity } from "../TokenActivity";
-import type { PoolEvidence } from "../../../../worker/src/venues/pool-evidence";
-import type { DiscoveryRow } from "@/lib/read-discoveries";
 import { ChartArea, RotateCcw, ArrowDown } from "lucide-react";
 import { DitherChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
@@ -29,8 +27,10 @@ import {
 import { TvChart } from "../tv";
 import { Coin, Face, Empty } from "../ui";
 import { SkeletonRows } from "../Skeleton";
-import { coverageOf, holdersFigure, holdersList, readTokenPage, type HoldersRead } from "../token-holders";
+import { holdersFigure, holdersList } from "../token-holders";
 import { useWatchlist } from "../watchlist";
+import { seatsOf } from "../token-seats";
+import { useTokenPageRead } from "../token-page-read";
 import { shortDateTime } from "@/lib/format";
 
 const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
@@ -61,31 +61,13 @@ export function Token({
   const [chartRevision, setChartRevision] = useState(0);
   const [sortBy, setSortBy] = useState<"position" | "return">("position");
   const [sortDescending, setSortDescending] = useState(true);
-  const [seats,setSeats]=useState<Seat[]>([]);
-  const [holderError,setHolderError]=useState("");
-  /** Where the holders read stands — see token-holders.ts. Seats alone cannot say "not answered yet". */
-  const [holdersRead,setHoldersRead]=useState<HoldersRead>("loading");
-  const [holderCoverage,setHolderCoverage]=useState<{published:number;total:number}|null>(null);
   /** Bumped by Try again, which re-runs the holders read — a failure was final until the page remounted. */
   const [holdersAttempt,setHoldersAttempt]=useState(0);
-  const [symbolClash,setSymbolClash]=useState(false);
-  const [activity,setActivity]=useState<{coin: DiscoveryRow | null; evidence: PoolEvidence | null; loading: boolean}>({coin:null,evidence:null,loading:true});
-  useEffect(()=>{
-    let alive=true;setActivity({coin:null,evidence:null,loading:true});setSeats([]);setHolderError("");setHoldersRead("loading");setHolderCoverage(null);setSymbolClash(false);
-    // BOUNDED, and a failure is one plain sentence — see readTokenPage.
-    void readTokenPage<{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean;coin:DiscoveryRow|null};evidence:PoolEvidence|null}>(token.id).then(read=>{
-      if(!alive)return;
-      if(!read.ok){setHolderError("Public holdings are unavailable right now.");setHoldersRead("failed");setActivity({coin:null,evidence:null,loading:false});return;}
-      const data=read.data;
-      setSymbolClash(data.market.symbolClash);
-      setActivity({coin:data.market.coin,evidence:data.evidence,loading:false});
-      if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");setHoldersRead("failed");return;}
-      setHoldersRead("ok");
-      setHolderCoverage(coverageOf(data.ledger));
-      setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({paper:h.paper,basisSource:h.basisSource,slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
-    });
-    return()=>{alive=false;};
-  },[token.id,token.symbol,theses,holdersAttempt]);
+  // KEYED ON THE TOKEN ALONE — see token-page-read.ts. The feed is read every
+  // ten seconds, and the posts are joined to the holders below instead of
+  // inside the read, so a feed read changes a thesis and re-reads nothing.
+  const { holders: holderRows, holdersRead, holderError, coverage: holderCoverage, symbolClash, activity } = useTokenPageRead(token.id, token.symbol, holdersAttempt);
+  const seats = useMemo<Seat[]>(() => seatsOf(holderRows, theses, token.symbol, symbolClash), [holderRows, theses, token.symbol, symbolClash]);
   const orderedSeats = useMemo(
     () =>
       [...seats].sort(
