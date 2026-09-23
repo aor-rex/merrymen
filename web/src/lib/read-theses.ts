@@ -52,7 +52,7 @@
  * owner's entire balance sheet — is not in the SELECT at all: absent, rather
  * than filtered.
  */
-import { publicationNarrowing } from "@merrymen/thesis";
+import { DERIVED_ID, publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -412,6 +412,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       const actions = await readActions(named);
       return { actions: actions.rows, tradesComplete: actions.complete, views: await viewRead(named) };
     };
+    let named = true;
     try {
       rows = await run(true);
     } catch {
@@ -419,9 +420,56 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       // read failure and is reported as one.
       try {
         rows = await run(false);
+        named = false;
       } catch (error) {
         console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
         return { source: "none", theses: [], tradesComplete: false };
+      }
+    }
+
+    // ── A ROW WITH NO NAME BORROWS ITS AUTHOR'S NEWEST ONE FOR THE COIN ──
+    //
+    // Seen on the live feed 2026-09-23: "sell TA151B4A9E1B 5.01 USDG". A held
+    // coin drops off the tape's qualified list and discovery then labels it
+    // with its own id, so every exit and review written after that went into
+    // the ledger unnamed. The writer now carries the buy's name forward; this
+    // gives the rows already written theirs.
+    //
+    // THE SAME AUTHOR ACCOUNT, and only an address-derived id: one agent's
+    // label for an id is never another's, and a stock's name is its ticker.
+    // Bounded to the read's own window, so it never reads further back than
+    // the query above already did. A failure costs the name, never the post.
+    if (named) {
+      const unnamed = [...rows.actions, ...rows.views].filter(
+        (r) => !(r.display_name ?? "").trim() && typeof r.symbol === "string" && DERIVED_ID.test(r.symbol),
+      );
+      if (unnamed.length) {
+        const accounts = [...new Set(unnamed.map((r) => String(r.agent_id)))];
+        const symbols = [...new Set(unnamed.map((r) => String(r.symbol)))];
+        try {
+          const found = (await db
+            .prepare(
+              `SELECT d.agent_id AS agent_id, d.symbol AS symbol, d.display_name AS display_name, MAX(d.at) AS at
+                 FROM decisions d
+                WHERE d.agent_id IN (${accounts.map(() => "?").join(", ")})
+                  AND d.symbol IN (${symbols.map(() => "?").join(", ")})
+                  AND d.display_name IS NOT NULL AND d.display_name <> ''
+                  AND d.at > ?
+                GROUP BY d.agent_id, d.symbol, d.display_name`,
+            )
+            .all(...accounts, ...symbols, since)) as { agent_id: string; symbol: string; display_name: string; at: number }[];
+          const newest = new Map<string, { name: string; at: number }>();
+          for (const f of found) {
+            const key = `${f.agent_id}|${f.symbol}`;
+            if (Number(f.at) > (newest.get(key)?.at ?? -1)) newest.set(key, { name: f.display_name, at: Number(f.at) });
+          }
+          for (const r of unnamed) {
+            const hit = newest.get(`${String(r.agent_id)}|${String(r.symbol)}`);
+            if (hit) r.display_name = hit.name;
+          }
+        } catch {
+          /* the rows keep their ids: a post without its coin's name is a worse post, not a missing one */
+        }
       }
     }
 

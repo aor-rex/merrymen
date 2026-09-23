@@ -751,6 +751,16 @@ function nameOf(row: ThesisRow): string | null {
 }
 
 /**
+ * THE SHAPE OF AN ID THAT NEEDS A NAME BESIDE IT: `T` plus the last eleven hex
+ * of the contract, exactly as trencher-discovery.ts mints it.
+ *
+ * Only these are ever looked up for a name another row carried. A stock's name
+ * IS its ticker (coin-name.ts never names one), so looking one up would cost a
+ * scan to find nothing — or, worse, find a stray and rename TSLA.
+ */
+export const DERIVED_ID = /^T[0-9A-F]{11}$/;
+
+/**
  * THE HEAD A READER SEES: the name, with the id left to a tooltip.
  *
  * `head` keeps "JUGGERNAUT (T3139F043B88)" because /why and the peer files are

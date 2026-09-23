@@ -27,6 +27,9 @@ import { flowKey } from "./deposit-log";
 // The paper/live boundary. A rule rather than a convention, enforced at the one
 // function every flow writer passes through — see addFlow.
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
+// Which coin ids need a name beside them — the publication module's rule, so
+// the writer and the feed reader look up names for the same set.
+import { DERIVED_ID } from "./thesis-policy";
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
@@ -1184,6 +1187,38 @@ export async function addDecision(row: DecisionRow): Promise<void> {
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);
+  }
+}
+
+/**
+ * THE NAME A DECISION ABOUT THIS COIN SHOULD CARRY: the tape's, or the one
+ * this agent's own newest named row gave it.
+ *
+ * A held coin drops off the tape's qualified list, and discovery then labels it
+ * with its own id — so every exit and review written after that went into the
+ * ledger unnamed and published "sell TA151B4A9E1B 5.01 USDG". The name its buy
+ * used is still here. `fromTape` wins when there is one; the lookup is only for
+ * an address-derived id (DERIVED_ID), and only ever within this agent, so one
+ * agent's label for an id can never become another's.
+ *
+ * Null on a miss or a read failure — absent, never a placeholder. The name was
+ * sanitised by coin-name.ts when it was first written, and the publication gate
+ * backstops it again.
+ */
+export async function displayNameFor(agentId: string, symbol: string, fromTape: string | null): Promise<string | null> {
+  if (fromTape) return fromTape;
+  if (!DERIVED_ID.test(symbol)) return null;
+  try {
+    const r = (await getDb()
+      .prepare(
+        `SELECT display_name FROM decisions
+          WHERE agent_id = ? AND symbol = ? AND display_name IS NOT NULL AND display_name <> ''
+          ORDER BY at DESC LIMIT 1`,
+      )
+      .get(agentId, symbol)) as { display_name: string | null } | undefined;
+    return r?.display_name ?? null;
+  } catch {
+    return null;
   }
 }
 
