@@ -10,9 +10,10 @@
  * and it fills on every proposal, so it would be the loudest thing on the feed
  * and the least news. Refusals and pending orders are not fills.
  *
- * A FILL, NOT A POST: each post's landed rows, folded into one reading (its
- * newest `at`, its total `said` — see `byPost`), are remembered as they were
- * last read, and it is news when either says a copy joined.
+ * A FILL, NOT A POST: each of a post's landed rows is remembered as it was last
+ * read — its `at` and its `said`, measured against its own last reading and
+ * never another row's (see `measure`) — and it is news when either says a copy
+ * joined.
  * The id is stable across reads (lib/post-id.ts leaves the outcome and the time
  * out of it on purpose), so a pending trade that lands keeps its id, which is
  * why only LANDED rows are remembered: the landing is the news. But the id
@@ -29,11 +30,11 @@
  *
  * `said` is not part of any key: it SHRINKS as old copies leave the feed's
  * window, and a key with it in would re-announce the row every time one did.
- * It is compared with the last read, and only its growth counts. A row whose
- * `at` went back is some other grouping of the same post, not a fill, and is
- * not remembered over the row it was. A post with no id (an agent with no
- * public slug) cannot be told apart from itself across reads, and is never
- * counted.
+ * It is compared with the row's last reading, and only its growth counts. A
+ * row whose `at` went back is some other grouping of the same post, not a fill,
+ * and the row it was stays remembered beside it. A post with no id (an agent
+ * with no public slug) cannot be told apart from itself across reads, and is
+ * never counted.
  *
  * HOW MANY, for the tab title: two fills of one post between two reads are
  * one row whose `said` grew by two — two fills, one tone. A row seen for the
@@ -99,34 +100,74 @@ function joined(before: Last, at: number | null, said: number | null): number {
   return Math.max(0, grew);
 }
 
+/** One read's landed rows of one post, each under its own `at`. */
+type Rows = Map<number, { said: number | null; row: Thesis }>;
+
+/** A post as it was last read. */
+interface Seen {
+  /** Each row's `said` as it was last read, by the row's `at` — kept while the row is off the read. */
+  rows: Map<number, number | null>;
+  /** The rows the last read of the post showed. */
+  shown: Set<number>;
+}
+
+/** How many rows of one post are remembered: far more than one read shows. */
+const ROWS_KEPT = 64;
+
 /**
- * ONE POST, ONE READING (R3L-1). The feed groups by size as well as words, and
- * a private book publishes no size, so the post id — which hashes the
+ * ONE POST, SEVERAL ROWS (R3L-1). The feed groups by size as well as words,
+ * and a private book publishes no size, so the post id — which hashes the
  * published size — is one id over every size: a steady-basket leg clamped by
- * cash or the day's headroom lands in a second row under the same id. Each
- * read's landed rows are folded by post before anything is compared: the
- * newest `at` (and its row, which is what the chime is for) and the total
- * `said`, unknown if any row's count is. Compared row by row, one new fill
- * counted as one group's count minus another's, and an order landing late
- * into the older group was never counted.
+ * cash or the day's headroom lands in a second row under the same id. So a
+ * read's landed rows are gathered by post, each under its own `at`. A row with
+ * no `at` has no age to be announced by, and is left out.
  */
-function byPost(theses: readonly Thesis[]): Map<string, Last & { row: Thesis }> {
-  const out = new Map<string, Last & { row: Thesis }>();
+function byPost(theses: readonly Thesis[]): Map<string, Rows> {
+  const out = new Map<string, Rows>();
   for (const t of theses) {
-    if (!isLandedTrade(t)) continue;
-    const id = t.postId as string;
     const at = finite(t.at);
+    if (!isLandedTrade(t) || at === null) continue;
     const said = finite(t.said);
-    const had = out.get(id);
-    if (!had) {
-      out.set(id, { at, said, row: t });
-      continue;
-    }
-    if (at !== null && (had.at === null || at > had.at)) {
-      had.at = at;
-      had.row = t;
-    }
-    had.said = had.said === null || said === null ? null : had.said + said;
+    const rows: Rows = out.get(t.postId as string) ?? new Map();
+    out.set(t.postId as string, rows);
+    const had = rows.get(at);
+    // Two rows of one post in the same second are read as one.
+    rows.set(at, had ? { said: had.said === null || said === null ? null : had.said + said, row: had.row } : { said, row: t });
+  }
+  return out;
+}
+
+/**
+ * EACH ROW AGAINST ITS OWN LAST READING (R4W-1), never against another row or
+ * the post's total. The action lane serves only its newest rows
+ * (read-theses.ts SHOW), so an older row of a post falls off the read whenever
+ * other activity pushes it past the bound — another agent's order in flight is
+ * enough — and comes back with every copy it always had. Folded into one
+ * total, that return counted as fills that never happened.
+ *
+ * A row read before is measured against what it said then. A row under an
+ * `at` never read is one of three things:
+ *
+ *   NEWER THAN EVERY ROW THE LAST READ SHOWED — a copy decided after all of
+ *   them landed, so at least one fill. When it is the only such row and the
+ *   last read's newest row has left, it is that row moved on, and it counts
+ *   its growth.
+ *   OLDER, and a row of the last read has left it BELOW this one and none
+ *   above — an order that landed late into an older row, moving its `at` up
+ *   past its old one: one fill.
+ *   ANYTHING ELSE — a row whose `at` went back (another grouping of the post),
+ *   or one the bound kept off the last read: not a fill.
+ */
+function measure(seen: Seen, read: Rows): Map<number, number> {
+  const top = Math.max(...seen.shown);
+  const gone = [...seen.shown].filter((at) => !read.has(at));
+  const newer = [...read.keys()].filter((at) => !seen.rows.has(at) && at > top);
+  const out = new Map<number, number>();
+  for (const [at, { said }] of read) {
+    const was = seen.rows.get(at);
+    if (was !== undefined) out.set(at, joined({ at, said: was }, at, said));
+    else if (at > top) out.set(at, newer.length === 1 && gone.includes(top) ? joined({ at: top, said: seen.rows.get(top) ?? null }, at, said) : 1);
+    else out.set(at, gone.some((g) => g < at) && !gone.some((g) => g > at) ? 1 : 0);
   }
   return out;
 }
@@ -134,7 +175,7 @@ function byPost(theses: readonly Thesis[]): Map<string, Last & { row: Thesis }> 
 export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
   const freshSec = opts.freshSec ?? FRESH_SEC;
   const cap = opts.cap ?? 2_000;
-  const last = new Map<string, Last>();
+  const last = new Map<string, Seen>();
   let seeded = false;
   return {
     /**
@@ -145,20 +186,27 @@ export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
     take(theses: readonly Thesis[], nowSec: number): Arrivals {
       const rows: Thesis[] = [];
       let fills = 0;
-      for (const [id, { at, said, row: t }] of byPost(theses)) {
-        const before = last.get(id);
-        // A row whose time went BACK is another grouping of this post, not a
-        // fill; the row it was is what the next read is measured against.
-        if (before && at !== null && before.at !== null && at < before.at) continue;
-        const count = before ? joined(before, at, said) : 1;
+      for (const [id, read] of byPost(theses)) {
+        const seen = last.get(id);
+        const newest = Math.max(...read.keys());
+        // A post seen for the first time is one fill, on its newest row.
+        const counts = seen ? measure(seen, read) : new Map([[newest, 1]]);
+        const kept = seen?.rows ?? new Map<number, number | null>();
+        for (const [at, { said }] of read) kept.set(at, said);
+        for (const at of [...kept.keys()].sort((x, y) => x - y)) {
+          if (kept.size <= ROWS_KEPT) break;
+          if (!read.has(at)) kept.delete(at);
+        }
         last.delete(id);
-        last.set(id, { at, said });
-        if (!seeded || count === 0) continue;
-        const age = at === null ? null : nowSec - at;
-        // A minute of clock skew either way, and no further.
-        if (age !== null && age <= freshSec && age >= -60) {
-          rows.push(t);
-          fills += count;
+        last.set(id, { rows: kept, shown: new Set(read.keys()) });
+        if (!seeded) continue;
+        for (const [at, count] of counts) {
+          const age = nowSec - at;
+          // A minute of clock skew either way, and no further.
+          if (count > 0 && age <= freshSec && age >= -60) {
+            rows.push(read.get(at)!.row);
+            fills += count;
+          }
         }
       }
       seeded = true;
