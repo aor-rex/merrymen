@@ -123,14 +123,15 @@ import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeCons
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { publishesAView, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
-import { MarketReviewClock, reviewSource } from "./market-review";
+import { MarketReviewClock, quietReviewRow } from "./market-review";
+import { ChainCoinNames, makeDecisionNamer } from "./decision-name";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -6054,6 +6055,19 @@ async function main() {
     return coinDisplayName(watchTokens.find((t) => t.symbol === symbol));
   }
 
+  /**
+   * THE NAME EVERY DECISION ROW ABOUT A COIN IS WRITTEN WITH: the tape's, else
+   * the one this agent's buy used, else the coin's own contract — the one
+   * source a redeploy does not wipe. See decision-name.ts. Mainnet, like
+   * discovery's own reads of these tokens: a paper Trencher trades mainnet
+   * coins too. Bounded and cached there, so an exit waits at most once per
+   * coin for a word nobody prices against.
+   */
+  const coinNames = new ChainCoinNames((address) =>
+    mainnetClient().readContract({ address, abi: erc20Abi, functionName: "symbol" }),
+  );
+  const decisionName = makeDecisionNamer({ watchTokens: () => watchTokens, ledger: displayNameFor, chain: coinNames });
+
   async function maybePost(decisionId: string, status: string): Promise<void> {
     try {
       // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
@@ -6265,13 +6279,9 @@ async function main() {
       // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN. A held coin
       // drops off the qualified list and discovery then labels it with its
       // own id, so an exit written after that carried no name and published
-      // "sell TA151B4A9E1B 5.01 USDG". The name its buy used is still in this
-      // ledger; see displayNameFor.
-      display_name: await displayNameFor(
-        active.agentId,
-        known?.symbol ?? d.symbol ?? "",
-        displayNameOf(known?.symbol ?? d.symbol ?? ""),
-      ),
+      // "sell TA151B4A9E1B 5.01 USDG" — and after a redeploy the buy's row
+      // is gone too. See decisionName.
+      display_name: await decisionName(active.agentId, known?.symbol ?? d.symbol ?? ""),
       action: known?.action ?? d.action,
       size_usdg: d.sizeUsdg,
       reason,
@@ -10064,19 +10074,11 @@ async function main() {
       const review = quote && fresh ? clock.prepare(quote, reviewPreparationMs,
         history?.read ? history.points.map(p => ({ at: p.at, priceUsd: p.px })) : [], now) : null;
       const id = newDecisionId();
-      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED. An unchanged review is
-      // one shared oracle series restated, and filing it publicly put the same
-      // line under every quiet agent every five minutes; see reviewSource.
-      await addDecision({ id, agent_id: agentId,
-        source: review ? reviewSource(review) : "research-unavailable", provenance: "deterministic-strategy",
-        // THE QUOTE THE REVIEW WAS WRITTEN AT, so a published one can say
-        // "+x% since posted". Only with a review: one exists only for a fresh,
-        // unstale quote, and "research unavailable" saw no market to mark.
-        mark_usd: review && quote ? quote.priceUsd : null,
-        ...(review ?? { action: "hold", symbol: focus?.symbol,
-          reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
-          evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
-      });
+      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED, and with the quote it
+      // was written at as its mark — see quietReviewRow, where a test runs it.
+      await addDecision(quietReviewRow({
+        id, agentId, review, quote, focusSymbol: focus?.symbol, historyRead: history?.read ?? false,
+      }));
       // Failed persistence leaves this decision due for the next tick.
       if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
         if (quote) clock.recorded(quote, review);
@@ -10577,17 +10579,11 @@ async function main() {
               {
                 tier: "pulse",
                 // The coin's own name, so the feed can say what was traded
-                // instead of printing eleven hex at a reader. Display only.
-                // The tape's, or — for a held coin the tape no longer labels,
-                // whose every review went out unnamed — the one its buy used.
-                displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)),
-                // THE COIN'S SIZE, from the same tape this review just read, so
-                // a trade can say "at $3.1M MC". It is GeckoTerminal's fdv_usd
-                // — price times TOTAL supply — which is the figure a memecoin
-                // trader quotes as its cap; the tape carries no circulating
-                // count to do better with. Absent tape, absent figure — never
-                // a zero.
-                mcapUsd: tape?.fdvUsd ?? null,
+                // instead of printing eleven hex at a reader, and its size
+                // from the same tape this review just read, so a trade can
+                // say "at $3.1M MC". Display only; see reviewRecord and
+                // decisionName.
+                ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol), tape }),
                 triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
               }); },
               m => console.log(`[trencher] ${m}`));
@@ -10597,8 +10593,8 @@ async function main() {
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
             // The coin's name when the focus is a discovered coin; a stock has
-            // none, and this is null for it. Display only.
-            { displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)) },
+            // none, and this is null for it. No tape on this path, so no size.
+            reviewRecord({ displayName: await decisionName(agentId, focus.symbol) }),
           );
           nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);

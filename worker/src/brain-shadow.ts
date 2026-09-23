@@ -388,6 +388,29 @@ export async function runShadow(
   return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now, options.triggers) };
 }
 
+/**
+ * WHAT A REVIEW IS RECORDED WITH, from what the caller already holds — the
+ * `displayName` and `mcapUsd` runShadow's options carry to the decision row.
+ *
+ * Built here rather than inline in the tick, where no test could reach it:
+ * both of the tick's Brain call sites spread this, so a review of a coin the
+ * tape sized says "at $3.1M MC" and one the tape did not says nothing.
+ *
+ * THE MARKET CAP IS GECKOTERMINAL'S fdv_usd — price times TOTAL supply — which
+ * is the figure a memecoin trader quotes as its cap; the tape carries no
+ * circulating count to do better with. Absent tape, or a tape that did not
+ * size the coin, is ABSENT — never a zero. persistBrainDecision refuses a
+ * non-positive one as well.
+ */
+export function reviewRecord(args: {
+  /** Display only; see decision-name.ts for where it comes from. */
+  displayName: string | null;
+  /** The tape entry this review read, when it had one. */
+  tape?: { fdvUsd: number | null } | null;
+}): { displayName: string | null; mcapUsd: number | null } {
+  return { displayName: args.displayName, mcapUsd: args.tape?.fdvUsd ?? null };
+}
+
 /** Parse a stored blob, or say it is unusable. A partial state is not a state. */
 function readTriggerState(raw: Record<string, unknown> | null): TriggerState | null {
   if (!raw || typeof raw !== "object") return null;
