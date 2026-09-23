@@ -33,6 +33,10 @@ import { dashboardBase, readReport, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
 import { loadGrantFile } from "../grant";
 import { signDecision, signKeyboard, signNeed, signPromptText, signUrl } from "./sign-prompt";
+import { bookAddresses } from "../custody";
+import { mainnetClient } from "../snapshot";
+import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
+import { dollars } from "./trade-rows";
 import type { StateRef, Watcher } from "./state";
 
 export interface AlertInputs {
@@ -180,6 +184,15 @@ interface TradeRowLite {
   fill_side?: string | null;
   fill_cash_usdg?: number | null;
   realized_pnl_usdg?: number | null;
+  /** The two token legs — the non-cash one is the coin (token-label.ts). */
+  sell_token?: string | null;
+  buy_token?: string | null;
+}
+
+/** What a ping says the trade was in: the coin's name and the side. */
+export interface TradeCoin {
+  label: string;
+  side: "buy" | "sell" | null;
 }
 
 /**
@@ -190,7 +203,24 @@ interface TradeRowLite {
  */
 const TRADE_PING_COLUMNS =
   "id, kind, amount_usdg, status, reject_rule, tx_hash, decision_id, " +
-  "target, fill_side, fill_cash_usdg, realized_pnl_usdg";
+  "target, fill_side, fill_cash_usdg, realized_pnl_usdg, sell_token, buy_token";
+
+/**
+ * The coin a ping row was in, named — never the router or vault in `target`.
+ * Null when the row has no coin leg (a transfer, a vault move). Never throws:
+ * a name is decoration on a receipt that is already correct without it.
+ */
+async function coinFor(db: DatabaseSync, t: TradeRowLite, agentId: string | null, cfg: ResolvedConfig): Promise<TradeCoin | null> {
+  try {
+    const token = nonCashLeg(t);
+    if (!token) return null;
+    const own = agentId ? bookAddresses(loadGrantFile(), agentId) : [];
+    const lbl = await tokenLabel(db, agentId, token, { customTokens: cfg.customTokens, own, client: mainnetClient(), timeoutMs: 2_500 });
+    return { label: labelText(lbl), side: sideOf(t) };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The P&L card for a row that closed something, or nothing at all.
@@ -211,9 +241,11 @@ async function sendCardFor(
    * numbers with nothing saying which position closed.
    */
   withCaption: boolean,
+  /** The coin's name. Without one there is no card — never an address. */
+  coin?: string | null,
 ): Promise<void> {
   try {
-    const card = pnlCardFromFill(row);
+    const card = pnlCardFromFill(row, coin);
     if (!card) return;
     await sendPnlPhoto({ token }, chatId, card, withCaption ? undefined : "");
   } catch {
@@ -293,17 +325,34 @@ export function tradeWhyEvidence(
  * it a parameter is what lets the dedupe live in the poll loop while this stays
  * a pure function of a row.
  */
-export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy = false): string {
+export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy = false, coin: TradeCoin | null = null): string {
+  // WHAT MOVED, IN DOLLARS: the fill's own cash when there is one, else the
+  // intended size. A leftover worth a fraction of a cent reads "<$0.01", not
+  // "0.00", which looked like a trade of nothing.
+  const cash = t.fill_cash_usdg ?? t.amount_usdg;
+  const name = coin ? esc(coin.label) : null;
+  const what = coin?.side === "buy" ? "Bought" : coin?.side === "sell" ? "Sold" : null;
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
-        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">proof — view on the explorer ↗</a>`
+        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">see it on the explorer ↗</a>`
         : `\n<code>${esc(t.tx_hash)}</code>`
       : "";
-    return `🏹 loosed an arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG landed${proof}`;
+    const result =
+      coin?.side === "sell" && t.realized_pnl_usdg != null
+        ? ` (${t.realized_pnl_usdg >= 0 ? "+" : "−"}${dollars(Math.abs(t.realized_pnl_usdg))})`
+        : "";
+    if (name && coin?.side === "sell" && cash > 0 && cash < 0.005) {
+      return `✅ Sold the leftover ${name} — worth less than a cent${proof}`;
+    }
+    if (name && what) return `✅ ${what} ${name} for ${dollars(cash)}${result}${proof}`;
+    return `✅ A trade went through — ${dollars(cash)}${proof}`;
   }
   if (t.status === "paper") {
-    return `📜 paper arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG filled at the live price (simulated, nothing signed)`;
+    if (name && what) {
+      return `📜 Practice: ${what.toLowerCase()} ${name} for ${dollars(cash)} at the live price — no real money moved`;
+    }
+    return `📜 Practice trade of ${dollars(cash)} at the live price — no real money moved`;
   }
   if (t.status === "rejected") {
     // A SPONSOR FAILURE IS NOT A WALL REFUSAL. The wall is the owner's own
@@ -332,11 +381,12 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     const label = rejectRuleLabel(t.reject_rule);
     const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
     const slug = t.reject_rule ?? "policy";
+    const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
     if (!label) {
-      return `🛡 the wall turned back a ${esc(t.kind)} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+      return `🛡 the wall turned back a ${thing} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
     }
     return (
-      `🛡 the wall turned back a ${esc(t.kind)} — ${esc(label)}.` +
+      `🛡 the wall turned back a ${thing} — ${esc(label)}.` +
       `${fix ? ` ${esc(fix)}` : ""}` +
       ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(slug)})`
     );
@@ -353,7 +403,8 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
       ? ` — ${esc(revertLabel)} (${esc(t.reject_rule)})`
       : ` — ${esc(t.reject_rule)}`
     : "";
-  return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
+  const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+  return `⚠️ a ${thing} for ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
 interface TradeAgg {
@@ -434,7 +485,8 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             const prev = deps.stateRef.get();
             const rule = t.status === "rejected" ? t.reject_rule : null;
             const withRemedy = rule !== null && rule !== prev.lastRemedyRule;
-            const receipt = tradeLine(t, explorer, withRemedy);
+            const coin = await coinFor(db, t, agentId, cfg);
+            const receipt = tradeLine(t, explorer, withRemedy, coin);
             /**
              * AND THEN, FOR A TRADE THAT ACTUALLY HAPPENED, WHY.
              *
@@ -462,7 +514,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // AND THE PICTURE, when this row closed something at a knowable
             // P&L. After the receipt on purpose: the text is the record and
             // goes out whatever happens to the image.
-            await sendCardFor(t, token, chatId, false);
+            await sendCardFor(t, token, chatId, false, coin?.label);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: t.id,
@@ -493,7 +545,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
                   "ORDER BY id ASC LIMIT 10",
               )
               .all(st.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
-            for (const t of closes) await sendCardFor(t, token, chatId, true);
+            for (const t of closes) await sendCardFor(t, token, chatId, true, (await coinFor(db, t, agentId, cfg))?.label);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: Math.max(st.lastNotifiedTradeId, maxRow?.m ?? st.lastNotifiedTradeId),

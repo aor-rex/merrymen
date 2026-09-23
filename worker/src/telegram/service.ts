@@ -48,6 +48,9 @@ import { specFor, stockSymbols, validStoredSetting } from "./setting-spec";
 import { signKeyboard, signUrl } from "./sign-prompt";
 import { confirmKeyboard, mintNonce, parseConfirmData } from "./buttons";
 import { BUILTIN_STRATEGIES } from "../strategies/registry";
+import { bookAddresses } from "../custody";
+import { mainnetClient } from "../snapshot";
+import type { TradeViewOpts } from "./trade-rows";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -264,6 +267,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * How a trade list reaches coin names: the owner's own added tokens, their
+   * account and vaults (which are never a coin, and which a receipt is netted
+   * over), and the chain for whatever the local ledger cannot name.
+   */
+  const tradeLookup = (cfg: ResolvedConfig): TradeViewOpts => {
+    const grant = loadGrantFile();
+    const agentId = deps.buildStatusContext().agentId ?? grant?.smartAccount ?? null;
+    return {
+      customTokens: cfg.customTokens,
+      book: agentId ? bookAddresses(grant, agentId) : undefined,
+      client: mainnetClient(),
+    };
+  };
+
+  /**
    * The capabilities one chat message may use, bound to WHO sent it.
    *
    * A factory rather than an object built inside `handle`, because a button
@@ -330,7 +348,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         positions: () => readPositions(statusCtx().agentId),
         depth: (symbol: string) => deps.readDepth(symbol),
         pnl: () => readPnl(statusCtx().agentId),
-        trades: () => readTrades(statusCtx().agentId),
+        // Names from the ledger first, then the chain — including the coin in a
+        // row re-recorded after a restart, which only its receipt still knows.
+        trades: () => readTrades(statusCtx().agentId, tradeLookup(cfg)),
         report: () => readReport(statusCtx()),
         brag: () => readBrag(statusCtx()),
         // NEVER WIRED, SO NEVER CALLED. `readWallet` has existed and been
@@ -801,7 +821,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // and has no use for recalled detail. Keeping memory out of this call also
         // means a remembered line can never nudge routing toward a trade.
         const identity = identityBlock(st.linkedAt, st.messageCount, now());
-        const liveState = readLlmState(statusCtx());
+        const liveState = await readLlmState(statusCtx());
         const routeCtx = { state: `SOUL:\n${identity}\n\n${liveState}`, history: await historyFor(msg.chatId) };
         const r = await interpretWithLlm(msg.text, routeCtx, llm);
         cmd = r.cmd;

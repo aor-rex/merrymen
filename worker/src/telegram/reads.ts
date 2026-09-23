@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+import { loadTradeViews, renderTradeList, type TradeViewOpts } from "./trade-rows";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
@@ -378,29 +379,19 @@ export function readPnl(passedId?: string | null): string {
   }
 }
 
-export function readTrades(agentId?: string | null): string {
+/**
+ * /trades — each row with the coin it was in, bought or sold, the dollars that
+ * actually moved, and its real time (trade-rows.ts). `opts.client` lets it ask
+ * the chain for names the ledger lacks and for rows re-recorded after a
+ * restart; without it, local names only.
+ */
+export async function readTrades(agentId?: string | null, opts: TradeViewOpts = {}): Promise<string> {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
     const who = resolveAgent(db, agentId);
     if (!who) return "🧾 no trades yet.";
-    const rows = db
-      .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 8",
-      )
-      .all(who) as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
-    if (!rows.length) return "🧾 no trades yet.";
-    const icon = (s: string) => (s === "landed" ? "✅" : s === "rejected" ? "🚫" : "⚠️");
-    const body = rows
-      // Words, not the slug — same vocabulary as the feed, the chat and the
-      // push. A list of refusals reading `(no-exit) (no-exit) (no-exit)` tells
-      // an owner how OFTEN it happened and nothing about what it was.
-      .map(
-        (r) =>
-          `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(rejectRuleLabel(r.reject_rule) ?? r.reject_rule ?? "")})` : ""} · ${r.at}`,
-      )
-      .join("\n");
-    return `🧾 <b>recent trades</b>\n${body}`;
+    return renderTradeList(await loadTradeViews(db, who, { limit: 8, ...opts }));
   } catch {
     return "🧾 no trades yet.";
   } finally {
@@ -783,7 +774,7 @@ export function readRecentEvents(agentId?: string | null, limit = 5): string {
  * The full state pack for natural-language chat: status + positions + P&L +
  * recent trades + recent events, tags stripped (the model gets plain text).
  */
-export function readLlmState(ctx: StatusContext): string {
+export async function readLlmState(ctx: StatusContext): Promise<string> {
   const strip = (s: string) => s.replace(/<[^>]+>/g, "");
   return [
     strip(readStatus(ctx)),
@@ -792,7 +783,7 @@ export function readLlmState(ctx: StatusContext): string {
     "",
     strip(readPnl(ctx.agentId)),
     "",
-    strip(readTrades(ctx.agentId)),
+    strip(await readTrades(ctx.agentId)),
     "",
     "RECENT EVENTS:",
     readRecentEvents(ctx.agentId, 5),
