@@ -19,16 +19,26 @@ export function trendOf(prev: number | null | undefined, next: number | null | u
 }
 
 /**
- * The direction of the LAST change this component saw, or null until it has
- * seen one. Remembered from the previous render rather than an effect, so the
+ * The direction of the LAST change this component SHOWED, or null until it has
+ * shown one. Remembered from the previous render rather than an effect, so the
  * flip plays in the same frame the new figure is drawn in.
+ *
+ * A MOVE IS ONLY A MOVE WHEN THE TEXT MOVED. The value carries more precision
+ * than the figure prints: a quote mid going from 250.1212 to 250.1234 is up, and
+ * "$250.12" both times. Driven by the value alone, the same figure switched to
+ * the up class and the stylesheet played a slide and a green tint over digits
+ * that had not changed — and a turn in the fourth decimal played a fall. So
+ * while the text stands still the trend stands still too: nothing on the figure
+ * changes, and nothing plays. The value is still remembered, so the next move
+ * that does reach the digits is measured from the latest reading.
  */
-export function useTrend(value: number | null): Trend {
-  const [seen, setSeen] = useState<{ value: number | null; trend: Trend }>({ value, trend: null });
-  if (!Object.is(seen.value, value)) {
+export function useTrend(value: number | null, text: string): Trend {
+  const [seen, setSeen] = useState<{ value: number | null; text: string; trend: Trend }>({ value, text, trend: null });
+  if (seen.text !== text) {
     const trend = trendOf(seen.value, value);
-    setSeen({ value, trend });
+    setSeen({ value, text, trend });
     return trend;
   }
+  if (!Object.is(seen.value, value)) setSeen({ ...seen, value });
   return seen.trend;
 }

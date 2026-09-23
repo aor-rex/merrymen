@@ -55,6 +55,58 @@ describe("a moving figure on screen", () => {
     }
   });
 
+  it("A MOVE THE DIGITS DO NOT SHOW IS NOT PLAYED — neither a flip nor a tint", async () => {
+    // The quote mid moves in the fourth decimal; the price prints two. Driven
+    // by the raw value, the same keyed span switched class and data-trend, the
+    // stylesheet started the slide and the colour, and the screen showed a
+    // move over digits that had not changed.
+    const t = testDom();
+    const { MovingFigure } = await import("./ui");
+    const at = (value: number, text: string) => createElement(MovingFigure, { value, text });
+    const span = () => t.container.querySelector(".flip-slot > span")!;
+    const trend = () => t.container.querySelector(".flip-slot")!.getAttribute("data-trend");
+    try {
+      await t.render(at(250.1212, "$250.12"));
+      await t.render(at(250.1234, "$250.12"));
+      assert.equal(span().className, "flip-still", "up in the fourth decimal, the same on screen");
+      assert.equal(trend(), null);
+
+      await t.render(at(251.004, "$251.00"));
+      assert.equal(span().className, "flip", "a move the digits show still plays");
+      assert.equal(trend(), "up");
+      const drawn = span();
+      await t.render(at(250.998, "$251.00"));
+      assert.equal(span(), drawn, "the same figure, not a new one");
+      assert.equal(span().className, "flip", "a turn below what is printed does not play a fall");
+      assert.equal(trend(), "up");
+
+      await t.render(at(250.5, "$250.50"));
+      assert.equal(span().className, "flip rev", "and the fall the digits do show is a fall");
+      assert.equal(trend(), "down");
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a first reading that prints what was already shown still counts as a reading", async () => {
+    // The Token strip prints the chart's last close while the live price is
+    // unread, so the first live reading can land on the same text. It is a
+    // reading all the same: the next move that reaches the digits flips.
+    const t = testDom();
+    const { MovingFigure } = await import("./ui");
+    const at = (value: number | null, text: string) => createElement(MovingFigure, { value, text });
+    const cls = () => t.container.querySelector(".flip-slot > span")!.className;
+    try {
+      await t.render(at(null, "$5.00"));
+      await t.render(at(5.001, "$5.00"));
+      assert.equal(cls(), "flip-still");
+      await t.render(at(5.1, "$5.10"));
+      assert.equal(cls(), "flip");
+    } finally {
+      await t.close();
+    }
+  });
+
   it("the balance flips only when the balance changes", async () => {
     const t = testDom();
     const { BalanceFigure } = await import("./studio");

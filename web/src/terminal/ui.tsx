@@ -156,9 +156,12 @@ export function Flip({ text, dir = null, children }: { text: string; dir?: Trend
   );
 }
 
-/** A figure that flips when its value moves between two readings — see motion.ts. */
+/**
+ * A figure that flips when its value moves between two readings AND the move
+ * reaches the text on screen — see motion.ts.
+ */
 export function MovingFigure({ value, text, children }: { value: number | null; text: string; children?: ReactNode }) {
-  const dir = useTrend(value);
+  const dir = useTrend(value, text);
   return (
     <Flip text={text} dir={dir}>
       {children}
