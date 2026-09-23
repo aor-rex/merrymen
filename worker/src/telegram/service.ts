@@ -406,7 +406,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           const ev = readWhyEvidence(statusCtx().agentId);
           const llm = resolveLlm(cfg);
           if (!ev.hasTrade || !llm) return ev.text;
-          return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
+          // Model text, sent as HTML: escaped, or a "<" in it (or in a
+          // decision's reason it quotes) makes Telegram refuse the message.
+          const plain = ev.text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+          return esc(await narrateWhy(plain, llm));
         },
         settings: () => settingsListText(cfg as unknown as Record<string, unknown>),
       },

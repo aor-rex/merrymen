@@ -90,6 +90,14 @@ export interface TradeViewOpts {
   client?: Pick<PublicClient, "readContract" | "getTransactionReceipt" | "getBlock"> | null;
 }
 
+/**
+ * A trade sent before a restart whose outcome no record kept — the old run
+ * died before it saw the receipt, and nothing since has matched it. Only
+ * trades carried over a redeploy are ever marked so; "waiting to confirm"
+ * would be a promise nothing is going to keep.
+ */
+export const UNCONFIRMED = "unconfirmed";
+
 const FILLED = new Set(["landed", "paper"]);
 const REFUSED = new Set(["rejected", "reverted"]);
 
@@ -233,10 +241,19 @@ export function tradeViewLine(v: TradeView, html: boolean): string {
     const why = v.refusal ? ` — ${e(v.refusal)}` : "";
     return `${v.status === "rejected" ? "🚫 blocked" : "⚠️ failed"}: ${what}, ${e(dollars(v.usdg))}${why} · ${when(v.at)}`;
   }
-  const paper = v.status === "paper" ? " (practice)" : v.status === "submitted" ? " (waiting to confirm)" : "";
+  const paper =
+    v.status === "paper"
+      ? " (practice)"
+      : v.status === "submitted"
+        ? " (waiting to confirm)"
+        : v.status === UNCONFIRMED
+          ? " (sent before a restart — how it ended isn't on record)"
+          : "";
   const result = v.realized !== null && v.side === "sell" ? ` (${e(signed(v.realized))})` : "";
   const time = v.atIsRestart ? `recorded ${when(v.at)} after a restart` : when(v.at);
-  return `${v.status === "landed" ? "✅" : v.status === "paper" ? "📜" : "⏳"} ${verb(v)} ${coin} for ${e(dollars(v.usdg))}${result}${paper} · ${time}`;
+  const icon = v.status === "landed" ? "✅" : v.status === "paper" ? "📜" : v.status === UNCONFIRMED ? "❔" : "⏳";
+  const doing = v.status === UNCONFIRMED ? (v.side === "sell" ? "tried to sell" : v.side === "buy" ? "tried to buy" : "tried to trade") : verb(v);
+  return `${icon} ${doing} ${coin} for ${e(dollars(v.usdg))}${result}${paper} · ${time}`;
 }
 
 /** The /trades message. */
