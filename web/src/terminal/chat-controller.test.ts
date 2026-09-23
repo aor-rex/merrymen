@@ -17,12 +17,13 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import React, { act, createElement } from "react";
 import { autonomyOf } from "@merrymen/core";
+import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
 import { useChatController, type ChatController } from "./chat-controller";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
-import { json, testDom } from "./test-dom";
+import { deferred, json, testDom } from "./test-dom";
 
 const KEY = "merrymen.chat.self";
 const ORDER_ID = "0123456789abcdef0123456789abcdef";
@@ -49,6 +50,7 @@ beforeEach(() => {
   calls = [];
   routes = {
     "GET /api/settings": () => json({ values: { liveTradingEnabled: true }, defaults: { telegramMaxActionUsdg: 25 } }),
+    "GET /api/orders/ceiling": () => json({ ceilingUsdg: 25 }),
   };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -84,6 +86,8 @@ function Harness(p: {
   chatKey?: string | null;
   open?: boolean;
   show?: boolean;
+  /** Two Agent screens on one controller — desktop's /agent body and its dock, both open. */
+  twice?: boolean;
   moves?: Thesis[] | null;
   perTrade?: number | null;
   onOutcome?: () => void;
@@ -96,27 +100,29 @@ function Harness(p: {
     deps: { sleep: () => new Promise((r) => setTimeout(r, 1)) },
   });
   chat = c;
+  const screen = (key: string) =>
+    createElement(Agent, {
+      key,
+      mine: MINE,
+      tokens: [],
+      perTrade: p.perTrade === undefined ? 10 : p.perTrade,
+      perDay: 50,
+      stopped: false,
+      chat: c,
+      onToken: noop,
+      onDeposit: noop,
+      onWithdraw: noop,
+      onLimits: noop,
+      onResign: noop,
+      onSettings: noop,
+      liveBlocker: null,
+    });
   return createElement(
     "div",
     null,
     createElement("i", { "data-unread": String(c.unread) }),
-    p.show === false
-      ? null
-      : createElement(Agent, {
-          mine: MINE,
-          tokens: [],
-          perTrade: p.perTrade === undefined ? 10 : p.perTrade,
-          perDay: 50,
-          stopped: false,
-          chat: c,
-          onToken: noop,
-          onDeposit: noop,
-          onWithdraw: noop,
-          onLimits: noop,
-          onResign: noop,
-          onSettings: noop,
-          liveBlocker: null,
-        }),
+    p.show === false ? null : screen("body"),
+    p.twice ? screen("dock") : null,
   );
 }
 const h = (p: Parameters<typeof Harness>[0] = {}) => createElement(Harness, p);
@@ -240,7 +246,9 @@ describe("sending feels instant", () => {
 });
 
 describe("when the reply does not come", () => {
-  it("A PAGE THAT IS NOT JSON IS SAID AS THE AGENT, WITH A RETRY, and the words come back", async () => {
+  it("A GATEWAY PAGE IS SAID AS THE SERVER'S, NOT AS A GARBLED ANSWER — with a Retry, and the words come back", async () => {
+    // The agent did not answer a 502. "I answered, but it arrived garbled"
+    // was a false sentence to the owner, and a test used to insist on it.
     let n = 0;
     routes["POST /api/chat"] = () =>
       ++n === 1
@@ -249,12 +257,13 @@ describe("when the reply does not come", () => {
     await ui.render(h());
     await settle();
     await typeAndSend("Are you there?");
-    await until(() => /arrived garbled/.test(text()), "the failure, in the agent's voice");
-    assert.doesNotMatch(text(), /Unexpected token|SyntaxError|DOMException/, "never the raw error");
+    await until(() => /the server said 502/.test(text()), "the failure, in the agent's voice");
+    assert.doesNotMatch(text(), /I answered|garbled/);
+    assert.doesNotMatch(text(), /Unexpected token|SyntaxError|DOMException|Bad Gateway/, "never the raw error");
     assert.equal(textarea().value, "Are you there?", "the draft is restored");
     await ui.click("Retry");
     await until(() => /Back with you\./.test(text()), "the retry's answer");
-    assert.doesNotMatch(text(), /arrived garbled/, "the failure gives way to the answer");
+    assert.doesNotMatch(text(), /the server said/, "the failure gives way to the answer");
     const asked = Array.from(ui.container.querySelectorAll(".desk-question")).filter((q) => q.textContent === "Are you there?");
     assert.equal(asked.length, 1, "one question, asked twice, is one line");
     assert.equal(textarea().value, "", "and the restored draft is spent");
@@ -268,8 +277,44 @@ describe("when the reply does not come", () => {
     await ui.render(h());
     await settle();
     await typeAndSend("hello");
-    await until(() => /arrived garbled/.test(text()), "the failure");
+    await until(() => /an answer back that I can't read/.test(text()), "the failure");
     assert.doesNotMatch(text(), /Send everything/);
+  });
+
+  it("AN ERROR THE ROUTE SENT AS JSON IS STILL THE SERVER'S, not a garbled answer", async () => {
+    for (const status of [500, 429]) {
+      routes["POST /api/chat"] = () => json({ error: "boom" }, status);
+      await ui.render(h());
+      await settle();
+      await typeAndSend(`status ${status}?`);
+      await until(() => new RegExp(`the server said ${status}`).test(text()), String(status));
+      assert.doesNotMatch(text(), /boom|garbled|I answered/);
+    }
+  });
+
+  it("A REJECTED KEY IS SAID AS ONE — no transcript, no Retry it cannot answer", async () => {
+    // Driven through the real route with a provider that refuses the key, and
+    // read by the real browser reader: the reviewer's case, end to end.
+    const refuse = (e: Error): Handler => (_url, init) =>
+      agentReplyResponse(JSON.parse(String(init!.body)) as AgentChatBody, { stream: true }, {
+        credentials: () => ({ provider: "groq", transport: "openai", baseUrl: "https://example.com/v1", model: "m", apiKey: "k", vision: false }),
+        stream: async () => {
+          throw e;
+        },
+      });
+    routes["POST /api/chat"] = refuse(new Error("groq 401 — invalid_api_key: Invalid API Key"));
+    await ui.render(h());
+    await settle();
+    await typeAndSend("hello?");
+    await until(() => /Groq refused the API key/.test(text()), "the refusal, named");
+    assert.doesNotMatch(text(), /invalid_api_key|401|it said|moment/);
+    assert.equal(buttons("Retry").length, 0, "asking again cannot fix a key");
+    assert.equal(textarea().value, "hello?", "the words still come back");
+    // A rate limit is the other kind: it passes, so it is offered.
+    routes["POST /api/chat"] = refuse(new Error("groq 429 — rate_limit_exceeded: slow down"));
+    await typeAndSend("hello again?");
+    await until(() => /rate-limited by Groq/.test(text()), "the rate limit");
+    assert.equal(buttons("Retry").length, 1);
   });
 
   it("A RETRY PUTS THE QUESTION ONCE — the model does not hear it twice", async () => {
@@ -277,7 +322,11 @@ describe("when the reply does not come", () => {
     // that line in the history, the model read it as asked twice in a row.
     let n = 0;
     routes["POST /api/chat"] = () =>
-      ++n === 1 ? json({ reply: "Hello." }) : n === 2 ? json({ reply: null, why: "llm-error" }) : json({ reply: "Here." });
+      ++n === 1
+        ? json({ reply: "Hello." })
+        : n === 2
+          ? json({ reply: null, why: "llm-error", kind: "provider-down", provider: "Groq" })
+          : json({ reply: "Here." });
     await ui.render(h());
     await settle();
     await typeAndSend("hi");
@@ -305,7 +354,7 @@ describe("when the reply does not come", () => {
     const cases: [Handler, RegExp][] = [
       [() => json({ reply: null, why: "not signed in" }, 401), /sign-in has lapsed/],
       [() => json({ reply: null, why: "no-llm" }), /Connect an AI provider in Settings/],
-      [() => json({ reply: null, why: "llm-error", detail: "groq 429 — rate limited" }), /groq 429 — rate limited/],
+      [() => json({ reply: null, why: "llm-error", kind: "rate-limited", provider: "Groq", detail: "groq 429 — rate limited" }), /rate-limited by Groq/],
       [() => { throw new TypeError("Failed to fetch"); }, /connection dropped/],
     ];
     await ui.render(h());
@@ -314,7 +363,7 @@ describe("when the reply does not come", () => {
       routes["POST /api/chat"] = handler;
       await typeAndSend("hello?");
       await until(() => said.test(text()), String(said));
-      assert.doesNotMatch(text(), /Failed to fetch|TypeError/);
+      assert.doesNotMatch(text(), /Failed to fetch|TypeError|groq 429/);
       if (String(said).includes("AI provider")) {
         assert.ok(ui.container.querySelector('a[href="/settings"]'), "no brain points at the screen that fixes it");
       }
@@ -355,10 +404,10 @@ describe("chips", () => {
     assert.equal(count("POST", "/api/orders"), 0, "a chip places nothing");
   });
 
-  it("THE OWNER'S OWN CHAT CEILING CLAMPS when it is the smaller, over the house default", async () => {
-    // The sealed cap is 100 here, so only the ceiling the owner set can stop a
-    // chip offering a size the orders route would refuse.
-    routes["GET /api/settings"] = () => json({ values: { telegramMaxActionUsdg: 20 }, defaults: { telegramMaxActionUsdg: 25 } });
+  it("THE CHAT CEILING CLAMPS when it is the smaller", async () => {
+    // The sealed cap is 100 here, so only the chat ceiling can stop a chip
+    // offering a size the orders route would refuse.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 20 });
     routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
     await ui.render(h({ perTrade: 100 }));
     await settle();
@@ -368,6 +417,30 @@ describe("chips", () => {
       Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent),
       ["$5.00", "$10.00", "$20.00 (max)"],
     );
+  });
+
+  it("THE CEILING IS THE ONE THE ORDERS ROUTE ENFORCES, not the default the settings screen shows", async () => {
+    // /api/settings says 25 (SETTINGS_DEFAULTS); the route falls back to the
+    // house's own value, here 10 from its env. A "$25.00 (max)" chip was one
+    // the route refused.
+    routes["GET /api/settings"] = () => json({ values: {}, defaults: { telegramMaxActionUsdg: 25 } });
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("buy some");
+    await until(() => buttons("$10.00 (max)").length === 1, "the route's ceiling");
+    assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
+  });
+
+  it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
+    routes["GET /api/orders/ceiling"] = () => json({ error: "the ledger could not be read" }, 503);
+    routes["POST /api/chat"] = () => json({ reply: "How much?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("buy");
+    await until(() => /How much\?/.test(text()), "reply");
+    assert.ok(!Array.from(ui.container.querySelectorAll(".desk-prompts button")).some((b) => b.textContent?.startsWith("$")));
   });
 
   it("WITH THE CAP UNREAD NO AMOUNT IS OFFERED", async () => {
@@ -516,6 +589,45 @@ describe("an order's answer reaches the owner wherever they are", () => {
     assert.doesNotMatch(text(), /Done —/);
   });
 
+  it("A CONFIRMED SETTING SENDS ONLY THE DECLARED KEYS, through the route that already exists", async () => {
+    // Not a new write path: the same authenticated PUT the Settings screen
+    // uses, carrying nothing but what the command declares. The args come off
+    // the wire from a model whose context another agent can write into, so an
+    // extra key riding along must be dropped here — /api/settings strips the
+    // house-owned fields again on the server, the second of two gates.
+    routes["POST /api/chat"] = () =>
+      json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25, liveTradingEnabled: true, sponsorGasEnabled: true } } });
+    routes["PUT /api/settings"] = () => json({ ok: true });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("trade bigger");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Done —/.test(text()), "done");
+    const puts = calls.filter((c) => c.method === "PUT");
+    assert.equal(puts.length, 1);
+    assert.equal(puts[0]!.url, "/api/settings");
+    assert.deepEqual(puts[0]!.body, { buyPerTickUsdg: 25 });
+  });
+
+  it("A NAVIGATE COMMAND WRITES NOTHING on its way", async () => {
+    // A command that both moved you and wrote something would be two acts
+    // behind one sentence.
+    routes["POST /api/chat"] = () => json({ reply: "This way.", command: { id: "open-settings", args: {} } });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("where are my settings?");
+    await until(() => buttons("Take me there").length === 1, "the card");
+    const before = calls.length;
+    await ui.click("Take me there");
+    await settle();
+    assert.deepEqual(
+      calls.slice(before).filter((c) => c.method !== "GET"),
+      [],
+      "nothing written, nothing placed",
+    );
+  });
+
   it("a confirmed setting is said, and the settings are read again", async () => {
     routes["POST /api/chat"] = () => json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25 } } });
     routes["PUT /api/settings"] = () => json({ ok: true });
@@ -527,6 +639,131 @@ describe("an order's answer reaches the owner wherever they are", () => {
     await ui.click("Yes, do it");
     await until(() => /Done — Put \$25\.00 to work each time I trade\./.test(text()), "done");
     await until(() => count("GET", "/api/settings") > before, "re-read");
+  });
+});
+
+describe("an answer that never came back is not a refusal", () => {
+  /** The card for a buy, confirmed, with POST /api/orders answered by `placing`. */
+  async function confirmBuy(placing: Handler) {
+    routes["POST /api/chat"] = () => json({ reply: "Placing.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = placing;
+    await ui.render(h());
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+  }
+  const asksWhatIsOpen = () => calls.filter((c) => c.method === "GET" && c.url === "/api/orders").length;
+  const dropped: Handler = () => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  it("A PLACEMENT WHOSE ANSWER WAS LOST IS SAID AS UNKNOWN — and the card cannot place it again", async () => {
+    // The connection can drop after the server wrote the order. "That didn't
+    // go through: Failed to fetch" was raw exception text AND a claim nobody
+    // could make, persisted, with the card left ready for a one-tap repeat.
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(dropped);
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|TypeError|didn't go through/);
+    assert.match(text(), /Check your trades before asking again/);
+    assert.equal(buttons("Yes, do it").length, 0, "no one-tap repeat of an order that may exist");
+    assert.equal(asksWhatIsOpen(), 1, "it asked once what is open on the key");
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+
+  it("AND WHEN AN ORDER IS OPEN ON THE KEY, IT IS FOLLOWED to its answer", async () => {
+    routes["GET /api/orders"] = (url) =>
+      url.includes("?id=")
+        ? json({ id: ORDER_ID, state: "done", result: "bought 5.00 USDG of TSLA", receipt: FILLED })
+        : json({ id: ORDER_ID, state: "queued", expiresAt: Date.now() + 300_000 });
+    await confirmBuy(dropped);
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the order's own answer");
+    assert.match(text(), /there is an order open on my key/);
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through/);
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+
+  it("A PLACEMENT THAT SUCCEEDED UNREADABLY IS LOOKED FOR, not guessed at", async () => {
+    // A 200 is a row that exists; without its id it can only be found.
+    routes["GET /api/orders"] = (url) =>
+      url.includes("?id=")
+        ? json({ id: ORDER_ID, state: "done", result: "bought 5.00 USDG of TSLA", receipt: FILLED })
+        : json({ id: ORDER_ID, state: "running" });
+    await confirmBuy(() => new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }));
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the order's own answer");
+    assert.doesNotMatch(text(), /didn't go through|Cannot read/);
+  });
+
+  it("AN ORDER ALREADY ANSWERED IS NOT TAKEN FOR THIS ONE", async () => {
+    // The newest order being done says nothing about whether this placing
+    // made it — so it is not followed, and the owner is sent to look.
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "done", result: "sold 2.00 USDG of WIF" });
+    await confirmBuy(dropped);
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    await settle(10);
+    assert.doesNotMatch(text(), /order open on my key|sold 2\.00 USDG of WIF/);
+    assert.equal(calls.filter((c) => c.url.startsWith("/api/orders?id=")).length, 0, "nothing followed");
+  });
+
+  it("A GATEWAY PAGE FOR A PLACEMENT IS NOT THE ROUTE'S REFUSAL either", async () => {
+    // A 502 from a proxy says nothing about whether the row was written
+    // behind it; only a body the route wrote is its answer.
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(() => new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } }));
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /refused \(502\)|didn't go through/);
+    assert.equal(buttons("Yes, do it").length, 0);
+  });
+
+  it("a refusal the route DID write is still said with its reason, and the card stays", async () => {
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await confirmBuy(() => json({ error: "12 USDG is over your 10 USDG limit for a chat order." }, 400));
+    await until(() => /That didn't go through: 12 USDG is over your 10 USDG limit/.test(text()), "the refusal");
+    assert.equal(buttons("Yes, do it").length, 1);
+    assert.equal(asksWhatIsOpen(), 0, "a refusal is an answer: nothing to go and look for");
+  });
+
+  it("A SETTING WHOSE ANSWER WAS LOST IS SAID AS UNKNOWN, never as a raw error", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25 } } });
+    routes["PUT /api/settings"] = dropped;
+    await ui.render(h());
+    await settle();
+    const before = count("GET", "/api/settings");
+    await typeAndSend("trade bigger");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't tell whether that change was saved/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through|Done —/);
+    await until(() => count("GET", "/api/settings") > before, "and the settings are read again, to find out");
+  });
+
+  it("A SNIPE LOOKUP WHOSE ANSWER WAS LOST PLACED NOTHING, and says so", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = dropped;
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't look that coin up/.test(text()), "the honest line");
+    assert.doesNotMatch(text(), /Failed to fetch|didn't go through/);
+    assert.equal(count("POST", "/api/orders"), 0);
+    assert.equal(buttons("Yes, do it").length, 1, "a lookup places nothing, so asking again is one tap");
+  });
+
+  it("A SNIPE'S ORDER WHOSE ANSWER WAS LOST is an order like any other", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json({ outcome: "resolved", say: "PEPE is the one you mean.", target: { symbol: "PEPE" }, usdgAmount: 5 });
+    routes["POST /api/orders"] = dropped;
+    routes["GET /api/orders"] = () => json({ state: "none" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    assert.equal(buttons("Yes, do it").length, 0);
   });
 });
 
@@ -642,10 +879,154 @@ describe("the agent's own fills", () => {
     assert.equal(chat.messages.at(-1)!.text, "Still here.", "and the reply is the newest line");
   });
 
+  it("A PAPER FILL IS NOT ANNOUNCED — no line, no unread dot", async () => {
+    await ui.render(h({ moves: [fill(100)], open: false, show: false }));
+    await settle();
+    await ui.render(h({ moves: [fill(200, { paper: true }), fill(100)], open: false }));
+    await settle(10);
+    assert.doesNotMatch(text(), /Filled/);
+    assert.equal(unread(), "false");
+  });
+
+  it("A CHAT SELL IS ONE LINE, with the receipt's own figure", async () => {
+    // The reviewer's case, end to end: the receipt says what the sell
+    // returned, the tape says the order's size, and they are one trade.
+    const now = Math.floor(Date.now() / 1000);
+    let answered = false;
+    routes["POST /api/chat"] = () => json({ reply: "Selling.", command: { id: "sell", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () =>
+      json(
+        answered
+          ? { id: ORDER_ID, state: "done", result: "sold TSLA for 4.97 USDG", receipt: { ...FILLED, side: "sell", usdgActual: 4.97 } }
+          : { id: ORDER_ID, state: "running" },
+      );
+    await ui.render(h({ moves: [] }));
+    await settle();
+    await typeAndSend("sell $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed it —/.test(text()), "placed");
+    const tape = [fill(now + 1, { action: "sell", symbol: "TSLA", sizeUsdg: 5.01 })];
+    await ui.render(h({ moves: tape }));
+    await until(() => /· Filled/.test(text()), "the fill, off the tape");
+    answered = true;
+    await until(() => /sold TSLA for 4\.97 USDG/.test(text()), "the receipt");
+    await settle(5);
+    await ui.render(h({ moves: tape }));
+    await settle(5);
+    assert.equal((text().match(/· Filled/g) ?? []).length, 1, "one trade, one line");
+    assert.match(text(), /\$4\.97 TSLA · Filled/);
+    assert.doesNotMatch(text(), /\$5\.01/, "and one figure: the receipt's");
+  });
+
   it("with the tape unread, nothing is merged and no watermark is set", async () => {
     await ui.render(h({ moves: null }));
     await settle();
     assert.equal(localStorage.getItem(KEY), null);
     assert.equal(chat.messages.length, 0);
+  });
+});
+
+describe("one proposal is one order", () => {
+  const card = () => {
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    const held = deferred<Response>();
+    routes["POST /api/orders"] = () => held.promise;
+    return held;
+  };
+
+  it("THE CARD STAYS BUSY WHEN THE SCREEN COMES BACK — a second tap places nothing", async () => {
+    // The guard was the screen's own state and the proposal the App's, so a
+    // phone tab switch (or the dock closed with Escape and reopened) mid-POST
+    // brought the same card back ready, and a tap placed it again.
+    const held = card();
+    await ui.render(h());
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    assert.equal(buttons("Doing it…").length, 1);
+    await ui.render(h({ show: false }));
+    await ui.render(h());
+    await settle();
+    assert.equal(buttons("Yes, do it").length, 0, "the new mount knows the card is being carried out");
+    assert.equal(buttons("Doing it…").length, 1);
+    for (const b of Array.from(ui.container.querySelectorAll(".desk-confirm button")) as HTMLButtonElement[]) {
+      await act(async () => b.click());
+    }
+    held.resolve(json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 }));
+    await until(() => /Placed it —/.test(text()), "placed");
+    await settle();
+    assert.equal(count("POST", "/api/orders"), 1);
+    assert.equal((text().match(/Placed it —/g) ?? []).length, 1);
+  });
+
+  it("TWO SCREENS ON AT ONCE SHARE ONE GUARD", async () => {
+    // Desktop can draw the /agent body and the dock together, one proposal on
+    // both. Tapped on each, it is still one order.
+    const held = card();
+    await ui.render(h({ twice: true }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 2, "the card, on both screens");
+    await act(async () => {
+      for (const b of buttons("Yes, do it")) b.click();
+    });
+    held.resolve(json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 }));
+    await until(() => /Placed it —/.test(text()), "placed");
+    await settle();
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+});
+
+describe("nothing is done twice by accident", () => {
+  it("TWO SENDS BEFORE THE REPLY ARE ONE MESSAGE", async () => {
+    // A double tap on Send, both landing before the screen has redrawn with
+    // the typing bubble (and so before the button knows to disable itself):
+    // the second must not become a second question.
+    const s = stream();
+    routes["POST /api/chat"] = () => s.response;
+    await ui.render(h());
+    await settle();
+    await act(async () => chat.setDraft("hello there"));
+    await act(async () => {
+      const send = ui.container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+      send.click();
+      send.click();
+    });
+    s.done({ reply: "Hello." });
+    await until(() => /Hello\./.test(text()), "reply");
+    await settle();
+    assert.equal(count("POST", "/api/chat"), 1);
+    const asked = Array.from(ui.container.querySelectorAll(".desk-question")).filter((q) => q.textContent === "hello there");
+    assert.equal(asked.length, 1);
+  });
+
+  it("AN ORDER IS FOLLOWED ONCE, however often the kept orders change", async () => {
+    // Two orders can be kept at once — the slot is released at a deadline even
+    // when nothing answered. When one answers, the list changes and the follow
+    // effect runs again; the other must not gain a second follower, or its
+    // answer is said twice.
+    const A = "a".repeat(32);
+    const B = "b".repeat(32);
+    const until_ = Date.now() + 300_000;
+    localStorage.setItem(KEY, JSON.stringify({ v: 2, messages: [], orders: [{ id: A, until: until_ }, { id: B, until: until_ }], since: null }));
+    let bAnswered = false;
+    routes["GET /api/orders"] = (url) => {
+      const id = new URL(url, "https://app.example.test").searchParams.get("id");
+      if (id === A) return json({ id: A, state: "done", result: "sold 2.00 USDG of WIF" });
+      return json(bAnswered ? { id: B, state: "done", result: "bought 5.00 USDG of TSLA" } : { id: B, state: "running" });
+    };
+    let outcomes = 0;
+    await ui.render(h({ onOutcome: () => outcomes++ }));
+    await until(() => /sold 2\.00 USDG of WIF/.test(text()), "the first answer");
+    await settle(5);
+    bAnswered = true;
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the second answer");
+    await settle(10);
+    assert.equal((text().match(/bought 5\.00 USDG of TSLA/g) ?? []).length, 1, "said once");
+    assert.equal(outcomes, 2, "and the book re-read once per order");
   });
 });

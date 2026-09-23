@@ -23,7 +23,9 @@ import {
   newestAt,
   receiptParts,
   receiptText,
+  llmFailureOf,
   refocusAfterSend,
+  retryHelps,
   tradeKeyOf,
   turnsToMessages,
 } from "./chat-thread";
@@ -113,8 +115,16 @@ describe("the agent's own fills, merged into the thread", () => {
     assert.deepEqual(mergeFills([], tape, since), []);
   });
 
-  it("A PAPER FILL SAYS SO", () => {
-    assert.equal(mergeFills([], [move({ paper: true })], since)[0]!.text, "$5.00 CASHCAT · Filled on paper");
+  it("A PAPER FILL IS NOT ANNOUNCED AS A FILL", () => {
+    // The tape books a paper trade as "landed", and the thread read that as a
+    // fill: "$5.00 CASHCAT · Filled on paper" on a surface that reads as money,
+    // an unread dot for every practice trade, and a paper agent that trades
+    // every tick turning the eighty-line thread into a trade log. The worker's
+    // receipt refuses to call a paper trade "filled" for the same reason.
+    assert.deepEqual(mergeFills([], [move({ paper: true })], since), []);
+    assert.deepEqual(mergeFills([], [move({ paper: true, action: "sell" }), move({ paper: true, at: since + 5 })], since), []);
+    // And a real fill beside it still is one.
+    assert.equal(mergeFills([], [move({ paper: true, at: since + 5 }), move()], since).length, 1);
   });
 
   it("A CHAT ORDER'S RECEIPT IS THE SAME TRADE, not a second one", () => {
@@ -205,6 +215,99 @@ describe("the agent's own fills, merged into the thread", () => {
     const tx = "0x" + "cd".repeat(32);
     assert.equal(tradeKeyOf({ ...move(), txHash: tx } as Thesis), `tx:${tx}`);
     assert.equal(tradeKeyOf(move({ action: "hold" })), null);
+  });
+});
+
+describe("a chat SELL joins its fill too", () => {
+  // A sell's receipt and its tape row do not carry the same figure: the tape's
+  // size is the order's (amount_usdg), the receipt's is the cash the fill
+  // returned, or nothing when the cost was booked from the quote. The join
+  // demanded the two agree to the cent, so every sell was two "Filled" lines,
+  // sometimes with two different dollar figures.
+  const T = 1_800_000_000;
+  const since = T - 3_600;
+  const sold = (over: Partial<Thesis> = {}) => move({ action: "sell", symbol: "TSLA", sizeUsdg: 5.01, at: T, ...over });
+  const placed = msg({ id: "p", at: T * 1000 - 60_000, text: "Placed it — sell TSLA.", order: { id: "abc" } });
+  const answer = (over: Partial<OrderReceipt> = {}, at = T * 1000 + 20_000) =>
+    msg({ id: "o", at, text: "sold TSLA", order: { id: "abc", receipt: receipt({ side: "sell", symbol: "TSLA", usdgActual: null, ...over }) } });
+  const events = (m: ChatMessage[]) => m.filter((x) => x.role === "event");
+
+  it("A QUOTE-BOOKED SELL IS ONE LINE — its receipt names no figure", () => {
+    const merged = mergeFills([placed, answer()], [sold()], since);
+    assert.equal(events(merged).length, 0, "no second line");
+    assert.equal(merged[1]!.trade?.symbol, "TSLA", "the receipt holds the fill's card");
+  });
+
+  it("A RECEIPT-BOOKED SELL IS ONE LINE, whatever its figure says", () => {
+    const merged = mergeFills([placed, answer({ usdgActual: 4.97 })], [sold()], since);
+    assert.equal(events(merged).length, 0);
+    assert.ok(merged[1]!.tradeKey);
+  });
+
+  it("AND WHEN THE TAPE SHOWS IT FIRST, the receipt absorbs it", () => {
+    const tapeFirst = mergeFills([placed], [sold()], since);
+    assert.equal(events(tapeFirst).length, 1);
+    const after = absorbFill([...tapeFirst, answer()], "o");
+    assert.equal(events(after).length, 0);
+    assert.equal(after.at(-1)!.tradeKey, tapeFirst.at(-1)!.tradeKey);
+  });
+
+  it("A SELL OF THE SAME COIN FROM BEFORE THE ORDER WAS PLACED IS NOT ITS FILL", () => {
+    // With no size to go on, the order's own life is the window: after it was
+    // placed, and before it was answered. The agent's own earlier sell of the
+    // same coin is its own line, in either order of arrival.
+    const earlier = sold({ at: T - 600, sizeUsdg: 2 });
+    const merged = mergeFills([placed, answer()], [sold(), earlier], since);
+    assert.equal(merged[1]!.trade?.at, T, "the receipt took the order's fill");
+    assert.deepEqual(events(merged).map((e) => e.trade?.at), [T - 600], "and the earlier sell kept its own line");
+    const tapeFirst = mergeFills([placed], [earlier], since);
+    assert.equal(absorbFill([...tapeFirst, answer()], "o").filter((m) => m.role === "event").length, 1, "an earlier sell is never absorbed");
+  });
+
+  it("NOR IS ONE THAT FILLED AFTER THE ORDER WAS ANSWERED", () => {
+    // A receipt is written after its fill, so a sell minutes after the answer
+    // is the agent's own next trade.
+    const later = sold({ at: T + 600 });
+    assert.equal(events(mergeFills([placed, answer()], [later], since)).length, 1);
+  });
+
+  it("TWO FILLS IN THE WINDOW: the receipt takes the one nearest its answer", () => {
+    const soon = sold({ at: T - 50, sizeUsdg: 1 });
+    const merged = mergeFills([placed, answer()], [sold(), soon], since);
+    assert.equal(merged[1]!.trade?.at, T);
+    const tapeFirst = mergeFills([placed], [soon, sold()], since);
+    const after = absorbFill([...tapeFirst, answer()], "o");
+    assert.equal(after.find((m) => m.id === "o")!.trade?.at, T);
+    assert.deepEqual(events(after).map((e) => e.trade?.at), [T - 50]);
+  });
+
+  it("THE CHAIN HASH DECIDES when both sides carry one", () => {
+    const tx = "0x" + "ab".repeat(32);
+    const other = "0x" + "cd".repeat(32);
+    const withHash = (h: string) => ({ ...sold(), txHash: h }) as Thesis;
+    assert.equal(events(mergeFills([placed, answer({ txHash: tx })], [withHash(tx)], since)).length, 0, "the same hash is one trade");
+    assert.equal(events(mergeFills([placed, answer({ txHash: tx })], [withHash(other)], since)).length, 1, "a different hash is not, whatever else agrees");
+  });
+
+  it("a buy's size must still agree — two buys of one coin are two trades", () => {
+    const bought = answer({ side: "buy", symbol: "CASHCAT", usdgActual: 20 });
+    assert.equal(events(mergeFills([placed, bought], [move({ at: T })], since)).length, 1);
+  });
+});
+
+describe("the tape learning a trade's hash", () => {
+  it("A LINE KEYED BEFORE THE TAPE CARRIED THE HASH IS NOT REPEATED ONCE IT DOES", () => {
+    // Owner moves now carry t.tx_hash, and the hash is the better key. A fill
+    // already in the thread under its old key must not come back as news
+    // under the new one.
+    const since = 1_800_000_000 - 1;
+    const first = mergeFills([], [move()], since);
+    assert.equal(first.length, 1);
+    const hashed = { ...move(), txHash: "0x" + "ef".repeat(32) } as Thesis;
+    const kept = first.map(({ trade: _t, ...m }) => m);
+    const again = mergeFills(kept, [hashed], since);
+    assert.equal(again.length, 1, "one trade, one line");
+    assert.equal(again[0]!.trade?.symbol, "CASHCAT", "and it gets its card back");
   });
 });
 
@@ -300,7 +403,7 @@ describe("chips", () => {
 
 describe("failures, in the agent's voice", () => {
   it("NEVER THE RAW ERROR TEXT, and each says what to do", () => {
-    for (const kind of ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off"] as const) {
+    for (const kind of ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server"] as const) {
       const line = failureLine(kind);
       assert.match(line, /^(I|My)\b/, `${kind} is said as the agent, in the first person`);
       assert.doesNotMatch(line, /DOMException|TypeError|Failed to fetch|undefined/);
@@ -309,8 +412,63 @@ describe("failures, in the agent's voice", () => {
     assert.match(failureLine("signed-out"), /[Ss]ign in/);
   });
 
-  it("the provider's own words ride along when there are some", () => {
-    assert.match(failureLine("llm-error", "groq 429 — rate limited"), /groq 429 — rate limited/);
+  it("A MODEL FAILURE IS SAID BY ITS KIND, never in the provider's words", () => {
+    // It used to paste them: "(it said: groq 401 — invalid_api_key: Invalid
+    // API Key). Give it a moment and try again." — a transcript, and advice no
+    // moment could make true.
+    const facts = (kind: "key-rejected" | "model-missing" | "other" | "rate-limited" | "provider-down" | "unreachable") => ({
+      llm: { kind, provider: "Groq" },
+    });
+    for (const kind of ["key-rejected", "model-missing", "other", "rate-limited", "provider-down", "unreachable"] as const) {
+      const line = failureLine("llm-error", facts(kind));
+      assert.match(line, /^(I|My)\b/, kind);
+      assert.doesNotMatch(line, /[{}]|invalid_api_key|\b[45]\d\d\b/, kind);
+    }
+    assert.match(failureLine("llm-error", facts("key-rejected")), /Groq refused the API key/);
+    assert.match(failureLine("llm-error", facts("rate-limited")), /rate-limited by Groq/);
+    // With no provider to name, it is still a sentence.
+    assert.match(failureLine("llm-error", { llm: { kind: "key-rejected", provider: null } }), /its provider refused the API key/);
+  });
+
+  it("RETRY ONLY WHERE ASKING AGAIN CAN HELP — and no line promises it where it cannot", () => {
+    const helps = (kind: "key-rejected" | "model-missing" | "other" | "rate-limited" | "provider-down" | "unreachable") =>
+      retryHelps("llm-error", { llm: { kind, provider: "Groq" } });
+    for (const kind of ["rate-limited", "provider-down", "unreachable"] as const) {
+      assert.equal(helps(kind), true, kind);
+      assert.match(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /[Tt]ry again/, kind);
+    }
+    for (const kind of ["key-rejected", "model-missing", "other"] as const) {
+      assert.equal(helps(kind), false, kind);
+      assert.doesNotMatch(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /moment|try again/i, kind);
+    }
+    // A model failure the server did not classify is not guessed to be passing.
+    assert.equal(retryHelps("llm-error"), false);
+    for (const kind of ["signed-out", "no-llm", "unreadable", "network", "timeout", "cut-off", "server"] as const) {
+      assert.equal(retryHelps(kind), true, kind);
+    }
+  });
+
+  it("WHAT THE ROUTE CLASSIFIED IS CHECKED, not trusted", () => {
+    // A kind this browser has never heard of is not guessed at: it is a
+    // reason it does not recognise, and no Retry is promised for it.
+    const unknown = llmFailureOf("brand-new-kind", "Groq");
+    assert.deepEqual(unknown, { kind: "other", provider: "Groq" });
+    assert.equal(retryHelps("llm-error", { llm: unknown }), false);
+    assert.deepEqual(llmFailureOf("rate-limited", "Groq"), { kind: "rate-limited", provider: "Groq" });
+    // A provider "name" that is not a short plain name is not repeated.
+    for (const provider of ["<b>Groq</b>", "x".repeat(41), "", 42, null, "groq 401 — {\"error\":1}"]) {
+      assert.equal(llmFailureOf("rate-limited", provider).provider, null, String(provider));
+    }
+  });
+
+  it("A SERVER THAT DID NOT ANSWER IS NOT 'I ANSWERED'", () => {
+    // A 502 gateway page was said as "I answered, but it arrived garbled" —
+    // a sentence about an answer that never existed.
+    const line = failureLine("server", { status: 502 });
+    assert.match(line, /the server said 502/);
+    assert.doesNotMatch(line, /I answered|garbled/);
+    assert.doesNotMatch(failureLine("server"), /said/, "no status is invented");
+    assert.doesNotMatch(failureLine("unreadable"), /I answered/, "and an unreadable body claims no answer either");
   });
 });
 

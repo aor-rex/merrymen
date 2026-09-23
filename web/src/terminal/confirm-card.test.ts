@@ -19,6 +19,11 @@
  * calls nothing ("AND NOTHING RUNS WITHOUT THE CLICK"); a refused write is said
  * in the thread and never answered "Done" ("A REFUSED SETTING IS NEVER CALLED
  * DONE"); and a confirmed setting is said back in the registry's own sentence.
+ * Three more followed when the card's guard moved into the controller, where
+ * two screens can share it: the proposal is only ever held, never run ("AND
+ * NOTHING RUNS WITHOUT THE CLICK"); a confirmed setting sends only its declared
+ * keys, through the settings route ("ONLY THE DECLARED KEYS"); and a navigate
+ * command writes nothing on its way ("A NAVIGATE COMMAND WRITES NOTHING").
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -30,17 +35,6 @@ const AGENT = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf
 const BOTTOM = AGENT.slice(AGENT.indexOf('className="desk-chat-bottom"'));
 
 describe("nothing happens without a click", () => {
-  it("THE PROPOSAL IS ONLY EVER HELD, NEVER RUN", () => {
-    // What arrives from /api/chat is held by the controller. If `send` ever
-    // called `confirm` — or fetched a route itself off the back of the
-    // command — the model would be acting, and the chat context is
-    // attacker-influenced (another agent writes a position's `reason`, and it
-    // is fed to this prompt). Run, not read: chat-controller.test.ts, "AND
-    // NOTHING RUNS WITHOUT THE CLICK".
-    const send = AGENT.slice(AGENT.indexOf("const send = async"), AGENT.indexOf("const confirm = async"));
-    assert.ok(!/confirm\(/.test(send), "send must not invoke the command it just received");
-  });
-
   it("and the button that runs it is a button, wired to confirm", () => {
     assert.match(BOTTOM, /onClick=\{confirm\}/);
     // Not a form submit and not an effect: a click, from a person, on a
@@ -72,27 +66,5 @@ describe("the words on the card are ours", () => {
     // against the registry; this is the client refusing to render a card for
     // anything it cannot put a sentence on.
     assert.match(BOTTOM, /\{pending && commandFor\(pending\.id\) &&/);
-  });
-});
-
-describe("what it does when confirmed", () => {
-  const CONFIRM = AGENT.slice(AGENT.indexOf("const confirm = async"), AGENT.indexOf("const blocked = blockerAdvice"));
-
-  it("SENDS ONLY THE DECLARED KEYS, THROUGH THE ROUTE THAT ALREADY EXISTS", () => {
-    // Not a new write path. The same authenticated PUT the settings screen
-    // uses, carrying nothing but `writes` — and /api/settings strips every
-    // house-owned field again on the server, so this is one of two gates.
-    assert.match(CONFIRM, /fetch\("\/api\/settings", \{/);
-    assert.match(CONFIRM, /JSON\.stringify\(commandPayload\(cmd, pending!\.args\)\)/);
-    assert.ok(!/\.\.\.pending/.test(CONFIRM), "the raw args must never be spread into the body");
-  });
-
-  it("a navigate command writes nothing on its way", () => {
-    // It returns before the PUT. A command that both moved you and wrote
-    // something would be two acts behind one sentence.
-    const nav = CONFIRM.indexOf('cmd.via === "navigate"');
-    const put = CONFIRM.indexOf('fetch("/api/settings"');
-    assert.ok(nav > 0 && nav < put, "the navigate branch must return before any write");
-    assert.match(CONFIRM.slice(nav, put), /return;/);
   });
 });

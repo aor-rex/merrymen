@@ -111,6 +111,58 @@ export function unansweredLine(last: OrderPoll): string {
   );
 }
 
+/**
+ * A WRITE WHOSE ANSWER MAY NEVER HAVE COME BACK.
+ *
+ * The route's answer — its status and the JSON it wrote, success or refusal —
+ * or NULL when there is none to read: the request threw (the connection
+ * dropped, possibly AFTER the server acted), or an error status came back with
+ * no body the route wrote (a gateway's page, which says nothing about what
+ * happened behind it). Null is "unknown", and a caller must never say it as a
+ * refusal: for an order, the row may exist. The card used to say "That didn't
+ * go through: Failed to fetch" — raw exception text, and a claim nobody could
+ * make — and leave itself ready to place the same order again.
+ */
+export async function routeAnswer<T>(
+  url: string,
+  init: RequestInit,
+): Promise<{ ok: boolean; status: number; body: T | null } | null> {
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch {
+    return null;
+  }
+  const body = /application\/json/i.test(res.headers.get("content-type") ?? "")
+    ? ((await res.json().catch(() => null)) as T | null)
+    : null;
+  if (!res.ok && body === null) return null;
+  return { ok: res.ok, status: res.status, body };
+}
+
+/**
+ * THE ORDER OPEN ON THIS OWNER'S KEY RIGHT NOW, by id — or null when there is
+ * none, or it could not be read.
+ *
+ * Asked ONCE, after a placement whose answer was lost. One order is open at a
+ * time, so an open one is the order that placement made, or the one it was
+ * refused beside; either way following it tells the owner what their key is
+ * doing, and its receipt names the order. GET without an id answers the
+ * newest order hosted; self-hosted it answers none, and the owner is told to
+ * check their trades.
+ */
+export async function fetchOpenOrder(): Promise<string | null> {
+  try {
+    const r = await fetch("/api/orders", { signal: AbortSignal.timeout(8_000) });
+    if (!r.ok) return null;
+    const b = (await r.json()) as { id?: unknown; state?: unknown };
+    const open = b.state === "queued" || b.state === "running";
+    return open && typeof b.id === "string" && /^[0-9a-f]{16,64}$/i.test(b.id) ? b.id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The real poll, as the card makes it. */
 export async function fetchOrderPoll(id: string): Promise<OrderPoll> {
   try {

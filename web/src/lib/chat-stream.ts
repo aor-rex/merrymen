@@ -61,6 +61,9 @@ export interface StreamedReply {
   command?: { id: string; args: Record<string, string | number | boolean> };
   /** "cut-off" when the stream ended with no `done` — half an answer is not an answer. */
   why?: string;
+  /** For a model failure: which kind, as the server classified it, and whose. */
+  kind?: string;
+  provider?: string;
   detail?: string;
 }
 
@@ -115,10 +118,13 @@ export async function readReplyStream(
       return { reply, ...(command && typeof command.id === "string" ? { command } : {}) };
     }
     if (name === "error") {
+      const text = (k: string) => (typeof payload[k] === "string" && payload[k] ? { [k]: payload[k] as string } : {});
       return {
         reply: null,
         why: typeof payload.why === "string" ? payload.why : "llm-error",
-        ...(typeof payload.detail === "string" && payload.detail ? { detail: payload.detail } : {}),
+        ...text("kind"),
+        ...text("provider"),
+        ...text("detail"),
       };
     }
     return null;

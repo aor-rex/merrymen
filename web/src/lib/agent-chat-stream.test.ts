@@ -16,6 +16,7 @@ import { describe, it } from "node:test";
 
 import { agentReplyResponse, type AgentChatOptions } from "./agent-chat";
 import { readReplyStream } from "./chat-stream";
+import Anthropic from "@anthropic-ai/sdk";
 import type { LlmCreds } from "../../../worker/src/llm";
 
 const credentials = (): LlmCreds => ({ provider: "test", transport: "openai", baseUrl: "https://example.com/v1", model: "m", apiKey: "k", vision: false });
@@ -100,7 +101,83 @@ describe("when there is nothing to stream", () => {
       throw new Error("groq 429 — rate limited");
     };
     const { out } = await streamed("sell?", failing);
-    assert.deepEqual(out, { reply: null, why: "llm-error", detail: "groq 429 — rate limited" });
+    // Classified here, where the error is: the browser says the kind in its
+    // own words and never pastes the provider's. An unknown provider id is
+    // not named.
+    assert.deepEqual(out, { reply: null, why: "llm-error", kind: "rate-limited", detail: "groq 429 — rate limited" });
+  });
+});
+
+describe("a model call that failed is classified where the error is", () => {
+  const as = (provider: string, transport: LlmCreds["transport"] = "openai") => (): LlmCreds => ({ ...credentials(), provider, transport });
+  const failWith = (e: unknown): AgentChatOptions["stream"] => async () => {
+    throw e;
+  };
+
+  it("A REJECTED KEY IS A KIND, named for the brain's provider — never a transcript", async () => {
+    // Seen in a live owner chat: the provider's own JSON pasted into the
+    // agent's sentence, followed by "give it a moment", which no moment fixes.
+    const { out } = await streamed("hi", failWith(new Error("groq 401 — invalid_api_key: Invalid API Key")), { credentials: as("groq") });
+    assert.equal(out.why, "llm-error");
+    assert.equal(out.kind, "key-rejected");
+    assert.equal(out.provider, "Groq");
+  });
+
+  it("THE ANTHROPIC SDK'S ERROR IS READ FOR WHAT IT IS, not for its message", async () => {
+    // Its message is the status and the whole JSON body. providerError never
+    // saw it, so it reached the owner as "401 {\"type\":\"error\",…}".
+    const e = new Anthropic.AuthenticationError(
+      401,
+      { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" }, request_id: "req_011" },
+      undefined,
+      new Headers(),
+    );
+    assert.match(e.message, /^401 \{"type":"error"/, "the SDK's own message, as the reviewer saw it");
+    const { out } = await streamed("hi", failWith(e), { credentials: as("anthropic", "anthropic") });
+    assert.equal(out.kind, "key-rejected");
+    assert.equal(out.provider, "Anthropic");
+    assert.doesNotMatch(out.detail ?? "", /[{}]|request_id|req_011/, "no JSON rides along either");
+    const overloaded = new Anthropic.InternalServerError(529, { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }, undefined, new Headers());
+    assert.equal((await streamed("hi", failWith(overloaded), { credentials: as("anthropic", "anthropic") })).out.kind, "provider-down");
+    const gone = new Anthropic.APIConnectionError({ message: undefined });
+    assert.equal((await streamed("hi", failWith(gone), { credentials: as("anthropic", "anthropic") })).out.kind, "unreachable");
+  });
+
+  it("each situation an owner can act on has its kind", async () => {
+    const cases: [string, string][] = [
+      ["groq 429 — rate_limit_exceeded: slow down", "rate-limited"],
+      ["groq 404 — model_not_found: The model does not exist", "model-missing"],
+      ["groq 503 — service unavailable", "provider-down"],
+      ["fetch failed", "unreachable"],
+      ["groq llama returned an empty reply (finish_reason: stop)", "other"],
+    ];
+    for (const [message, kind] of cases) {
+      assert.equal((await streamed("hi", failWith(new Error(message)), { credentials: as("groq") })).out.kind, kind, message);
+    }
+  });
+
+  it("A PROVIDER STREAM CUT MID-REPLY IS A CUT-OFF, which asking again can fix", async () => {
+    const { out } = await streamed("hi", failWith(new Error("groq llama stream ended before the reply was finished")), { credentials: as("groq") });
+    assert.deepEqual(out, { reply: null, why: "cut-off" });
+  });
+
+  it("the unstreamed answer is classified the same way", async () => {
+    const res = await agentReplyResponse({ message: "hi" }, { stream: false }, {
+      credentials: as("groq"),
+      complete: async () => {
+        throw new Error("groq 401 — invalid_api_key: Invalid API Key");
+      },
+    });
+    const body = (await res.json()) as { why?: string; kind?: string; provider?: string };
+    assert.equal(body.why, "llm-error");
+    assert.equal(body.kind, "key-rejected");
+    assert.equal(body.provider, "Groq");
+  });
+
+  it("a custom provider is not named by its catalogue label", async () => {
+    const { out } = await streamed("hi", failWith(new Error("fetch failed")), { credentials: as("custom") });
+    assert.equal(out.kind, "unreachable");
+    assert.equal(out.provider, undefined);
   });
 });
 

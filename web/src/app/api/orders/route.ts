@@ -62,6 +62,7 @@ import { resolveConfig } from "@merrymen/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { ceilingFor } from "@/lib/order-ceiling";
 import {
   LEDGER_UNREADABLE,
   orderTtlMs,
@@ -114,29 +115,6 @@ async function orderTtlFor(req: Request): Promise<number> {
 const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
 
 /**
- * The most this owner allows one typed order to spend.
- *
- * Falls back to the house default when the tenant has stored nothing, and when
- * the store cannot be read — the SAFE direction, because the default is the
- * smaller number and the sealed per-trade cap is the real wall underneath it
- * either way. Enforced again in the worker, which reads the settings.json the
- * orchestrator wrote for that child: two gates, neither relying on the other.
- */
-async function ceilingFor(req: Request): Promise<number> {
-  const fallback = resolveConfig().telegramMaxActionUsdg;
-  if (!isHostedMode()) return fallback;
-  const tenant = tenantOf(req);
-  if (!tenant) return fallback;
-  try {
-    const stored = await getSettingsStore().get(tenant);
-    const own = stored?.telegramMaxActionUsdg;
-    return typeof own === "number" && Number.isFinite(own) && own >= 0 ? own : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-/**
  * The primary key for this order, in this minute.
  *
  * A HASH, and the minute bucket is what makes a retry idempotent without making
@@ -174,14 +152,13 @@ export async function POST(req: Request) {
   // silently inheriting nothing would let this surface claim more than the
   // owner's configured limit allows. Enforced again in the worker.
   //
-  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER. `resolveConfig()` reads
-  // the WEB process's own ~/.merrymen/settings.json merged with the server env
-  // — hosted, that is the house's file and has nothing to do with this tenant,
-  // whose settings live in the per-tenant store that /api/settings reads. So
-  // every hosted tenant was being held to the house default whatever they had
-  // configured. Self-hosted the two genuinely are one home, and the bare
-  // resolve is right there.
-  const ceiling = await ceilingFor(req);
+  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER — see lib/order-ceiling.ts,
+  // which GET /api/orders/ceiling also calls, so the chat's amount chips offer
+  // exactly the ceiling this refuses at. Falls back to the house's value (the
+  // smaller, SAFE direction) when the tenant stored none or the store cannot be
+  // read. Enforced again in the worker, which reads the settings.json the
+  // orchestrator wrote for that child: two gates, neither relying on the other.
+  const ceiling = await ceilingFor(req, isHostedMode());
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },

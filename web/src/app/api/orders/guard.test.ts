@@ -17,8 +17,10 @@
  * sqlite through the ledger's own driver, and against real command files.
  *
  * What is still read from the source is what is still only in the route: who
- * the caller is, the id's hash, the owner's ceiling and tick lookups, and the
- * words the route must never contain.
+ * the caller is, the id's hash, the tick lookup, that POST applies the shared
+ * ceiling, and the words the route must never contain. The ceiling's own rules
+ * run here (chatOrderCeiling), and the resolution end to end in
+ * ceiling/route.test.ts.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -30,6 +32,7 @@ import { after, describe, it } from "node:test";
 import {
   ORDER_IN_FLIGHT_MS,
   ORDER_STALE_GRACE_MS,
+  chatOrderCeiling,
   isDuplicateKey,
   orderTtlMs,
   placedResponse,
@@ -217,12 +220,15 @@ describe("what a size is allowed to be", () => {
     assert.deepEqual(readOrder({ side: "buy", symbol: "TSLA", usdgAmount: "25" }), { order: { ...ORDER } });
   });
 
-  it("THE OWNER'S OWN CEILING IS APPLIED, not silently inherited as nothing", () => {
+  it("THE OWNER'S OWN CEILING IS APPLIED, not silently inherited as nothing", async () => {
     // The setting predates this surface and is named for the other one; it
     // means the same thing in both. Applying it is the point — a new surface
     // that bounded nothing would claim more than the owner's configured limit.
-    assert.match(CODE, /resolveConfig\(\)\.telegramMaxActionUsdg/);
+    // The resolution runs in chatOrderCeiling, which the chips' ceiling route
+    // runs too (ceiling/route.test.ts executes it end to end).
+    assert.match(CODE, /const ceiling = await ceilingFor\(req, isHostedMode\(\)\);/);
     assert.match(CODE, /over your \$\{ceiling\} USDG limit/);
+    assert.equal(await chatOrderCeiling({ hosted: false, tenant: null, fallback: 10, stored: async () => ({ telegramMaxActionUsdg: 99 }) }), 10);
   });
 
   it("and a symbol is a ticker, not a sentence", () => {
@@ -413,22 +419,45 @@ describe("what the review found, pinned so it cannot come back", () => {
     assert.equal(readCommandState(h, "stale")?.state, "queued");
   });
 
-  it("THE CEILING IS THE CALLER'S, not this container's", () => {
+  it("THE CEILING IS THE CALLER'S, not this container's", async () => {
     // `resolveConfig()` reads the WEB process's own ~/.merrymen/settings.json —
     // hosted, the house's file, which has nothing to do with this tenant, whose
     // settings live in the per-tenant store /api/settings reads. Every hosted
     // tenant was held to the house default whatever they had configured.
-    assert.match(CODE, /const ceiling = await ceilingFor\(req\);/);
-    assert.match(CODE, /getSettingsStore\(\)\.get\(tenant\)/);
+    const asked: string[] = [];
+    const stored = async (tenant: string) => {
+      asked.push(tenant);
+      return { telegramMaxActionUsdg: 7 };
+    };
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored }), 7, "the tenant's own");
+    assert.deepEqual(asked, ["0xabc"]);
+    // Nothing stored, or nothing usable: the house's.
+    for (const own of [undefined, null, -1, Number.NaN, "7"]) {
+      assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored: async () => ({ telegramMaxActionUsdg: own }) }), 10, String(own));
+    }
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored: async () => null }), 10);
+    // Zero is the owner's own "no chat ceiling", and is theirs to set.
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored: async () => ({ telegramMaxActionUsdg: 0 }) }), 0);
+    // No tenant: nobody's store is read.
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: null, fallback: 10, stored }), 10);
+    assert.equal(asked.length, 1);
     // Self-hosted the web process and the worker genuinely share one home, so
-    // the bare resolve is correct there and stays.
-    assert.match(CODE, /if \(!isHostedMode\(\)\) return fallback;/);
+    // the bare resolve is correct there and no store is read.
+    assert.equal(await chatOrderCeiling({ hosted: false, tenant: "0xabc", fallback: 10, stored }), 10);
+    assert.equal(asked.length, 1);
   });
 
-  it("and an unreadable settings store falls back to the SMALLER number", () => {
+  it("and an unreadable settings store falls back to the SMALLER number", async () => {
     // Fail-safe: the default is the tighter ceiling, and the sealed per-trade
-    // cap is the real wall underneath either way.
-    const fn = CODE.slice(CODE.indexOf("async function ceilingFor"), CODE.indexOf("function orderId"));
-    assert.match(fn, /catch \{\s*return fallback;\s*\}/);
+    // cap is the real wall underneath either way. A store that throws before
+    // it even returns a promise is unreadable too.
+    const rejects = async () => {
+      throw new Error("store down");
+    };
+    const throws = (): Promise<null> => {
+      throw new Error("no DEK");
+    };
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored: rejects }), 10);
+    assert.equal(await chatOrderCeiling({ hosted: true, tenant: "0xabc", fallback: 10, stored: throws }), 10);
   });
 });

@@ -4,7 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
-import { followWindowMs } from "../order-follow";
+import { fetchOpenOrder, followWindowMs, routeAnswer } from "../order-follow";
 import type { ChatContext, ChatController } from "../chat-controller";
 import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
 import type { OrderReceipt } from "@/lib/order-state";
@@ -111,7 +111,8 @@ export function Agent({
    */
   const pending: { id: string; args: Record<string, CommandArg> } | null = chat.proposal;
   const setPending = chat.setProposal;
-  const [running,setRunning]=useState(false);
+  /** The card is being carried out — the controller's, so every screen drawing it agrees. */
+  const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -254,16 +255,64 @@ export function Agent({
   const followOrder = (id: string, expiresInMs: number | null) => chat.followOrder(id, expiresInMs);
 
   /**
+   * AN ORDER WHOSE PLACING NEVER ANSWERED IS NOT A REFUSAL.
+   *
+   * The connection can drop after the server wrote the row, so nothing here
+   * is known — and the card goes, because tapping it again may be a second
+   * order at a second price. The key is asked, once, what is open on it: an
+   * open order is followed to its answer like any other; otherwise the owner
+   * is told plainly that it is unknown, and where to look.
+   */
+  const orderLost = async () => {
+    setPending(null);
+    chat.say({ role: "owner", text: "✓ Confirmed" });
+    const open = await fetchOpenOrder();
+    if (open) {
+      chat.say({
+        role: "agent",
+        text: "I lost the line while placing that, but there is an order open on my key now — I'll tell you how it ends.",
+        order: { id: open },
+      });
+      followOrder(open, null);
+      return;
+    }
+    chat.say({
+      role: "agent",
+      text: "I couldn't confirm that order reached my key — the connection dropped before I heard back. Check your trades before asking again.",
+    });
+  };
+
+  /**
+   * Place one order through the ONE channel orders take, and say what is true
+   * the moment it exists — placed, not filled — then follow it to its answer.
+   */
+  const placeOrder = async (payload: unknown, words: (duplicate: boolean) => string) => {
+    const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }>("/api/orders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // A 200 is a row that exists, but one whose id could not be read cannot be
+    // followed — so it is looked for, exactly like an answer that was lost.
+    if (!placed || (placed.ok && typeof placed.body?.id !== "string")) return orderLost();
+    if (!placed.ok) throw new Error(placed.body?.error ?? `that was refused (${placed.status})`);
+    const body = placed.body!;
+    chat.say({ role: "owner", text: "✓ Confirmed" });
+    chat.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id! } });
+    setPending(null);
+    followOrder(body.id!, followWindowMs(body));
+  };
+
+  /**
    * DO THE THING THE OWNER JUST CONFIRMED.
    *
    * The model proposed it; this runs only from a click, and it calls the SAME
    * authenticated route the buttons already call. Nothing here is a new way
    * into the app — it is the existing way, reached by asking.
    */
-  const confirm = async () => {
-    const cmd = pending && commandFor(pending.id);
-    if (!cmd || running) return;
-    setRunning(true);
+  const confirm = () => chat.confirm(async (proposal) => {
+    const cmd = commandFor(proposal.id);
+    if (!cmd) return;
     try {
       if (cmd.via === "navigate") {
         window.location.href = cmd.to!;
@@ -277,50 +326,43 @@ export function Agent({
         // which, not covered by the key yet, or nothing found. Rendering it
         // verbatim is deliberate: every one of those is a fact the browser does
         // not have and must not invent, and three of them are not errors.
-        const res = await fetch("/api/snipe", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
-        });
-        const out = (await res.json().catch(() => null)) as {
+        const found = await routeAnswer<{
           outcome?: string;
           say?: string;
           error?: string;
           target?: { symbol?: string };
           usdgAmount?: number;
-        } | null;
-        if (!res.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${res.status})`);
+        }>("/api/snipe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(commandPayload(cmd, proposal.args)),
+        });
+        // A lookup places nothing, so a lost answer costs only the asking —
+        // and the card stays for exactly that.
+        if (!found) {
+          chat.say({ role: "agent", text: "I couldn't look that coin up — the connection dropped before I heard back, and nothing was placed. Try again." });
+          return;
+        }
+        const out = found.body;
+        if (!found.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${found.status})`);
         // RESOLVED IS NOT PLACED. The route's job ends at "this query means this
         // one coin, and your key covers it"; the order goes through the SAME
         // channel the buy card uses, from here, so there is exactly one way an
         // order is ever created. The other three outcomes never reach an order
         // at all and are rendered as what they are.
         if (out?.outcome === "resolved" && out.target?.symbol) {
-          const placed = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }),
-          });
-          const body = (await placed.json().catch(() => null)) as
-            | { error?: string; duplicate?: boolean }
-            | null;
-          const snipeBody = body as { error?: string; duplicate?: boolean; id?: string; expiresInMs?: number } | null;
-          if (!placed.ok) throw new Error(snipeBody?.error ?? `that was refused (${placed.status})`);
           // FOLLOWED LIKE ANY ORDER. This placed an order and then said
           // "however it ends it lands on your trades" — false for every refusal
           // that returns before an intent is built, which writes no trade row —
           // and never asked how it ended. It is the same order as a typed buy,
-          // so it gets the same follow and the same receipt.
-          chat.say({ role: "owner", text: "✓ Confirmed" });
-          chat.say({
-            role: "agent",
-            text: snipeBody?.duplicate
-              ? `${out.say} I already had that one queued, so I have not placed it twice.`
-              : `${out.say} Placed, not filled — my key's limits still decide, and I will tell you which.`,
-            ...(snipeBody?.id ? { order: { id: snipeBody.id } } : {}),
-          });
-          setPending(null);
-          if (snipeBody?.id) followOrder(snipeBody.id, followWindowMs(snipeBody));
+          // so it gets the same follow, the same receipt, and the same care
+          // when its answer is lost.
+          const said = out.say;
+          await placeOrder({ side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }, (duplicate) =>
+            duplicate
+              ? `${said} I already had that one queued, so I have not placed it twice.`
+              : `${said} Placed, not filled — my key's limits still decide, and I will tell you which.`,
+          );
           return;
         }
         chat.say({ role: "owner", text: "✓ Confirmed" });
@@ -342,15 +384,7 @@ export function Agent({
         // past tense of the ASKING rather than of the trading: "I've placed it"
         // is true the moment the row exists; "bought TSLA" would be a claim
         // about somebody's money made by a browser, ahead of any evidence.
-        const placed = await fetch("/api/orders", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
-        });
-        const body = (await placed.json().catch(() => null)) as
-          | { error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }
-          | null;
-        if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
+        //
         // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
         // reaches the tape, and every refusal that returns before an intent is
         // built — paused, expired, over the ceiling, a symbol I do not watch,
@@ -359,49 +393,51 @@ export function Agent({
         // PERSISTED to this browser, so the false promise outlives the order.
         //
         // What is true the moment the row exists is only that it was placed. So
-        // that is what this says, and the outcome is fetched below and said in
-        // its own turn — from the worker's own words, not from a guess here.
-        chat.say({ role: "owner", text: "✓ Confirmed" });
-        chat.say({
-          role: "agent",
-          text: body?.duplicate
+        // that is what this says, and the outcome is followed and said in its
+        // own turn — from the worker's own words, not from a guess here.
+        await placeOrder(commandPayload(cmd, proposal.args), (duplicate) =>
+          duplicate
             ? `That exact order is already queued — I have not placed a second one.`
-            : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
-          ...(body?.id ? { order: { id: body.id } } : {}),
-        });
-        setPending(null);
-        if (body?.id) followOrder(body.id, followWindowMs(body));
+            : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+        );
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
       // `commandPayload` drops everything the command did not declare, and
       // /api/settings strips every house-owned field again on the server — two
       // independent gates, neither relying on the other.
-      const put = await fetch("/api/settings", {
+      const put = await routeAnswer<{ errors?: string[] }>("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(commandPayload(cmd, pending!.args)),
+        body: JSON.stringify(commandPayload(cmd, proposal.args)),
       });
-      if (!put.ok) {
-        const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
-        throw new Error(j?.errors?.join(" ") ?? `that was refused (${put.status})`);
+      // THE WRITE MAY HAVE LANDED. Said as unknown, and the settings are read
+      // again so what the model is told catches up whichever it was. A setting
+      // is one value, so asking again is safe, and the card stays for that.
+      if (!put) {
+        chat.say({
+          role: "agent",
+          text: "I couldn't tell whether that change was saved — the connection dropped before I heard back. Asking again is safe: it only sets the same value.",
+        });
+        chat.refreshSettings();
+        return;
       }
+      if (!put.ok) throw new Error(put.body?.errors?.join(" ") ?? `that was refused (${put.status})`);
       // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
       // agent did on your instruction belongs in the record of what you asked.
       chat.say({ role: "owner", text: "✓ Confirmed" });
-      chat.say({ role: "agent", text: `Done — ${cmd.say(pending!.args)}` });
+      chat.say({ role: "agent", text: `Done — ${cmd.say(proposal.args)}` });
       setPending(null);
       // What the model is told about the settings has just changed.
       chat.refreshSettings();
     } catch (e) {
       // NEVER A SILENT REFUSAL, and said in the thread where the owner is
-      // looking, with the route's own reason. The card stays, so asking again
-      // is one tap — and never automatic, because this may be an order.
+      // looking, with the route's own reason — only a body the route wrote
+      // reaches here (routeAnswer). The card stays, so asking again is one
+      // tap — and never automatic, because this may be an order.
       chat.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
-    } finally {
-      setRunning(false);
     }
-  };
+  });
 
   const blocked = blockerAdvice(liveBlocker);
   /**
@@ -863,7 +899,7 @@ export function Agent({
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,
               perTrade,
-              ceiling: ceilingOf(chat.settings),
+              ceiling: chat.ceiling,
             }).map((q) => (
               <button type="button" key={q.label} onClick={() => send(q.message)}>
                 {q.label}
@@ -912,19 +948,6 @@ export function Agent({
   );
 }
 
-/**
- * The owner's ceiling on one chat order, as /api/settings reported it — the
- * owner's own value over the house default, as the orders route resolves it.
- * Null when the settings were not read: no chip may suggest a size against a
- * limit nobody read.
- */
-function ceilingOf(settings: ChatController["settings"]): number | null {
-  const own = settings?.values?.telegramMaxActionUsdg;
-  const fallback = settings?.defaults?.telegramMaxActionUsdg;
-  const v = typeof own === "number" ? own : fallback;
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
-}
-
 /** A receipt's pill and line — templated from the worker's ledger facts, never written. */
 function ReceiptRow({ side, line }: { side: "Buy" | "Sell" | null; line: string }) {
   return (
@@ -951,10 +974,15 @@ function ChatLine({
   onToken: (id: string) => void;
   onRetry?: () => void;
 }) {
-  const card = m.trade ? (
+  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
+  // ONE LINE, ONE FIGURE. A receipt joined to its fill shows the worker's
+  // figure on the card too: for a sell the tape's size is the order's, and the
+  // receipt's is what the fill returned.
+  const trade = m.trade && receipt && receipt.usdgActual !== null ? { ...m.trade, sizeUsdg: receipt.usdgActual } : m.trade;
+  const card = trade ? (
     <TradeTokenCard
-      trade={m.trade}
-      token={tokens.find((t) => t.symbol.toUpperCase() === m.trade?.symbol?.toUpperCase())}
+      trade={trade}
+      token={tokens.find((t) => t.symbol.toUpperCase() === trade.symbol?.toUpperCase())}
       onToken={onToken}
     />
   ) : null;
@@ -979,7 +1007,6 @@ function ChatLine({
       </div>
     );
   }
-  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
   return (
     <div className="chat-msg chat-msg-agent">
       <div className="desk-reply">
