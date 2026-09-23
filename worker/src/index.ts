@@ -106,13 +106,13 @@ import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbo
 import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
-import { renderWhy } from "./strategies/reasons";
+import { publishesIdle, renderWhy } from "./strategies/reasons";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
 import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
-import { opsHeadroomOf, takeTick } from "./strategies/types";
+import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
@@ -10013,6 +10013,18 @@ async function main() {
     lastEquityUsdg = equityUsdg;
     lastEquityKnown = !bookIncomplete;
     if (!paper) lastGasWei = balances.ethWei;
+    // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
+    // peak and equity settled above and read twice: by the Trencher's entry
+    // review below, and by every strategy through the snapshot. Null when the
+    // wall would not judge at all — see strategies/types.ts drawdownOf. A
+    // proposal it withholds is one the wall was certain to refuse; it never
+    // widens anything, and checkPolicy still judges whatever does go out.
+    const drawdownNow = drawdownOf({
+      peakUsdg: drawdownPeak(),
+      equityUsdg,
+      equityKnown: !bookIncomplete,
+      maxDrawdownBps: active.limits.maxDrawdownBps,
+    });
 
     // A quiet strategy still forms a market view, and publishes it when it
     // changes. Run this after the tick so an actual published decision takes
@@ -10103,11 +10115,18 @@ async function main() {
         const feedFor = (token: string): `0x${string}` | null =>
           STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
 
-        const trenchEligible = fastTrencher ? await trenchCandidates() : [];
+        // NO ENTRY REVIEW WHILE THE BREAKER IS TRIPPED. The wall refuses every
+        // buy, so each review of a new coin was a paid Brain call for an entry
+        // that could never be made — thirty of them in fifteen minutes on the
+        // live feed. Held positions are still reviewed below: exits only.
+        const entriesBraked = breakerTripped({ drawdown: drawdownNow });
+        const trenchEligible = fastTrencher && !entriesBraked ? await trenchCandidates() : [];
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
-        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        // Braked, "no pool passes the entry checks" would be a false sentence:
+        // none was looked at. The strategy's idle reason says why instead.
+        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
           token: p.token,
@@ -10733,6 +10752,9 @@ async function main() {
       // moment the wall would start refusing, rather than a tick in either
       // direction. A grant with no finite count is "not read", never zero.
       opsHeadroom: opsHeadroomOf(active.limits.maxOpsPerDay, opsTodayCount()),
+      // And the drawdown, the same way: a strategy stops proposing buys on the
+      // tick the breaker would start refusing them, and says so once.
+      drawdown: drawdownNow,
       perTradeCapUsdg: active.limits.perTradeUsdg,
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
@@ -10991,7 +11013,11 @@ async function main() {
         // renderWhy is the only producer of these strings — the same
         // property that makes a deterministic strategy's trade reason safe
         // to publish makes its SILENCE safe to publish.
-        await addDecision({
+        //
+        // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
+        // account's losses, and the refusal it replaces leaves the public
+        // feed; the owner has the event above. See publishesIdle.
+        if (!idle || publishesIdle(idle)) await addDecision({
           id: newDecisionId(),
           agent_id: agentId,
           source: publicationSourceFor(strategy.name),
@@ -11083,7 +11109,9 @@ async function main() {
       if (!stamped.ok) continue;
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
-    const entries = await proposeClassEntries();
+    // Not while the breaker is tripped: every class entry is a buy the wall
+    // would refuse. The exits above are never withheld.
+    const entries: Tick = breakerTripped(snap) ? { intents: [], why: [] } : await proposeClassEntries();
     for (const [at, intent] of entries.intents.entries()) {
       const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       if (!stamped.ok) continue;

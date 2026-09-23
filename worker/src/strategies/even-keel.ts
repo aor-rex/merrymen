@@ -9,7 +9,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import { opsSpent, type Snapshot, type Tick } from "./types";
+import { breakerIdle, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 export interface EvenKeelLeg {
@@ -106,9 +106,15 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   // count does not bind — the same line `withinCap` draws for the money.
   const countSpent = opsSpent(snap);
   const counted: Tick = { intents: [], why: [], idle: { code: "ops-spent" } };
+  // THE DRAWDOWN BREAKER BINDS THE BUYS the same way, and ahead of the count:
+  // tripped, the wall refuses every seed and every top-up. A trim is a sell
+  // into cash — the one move the breaker exists never to block.
+  const brake = breakerIdle(snap);
+  const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
 
   // Cold start: nothing invested yet → lay down an equal-weight entry from cash.
   if (invested === 0n) {
+    if (braked) return braked;
     if (countSpent) return counted;
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
     const per = budget / BigInt(tradable.length);
@@ -232,7 +238,7 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
       });
       why.push({ code: "keel-trim", symbol: l.symbol, overRaw: sellUsdg });
     } else if (-diff > band && cashLeft > 0n) {
-      if (countSpent) {
+      if (braked || countSpent) {
         withheld = true;
         continue;
       }
@@ -253,5 +259,5 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
     }
   }
 
-  return intents.length === 0 && withheld ? counted : { intents, why };
+  return intents.length === 0 && withheld ? (braked ?? counted) : { intents, why };
 }
