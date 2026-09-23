@@ -36,6 +36,8 @@ type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>
 let routes: Record<string, Handler>;
 let calls: { method: string; url: string; body: Record<string, unknown> | null }[];
 let chat: ChatController;
+/** How far this browser's clock runs ahead of the true one (the server's, the ledger's). */
+let clockAhead = 0;
 
 beforeEach(() => {
   ui = testDom();
@@ -48,6 +50,7 @@ beforeEach(() => {
   (globalThis as { self?: unknown }).self = ui.dom.window;
   localStorage.clear();
   calls = [];
+  clockAhead = 0;
   routes = {
     "GET /api/settings": () => json({ values: { liveTradingEnabled: true }, defaults: { telegramMaxActionUsdg: 25 } }),
     "GET /api/orders/ceiling": () => json({ ceilingUsdg: 25 }),
@@ -97,7 +100,7 @@ function Harness(p: {
     open: p.open ?? true,
     moves: p.moves ?? null,
     onOutcome: p.onOutcome,
-    deps: { sleep: () => new Promise((r) => setTimeout(r, 1)) },
+    deps: { sleep: () => new Promise((r) => setTimeout(r, 1)), now: () => Date.now() + clockAhead },
   });
   chat = c;
   const screen = (key: string) =>
@@ -919,6 +922,53 @@ describe("the agent's own fills", () => {
     assert.match(text(), /\$4\.97 TSLA · Filled/);
     assert.doesNotMatch(text(), /\$5\.01/, "and one figure: the receipt's");
   });
+
+  /**
+   * Place a chat sell of TSLA from a browser whose clock is `aheadMin` off,
+   * and bring its fill and its answer in the given order. POST's reply carries
+   * the server's true times, as the route writes them.
+   */
+  async function skewedSell(aheadMin: number, tapeFirst: boolean) {
+    clockAhead = aheadMin * 60_000;
+    const now = Math.floor(Date.now() / 1000);
+    let answered = false;
+    routes["POST /api/chat"] = () => json({ reply: "Selling.", command: { id: "sell", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () =>
+      json(
+        answered
+          ? { id: ORDER_ID, state: "done", result: "sold TSLA", receipt: { ...FILLED, side: "sell", usdgActual: null } }
+          : { id: ORDER_ID, state: "running" },
+      );
+    await ui.render(h({ moves: [] }));
+    await settle();
+    await typeAndSend("sell $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed it —/.test(text()), "placed");
+    const tape = [fill(now + 1, { action: "sell", symbol: "TSLA", sizeUsdg: 5.01 })];
+    if (tapeFirst) {
+      await ui.render(h({ moves: tape }));
+      await until(() => /· Filled/.test(text()), "the fill, off the tape");
+    }
+    answered = true;
+    await until(() => /sold TSLA/.test(text()), "the receipt");
+    await settle(5);
+    await ui.render(h({ moves: tape }));
+    await settle(5);
+  }
+
+  for (const [aheadMin, tapeFirst] of [[5, false], [-5, true], [11, true]] as const) {
+    it(`A BROWSER CLOCK ${aheadMin} MINUTES OFF STILL MAKES A CHAT SELL ONE LINE (${tapeFirst ? "tape" : "receipt"} first) — its life is read on the server's clock`, async () => {
+      // Every line here is stamped by this browser and the fill by the worker.
+      // With two minutes of slack between them, a browser three minutes off
+      // showed one sell as two "Filled" lines. POST's reply carries the
+      // server's own placement time, and the placing line keeps it.
+      await skewedSell(aheadMin, tapeFirst);
+      assert.equal((text().match(/· Filled/g) ?? []).length, 1, "one trade, one line");
+      assert.equal(chat.messages.filter((m) => m.role === "event").length, 0);
+    });
+  }
 
   it("with the tape unread, nothing is merged and no watermark is set", async () => {
     await ui.render(h({ moves: null }));

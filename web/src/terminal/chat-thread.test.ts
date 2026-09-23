@@ -293,6 +293,99 @@ describe("a chat SELL joins its fill too", () => {
     const bought = answer({ side: "buy", symbol: "CASHCAT", usdgActual: 20 });
     assert.equal(events(mergeFills([placed, bought], [move({ at: T })], since)).length, 1);
   });
+
+  it("TWO SELLS OF ONE COIN: each receipt takes its own fill, and the second is not shown twice", () => {
+    // Both orders' lives can hold the first fill — the second order was placed
+    // before the first one's fill had reached the tape — so both receipts can
+    // claim it. Only one may. Otherwise, when the second fill arrives, both
+    // receipts are already keyed to the first, and the second sell shows twice:
+    // once on its receipt and once as a fill line of its own.
+    const two = [
+      msg({ id: "p1", at: T * 1000 - 100_000, text: "Placed 1", order: { id: "aaa" } }),
+      msg({ id: "o1", at: T * 1000 + 20_000, text: "sold 1", order: { id: "aaa", receipt: receipt({ side: "sell", symbol: "TSLA", usdgActual: null }) } }),
+      msg({ id: "p2", at: T * 1000 + 30_000, text: "Placed 2", order: { id: "bbb" } }),
+      msg({ id: "o2", at: T * 1000 + 90_000, text: "sold 2", order: { id: "bbb", receipt: receipt({ side: "sell", symbol: "TSLA", usdgActual: null }) } }),
+    ];
+    const first = mergeFills(two, [sold()], since);
+    assert.equal(first.find((m) => m.id === "o1")!.trade?.at, T, "the first receipt takes the first fill");
+    assert.equal(first.find((m) => m.id === "o2")!.tradeKey, undefined, "and the second does not take it too");
+    const second = mergeFills(first, [sold({ at: T + 60 }), sold()], since);
+    assert.equal(second.find((m) => m.id === "o2")!.trade?.at, T + 60, "the second receipt takes the second fill");
+    assert.deepEqual(events(second), [], "two sells, two lines — no fill line left over");
+  });
+});
+
+describe("a browser clock that is wrong does not split one trade", () => {
+  // Every line's `at` is THIS BROWSER's clock; a fill's is the worker's. The
+  // join held one against the other with two minutes of slack, so a browser
+  // three minutes off showed one chat buy as two "Filled" lines — the half
+  // hour either side it had before tolerated that — and a sell the same.
+  // order-follow.ts documents browser clocks eleven minutes fast.
+  const T = 1_800_000_000;
+  const since = T - 3_600;
+  /** The true moments: placed twenty seconds before the fill, answered fifteen after. */
+  const PLACED = T * 1000 - 20_000;
+  const ANSWERED = T * 1000 + 15_000;
+  const SKEWS = [0, 3, 5, 11, -3, -5, -11];
+  /**
+   * The two lines a chat order leaves, stamped by a browser `skewMin` off. The
+   * placing line keeps the server's own placement time when POST gave it.
+   */
+  const lines = (side: "buy" | "sell", skewMin: number, server = true) => [
+    msg({ id: "p", at: PLACED + skewMin * 60_000, text: "Placed it", order: { id: "abc", ...(server ? { serverPlacedAt: PLACED } : {}) } }),
+    msg({
+      id: "o",
+      at: ANSWERED + skewMin * 60_000,
+      text: "done",
+      order: { id: "abc", receipt: receipt({ side, symbol: "TSLA", usdgActual: side === "buy" ? 5 : null }) },
+    }),
+  ];
+  const fill = (side: "buy" | "sell", over: Partial<Thesis> = {}) => move({ action: side, symbol: "TSLA", sizeUsdg: 5, at: T, ...over });
+  const events = (m: ChatMessage[]) => m.filter((x) => x.role === "event");
+  /** Extra lines for one trade, in both orders of arrival. */
+  const extra = (side: "buy" | "sell", skewMin: number, server = true) => {
+    const [placed, answer] = lines(side, skewMin, server);
+    const receiptFirst = events(mergeFills([placed!, answer!], [fill(side)], since)).length;
+    const tapeFirst = events(absorbFill([...mergeFills([placed!], [fill(side)], since), answer!], "o")).length;
+    return [receiptFirst, tapeFirst];
+  };
+
+  for (const side of ["buy", "sell"] as const) {
+    it(`A CHAT ${side.toUpperCase()} IS ONE LINE HOWEVER FAR THE BROWSER'S CLOCK IS OFF — the order's life is read on the server's`, () => {
+      for (const skew of SKEWS) assert.deepEqual(extra(side, skew), [0, 0], `${skew} minutes off`);
+    });
+  }
+
+  it("A BUY WHOSE PLACING THE SERVER DID NOT TIME STILL JOINS ON ITS SIZE, within half an hour either side", () => {
+    // A thread kept from before the placing line carried the server's time, or
+    // an order found after its placing was lost: its size is what tells two
+    // buys apart, and the old tolerance holds for it.
+    for (const skew of SKEWS) assert.deepEqual(extra("buy", skew, false), [0, 0], `${skew} minutes off`);
+    assert.deepEqual(extra("buy", 40, false), [1, 1], "but not a fill forty minutes from the answer");
+  });
+
+  it("ON THE SERVER'S CLOCK THE ORDER'S LIFE STILL SHUTS OUT THE AGENT'S OWN SELLS of the same coin", () => {
+    for (const skew of [5, -5, 11]) {
+      const earlier = fill("sell", { at: T - 600, sizeUsdg: 2 });
+      const later = fill("sell", { at: T + 600, sizeUsdg: 3 });
+      const merged = mergeFills(lines("sell", skew), [later, fill("sell"), earlier], since);
+      assert.equal(merged.find((m) => m.id === "o")!.trade?.at, T, `${skew}m: the receipt took the order's own fill`);
+      assert.deepEqual(events(merged).map((e) => e.trade?.at), [T - 600, T + 600], `${skew}m: the others kept their own lines`);
+    }
+  });
+
+  it("AND A BUY OF THE SAME SIZE FROM BEFORE THE ORDER IS NOT ITS FILL, once its life is on the server's clock", () => {
+    // The agent's own $5 buy of the coin ten minutes before the owner asked
+    // agrees on every fact but time. With the order's life known, a receipt
+    // whose own fill has not reached the tape yet waits for it.
+    const earlier = fill("buy", { at: T - 600 });
+    const early = mergeFills(lines("buy", 5), [earlier], since);
+    assert.equal(early.find((m) => m.id === "o")!.tradeKey, undefined, "the receipt waits");
+    assert.deepEqual(events(early).map((e) => e.trade?.at), [T - 600]);
+    const later = mergeFills(early, [fill("buy"), earlier], since);
+    assert.equal(later.find((m) => m.id === "o")!.trade?.at, T, "and takes its own fill when it comes");
+    assert.deepEqual(events(later).map((e) => e.trade?.at), [T - 600]);
+  });
 });
 
 describe("the tape learning a trade's hash", () => {

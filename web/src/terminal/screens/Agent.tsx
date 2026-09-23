@@ -4,7 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
-import { fetchOpenOrder, followWindowMs, routeAnswer } from "../order-follow";
+import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt } from "../order-follow";
 import type { ChatContext, ChatController } from "../chat-controller";
 import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
 import type { OrderReceipt } from "@/lib/order-state";
@@ -287,7 +287,7 @@ export function Agent({
    * the moment it exists — placed, not filled — then follow it to its answer.
    */
   const placeOrder = async (payload: unknown, words: (duplicate: boolean) => string) => {
-    const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }>("/api/orders", {
+    const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresAt?: number; expiresInMs?: number }>("/api/orders", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
@@ -297,8 +297,13 @@ export function Agent({
     if (!placed || (placed.ok && typeof placed.body?.id !== "string")) return orderLost();
     if (!placed.ok) throw new Error(placed.body?.error ?? `that was refused (${placed.status})`);
     const body = placed.body!;
+    // THE SERVER'S OWN TIME FOR THE PLACEMENT goes on the line that says it,
+    // said the moment the reply is in hand: the thread reads the order's life
+    // from the two, on the ledger's clock, so a browser minutes off cannot make
+    // its fill a second line (chat-thread.ts lifeOf).
+    const serverAt = serverPlacedAt(body);
     chat.say({ role: "owner", text: "✓ Confirmed" });
-    chat.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id! } });
+    chat.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id!, ...(serverAt !== null ? { serverPlacedAt: serverAt } : {}) } });
     setPending(null);
     followOrder(body.id!, followWindowMs(body));
   };

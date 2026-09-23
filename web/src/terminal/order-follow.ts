@@ -188,6 +188,26 @@ export function followWindowMs(body: unknown): number | null {
 }
 
 /**
+ * WHEN THE SERVER PLACED THE ORDER, ON THE SERVER'S CLOCK — or null when the
+ * reply did not say.
+ *
+ * POST computes `expiresAt` and `expiresInMs` from one `now` of its own
+ * (order-state.ts placedResponse), so their difference is that `now`. Not a
+ * deadline to wait on — followWindowMs is for that — but the one moment the
+ * chat can hold against the LEDGER's clock: the thread reads a receipt's
+ * order's life from it, so a browser clock minutes off cannot make one trade
+ * two lines (chat-thread.ts lifeOf).
+ */
+export function serverPlacedAt(body: unknown): number | null {
+  const b = body as { expiresAt?: unknown; expiresInMs?: unknown } | null | undefined;
+  const at = b?.expiresAt;
+  const left = b?.expiresInMs;
+  if (typeof at !== "number" || typeof left !== "number" || !Number.isFinite(at) || !Number.isFinite(left) || left < 0) return null;
+  const placed = at - left;
+  return placed > 0 ? placed : null;
+}
+
+/**
  * When to stop asking, as a moment on THIS browser's clock.
  *
  * Measured from `now` — when the POST's reply is in hand — so the wait can
