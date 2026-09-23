@@ -29,8 +29,14 @@ import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
 import { narrateJournal, narrateTrade } from "./interpreter";
-import { readReport, type StatusContext } from "./reads";
+import { dashboardBase, readReport, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
+import { loadGrantFile } from "../grant";
+import { settleFor, signDecision, signMessage, signNeed } from "./sign-prompt";
+import { bookAddresses } from "../custody";
+import { mainnetClient } from "../snapshot";
+import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
+import { dollars } from "./trade-rows";
 import type { StateRef, Watcher } from "./state";
 
 export interface AlertInputs {
@@ -98,6 +104,8 @@ export interface NotifierDeps {
 const LOOP_GAP_MS = 15_000;
 const IDLE_GAP_MS = 30_000;
 const CONDITION_COOLDOWN_SEC = 6 * 3600;
+/** How soon a sign prompt Telegram refused is tried again. */
+const SIGN_RETRY_SEC = 30 * 60;
 const LOW_GAS_WEI = 500_000_000_000_000n; // 0.0005 native — a few trades left
 
 function openRO(): DatabaseSync | null {
@@ -130,6 +138,26 @@ function decisionFor(db: DatabaseSync, decisionId: string | null | undefined): D
   }
 }
 
+/**
+ * The worker's own verdict on why this agent is not trading for real — the
+ * RULE, not the sentence (reads.ts `readLiveBlocker` returns the sentence).
+ * Null on any read failure: unknown, never "clear".
+ */
+function liveBlockerRule(agentId: string): string | null {
+  const db = openRO();
+  if (!db) return null;
+  try {
+    const row = db.prepare("SELECT live_blocker FROM agents WHERE smart_account = ?").get(agentId) as
+      | { live_blocker: string | null }
+      | undefined;
+    return row?.live_blocker?.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
 /** What the news desk held when this pass ran. Empty on any read failure. */
 function newsNow(): NewsLite[] {
   try {
@@ -158,6 +186,15 @@ interface TradeRowLite {
   fill_side?: string | null;
   fill_cash_usdg?: number | null;
   realized_pnl_usdg?: number | null;
+  /** The two token legs — the non-cash one is the coin (token-label.ts). */
+  sell_token?: string | null;
+  buy_token?: string | null;
+}
+
+/** What a ping says the trade was in: the coin's name and the side. */
+export interface TradeCoin {
+  label: string;
+  side: "buy" | "sell" | null;
 }
 
 /**
@@ -168,7 +205,24 @@ interface TradeRowLite {
  */
 const TRADE_PING_COLUMNS =
   "id, kind, amount_usdg, status, reject_rule, tx_hash, decision_id, " +
-  "target, fill_side, fill_cash_usdg, realized_pnl_usdg";
+  "target, fill_side, fill_cash_usdg, realized_pnl_usdg, sell_token, buy_token";
+
+/**
+ * The coin a ping row was in, named — never the router or vault in `target`.
+ * Null when the row has no coin leg (a transfer, a vault move). Never throws:
+ * a name is decoration on a receipt that is already correct without it.
+ */
+async function coinFor(db: DatabaseSync, t: TradeRowLite, agentId: string | null, cfg: ResolvedConfig): Promise<TradeCoin | null> {
+  try {
+    const token = nonCashLeg(t);
+    if (!token) return null;
+    const own = agentId ? bookAddresses(loadGrantFile(), agentId) : [];
+    const lbl = await tokenLabel(db, agentId, token, { customTokens: cfg.customTokens, own, client: mainnetClient(), timeoutMs: 2_500 });
+    return { label: labelText(lbl), side: sideOf(t) };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The P&L card for a row that closed something, or nothing at all.
@@ -189,9 +243,11 @@ async function sendCardFor(
    * numbers with nothing saying which position closed.
    */
   withCaption: boolean,
+  /** The coin's name. Without one there is no card — never an address. */
+  coin?: string | null,
 ): Promise<void> {
   try {
-    const card = pnlCardFromFill(row);
+    const card = pnlCardFromFill(row, coin);
     if (!card) return;
     await sendPnlPhoto({ token }, chatId, card, withCaption ? undefined : "");
   } catch {
@@ -271,17 +327,47 @@ export function tradeWhyEvidence(
  * it a parameter is what lets the dedupe live in the poll loop while this stays
  * a pure function of a row.
  */
-export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy = false): string {
+export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy = false, coin: TradeCoin | null = null): string {
+  // WHAT MOVED, IN DOLLARS: the fill's own cash when there is one, else the
+  // intended size. A leftover worth a fraction of a cent reads "<$0.01", not
+  // "0.00", which looked like a trade of nothing.
+  const cash = t.fill_cash_usdg ?? t.amount_usdg;
+  // ESCAPED, ALWAYS: "<$0.01" is a tag to Telegram's HTML parser, and a
+  // refused parse used to cost the owner the whole message.
+  const usd = (n: number) => esc(dollars(n));
+  const name = coin ? esc(coin.label) : null;
+  const what = coin?.side === "buy" ? "Bought" : coin?.side === "sell" ? "Sold" : null;
+  // No coin — say what kind of move it was, not "a trade": a transfer out of
+  // the account must never read as a trade.
+  const other =
+    t.kind === "transfer" ? "transfer out of your account"
+    : t.kind === "vault-deposit" ? "move into your savings vault"
+    : t.kind === "vault-withdraw" ? "move out of your savings vault"
+    : t.kind === "equity-order" && t.target && !/^0x/i.test(t.target) ? `${esc(t.target)} order`
+    : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
+    : esc(t.kind);
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
-        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">proof — view on the explorer ↗</a>`
+        ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">see it on the explorer ↗</a>`
         : `\n<code>${esc(t.tx_hash)}</code>`
       : "";
-    return `🏹 loosed an arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG landed${proof}`;
+    const realized = t.realized_pnl_usdg ?? null;
+    const result =
+      coin?.side === "sell" && realized !== null ? ` (${realized >= 0 ? "+" : "−"}${usd(Math.abs(realized))})` : "";
+    // A LEFTOVER only when nothing material was lost on it: a near-total-loss
+    // exit also sells for under a cent, and "the leftover" would hide the loss.
+    if (name && coin?.side === "sell" && cash > 0 && cash < 0.005 && Math.abs(realized ?? 0) < 0.005) {
+      return `✅ Sold the leftover ${name} — worth less than a cent${proof}`;
+    }
+    if (name && what) return `✅ ${what} ${name} for ${usd(cash)}${result}${proof}`;
+    return `✅ A ${other} went through — ${usd(cash)}${proof}`;
   }
   if (t.status === "paper") {
-    return `📜 paper arrow — ${esc(t.kind)} ${t.amount_usdg.toFixed(2)} USDG filled at the live price (simulated, nothing signed)`;
+    if (name && what) {
+      return `📜 Practice: ${what.toLowerCase()} ${name} for ${usd(cash)} at the live price — no real money moved`;
+    }
+    return `📜 Practice ${other} of ${usd(cash)} — no real money moved`;
   }
   if (t.status === "rejected") {
     // A SPONSOR FAILURE IS NOT A WALL REFUSAL. The wall is the owner's own
@@ -310,11 +396,12 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     const label = rejectRuleLabel(t.reject_rule);
     const fix = withRemedy ? rejectRuleRemedy(t.reject_rule) : null;
     const slug = t.reject_rule ?? "policy";
+    const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
     if (!label) {
-      return `🛡 the wall turned back a ${esc(t.kind)} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
+      return `🛡 the wall turned back a ${thing} (${esc(slug)}) — ${t.amount_usdg.toFixed(2)} USDG stayed home`;
     }
     return (
-      `🛡 the wall turned back a ${esc(t.kind)} — ${esc(label)}.` +
+      `🛡 the wall turned back a ${thing} — ${esc(label)}.` +
       `${fix ? ` ${esc(fix)}` : ""}` +
       ` ${t.amount_usdg.toFixed(2)} USDG stayed home (${esc(slug)})`
     );
@@ -331,7 +418,8 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
       ? ` — ${esc(revertLabel)} (${esc(t.reject_rule)})`
       : ` — ${esc(t.reject_rule)}`
     : "";
-  return `⚠️ a ${esc(t.kind)} of ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
+  const thing = name && coin?.side ? `${coin.side} of ${name}` : esc(t.kind);
+  return `⚠️ a ${thing} for ${t.amount_usdg.toFixed(2)} USDG didn't go through${why} (nothing moved)`;
 }
 
 interface TradeAgg {
@@ -412,7 +500,8 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             const prev = deps.stateRef.get();
             const rule = t.status === "rejected" ? t.reject_rule : null;
             const withRemedy = rule !== null && rule !== prev.lastRemedyRule;
-            const receipt = tradeLine(t, explorer, withRemedy);
+            const coin = await coinFor(db, t, agentId, cfg);
+            const receipt = tradeLine(t, explorer, withRemedy, coin);
             /**
              * AND THEN, FOR A TRADE THAT ACTUALLY HAPPENED, WHY.
              *
@@ -440,7 +529,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
             // AND THE PICTURE, when this row closed something at a knowable
             // P&L. After the receipt on purpose: the text is the record and
             // goes out whatever happens to the image.
-            await sendCardFor(t, token, chatId, false);
+            await sendCardFor(t, token, chatId, false, coin?.label);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: t.id,
@@ -471,7 +560,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
                   "ORDER BY id ASC LIMIT 10",
               )
               .all(st.lastNotifiedTradeId, agentId) as unknown as TradeRowLite[];
-            for (const t of closes) await sendCardFor(t, token, chatId, true);
+            for (const t of closes) await sendCardFor(t, token, chatId, true, (await coinFor(db, t, agentId, cfg))?.label);
             deps.stateRef.set({
               ...deps.stateRef.get(),
               lastNotifiedTradeId: Math.max(st.lastNotifiedTradeId, maxRow?.m ?? st.lastNotifiedTradeId),
@@ -498,17 +587,49 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       // there was nothing to look at but the absence of a complaint. The key
       // is enough to answer that and carries no chat content into the log.
       console.log(`[notify] condition alert sent — ${key}`);
-      deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
+      // RE-READ AFTER THE SEND. `st` was read before the await, and the poll
+      // loop may have saved the offset (or a chat setting) meanwhile — writing
+      // the old copy back would undo it, and a rolled-back offset makes
+      // Telegram deliver the same messages, and run the same commands, twice.
+      const fresh = deps.stateRef.get();
+      deps.stateRef.set({ ...fresh, firedAlerts: { ...fresh.firedAlerts, [key]: now() } });
     };
 
-    if (inputs.grantExpiresAt !== null) {
-      const left = inputs.grantExpiresAt - now();
-      if (left > 0 && left < 86_400) {
-        // Key includes the expiry so a re-signed grant alerts afresh.
-        await fire(
-          `grant-expiry:${inputs.grantExpiresAt}`,
-          `⏳ your permission grant dies in ${Math.max(1, Math.floor(left / 3600))}h — re-sign at the dashboard /grant to keep the band riding.`,
-        );
+    // ── "SIGN NOW", WITH THE BUTTON ─────────────────────────────────────────
+    //
+    // Replaces the old expiry line ("re-sign at the dashboard /grant"), which
+    // named a page and made the owner go and find it, and which said nothing
+    // at all when an UPDATE was the reason a signature was needed. Everything
+    // that decides lives in sign-prompt.ts; this only reads and sends.
+    //
+    // Read from the grant FILE, not `inputs.grantExpiresAt`: that comes from
+    // the armed agent, and an expired grant is exactly the one that is no
+    // longer armed — so the input goes null at the moment it matters most.
+    {
+      const grant = loadGrantFile();
+      const who = deps.getAgentId() ?? grant?.smartAccount ?? null;
+      const signInputs = {
+        blocker: who ? liveBlockerRule(who) : null,
+        grantExpiresAt: grant?.expiresAt ?? null,
+        grantedAt: grant?.grantedAt ?? null,
+        now: now(),
+      };
+      const need = signNeed(signInputs);
+      const st = deps.stateRef.get();
+      const d = signDecision(need, st.signWatch, need ? st.firedAlerts[need.key] : undefined, now(), settleFor(cfg.tickSeconds));
+      if ((d.watch?.key ?? null) !== (st.signWatch?.key ?? null) || (d.watch?.since ?? null) !== (st.signWatch?.since ?? null)) {
+        deps.stateRef.set({ ...deps.stateRef.get(), signWatch: d.watch });
+      }
+      if (d.send && need) {
+        const m = signMessage(need.reason, signInputs, getName(), dashboardBase());
+        const sent = await sendMessage({ token }, chatId, m.text, m.keyboard ? { keyboard: m.keyboard } : {});
+        // A sent prompt waits out its repeat; a FAILED one retries in half an
+        // hour — not every 15-second pass (a blocked bot fails for ever), and
+        // not after a day (a blip should not cost the owner the prompt).
+        if (sent.ok) console.log(`[notify] sign prompt sent — ${need.key}`);
+        const stamp = sent.ok ? now() : now() - need.repeatSec + SIGN_RETRY_SEC;
+        const now2 = deps.stateRef.get();
+        deps.stateRef.set({ ...now2, firedAlerts: { ...now2.firedAlerts, [need.key]: stamp } });
       }
     }
     // ── A CEILING SO LOW THE AGENT HAS NOTHING WORTH DOING ─────────────────
@@ -629,7 +750,12 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       const st = deps.stateRef.get();
       if (st.firedAlerts[key] !== undefined) return;
       await sendMessage({ token }, chatId, message);
-      deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
+      // RE-READ AFTER THE SEND. `st` was read before the await, and the poll
+      // loop may have saved the offset (or a chat setting) meanwhile — writing
+      // the old copy back would undo it, and a rolled-back offset makes
+      // Telegram deliver the same messages, and run the same commands, twice.
+      const fresh = deps.stateRef.get();
+      deps.stateRef.set({ ...fresh, firedAlerts: { ...fresh.firedAlerts, [key]: now() } });
     };
     const rel = relationship(deps.stateRef.get().linkedAt, deps.stateRef.get().messageCount, now());
     const MILESTONES: Record<number, string> = {

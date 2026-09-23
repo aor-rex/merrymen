@@ -619,6 +619,14 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
   } catch (e) {
     log(`${tenant}: could not publish telegram state — ${e instanceof Error ? e.message : String(e)}`);
   }
+  // EVERY PASS, AND BEFORE THE EARLY RETURNS BELOW. This call used to sit at
+  // the end of the function, after `return`s that fire whenever there is no
+  // newly linked chat to add — which is every steady-state pass, and every
+  // pass after a redeploy (telegram.json is rewritten without linkedChats). So
+  // a setting changed from chat was promoted only in the one pass that also
+  // added a chat to the allowlist, and otherwise reverted fifteen seconds
+  // later. It does its own read-modify-write, so running it first is safe.
+  await promoteChatSettings(tenant, tg.chatSettings);
   if (tg.linkedChats.length === 0) return;
   try {
     const stored = (await getSettingsStore().get(tenant)) ?? {};
@@ -631,7 +639,6 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
   } catch (e) {
     log(`${tenant}: could not promote telegram link — ${e instanceof Error ? e.message : String(e)}`);
   }
-  await promoteChatSettings(tenant, tg.chatSettings);
 }
 
 /**

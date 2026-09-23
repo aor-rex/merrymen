@@ -604,3 +604,38 @@ describe("PC control — gating, confirm-park, and injection safety", () => {
     assert.equal(await executeCommand({ kind: "pc" }, d), "PCSTATUS");
   });
 });
+
+describe("settings by text — the classifier names, the code decides", () => {
+  it("a setting outside the closed list becomes \"unknown\", never a raw key", () => {
+    assert.deepEqual(coerceLlmCommand({ kind: "set", setting: "telegramAgentAutoShell", value: "on" }), {
+      kind: "set",
+      setting: "unknown",
+      value: "on",
+    });
+    assert.deepEqual(coerceLlmCommand({ kind: "set", setting: "buyPerTickUsdg", value: "$20" }), {
+      kind: "set",
+      setting: "buyPerTickUsdg",
+      value: "$20",
+    });
+  });
+
+  it("/set takes the last word as the value and the rest as the setting", () => {
+    assert.deepEqual(parseSlash("/set stop loss 8%"), { kind: "set", setting: "stop loss", value: "8%" });
+    assert.deepEqual(parseSlash("/settings"), { kind: "settings" });
+    assert.equal(parseSlash("/set onlyoneword")?.kind, "unknown");
+    assert.deepEqual(parseSlash("/set basket QQQ NVDA"), { kind: "set", setting: "basket", value: "QQQ NVDA" });
+    assert.deepEqual(parseSlash("/set max hold 1 day"), { kind: "set", setting: "max hold", value: "1 day" });
+  });
+
+  it("\"set\" is a control command — gated like /strategy and /cap", async () => {
+    const { CONTROL_KINDS } = await import("./interpreter");
+    assert.ok(CONTROL_KINDS.has("set"));
+  });
+
+  it("coin research is chat, never a PC agent task", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./interpreter.ts", import.meta.url), "utf8");
+    assert.match(src, /AGENT TASKS are ONLY for work on the owner's own computer/);
+    assert.match(src, /"use the brain"/);
+  });
+});

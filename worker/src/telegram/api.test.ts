@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { BOT_COMMANDS, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
+import { BOT_COMMANDS, answerCallbackQuery, editMessageText, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
 import { parseSlash } from "./interpreter";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
@@ -86,6 +86,118 @@ describe("getUpdates", () => {
     assert.deepEqual(messages, []);
     assert.equal(nextOffset, 9);
     assert.match(reason!, /flood/);
+  });
+
+  it("asks Telegram for button presses, or they are never delivered", async () => {
+    const f = fakeFetch(200, OK([]));
+    await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.match(f.lastBody!, /"allowed_updates":\["message","callback_query"\]/);
+  });
+
+  it("returns a button press as a callback, never as a typed message", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 40,
+          callback_query: {
+            id: "cbq-1",
+            data: "mm:ok:ab12",
+            from: { id: 555, username: "alice" },
+            message: { message_id: 77, chat: { id: 555 } },
+          },
+        },
+        { update_id: 41, message: { text: "hi", chat: { id: 555 }, from: { id: 555 } } },
+      ]),
+    );
+    const { messages, callbacks, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 40);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]!.text, "hi");
+    assert.deepEqual(callbacks, [
+      { updateId: 40, id: "cbq-1", chatId: 555, fromId: 555, fromUsername: "alice", messageId: 77, data: "mm:ok:ab12" },
+    ]);
+    assert.equal(nextOffset, 42);
+  });
+
+  it("drops a press whose message Telegram no longer returns — no chat, no owner to check", async () => {
+    const f = fakeFetch(200, OK([{ update_id: 9, callback_query: { id: "x", data: "mm:ok:1", from: { id: 1 } } }]));
+    const { messages, callbacks, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 9);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(callbacks, []);
+    assert.equal(nextOffset, 10);
+  });
+});
+
+describe("sendMessage — inline buttons", () => {
+  it("sends the keyboard in Telegram's wire shape and returns the message id", async () => {
+    const f = fakeFetch(200, OK({ message_id: 314 }));
+    const r = await sendMessage({ token: "t", fetchFn: f }, 1, "change it?", {
+      keyboard: [[{ text: "Yes", callbackData: "mm:ok:1" }, { text: "Sign", url: "https://app.merrymen.dev/grant" }]],
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.messageId, 314);
+    const body = JSON.parse(f.lastBody!) as { reply_markup: { inline_keyboard: unknown[][] } };
+    assert.deepEqual(body.reply_markup.inline_keyboard, [
+      [
+        { text: "Yes", callback_data: "mm:ok:1" },
+        { text: "Sign", url: "https://app.merrymen.dev/grant" },
+      ],
+    ]);
+  });
+
+  it("a refused LINK button costs the button, never the message — the link moves into the text", async () => {
+    const bodies: string[] = [];
+    const f: FetchLike = async (_url, init) => {
+      bodies.push(init?.body ?? "");
+      const first = bodies.length === 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          first
+            ? { ok: false, description: "Bad Request: inline keyboard button URL 'http://localhost:3100/grant' is invalid" }
+            : OK({ message_id: 5 }),
+      };
+    };
+    const r = await sendMessage({ token: "t", fetchFn: f }, 1, "sign please", {
+      keyboard: [[{ text: "Sign now", url: "http://localhost:3100/grant" }], [{ text: "Later", callbackData: "mm:no:1" }]],
+    });
+    assert.equal(r.ok, true);
+    assert.equal(bodies.length, 2);
+    const retry = JSON.parse(bodies[1]!) as { text: string; reply_markup?: { inline_keyboard: unknown[][] } };
+    assert.match(retry.text, /Sign now: http:\/\/localhost:3100\/grant/);
+    assert.deepEqual(retry.reply_markup?.inline_keyboard, [[{ text: "Later", callback_data: "mm:no:1" }]]);
+  });
+
+  it("does not retry a failure that has nothing to do with the buttons", async () => {
+    let calls = 0;
+    const f: FetchLike = async () => {
+      calls += 1;
+      return { ok: true, status: 200, json: async () => ({ ok: false, description: "Forbidden: bot was blocked by the user" }) };
+    };
+    const r = await sendMessage({ token: "t", fetchFn: f }, 1, "x", { keyboard: [[{ text: "a", url: "https://x.y" }]] });
+    assert.equal(r.ok, false);
+    assert.equal(calls, 1);
+  });
+});
+
+describe("editMessageText + answerCallbackQuery", () => {
+  it("edits by chat + message id, and an absent keyboard removes the buttons", async () => {
+    const f = fakeFetch(200, OK(true));
+    const r = await editMessageText({ token: "t", fetchFn: f }, 12, 34, "✅ done");
+    assert.equal(r.ok, true);
+    assert.match(f.lastUrl!, /\/editMessageText$/);
+    const body = JSON.parse(f.lastBody!) as Record<string, unknown>;
+    assert.equal(body.chat_id, 12);
+    assert.equal(body.message_id, 34);
+    assert.equal(body.reply_markup, undefined);
+  });
+
+  it("answers a press with an optional toast", async () => {
+    const f = fakeFetch(200, OK(true));
+    await answerCallbackQuery({ token: "t", fetchFn: f }, "cbq-9", "changed");
+    assert.match(f.lastUrl!, /\/answerCallbackQuery$/);
+    assert.deepEqual(JSON.parse(f.lastBody!), { callback_query_id: "cbq-9", text: "changed" });
   });
 });
 
@@ -226,6 +338,7 @@ const HIDDEN_ALIASES = new Set([
   "digest", // report
   "send", "withdraw", // transfer
   "yes", "no", // confirm/cancel
+  "config", // settings
   "rename", // name
   "whoareyou", // soul
   "screenshot", "screen", // shot
@@ -343,5 +456,29 @@ describe("publicBotCommands — what strangers see", () => {
     for (const pub of publicBotCommands) {
       assert.ok(BOT_COMMANDS.includes(pub), `/${pub.command} missing from the full menu`);
     }
+  });
+});
+
+describe("a refused request keeps Telegram's reason", () => {
+  it("reads the description on an HTTP 400, so the plain-text retry actually runs", async () => {
+    const bodies: string[] = [];
+    const f: FetchLike = async (_url, init) => {
+      bodies.push(init?.body ?? "");
+      const first = bodies.length === 1;
+      return {
+        ok: !first,
+        status: first ? 400 : 200,
+        json: async () => (first ? { ok: false, description: "Bad Request: can't parse entities: unsupported start tag \"$0.01\"" } : OK({ message_id: 9 })),
+      };
+    };
+    const r = await sendMessage({ token: "t", fetchFn: f }, 1, "sold X for <$0.01");
+    assert.equal(r.ok, true, "the reply is delivered as plain text, not lost");
+    assert.equal(bodies.length, 2);
+  });
+
+  it("still says HTTP <code> when there is no body to read", async () => {
+    const f: FetchLike = async () => ({ ok: false, status: 502, json: async () => { throw new Error("html"); } });
+    const { reason } = await getMe({ token: "t", fetchFn: f });
+    assert.match(reason!, /HTTP 502/);
   });
 });
