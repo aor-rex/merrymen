@@ -301,9 +301,11 @@ export async function readEvidencedSells(
   return new Set(sells.filter((s) => replay.vouched.has(s.op) && replay.sellSource.get(s.op) === own).map((s) => s.op));
 }
 
-/** Ranked candidates read per page, and how many pages before the list settles for what it found. */
+/** Ranked candidates read per page, and how many pages before the scan stops. */
 const TOP_TRADES_PAGE = TOP_TRADES * 4;
 const TOP_TRADES_MAX_PAGES = 50;
+/** The most ranked candidates one TOP TRADES read looks at. */
+export const TOP_TRADES_SCAN_ROWS = TOP_TRADES_PAGE * TOP_TRADES_MAX_PAGES;
 
 /**
  * TOP TRADES: this period's best closed trades, by RETURN.
@@ -343,6 +345,10 @@ const TOP_TRADES_MAX_PAGES = 50;
  * answer (`read` false) rather than handing back a list that silently skipped
  * it — or an empty one the page would print as "No closed trades yet". Met only
  * after five checked trades, it ranks below all of them and changes nothing.
+ * The scan's own bound (TOP_TRADES_SCAN_ROWS) is the same kind of cut: past
+ * it, more unvouched sells than it reads can rank above every checked one, so
+ * a scan that stops there with candidates left and the list not full is unread
+ * too — and one that read every candidate, however many pages, is whole.
  */
 export async function readTopTrades(
   db: Db,
@@ -367,8 +373,14 @@ export async function readTopTrades(
     const vouched = new Set<string>();
     const cut = new Set<string>();
     const replayed = new Set<string>();
+    /** A ranked candidate lies past the last page read. */
+    let more = false;
     for (let page = 0; page < TOP_TRADES_MAX_PAGES && trades.length < TOP_TRADES; page++) {
-      const rows = (await ranked.all(publicBook ? 1 : 0, account, epoch, book, book === "paper" ? "paper" : "receipt", TOP_TRADES_PAGE, page * TOP_TRADES_PAGE)) as Record<string, unknown>[];
+      // One row past the page, so the last page the bound allows knows whether
+      // anything was left below it — a full page is not proof that there was.
+      const read = (await ranked.all(publicBook ? 1 : 0, account, epoch, book, book === "paper" ? "paper" : "receipt", TOP_TRADES_PAGE + 1, page * TOP_TRADES_PAGE)) as Record<string, unknown>[];
+      more = read.length > TOP_TRADES_PAGE;
+      const rows = read.slice(0, TOP_TRADES_PAGE);
       // Replay each coin once, the first time one of its sells is a candidate.
       const fresh = [...new Set(rows.map((r) => r.coin_token).filter((t): t is string => typeof t === "string" && t !== "" && !replayed.has(t)))];
       if (fresh.length > 0) {
@@ -391,8 +403,12 @@ export async function readTopTrades(
         // unpriced.
         if (t.action === "sell" && t.realizedPnlBps !== null) trades.push(t);
       }
-      if (rows.length < TOP_TRADES_PAGE) break;
+      if (!more) break;
     }
+    // THE SCAN'S OWN BOUND IS A CUT TOO. Stopped with candidates left unread
+    // and the list not full, any of them may belong in it — so this is the
+    // same unanswered read as a cut coin, not a short list and not an empty one.
+    if (more && trades.length < TOP_TRADES) return { trades: [], read: false };
     return { trades, read: true };
   } catch (error) {
     console.error("[profile-trades] top trades read failed", error instanceof Error ? error.name : "unknown");

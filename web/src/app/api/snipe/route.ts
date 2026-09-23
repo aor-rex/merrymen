@@ -27,6 +27,7 @@ import {
 } from "@merrymen/core";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { OWNER_CHANGED, ownerMismatch } from "@/lib/order-owner";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { sharedRead } from "@/lib/read-discoveries";
 import { usd } from "@/lib/format";
@@ -108,11 +109,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "sign in first" }, { status: 401 });
   }
 
-  let body: { query?: unknown; usdgAmount?: unknown };
+  let body: { query?: unknown; usdgAmount?: unknown; owner?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "bad body" }, { status: 400 });
+  }
+  // THE OWNER WHO CONFIRMED, not whoever is signed in now (lib/order-owner.ts):
+  // a lookup under another wallet's session would resolve against that
+  // wallet's coins, and hand back an order for the card to place.
+  if (isHostedMode() && ownerMismatch(body.owner, tenant)) {
+    return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
 
   const query = typeof body.query === "string" ? body.query.slice(0, 64).trim() : "";

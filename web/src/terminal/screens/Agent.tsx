@@ -4,7 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
-import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt } from "../order-follow";
+import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt, SNIPE_LOOKUP_MS } from "../order-follow";
 import type { ChatContext, ChatController, ConfirmScope } from "../chat-controller";
 import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
 import type { OrderReceipt } from "@/lib/order-state";
@@ -39,6 +39,9 @@ import { count } from "@/lib/format";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
+
+/** A request that acts, naming the owner it acts for, so the route can refuse anyone else's session (ConfirmScope.owner). */
+const ownedBy = (on: ConfirmScope, payload: Record<string, unknown>) => (on.owner ? { ...payload, owner: on.owner } : payload);
 
 export function Agent({
   mine,
@@ -271,7 +274,9 @@ export function Agent({
   const orderLost = async (on: ConfirmScope) => {
     on.setProposal(null);
     on.say({ role: "owner", text: "✓ Confirmed" });
-    const open = await fetchOpenOrder();
+    // Asked under the session the browser holds NOW: once the owner has
+    // changed, what is open is somebody else's, and it is not looked for.
+    const open = on.alive() ? await fetchOpenOrder() : null;
     if (open) {
       on.say({
         role: "agent",
@@ -290,12 +295,27 @@ export function Agent({
   /**
    * Place one order through the ONE channel orders take, and say what is true
    * the moment it exists — placed, not filled — then follow it to its answer.
+   *
+   * FOR THE OWNER WHO TAPPED, OR NOT AT ALL. The POST carries whatever session
+   * this browser holds when it leaves, and a snipe reaches here only after its
+   * lookup answered — time enough for another owner to sign in. So nothing is
+   * sent once the owner has changed (on.alive), and what is sent names the
+   * owner it is for, so the route refuses a session that is not theirs.
    */
-  const placeOrder = async (on: ConfirmScope, payload: unknown, words: (duplicate: boolean) => string) => {
+  const placeOrder = async (on: ConfirmScope, payload: Record<string, unknown>, words: (duplicate: boolean) => string) => {
+    if (!on.alive()) {
+      // Said only where the owner who tapped can read it (on.say): back on
+      // this browser, never in the thread of whoever signed in meanwhile.
+      on.say({
+        role: "agent",
+        text: "I didn't place that — the wallet signed in here changed after you confirmed, so nothing was sent. Ask again if you still want it.",
+      });
+      return;
+    }
     const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresAt?: number; expiresInMs?: number }>("/api/orders", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(ownedBy(on, payload)),
     });
     // A 200 is a row that exists, but one whose id could not be read cannot be
     // followed — so it is looked for, exactly like an answer that was lost.
@@ -342,15 +362,22 @@ export function Agent({
           error?: string;
           target?: { symbol?: string };
           usdgAmount?: number;
-        }>("/api/snipe", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, proposal.args)),
-        });
+        }>(
+          "/api/snipe",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(ownedBy(on, commandPayload(cmd, proposal.args))),
+          },
+          // BOUNDED: the order it resolves to goes out only after it answers,
+          // so an open-ended lookup was an open-ended gap between the tap and
+          // the order (SNIPE_LOOKUP_MS).
+          SNIPE_LOOKUP_MS,
+        );
         // A lookup places nothing, so a lost answer costs only the asking —
         // and the card stays for exactly that.
         if (!found) {
-          on.say({ role: "agent", text: "I couldn't look that coin up — the connection dropped before I heard back, and nothing was placed. Try again." });
+          on.say({ role: "agent", text: "I couldn't look that coin up — no answer came back, and nothing was placed. Try again." });
           return;
         }
         const out = found.body;

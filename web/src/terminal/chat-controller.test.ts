@@ -21,7 +21,8 @@ import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
-import { useChatController, type ChatController } from "./chat-controller";
+import { ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
+import { chatKeyFor } from "./chat-store";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
 import { deferred, json, testDom } from "./test-dom";
 
@@ -34,7 +35,7 @@ const originalFetch = globalThis.fetch;
 const originalRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
 type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
 let routes: Record<string, Handler>;
-let calls: { method: string; url: string; body: Record<string, unknown> | null }[];
+let calls: { method: string; url: string; body: Record<string, unknown> | null; deadline: boolean }[];
 let chat: ChatController;
 /** How far this browser's clock runs ahead of the true one (the server's, the ledger's). */
 let clockAhead = 0;
@@ -58,7 +59,7 @@ beforeEach(() => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    calls.push({ method, url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null });
+    calls.push({ method, url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null, deadline: !!init?.signal });
     const handler = routes[`${method} ${url.split("?")[0]}`];
     return handler ? handler(url, init) : json({ error: "not scripted" }, 404);
   }) as typeof fetch;
@@ -453,12 +454,70 @@ describe("chips", () => {
     await settle(5);
     const chips = () => Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent);
     assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
-    // And a ceiling just read is not read again for every message.
+    // WITHIN THIRTY SECONDS OF THAT READ — the natural flow after seeing an
+    // unwanted max: lower it, come straight back, ask again. The ceiling was
+    // re-read only once it was 30 s old, so these chips still offered 10.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 7 });
+    clockAhead += 20_000;
     await typeAndSend("buy some more");
     await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
     await settle(5);
-    assert.equal(count("GET", "/api/orders/ceiling"), 2, "once when the chat opened, once when it had gone stale");
-    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
+    assert.deepEqual(chips(), ["$5.00", "$7.00 (max)"], "the ceiling the owner just set");
+    assert.equal(count("GET", "/api/orders/ceiling"), 3, "once when the chat opened, and once for each question of how much");
+  });
+
+  it("A MESSAGE THAT ASKS NOTHING OF HOW MUCH DOES NOT READ THE CEILING", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "All quiet today." });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("anything new?");
+    await until(() => /All quiet today\./.test(text()), "reply");
+    await settle(5);
+    assert.equal(count("GET", "/api/orders/ceiling"), 1, "only when the chat opened");
+  });
+
+  it("NO AMOUNT IS OFFERED UNTIL THE CEILING IS READ FOR THAT QUESTION — and none on a read that failed", async () => {
+    // Chips drawn with the reply against the last ceiling read would offer it
+    // for as long as the new read took; a read that failed would leave it.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 25 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    const held = deferred<Response>();
+    routes["GET /api/orders/ceiling"] = () => held.promise;
+    await typeAndSend("buy some");
+    await until(() => /How much should I put in\?/.test(text()), "reply");
+    await settle(5);
+    const amounts = () =>
+      Array.from(ui.container.querySelectorAll(".desk-prompts button"))
+        .map((b) => b.textContent ?? "")
+        .filter((t) => t.startsWith("$"));
+    assert.deepEqual(amounts(), [], "not the 25 read when the chat opened, while the new read is out");
+    held.resolve(json({ ceilingUsdg: 10 }));
+    await until(() => amounts().length > 0, "the chips, once it is read");
+    assert.deepEqual(amounts(), ["$5.00", "$10.00 (max)"]);
+    routes["GET /api/orders/ceiling"] = () => json({ error: "the ledger could not be read" }, 503);
+    await typeAndSend("buy again");
+    await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
+    await settle(5);
+    assert.deepEqual(amounts(), [], "a limit that could not be read now offers no amount, not the last one");
+  });
+
+  it("AN OLDER READ OF THE CEILING LANDING LATE DOES NOT PUT BACK THE CEILING IT READ", async () => {
+    const opened = deferred<Response>();
+    routes["GET /api/orders/ceiling"] = () => opened.promise;
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    await typeAndSend("buy some");
+    await until(() => buttons("$10.00 (max)").length === 1, "the chips against the question's read");
+    // The read the chat started when it opened answers only now, with what
+    // the ceiling was before the owner lowered it.
+    opened.resolve(json({ ceilingUsdg: 25 }));
+    await settle(10);
+    assert.equal(buttons("$10.00 (max)").length, 1);
+    assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
   });
 
   it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
@@ -901,6 +960,137 @@ describe("whose thread", () => {
     assert.equal(count("POST", "/api/orders"), 2, "one order each, nothing twice");
     assert.match(text(), /WIF/);
     assert.doesNotMatch(text(), /TSLA/, "and still nothing of A's");
+  });
+});
+
+describe("a confirm places its order for the owner who tapped it, or not at all", () => {
+  // The scope above bound what a confirm SAYS to the owner who tapped it, but
+  // not the order it places. A snipe's lookup answered with no deadline, and
+  // then POST /api/orders went out carrying whichever session this browser
+  // held by then: B signing in while A's lookup was out got a real order B
+  // never confirmed, with no line in B's thread and nothing following it.
+  const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const keyOf = (owner: string) => `merrymen.chat.${owner}`;
+  const RESOLVED = { outcome: "resolved", say: "PEPE is the one you mean.", target: { symbol: "PEPE" }, usdgAmount: 5 };
+  const sentOrders = () => count("POST", "/api/orders");
+
+  /** Owner A asks for a snipe and taps Yes; the lookup is held until the test lets it answer. */
+  async function snipeHeldAfterTap() {
+    const held = deferred<Response>();
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => held.promise;
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await settle();
+    assert.equal(count("POST", "/api/snipe"), 1, "the lookup is out");
+    return held;
+  }
+
+  it("A LOOKUP THAT ANSWERS AFTER ANOTHER OWNER SIGNED IN PLACES NOTHING — and tells the new owner nothing", async () => {
+    const held = await snipeHeldAfterTap();
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    held.resolve(json(RESOLVED));
+    await settle(20);
+    assert.equal(count("POST", "/api/orders"), 0, "no order goes out under B's session");
+    assert.deepEqual(chat.messages.map((m) => m.text), [], "and B's thread holds nothing of A's");
+    assert.equal(count("GET", "/api/orders"), 0, "nothing is followed or looked for under B's session");
+  });
+
+  it("AN OWNER WHO LEFT AND CAME BACK MID-LOOKUP IS TOLD IT WAS NOT PLACED — the owner changed while it was in flight", async () => {
+    const held = await snipeHeldAfterTap();
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    held.resolve(json(RESOLVED));
+    await until(() => /I didn't place that/.test(text()), "A is told");
+    assert.equal(count("POST", "/api/orders"), 0, "nothing was placed, not even for the owner who came back");
+    assert.match(text(), /nothing was sent/);
+    assert.doesNotMatch(text(), /Placed, not filled/);
+  });
+
+  it("EVERY REQUEST THAT ACTS NAMES THE OWNER WHO TAPPED, so the route can refuse another session — and the refusal is said", async () => {
+    // Another TAB signing in changes the cookie this tab sends without
+    // changing its key, which no check in this browser can see. So the card
+    // says whose confirm it is, and the route refuses a session that is not
+    // that owner's (orders/owner.test.ts, snipe/route.test.ts).
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json(RESOLVED);
+    routes["POST /api/orders"] = () =>
+      json({ error: "this browser is signed in with a different wallet now than the one that confirmed this, so nothing was placed." }, 409);
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /didn't go through/.test(text()), "the refusal");
+    const sent = (path: string) => calls.find((c) => c.method === "POST" && c.url === path)!;
+    assert.equal(sent("/api/snipe").body!.owner, A, "the lookup names A");
+    assert.equal(sent("/api/orders").body!.owner, A, "and so does the order");
+    assert.equal(sent("/api/orders").body!.symbol, "PEPE", "beside the order it always carried");
+    assert.match(text(), /different wallet now than the one that confirmed this/, "said in A's thread, in the route's words");
+    assert.equal(count("POST", "/api/orders"), 1);
+    assert.equal(buttons("Yes, do it").length, 1, "nothing was placed, so the card stays");
+  });
+
+  it("AN ORDER WHOSE ANSWER WAS LOST AFTER THE OWNER CHANGED IS NOT LOOKED FOR under the next owner's session", async () => {
+    // "What is open on the key" is asked with the session the browser holds
+    // NOW — the next owner's — and would find, and follow, their order.
+    const held = deferred<Response>();
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => held.promise;
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await settle();
+    assert.equal(sentOrders(), 1, "A's order went out while A was the owner");
+    await ui.render(h({ chatKey: keyOf(B) }));
+    await settle();
+    held.resolve(new Response("bad gateway", { status: 502 }));
+    await settle(20);
+    assert.equal(count("GET", "/api/orders"), 0, "nothing of B's is looked for on A's behalf");
+    assert.deepEqual(chat.messages.map((m) => m.text), []);
+  });
+
+  it("THE OWNER NAMED IS THE WALLET THE THREAD IS KEPT FOR — and self-hosted, nobody", () => {
+    const mixed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+    assert.equal(ownerOfChatKey(chatKeyFor({ hosted: true, address: mixed })), mixed.toLowerCase());
+    assert.equal(ownerOfChatKey(`merrymen.chat.${mixed}`), mixed.toLowerCase(), "one wallet, however its key was cased");
+    assert.equal(ownerOfChatKey(chatKeyFor({ hosted: false, address: null })), null);
+    assert.equal(ownerOfChatKey(chatKeyFor(null)), null);
+    assert.equal(ownerOfChatKey("merrymen.chat.0xnot-an-address"), null);
+  });
+
+  it("A SNIPE'S LOOKUP HAS A DEADLINE; the order itself is never cut short by one", async () => {
+    // Bounding the lookup bounds the time between a tap and its order. The
+    // order's own POST is not bounded here: an order whose answer is lost is
+    // looked for (orderLost), and a deadline would only manufacture that.
+    routes["POST /api/chat"] = () => json({ reply: "Going after it.", command: { id: "snipe", args: { query: "pepe", usdgAmount: 5 } } });
+    routes["POST /api/snipe"] = () => json(RESOLVED);
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("snipe pepe with $5");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed, not filled/.test(text()), "placed");
+    const sent = (path: string) => calls.find((c) => c.method === "POST" && c.url === path)!;
+    assert.equal(sent("/api/snipe").deadline, true, "the lookup carries a deadline");
+    assert.equal(sent("/api/orders").deadline, false);
+    // Self-hosted there is one operator and no sign-in: nobody to name.
+    assert.equal("owner" in sent("/api/snipe").body!, false);
+    assert.equal("owner" in sent("/api/orders").body!, false);
   });
 });
 
