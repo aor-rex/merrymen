@@ -4,6 +4,7 @@ import { useAgentImageSrc } from "./agent-image-state";
 import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
+import { useTrend, type Trend } from "./motion";
 // The one face recipe. This file used to carry its own copy of these, so the
 // terminal's faces and components/AgentAvatar's could drift with nothing to
 // notice — and changing the seed would have meant changing both.
@@ -136,14 +137,32 @@ export function Delta({ value, suffix = "", size = 13 }: { value: number | null;
   );
 }
 
-/** Replays on every text change, so a figure reads as having just moved. */
-export function Flip({ text, dir = "up" }: { text: string; dir?: "up" | "down" }) {
+/**
+ * Replays when its text changes, so a figure reads as having just moved — in
+ * the direction it moved, and not at all when `dir` is null.
+ *
+ * NULL IS THE FIRST DRAW. A remount replays a keyed animation, so a Flip with a
+ * fixed direction flipped every price on the screen each time the screen was
+ * drawn, as if the whole market had just ticked up. `data-trend` carries the
+ * direction for the colour the stylesheet gives a move (live-motion.css).
+ */
+export function Flip({ text, dir = null, children }: { text: string; dir?: Trend; children?: ReactNode }) {
   return (
-    <span className="flip-slot">
-      <span key={text} className={dir === "up" ? "flip" : "flip rev"}>
-        {text}
+    <span className="flip-slot" data-trend={dir ?? undefined}>
+      <span key={text} className={dir === null ? "flip-still" : dir === "up" ? "flip" : "flip rev"}>
+        {children ?? text}
       </span>
     </span>
+  );
+}
+
+/** A figure that flips when its value moves between two readings — see motion.ts. */
+export function MovingFigure({ value, text, children }: { value: number | null; text: string; children?: ReactNode }) {
+  const dir = useTrend(value);
+  return (
+    <Flip text={text} dir={dir}>
+      {children}
+    </Flip>
   );
 }
 

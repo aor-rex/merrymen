@@ -25,7 +25,7 @@ import {
   deltaClass,
 } from "../live";
 import { TvChart } from "../tv";
-import { Coin, Face, Empty } from "../ui";
+import { Coin, Face, Empty, MovingFigure } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { holdersFigure, holdersList } from "../token-holders";
 import { useWatchlist } from "../watchlist";
@@ -182,7 +182,10 @@ export function Token({
       <div className="token-hero">
         <div>
           <div className="price" title={quoteTitle(token)}>
-            {coinPrice(token.priceUsd)}
+            {/* Flips when a newer read moves it — the market read lands every
+                thirty seconds now, and a price that changes in place with no
+                sign of it reads as a price that never changes. */}
+            <MovingFigure value={token.priceUsd} text={coinPrice(token.priceUsd)} />
           </div>
           {winPct != null && (
             <strong className={down ? "down" : "up"}>
@@ -209,7 +212,11 @@ export function Token({
                 : "Token price"}
           </span>
           <strong title={quoteTitle(token)}>
-            {coinPrice(token.priceUsd ?? last?.close ?? null)}
+            {/* The desktop's copy of the price above, which is hidden there.
+                It moves with the LIVE price only: the chart close it falls
+                back to is another measurement, and a price arriving in its
+                place is not the market moving. */}
+            <MovingFigure value={token.priceUsd} text={coinPrice(token.priceUsd ?? last?.close ?? null)} />
           </strong>
         </div>
         <div>

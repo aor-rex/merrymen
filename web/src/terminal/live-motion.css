@@ -1,0 +1,61 @@
+/* ══ WAVE 2 · LIVE — a figure that moves ═══════════════════════════════════════
+   Its own sheet rather than a hunk of terminal.css, which the feed's rows also
+   extend this wave. Every selector here is new, and scoped to the terminal the
+   way terminal.css scopes its own. */
+
+/* A MOVE HAS A COLOUR AS WELL AS A DIRECTION.
+   `Flip` (ui.tsx) replays its slide when its text changes, and carries which
+   way the value went in data-trend; the figure starts in the colour of the
+   move and settles back into its own. A figure drawn for the first time has
+   no trend and does neither — see motion.ts. */
+:where(.terminal-host) .flip-still {
+  display: inline-block;
+}
+
+/* CLIPPED WITHOUT MOVING THE BASELINE. The slot clips the slide with
+   `overflow: hidden` (terminal.css), and an inline-block that is not
+   overflow-visible sits on its BOTTOM EDGE instead of its text's baseline —
+   measured in Chromium, a price in the tape rode 2.4px above the ticker beside
+   it and the row grew. `clip` clips the same box and keeps the baseline; a
+   browser without it keeps `hidden`. `span.` outranks the terminal.css rule
+   whichever sheet loads first. */
+:where(.terminal-host) span.flip-slot {
+  overflow: clip;
+}
+
+:where(.terminal-host) .flip-slot[data-trend="up"] > .flip {
+  animation:
+    flip-up 170ms cubic-bezier(0.4, 0, 0.2, 1),
+    tick-up 900ms ease-out;
+}
+
+:where(.terminal-host) .flip-slot[data-trend="down"] > .flip.rev {
+  animation:
+    flip-down 170ms cubic-bezier(0.4, 0, 0.2, 1),
+    tick-down 900ms ease-out;
+}
+
+@keyframes tick-up {
+  from {
+    color: var(--up);
+  }
+}
+
+@keyframes tick-down {
+  from {
+    color: var(--down);
+  }
+}
+
+/* The slide is what moves; the colour only says which way. Under reduced
+   motion the colour stays and the slide goes — these selectors outrank the
+   `.flip { animation: none }` rule in terminal.css, so they must say it here. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .flip-slot[data-trend="up"] > .flip {
+    animation: tick-up 900ms ease-out;
+  }
+
+  :where(.terminal-host) .flip-slot[data-trend="down"] > .flip.rev {
+    animation: tick-down 900ms ease-out;
+  }
+}

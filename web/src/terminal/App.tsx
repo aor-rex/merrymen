@@ -66,6 +66,7 @@ import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
+import "./live-motion.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
