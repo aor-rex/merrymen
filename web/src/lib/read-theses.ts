@@ -52,7 +52,7 @@
  * owner's entire balance sheet — is not in the SELECT at all: absent, rather
  * than filtered.
  */
-import { DERIVED_ID, publicationNarrowing } from "@merrymen/thesis";
+import { DERIVED_ID, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -95,37 +95,15 @@ const IS_ACTION = "(d.action IS NOT NULL AND d.action <> 'hold')";
 const IS_VIEW = "(d.action IS NULL OR d.action = 'hold')";
 
 /**
- * A FILL SOMEBODY READ: off the settled receipt, or booked on the paper book.
- * Never the pre-trade quote — `basis_source` calls that an ESTIMATE, and an
- * estimated entry price is a figure nobody read.
+ * WHAT THE CALL WAS WORTH, folded over the group's copies — or NULL. The fold
+ * lives beside the gate (thesis-policy's fillFigures/markFigures) because the
+ * peer files read groups too, and "when is a figure read" must have one answer:
+ * only when EVERY copy was, and never from a quoted fill. publishableThesis
+ * turns what survives into the post's figures, and a surface renders nothing
+ * for a null — never 0%.
  */
-const EVIDENCED = "(t.basis_source IN ('receipt', 'paper') AND t.fill_price_usd > 0 AND t.fill_cash_usdg > 0)";
-/** True when EVERY copy in the group meets `cond` — the only time a folded figure is read. */
-const EVERY = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
-
-/**
- * WHAT THE CALL WAS WORTH, folded over the group's copies — or NULL.
- *
- * A post is a group of identical copies, so each figure is one number for all
- * of them, and it exists only when EVERY copy was read. One unevidenced fill in
- * a ×3 buy makes the entry unread rather than an average of the two somebody
- * happened to read; two copies of a view seen at different prices have no one
- * "when posted", so no mark. publishableThesis turns what survives into the
- * post's figures, and a surface renders nothing for a null — never 0%.
- *
- * The entry is averaged by what was PAID (Σ cash / Σ units), which is what a
- * position of those fills cost per unit; a plain mean of prices is not.
- * Division guarded per row, because Postgres raises on a zero divisor.
- */
-const FILLS = `
-  CASE WHEN ${EVERY(EVIDENCED)} AND MIN(t.fill_price_usd) = MAX(t.fill_price_usd) THEN MIN(t.fill_price_usd)
-       WHEN ${EVERY(EVIDENCED)}
-       THEN SUM(t.fill_cash_usdg) / SUM(CASE WHEN ${EVIDENCED} THEN t.fill_cash_usdg / t.fill_price_usd END) END AS entry_price_usd,
-  CASE WHEN ${EVERY(`${EVIDENCED} AND t.realized_pnl_usdg IS NOT NULL`)} THEN SUM(t.realized_pnl_usdg) END AS realized_pnl_usdg,
-  CASE WHEN ${EVERY(`${EVIDENCED} AND t.realized_pnl_usdg IS NOT NULL`)} THEN SUM(t.fill_cash_usdg) END AS closed_cash_usdg,`;
-const MARKS = `
-  CASE WHEN COUNT(d.mark_usd) = COUNT(*) AND MIN(d.mark_usd) = MAX(d.mark_usd) THEN MIN(d.mark_usd) END AS mark_usd,
-  CASE WHEN COUNT(d.mcap_usd) = COUNT(*) AND MIN(d.mcap_usd) = MAX(d.mcap_usd) THEN MIN(d.mcap_usd) END AS mcap_usd,`;
+const FILLS = fillFigures("t");
+const MARKS = markFigures("d");
 
 /**
  * WHICH OPTIONAL COLUMNS A READ ASKS FOR, richest first.

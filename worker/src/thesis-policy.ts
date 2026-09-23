@@ -513,6 +513,49 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
 }
 
 /**
+ * THE SQL HALF OF A CALL'S FIGURES — the fold a reader of GROUPED copies runs
+ * before handing a group to `publishableThesis` (see the figure fields on
+ * ThesisRow). Shared by the feed and the peer files for the reason
+ * `publicationNarrowing` is: two readers with their own copy of "when is a
+ * figure read" would publish two answers to it.
+ *
+ * A group is many identical copies, so each figure is one number for all of
+ * them, and it exists only when EVERY copy was read: one unevidenced fill in a
+ * ×3 buy makes the entry unread rather than an average of the two somebody
+ * happened to read. EVIDENCED is a fill off the settled receipt or the paper
+ * book — never the pre-trade quote, which `basis_source` calls an estimate,
+ * and an estimated entry price is a figure nobody read.
+ *
+ * The entry is averaged by what was PAID (Σ cash / Σ units), which is what a
+ * position of those fills cost per unit; a plain mean of prices is not. Each
+ * division is guarded per row, because Postgres raises on a zero divisor.
+ * Each column ends in a comma, for splicing into a SELECT list.
+ */
+export function fillFigures(t: string): string {
+  const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
+  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL`;
+  const every = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
+  return `
+    CASE WHEN ${every(evidenced)} AND MIN(${t}.fill_price_usd) = MAX(${t}.fill_price_usd) THEN MIN(${t}.fill_price_usd)
+         WHEN ${every(evidenced)}
+         THEN SUM(${t}.fill_cash_usdg) / SUM(CASE WHEN ${evidenced} THEN ${t}.fill_cash_usdg / ${t}.fill_price_usd END) END AS entry_price_usd,
+    CASE WHEN ${every(booked)} THEN SUM(${t}.realized_pnl_usdg) END AS realized_pnl_usdg,
+    CASE WHEN ${every(booked)} THEN SUM(${t}.fill_cash_usdg) END AS closed_cash_usdg,`;
+}
+
+/**
+ * The decision's own mark and market cap, folded the same way: two copies of a
+ * view seen at different prices have no one "when posted", so no mark.
+ */
+export function markFigures(d: string): string {
+  const one = (col: string) =>
+    `CASE WHEN COUNT(${d}.${col}) = COUNT(*) AND MIN(${d}.${col}) = MAX(${d}.${col}) THEN MIN(${d}.${col}) END AS ${col},`;
+  return `
+    ${one("mark_usd")}
+    ${one("mcap_usd")}`;
+}
+
+/**
  * Anything that looks like an on-chain identifier.
  *
  * `rh:` is included because the brokerage rail's agent id embeds an account
