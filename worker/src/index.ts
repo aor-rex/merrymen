@@ -117,6 +117,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, commandTickReady, createCommandWake, createTickClock } from "./command-wake";
+import { placeOrder } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -4819,91 +4820,42 @@ async function main() {
    * not in the caller.
    */
   async function runOrderCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<OrderReply> {
-    // ANSWERED, NOT STARVED.
-    //
-    // The tick returns early when the market could not be read, and that return
-    // sits a thousand lines above the command drain — so an owner's explicit
-    // order was skipped entirely on such a tick, and with the fleet
-    // rate-limited, on every tick after it until the order expired. Watched
-    // exactly that: "the market could not be read this tick (49 read(s)
-    // failed)", four ticks running, while a queued buy waited to be told
-    // anything at all and was eventually swept as "never ran".
-    //
-    // REFUSED HERE RATHER THAN FILLED. The equity snapshot behind the drawdown
-    // breaker is precisely what could not be read, and checkPolicy SKIPS the
-    // breaker when equity is unknown — so running the order on this tick would
-    // place a trade with that guard silently switched off. A prompt no is worth
-    // more than a late yes, and the owner can ask again in a minute.
-    if (marketUnreadable) {
-      return {
-        ok: false,
-        line:
-          "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
-          "not about your order. Ask again in a minute.",
-      };
-    }
-    // THE BOOK, FOR THE SAME REASON. A tick that could not read a balance or
-    // price a holding returns before equity is composed ("trading + equity
-    // paused"), so the figure the drawdown breaker would judge this order
-    // against is exactly the one missing. That return used to sit above the
-    // drain too, so the order was not refused — it starved until its window
-    // closed and was swept as "never ran". Refused now, by name, at once.
-    if (bookUnreadable) {
-      return {
-        ok: false,
-        line:
-          "I could not value your book this tick, so I did not place it — that is a fact about my reads, " +
-          "not about your order. Ask again in a minute.",
-      };
-    }
-    if (isPaused()) {
-      return { ok: false, line: "you have me paused, so I did not place it. Un-pause and ask again." };
-    }
-    const a = cmd.args ?? {};
-    const side = a.side === "buy" || a.side === "sell" ? a.side : null;
-    if (!side) return { ok: false, line: `'${String(a.side)}' is not a buy or a sell` };
-    // A SYMBOL IS A SHORT PLAIN TICKER OR IT IS NOTHING. It is resolved against
-    // the watch set below, so this only has to stop the shapes that have no
-    // business reaching a lookup at all.
-    const symbol = typeof a.symbol === "string" ? a.symbol.trim().toUpperCase() : "";
-    if (!/^[A-Z0-9]{1,12}$/.test(symbol)) return { ok: false, line: `'${String(a.symbol)}' is not a symbol I can look up` };
-    const size = typeof a.usdgAmount === "number" ? a.usdgAmount : Number(a.usdgAmount);
-    // FINITE AND POSITIVE, SAID OUT LOUD. The wall now refuses a non-positive
-    // swap by name too — two gates, neither relying on the other — but NaN and
-    // Infinity have to die before `usdg()` turns them into a BigInt throw.
-    if (!Number.isFinite(size) || size <= 0) {
-      return { ok: false, line: `${String(a.usdgAmount)} is not an amount I can trade` };
-    }
-    // THE OWNER'S OWN CEILING ON A TYPED ORDER. The setting predates this
-    // surface and is named for the other one, but it means the same thing in
-    // both: the most a single chat-typed action may spend. Applying it here
-    // rather than silently inheriting nothing is the point — the sealed
-    // per-trade cap is a wall, and this is the owner's own smaller fence
-    // inside it.
-    const ceiling = cfg.telegramMaxActionUsdg;
-    if (ceiling > 0 && size > ceiling) {
-      return {
-        ok: false,
-        line: `${size} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.`,
-      };
-    }
-    // And from here the wall decides. submitChatTrade reports what the LEDGER
-    // said, so this returns a verdict about a trade that really happened or
-    // really did not.
-    //
-    // THE VERDICT TRAVELS WITH THE SENTENCE. This used to sniff the first emoji
-    // of the prose, which recognised three branches and missed every refusal
-    // that returns before an intent is built — so all of those were recorded as
-    // successes. `ok` is the sole input to the event LEVEL, and "ok" is a level
-    // no surface in this app renders, so an owner refused for being paused,
-    // expired, over their ceiling or in an unwatched symbol saw nothing at all.
-    //
-    // THE ORDER'S DEADLINE GOES INTO THE INTENT QUEUE WITH IT. The claim judged
-    // it once, but the queue can hold the order behind the tick's own intents
-    // for minutes, so the queue judges it again when it reaches the order. A
-    // command with no deadline — a legacy row — has none to carry.
-    if (typeof cmd.expiresAt !== "number") return submitChatTrade(side, symbol, size);
-    return submitChatTrade(side, symbol, size, { ...chatAsked(side, symbol, size), notAfterMs: cmd.expiresAt });
+    // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
+    // runs it: the unreadable market and the unread book (both drained with
+    // their flag by the tick that could not read them — answered, not
+    // starved), a book that cannot be totalled for a BUY (checkPolicy would
+    // skip the drawdown breaker for it), the owner's pause, the arguments, and
+    // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
+    // other surface and meaning the same thing in both. `lastEquityKnown` is
+    // this tick's: every drain runs after the tick composed it, and the ticks
+    // that could not compose it drain with `bookUnreadable`.
+    return placeOrder(
+      cmd.args,
+      {
+        marketUnreadable,
+        bookUnreadable,
+        equityKnown: lastEquityKnown,
+        paused: isPaused(),
+        ceilingUsdg: cfg.telegramMaxActionUsdg,
+      },
+      (side, symbol, size) => {
+        // And from here the wall decides. submitChatTrade reports what the
+        // LEDGER said, so this returns a verdict about a trade that really
+        // happened or really did not.
+        //
+        // THE VERDICT TRAVELS WITH THE SENTENCE. This used to sniff the first
+        // emoji of the prose, which recognised three branches and missed every
+        // refusal that returns before an intent is built — so all of those were
+        // recorded as successes. `ok` is the sole input to the event LEVEL.
+        //
+        // THE ORDER'S DEADLINE GOES INTO THE INTENT QUEUE WITH IT. The claim
+        // judged it once, but the queue can hold the order behind the tick's own
+        // intents for minutes, so the queue judges it again when it reaches the
+        // order. A command with no deadline — a legacy row — has none to carry.
+        if (typeof cmd.expiresAt !== "number") return submitChatTrade(side, symbol, size);
+        return submitChatTrade(side, symbol, size, { ...chatAsked(side, symbol, size), notAfterMs: cmd.expiresAt });
+      },
+    );
   }
 
   /**
