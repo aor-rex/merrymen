@@ -29,7 +29,7 @@ import {
 import { tenantOf } from "@/lib/auth";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
-import { AGENT_NAME_RULE, agentNameAccepted, normalizeAgentName } from "@/lib/agent-name-rule";
+import { agentNameSave } from "@/lib/settings-agent-name";
 
 export const dynamic = "force-dynamic";
 
@@ -416,41 +416,14 @@ export async function PUT(req: Request) {
 
   // ── enums ───────────────────────────────────────────────────────────────
   if ("agentName" in body) {
-    const v = body.agentName;
-    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), in the web
-    // tier's one copy (lib/agent-name-rule.ts) rather than imported from the
-    // soul: that module touches the filesystem. If the two ever disagree the
-    // worker wins and silently keeps the old name, so the shapes must match
-    // exactly. Partner enrollment writes names through the same copy.
-    //
-    // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
-    // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
-    // the shared regex admits internal double spaces — so "Little  John" was
-    // kept verbatim here and collapsed to "Little John" by the soul. The two
-    // then never agree, which makes `cfg.agentName !== getName()` true forever:
-    // harmless while the reconcile only ran on re-arm, an identity-file rewrite
-    // every tick once it runs unconditionally. Normalise once, at the door.
-    // NFC is part of the shape that must match: a decomposed "José" and a
-    // precomposed one are the same name, and only one of them is 4 characters.
-    const norm = typeof v === "string" ? normalizeAgentName(v) : v;
-    if (norm === "" || norm === null || norm === undefined) {
-      setOrClear("agentName", undefined);
-    } else if (
-      typeof norm !== "string" ||
-      // `stored.agentName`: a name already held keeps the rule it was stored
-      // under, so re-saving the form never renames or blocks a "007".
-      !agentNameAccepted(norm, stored.agentName)
-    ) {
-      // The old rule was ASCII-only and the old message said "letters and
-      // numbers", which sent anyone called José or Робин round a loop they
-      // could not escape by complying. See worker/src/soul.ts NAME_RE. The
-      // letter requirement is named in the message for the same reason: "007"
-      // starts with a number, so a message that stopped there would be obeyed
-      // and refused again.
-      errors.push(`name: ${AGENT_NAME_RULE}`);
-    } else {
-      setOrClear("agentName", norm);
-    }
+    // The rule, the normalisation and the grandfathering of a stored "007"
+    // live in lib/settings-agent-name.ts, where a test runs them. `stored` is
+    // what this tenant's settings hold NOW, read above — never `next`, which
+    // this same save may already have changed.
+    const save = agentNameSave(body.agentName, stored);
+    if (save.kind === "clear") setOrClear("agentName", undefined);
+    else if (save.kind === "error") errors.push(save.message);
+    else setOrClear("agentName", save.name);
   }
 
   if ("xHandle" in body) {

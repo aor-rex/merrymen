@@ -67,8 +67,14 @@ function qtyOf(raw: string | null): bigint | null {
  * cleared by a sell that only LOOKS like it closed the position. The same holds
  * when the read was truncated (`complete` false): the replay cannot know what
  * came before its first row.
+ *
+ * AND A TRUNCATED READ THAT FOUND NO QUOTE ANSWERS NULL, NOT FALSE. It used to
+ * answer false, which read as "a quote it never read is not invented" — but the
+ * quote-booked fill can sit in exactly the rows the read cut off, under a
+ * holding that never went flat since, and false is the one answer the desk and
+ * the chat print a % on. Absence from a partial read is not absence.
  */
-export function costFromQuote(fills: readonly BasisFill[], complete: boolean): boolean {
+export function costFromQuote(fills: readonly BasisFill[], complete: boolean): boolean | null {
   let exact = complete;
   let held = 0n;
   let quote = false;
@@ -92,7 +98,8 @@ export function costFromQuote(fills: readonly BasisFill[], complete: boolean): b
       }
     }
   }
-  return quote;
+  if (quote) return true;
+  return complete ? false : null;
 }
 
 /**

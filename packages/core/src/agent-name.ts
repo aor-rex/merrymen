@@ -40,6 +40,72 @@
  */
 export const DEFAULT_AGENT_NAME = "Robin";
 
+/**
+ * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET.
+ *
+ * ONE DEFINITION, for the soul (worker/src/soul.ts, which imports it by
+ * relative path) and for every web writer (lib/agent-name-rule.ts re-exports
+ * it). It used to be two byte-identical copies held together by a test that
+ * read the soul's source, and when the copies disagreed the worker won and
+ * silently kept the old name while the settings save had said it succeeded.
+ *
+ * This was `[A-Za-z0-9]`, which refused José, Müller, Łukasz, Робин, 小红,
+ * रोबिन and رَوبِن — and refused them at the END of the create wizard, in the
+ * same request that carried the strategy, the caps and the paper/live choice,
+ * so one accent discarded the whole form. The message said "letters and
+ * numbers", which is worse than unhelpful: é IS a letter, so a reader who
+ * complied failed again.
+ *
+ * `\p{M}` is not decoration. Devanagari, Thai, Bengali, Tamil and vowelled
+ * Arabic carry combining marks that NFC does not compose away, so a rule of
+ * letters-and-numbers alone still refuses रोबिन and โรบิน. U+200C and U+200D
+ * are admitted for the same reason: Persian and several Indic orthographies
+ * need them inside a single word.
+ *
+ * Everything else stays excluded, which keeps out the thing that actually
+ * matters — `\p{Cf}` bidi overrides, whose whole purpose is to make text
+ * display as something other than what it is.
+ *
+ * AT LEAST ONE LETTER, which is the lookahead. A name renders beside an
+ * agent's return on a page that ranks people, and "99.5" or "1000" there reads
+ * as a figure nobody measured. Digits are still welcome inside a name that has
+ * a letter — "R2", "Agent 47". This is the rule for a name somebody is
+ * CHOOSING NOW (chat /name, the settings form, the wizard, partner
+ * enrollment). A name already stored is held to STORED_AGENT_NAME_RE instead.
+ */
+export const AGENT_NAME_RE = /^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+
+/**
+ * THE RULE A NAME WAS STORED UNDER — everything above except the letter.
+ *
+ * Agents were named "007" before the letter rule existed, and the owner's rule
+ * is that an existing agent is not renamed. Read back through AGENT_NAME_RE,
+ * "007" comes out as the default: the reconcile would refuse the configured
+ * "007" and tell the owner the agent "is still called Robin", which is false,
+ * and the first re-arm — every restart is one — would write "Robin" onto the
+ * roster while the owner's own feed and the Brain persona still said 007. So
+ * reading the identity file, carrying a name settings already holds into it,
+ * and re-saving a settings form that still carries it all use this; only a
+ * name typed now meets the letter rule.
+ *
+ * Everything else still applies to a stored name: a bidi override, a leading
+ * mark or twenty-five characters are refused however they were stored.
+ */
+export const STORED_AGENT_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+
+/**
+ * THE SHAPE A NAME IS STORED IN, on both sides of the reconcile.
+ *
+ * NFC, because a decomposed "José" and a precomposed one are the same name and
+ * only one of them is 4 characters; and whitespace collapsed, because a name
+ * stored with a double space by one tier and collapsed by the other would never
+ * compare equal — `cfg.agentName !== getName()` true forever, an identity-file
+ * rewrite on every reconcile, silently, because the write itself succeeds.
+ */
+export function normalizeAgentName(raw: string): string {
+  return raw.normalize("NFC").trim().replace(/\s+/g, " ");
+}
+
 const ADJECTIVES = [
   "Amber", "Ashen", "Autumn", "Birch", "Blue", "Bold", "Brindle", "Brisk",
   "Bronze", "Calm", "Cedar", "Clever", "Cobalt", "Copper", "Crimson", "Dapple",
