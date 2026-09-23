@@ -300,7 +300,7 @@ export function Profile({
             emptyTitle="No completed buys or sells recorded in this trading period."
             onToken={onToken}
           />
-          {recentTrades.length > 0 && agent.publicBook === false && (own
+          {recentTrades.length > 0 && agent.publicBook === false && (own?.recentTrades
             ? <p className="public-empty">Only you can see the sizes and dollar figures here. Visitors see percentages.</p>
             : <p className="public-empty">Trade sizes are private.</p>)}
           {recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}

@@ -219,3 +219,13 @@ it("an owner's read that fails leaves the public figures, and no dollars", async
   assert.doesNotMatch(table.textContent!, /\$/);
   assert.match(text(), /Trade sizes are private\./);
 });
+
+it("an owner's read that could not read the fills does not claim to show the owner's sizes", async () => {
+  // The top trades came back and the list did not: the list shown is the
+  // public one, so the note under it is the public one too.
+  globalThis.fetch = (async () => json({ recentTrades: [], activityRead: false, topTrades: [], topTradesRead: true })) as typeof fetch;
+  await render(agent({ publicBook: false, recentTrades: [ownFill("2", "sell", nowSec() - 60, 1_234, null)] }), { isMine: true });
+  await act(async () => {});
+  assert.match(text(), /Trade sizes are private\./);
+  assert.doesNotMatch(text(), /Only you can see/);
+});
