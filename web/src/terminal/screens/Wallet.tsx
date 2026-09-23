@@ -6,7 +6,7 @@ import { verifiedAdapter } from "@/lib/verified-adapter";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
 import { parseAmount, type AmountField } from "@/lib/parse-amount";
 import { fullDateTime } from "@/lib/format";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPublicClient, erc20Abi, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
@@ -48,6 +48,7 @@ import { SignOut } from "../SignOut";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
+import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
@@ -1123,6 +1124,49 @@ export default function GrantPage() {
   // phases below — presentation only, no logic changed. -1 = the desync recovery
   // panel (its own screen, off the numbered track).
   const wizStep = desynced ? -1 : !grant || switching ? 0 : !backedUp ? 1 : 2;
+
+  // ARRIVING AT /grant#resign — from the Telegram "Sign now" button or a
+  // dashboard banner. The section below renders only once the grant has
+  // loaded, long after the browser's own jump to the anchor gave up, so the
+  // owner landed at the top of the page. Scroll there ourselves, once, the
+  // first time it exists (resign-anchor.ts says why only once).
+  const resignJumped = useRef(false);
+  useEffect(() => {
+    const present = document.getElementById(RESIGN_ANCHOR) !== null;
+    if (!shouldJumpToResign(window.location.hash, resignJumped.current, present)) return;
+    resignJumped.current = true;
+    // Instant, like a real anchor jump: a smooth scroll is driven by animation
+    // frames, which a hidden tab or an in-app browser may never deliver.
+    document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
+  }, [wizStep, grant, serverArmed]);
+
+  // SIGNED IN ON THIS SCREEN. It loads the grant once, on mount, as whoever
+  // was signed in then — so an owner who opened a "Sign now" link signed out
+  // (Telegram's in-app browser usually is), then signed in here, kept seeing
+  // the restore form. Load again as them; the hash survives the reload, so the
+  // jump above then lands on the section they came for.
+  // Guarded against a reload loop — resign-anchor.ts `shouldReloadAfterSignIn`.
+  const hasGrantRef = useRef(false);
+  hasGrantRef.current = grant !== null;
+  useEffect(() => {
+    const again = () => {
+      let lastAt: number | null = null;
+      try {
+        lastAt = Number(sessionStorage.getItem(SIGNED_IN_RELOAD_KEY) ?? 0);
+      } catch {
+        lastAt = null;
+      }
+      if (!shouldReloadAfterSignIn(hasGrantRef.current, lastAt, Date.now())) return;
+      try {
+        sessionStorage.setItem(SIGNED_IN_RELOAD_KEY, String(Date.now()));
+      } catch {
+        return; // cannot remember that we reloaded, so do not
+      }
+      window.location.reload();
+    };
+    window.addEventListener(SIGNED_IN_EVENT, again);
+    return () => window.removeEventListener(SIGNED_IN_EVENT, again);
+  }, []);
   const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
 

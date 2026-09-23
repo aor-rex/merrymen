@@ -7,6 +7,7 @@ import { RecoverPanel } from "@/components/RecoverPanel";
 import { loadGrant } from "@/lib/session";
 import { X } from "lucide-react";
 import { PrivySignIn } from "@/terminal/PrivySignIn";
+import { announceSignedIn } from "@/lib/resign-anchor";
 import { privyEnabled } from "@/lib/privy-client";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/core";
@@ -56,8 +57,12 @@ export { requestJson } from "./request-json";
 export const PRIVY_BETA = privyEnabled();
 
 export function SignIn({onDone}:{onDone:()=>void}) {
-  if (PRIVY_BETA) return <PrivySignIn onDone={onDone}/>;
-  return <WalletSignIn onDone={onDone}/>;
+  // Announced as well as reported: a screen that loaded signed-out (the grant
+  // page, reached from a "Sign now" link) reloads as the owner — see
+  // resign-anchor.ts.
+  const done=()=>{announceSignedIn();onDone();};
+  if (PRIVY_BETA) return <PrivySignIn onDone={done}/>;
+  return <WalletSignIn onDone={done}/>;
 }
 
 /** The original injected-wallet login. Still the ONLY way an existing owner proves their tenant. */
