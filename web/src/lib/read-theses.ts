@@ -82,13 +82,6 @@ const VIEW_PAIRS = 60;
  * nothing, rather than letting one chatty name cost the whole read.
  */
 const VIEW_DEPTH = 3;
-/**
- * The most names one agent may fill of the public view lane. The lane is also
- * dealt out in turns — every agent's newest name before anybody's second — so
- * a Trencher rotating sixty coins cannot hold a quieter agent's changed view
- * off the page. An agent's own profile is not shared, and gets the whole lane.
- */
-const PER_AGENT_VIEWS = 10;
 /** Per lane — a busy view lane cannot take a slot a trade needed. */
 const SHOW = 40;
 
@@ -135,9 +128,10 @@ export type FeedThesis = PublicThesis & {
   handleVerified: boolean;
   /**
    * Epoch SECONDS this post, as it stands, was first said with nothing else
-   * said about the same name after it. Null when something else was — then
-   * `said` and `firstAt` still count every copy in the window, but the copies
-   * are not one unbroken stretch, and "×N · since" would hide the change.
+   * said about the same name after it — a trade or a view alike. Null when
+   * something else was — then `said` and `firstAt` still count every copy in
+   * the window, but the copies are not one unbroken stretch, and "×N · since"
+   * would hide the change.
    */
   unchangedSince: number | null;
   /**
@@ -177,6 +171,8 @@ type Group = ThesisRow & {
   in_pair: number;
   /** The newest time of the next group of the same (agent, name), or null. */
   next_at: number | null;
+  /** The newest time anything in the OTHER lane was said about the same (agent, name), or null. */
+  other_at: number | null;
   /** Views only: how many names this account said something about. */
   agent_names?: number;
 };
@@ -284,53 +280,86 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         WHERE ${[...where, lane].join(" AND ")}
         GROUP BY a.name, a.x_handle, ${named ? "a.x_verified," : ""} a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
                  d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body`;
+    // THE NEWEST WORD ABOUT EACH NAME IN A LANE, and nothing else: no words,
+    // no outcome, no post. The same WHERE as the lane itself, so "something
+    // else was said" means something the feed could have published, not a
+    // private row the gate keeps from it.
+    const latestIn = (lane: string) =>
+      `SELECT d.agent_id AS agent_id, COALESCE(d.symbol, '') AS sym, MAX(d.at) AS at
+         FROM decisions d
+         JOIN agents a ON a.smart_account = d.agent_id
+         LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+        WHERE ${[...where, lane].join(" AND ")}
+        GROUP BY d.agent_id, COALESCE(d.symbol, '')`;
     // WHERE EACH GROUP SITS AMONG THE OTHERS ABOUT THE SAME NAME. Window
     // functions over the grouped rows, as distinct-trades.ts already runs on
     // both backends: `in_pair` says whether this is the agent's latest word on
-    // the name, and `next_at` says when the word before it last appeared —
-    // which is what decides whether a repeat is one unbroken stretch.
-    const placed = (named: boolean, lane: string) =>
+    // the name in its lane, and `next_at` says when the word before it last
+    // appeared — which is what decides whether a repeat is one unbroken
+    // stretch. `other_at` is the same question asked of the OTHER lane: each
+    // lane looked only at itself, so a hold, a buy of the name, and the same
+    // hold again read as one hold standing since before the buy.
+    const placed = (named: boolean, lane: string, other: string) =>
       `SELECT g.*,
               ROW_NUMBER() OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS in_pair,
               LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at,
-              MAX(g.last_at) OVER (PARTITION BY g.agent_id, g.sym) AS pair_at
-         FROM (${grouped(named, lane)}) g`;
+              o.at AS other_at
+         FROM (${grouped(named, lane)}) g
+         LEFT JOIN (${latestIn(other)}) o ON o.agent_id = g.agent_id AND o.sym = g.sym`;
 
     const actionPage = (named: boolean, offset: number) =>
       db
         .prepare(
-          `SELECT r.* FROM (${placed(named, IS_ACTION)}) r
+          `SELECT r.* FROM (${placed(named, IS_ACTION, IS_VIEW)}) r
             ORDER BY r.last_at DESC, r.last_id DESC
             LIMIT ? OFFSET ?`,
         )
-        .all(...args, ACTION_PAGE, offset) as Promise<Group[]>;
+        .all(...args, ...args, ACTION_PAGE, offset) as Promise<Group[]>;
 
     // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
     // re-said every tick always had the freshest time, so any agent with forty
-    // names took all forty slots. Here each agent's names are numbered newest
-    // first (`agent_turn`), and the lane is filled turn by turn: every agent's
-    // newest name, then every agent's second, up to a cap per agent. Each pair
-    // brings its newest VIEW_DEPTH groups, so the gate — not the SQL — picks
-    // the word that is published. `agent_names` is the account's whole count
-    // of names, read before any cap, so a count cut by the cap can say so.
-    const perAgent = opts.agentSlug ? limit : Math.min(limit, PER_AGENT_VIEWS);
+    // names took all forty slots. Here each agent's names are numbered
+    // (`agent_turn`), and the lane is filled turn by turn: every agent's first
+    // name, then every agent's second. The turns ARE the fairness — a busy
+    // agent only ever gets slots nobody else's turn wanted — so there is no
+    // cap per agent on top of them. There was one, of ten, and all it did was
+    // leave a lane with room in it while hiding the agent's eleventh name.
+    //
+    // NUMBERED BY WHEN THE NAME LAST CHANGED, not when it was last said. A
+    // name re-said every thirty seconds has not changed in an hour, and ranked
+    // by its newest copy it came before the one view the agent had actually
+    // changed, which then fell off the end. The change time is the first copy
+    // of the newest word — or, when that word was also said before the one
+    // behind it (A, then B, then A), the last time the other word was said,
+    // since the return to A came after that. Never later than the truth: a
+    // view is never ranked as fresher than it is.
+    //
+    // Each pair brings its newest VIEW_DEPTH groups, so the gate — not the SQL
+    // — picks the word that is published. `agent_names` is the account's whole
+    // count of names, read before the lane is cut, so a count cut by the lane
+    // can say so.
     const viewRead = (named: boolean) =>
       db
         .prepare(
           `SELECT s.* FROM (
              SELECT q.*,
                     MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
-                    DENSE_RANK() OVER (ORDER BY q.agent_turn, q.pair_at DESC, q.agent_id, q.sym) AS turn
+                    DENSE_RANK() OVER (ORDER BY q.agent_turn, q.changed_at DESC, q.agent_id, q.sym) AS turn
                FROM (
-                 SELECT r.*, DENSE_RANK() OVER (PARTITION BY r.agent_id ORDER BY r.pair_at DESC, r.sym) AS agent_turn
-                   FROM (${placed(named, IS_VIEW)}) r
-                  WHERE r.in_pair <= ?
+                 SELECT c.*, DENSE_RANK() OVER (PARTITION BY c.agent_id ORDER BY c.changed_at DESC, c.sym) AS agent_turn
+                   FROM (
+                     SELECT r.*,
+                            MAX(CASE WHEN r.in_pair = 1 AND r.next_at > r.first_at THEN r.next_at
+                                     WHEN r.in_pair = 1 THEN r.first_at END) OVER (PARTITION BY r.agent_id, r.sym) AS changed_at
+                       FROM (${placed(named, IS_VIEW, IS_ACTION)}) r
+                      WHERE r.in_pair <= ?
+                   ) c
                ) q
            ) s
-           WHERE s.agent_turn <= ? AND s.turn <= ?
+           WHERE s.turn <= ?
            ORDER BY s.turn, s.in_pair`,
         )
-        .all(...args, VIEW_DEPTH, perAgent, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+        .all(...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
 
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.
@@ -411,13 +440,18 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       } satisfies FeedThesis;
     };
 
+    // Nothing at all, or something before `first`. Numbered because Postgres
+    // hands an aggregate of a BIGINT back as a string.
+    const before = (at: number | null | undefined, first: number) => at === null || at === undefined || Number(at) < first;
+
     // AN ACTION REPEATS FROM ITS FIRST TIME only while nothing else happened to
-    // the same name after it began: it is the newest group on the name, and
-    // the group before it last appeared before this one's first copy.
+    // the same name after it began: it is the newest group on the name, the
+    // group before it last appeared before this one's first copy, and no view
+    // of the name came after that first copy either.
     const actions = rows.actions
       .map((r) => {
         const first = Number(r.first_at ?? r.last_at ?? 0);
-        const unbroken = Number(r.in_pair) === 1 && (r.next_at === null || r.next_at === undefined || Number(r.next_at) < first);
+        const unbroken = Number(r.in_pair) === 1 && before(r.next_at, first) && before(r.other_at, first);
         return gated(r, unbroken ? first : null);
       })
       .filter((t): t is FeedThesis => t !== null)
@@ -442,12 +476,15 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       for (const winner of newest) {
         // The word is the newest one the gate lets out. It stands unchanged
         // since its first copy only if no other word about the name came after
-        // that. Every word that could have is among those read: a winner that
+        // that. Every view that could have is among those read: a winner that
         // is not the newest already has a newer one here, and behind the newest
-        // VIEW_DEPTH reads at least one more.
+        // VIEW_DEPTH reads at least one more. Every trade that could have is on
+        // each row as `other_at`, read whole in SQL rather than from the
+        // bounded action scan.
         const first = Number(winner.first_at ?? winner.last_at ?? 0);
         const others = newest.filter((g) => g !== winner).map((g) => Number(g.last_at));
-        const post = gated(winner, others.every((at) => at < first) ? first : null);
+        const unbroken = others.every((at) => at < first) && newest.every((g) => before(g.other_at, first));
+        const post = gated(winner, unbroken ? first : null);
         if (!post) continue;
         chosen.push({ post, author: authorOf(winner) });
         break;
