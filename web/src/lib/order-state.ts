@@ -323,18 +323,112 @@ export async function placeHostedOrder(
   }
 }
 
+// ── the receipt (C3) ──────────────────────────────────────────────────────
+
+/**
+ * WHAT AN ORDER BECAME, AS THE WORKER READ IT OFF THE LEDGER.
+ *
+ * The child writes this beside `{ ok, line }` when an order finishes, from the
+ * trade row or the verdict it just wrote — never from a model. The browser
+ * templates "[Buy] $5.00 CASHCAT · Filled" from it, so it is the one place a
+ * receipt's words can come from, and this module only carries it.
+ */
+export interface OrderReceipt {
+  status: "filled" | "refused" | "failed" | "expired";
+  side: "buy" | "sell" | null;
+  symbol: string | null;
+  token: string | null;
+  usdgActual: number | null;
+  txHash: string | null;
+  rejectRule: string | null;
+}
+
+const RECEIPT_STATUSES = new Set(["filled", "refused", "failed", "expired"]);
+
+/**
+ * A receipt, checked field by field, or null when there is none.
+ *
+ * NOT TRUSTED FOR BEING OURS. It crosses two processes and a table, and the
+ * self-hosted file sits in a home directory anything on the machine can write.
+ * So each field must have the shape the ledger fact has — a 32-byte hash, a
+ * 20-byte address, a rule slug — and a field that does not is NULL, which the
+ * card renders as nothing. A size that is not a finite, non-negative number
+ * is null, never 0: "$0.00 filled" is a claim, and nobody read it.
+ *
+ * WITHOUT A STATUS THERE IS NO RECEIPT. The status is the sentence; a receipt
+ * that cannot say whether it filled has nothing to template.
+ */
+export function receiptOf(v: unknown): OrderReceipt | null {
+  let bag: unknown = v;
+  if (typeof v === "string") {
+    try {
+      bag = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  if (!bag || typeof bag !== "object" || Array.isArray(bag)) return null;
+  const r = bag as Record<string, unknown>;
+  if (typeof r.status !== "string" || !RECEIPT_STATUSES.has(r.status)) return null;
+  const text = (x: unknown, shape: RegExp) => (typeof x === "string" && shape.test(x) ? x : null);
+  return {
+    status: r.status as OrderReceipt["status"],
+    side: r.side === "buy" || r.side === "sell" ? r.side : null,
+    // A ticker, not a sentence: printable, no markup, bounded. Launchpad coins
+    // carry lower case and the odd `$`, so the worker's own route shape
+    // (A-Z0-9, 12) is too strict for what a fill can be named.
+    symbol: text(r.symbol, /^[^\s<>"'`\u0000-\u001f]{1,24}$/),
+    token: text(r.token, /^0x[0-9a-fA-F]{40}$/),
+    usdgActual: typeof r.usdgActual === "number" && Number.isFinite(r.usdgActual) && r.usdgActual >= 0 ? r.usdgActual : null,
+    txHash: text(r.txHash, /^0x[0-9a-fA-F]{64}$/),
+    rejectRule: text(r.rejectRule, /^[a-z0-9][a-z0-9-]{0,63}$/i),
+  };
+}
+
+/**
+ * The hosted row's `result`: the worker's line, and the receipt when it rode
+ * inside it.
+ *
+ * TWO WAYS A RECEIPT CAN CROSS THE TABLE, and the reader accepts both because
+ * the ferry that writes them deploys at the same moment this does: a column of
+ * its own (read in hostedOrderReply), or an envelope `{ line, receipt }` in
+ * `result`. A worker's line is English and never parses as an object with a
+ * `line`, so a bare line is always read as exactly what it was.
+ */
+export function resultOf(raw: unknown): { line: string | null; receipt: OrderReceipt | null } {
+  if (!present(raw)) return { line: null, receipt: null };
+  const s = String(raw);
+  if (s.startsWith("{")) {
+    try {
+      const env = JSON.parse(s) as { line?: unknown; receipt?: unknown };
+      if (env && typeof env === "object" && typeof env.line === "string") {
+        return { line: env.line, receipt: receiptOf(env.receipt) };
+      }
+    } catch {
+      /* a line that happens to start with a brace */
+    }
+  }
+  return { line: s, receipt: null };
+}
+
 /** The hosted table row, as the card reads it. */
 export function hostedOrderReply(
   row: Record<string, unknown>,
   nowMs: number,
-): { id: string; state: OrderState; result: string | null; at: number; expiresAt: number | null } {
+): { id: string; state: OrderState; result: string | null; at: number; expiresAt: number | null; receipt?: OrderReceipt } {
   const expiresAt = orderExpiresAt(row.args);
+  const { line, receipt: carried } = resultOf(row.result);
+  // The column wins over the envelope: it is the one written for the purpose.
+  const receipt = receiptOf(row.receipt) ?? carried;
   return {
     id: String(row.id),
     state: orderStateOf({ done: present(row.done_at), claimed: present(row.claimed_at), expiresAt }, nowMs),
-    result: present(row.result) ? String(row.result) : null,
+    result: line,
     at: Number(row.created_at),
     expiresAt,
+    // Only when one was written: an older worker's answer has none, and the
+    // card then renders its line exactly as before.
+    ...(receipt ? { receipt } : {}),
   };
 }
 
@@ -363,16 +457,21 @@ export async function readHostedOrder(
 > {
   if (!db) return LEDGER_UNREADABLE;
   try {
+    // `*`, NOT A COLUMN LIST, because of `receipt`. That column is created by
+    // the WRITER's migrations and this reader deploys at the same moment, so
+    // naming it would throw for the minute between the two — and a throw here
+    // is a 503 on every order's card. `*` returns it where it exists and
+    // nothing where it does not; hostedOrderReply reads only what it knows.
     const row = (await (id
       ? db
           .prepare(
-            `SELECT id, created_at, claimed_at, done_at, result, args FROM agent_commands
+            `SELECT * FROM agent_commands
               WHERE agent_id = ? AND kind = 'trade' AND id = ? LIMIT 1`,
           )
           .get(agent, id)
       : db
           .prepare(
-            `SELECT id, created_at, claimed_at, done_at, result, args FROM agent_commands
+            `SELECT * FROM agent_commands
               WHERE agent_id = ? AND kind = 'trade' ORDER BY created_at DESC, id DESC LIMIT 1`,
           )
           .get(agent))) as Record<string, unknown> | undefined;
@@ -425,7 +524,8 @@ export function placeSelfHostedOrder(
 /** worker/src/command-files.ts `readCommandState`, as this reply reads it. */
 export interface FileState {
   state: "queued" | "running" | "done";
-  result?: { ok: boolean; line: string; at: number };
+  /** `receipt` is C3's, written by a worker that knows it; an older one writes none. */
+  result?: { ok: boolean; line: string; at: number; receipt?: unknown };
   expiresAt?: number | null;
 }
 
@@ -438,6 +538,7 @@ export interface FileState {
 export function selfHostedOrderReply(id: string, st: FileState | null, nowMs: number) {
   if (!st) return { state: "none" as const };
   const expiresAt = st.state === "queued" ? (st.expiresAt ?? null) : null;
+  const receipt = receiptOf(st.result?.receipt);
   return {
     id,
     state: orderStateOf({ done: st.state === "done", claimed: st.state === "running", expiresAt }, nowMs),
@@ -445,5 +546,8 @@ export function selfHostedOrderReply(id: string, st: FileState | null, nowMs: nu
     ok: st.result?.ok ?? null,
     at: st.result?.at ?? null,
     expiresAt,
+    // Undefined, not absent, so the reply keeps one inferred shape; JSON drops
+    // it, and an older worker's answer reaches the card with no receipt at all.
+    receipt: receipt ?? undefined,
   };
 }
