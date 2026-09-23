@@ -134,6 +134,7 @@ import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock, quietReviewRow } from "./market-review";
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
+import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -6229,38 +6230,24 @@ async function main() {
 
     const id = newDecisionId();
     intent.decisionId = id;
-    const d = describeIntent(intent);
-    await addDecision({
+    // THE ROW, built in decision-row.ts where a test runs it: the symbol the
+    // producer knows, the coin's name from the one namer (never a wait on the
+    // chain — an exit's swap is sent only after this returns), and the
+    // provenance its why code gives.
+    const row = await intentDecisionRow({
       id,
-      agent_id: active.agentId,
+      agentId: active.agentId,
       source,
-      symbol: known?.symbol ?? d.symbol,
-      // A SELL IS A ROW TOO. The mechanical exits — stop, take, drain, aged —
-      // never pass through the Brain, so they were the one side of a Trencher
-      // round trip the feed could not name: "buy AI (T3AD…)" and then "sell
-      // T3AD…" for the same coin, minutes apart. Same column, same rule, and
-      // it is a no-op for the issuer-backed tickers these strategies mostly
-      // trade — see coin-name.ts.
-      //
-      // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN. A held coin
-      // drops off the qualified list and discovery then labels it with its
-      // own id, so an exit written after that carried no name and published
-      // "sell TA151B4A9E1B 5.01 USDG" — and after a redeploy the buy's row
-      // is gone too. See decisionName.
-      display_name: await decisionName(active.agentId, known?.symbol ?? d.symbol ?? ""),
-      action: known?.action ?? d.action,
-      size_usdg: d.sizeUsdg,
       reason,
-      evidence_json: known?.evidence ?? null,
-      // RECORDED, NOT INFERRED LATER. `source` cannot answer this on its own:
-      // an even-keel buy and an even-keel stop-floor sell publish under the
-      // same source and are different kinds of decision. See provenance.ts.
-      provenance: known?.provenance ?? provenanceOf(source, known?.whyCode),
+      described: describeIntent(intent),
+      known,
+      name: decisionName,
     });
+    await addDecision(row);
     // addDecision is best-effort for observational producers. Execution needs
     // evidence that its new decision really reached the ledger before acting.
     const recorded = verifyDecisionOwner(await decisionAgent(id), active.agentId);
-    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: known?.action ?? d.action, symbol: known?.symbol ?? d.symbol, reason })) {
+    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: row.action, symbol: row.symbol, reason })) {
       reviewClock(active.agentId).noteDecision(Math.floor(Date.now() / 1000));
     }
     return recorded;

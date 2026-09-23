@@ -29,6 +29,7 @@ delete process.env.DATABASE_URL;
 const originalCwd = process.cwd();
 const store = await import("./store");
 const { ChainCoinNames, makeDecisionNamer, warmHeldNames } = await import("./decision-name");
+const { intentDecisionRow } = await import("./decision-row");
 try {
   process.chdir(isolatedCwd);
   await store.initStore();
@@ -356,5 +357,130 @@ describe("discovery starts the reads for what is held", () => {
     assert.deepEqual(asked, [heldAddr], "a malformed row costs its own name, not the next coin's");
     assert.doesNotThrow(() => warmHeldNames(names, { tokens: [heldTok], held: [null as unknown as string] }));
     assert.doesNotThrow(() => warmHeldNames({ warm: () => { throw new Error("boom"); } }, { tokens: [heldTok], held: [heldAddr] }));
+  });
+});
+
+describe("the row ensureDecision stamps a trade with, executed", () => {
+  // ensureDecision (index.ts) writes this row before any trade the tick sends
+  // may execute. It was assembled inline in main(), which no test boots: the
+  // checker put the name back on the ledger alone and every test passed.
+  const readRow = async (id: string) => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    try {
+      const r = raw.prepare("SELECT symbol, display_name, action, size_usdg, reason, provenance, source, evidence_json FROM decisions WHERE id = ?").get(id);
+      return r ? { ...r } : undefined;
+    } finally {
+      raw.close();
+    }
+  };
+  const exitAddr = "0x00000000000000000000000000666666666f6000" as `0x${string}`;
+  const exitId = `T${exitAddr.slice(-11).toUpperCase()}`;
+  const exitTok = forgotten({ symbol: exitId, name: exitId, address: exitAddr });
+
+  it("A STOP ON A COIN THE TAPE FORGOT, AFTER A REDEPLOY, IS WRITTEN WITH THE COIN'S OWN NAME", async () => {
+    const { names } = chainOf({ [exitAddr]: "STOPCAT" });
+    await warmed(names, exitTok);
+    await store.addDecision(
+      await intentDecisionRow({
+        id: "row-stop",
+        agentId: AGENT,
+        source: "strategy:trencher",
+        reason: "stop",
+        described: { action: "sell", symbol: exitId, sizeUsdg: 4.2 },
+        known: { whyCode: "stop-floor" },
+        name: namer([exitTok], names),
+      }),
+    );
+    assert.deepEqual(await readRow("row-stop"), {
+      symbol: exitId,
+      display_name: "STOPCAT",
+      action: "sell",
+      size_usdg: 4.2,
+      reason: "stop",
+      provenance: "hard-risk-exit",
+      source: "strategy:trencher",
+      evidence_json: null,
+    });
+  });
+
+  it("THE NAME IS ASKED FOR THE ROW'S OWN SYMBOL — the producer's, when it knows one the intent cannot say", async () => {
+    // A class token is in no watch list, so describeIntent finds no symbol for
+    // it; the class route passes the one it built the intent with.
+    const asked: string[] = [];
+    const r = await intentDecisionRow({
+      id: "row-class",
+      agentId: AGENT,
+      source: "class-route",
+      described: { action: "buy", sizeUsdg: 5 },
+      known: { symbol: "TCLASS000001", action: "sell", evidence: "{\"band\":1}", provenance: "deterministic-strategy" },
+      name: async (_a, s) => {
+        asked.push(s);
+        return s === "TCLASS000001" ? "CLASSY" : null;
+      },
+    });
+    assert.deepEqual(asked, ["TCLASS000001"]);
+    assert.equal(r.display_name, "CLASSY");
+    assert.equal(r.symbol, "TCLASS000001");
+    assert.equal(r.action, "sell", "the producer knows which side it is on");
+    assert.equal(r.evidence_json, "{\"band\":1}");
+    assert.equal(r.provenance, "deterministic-strategy");
+    // And where the description does name something, the producer's own
+    // symbol still wins — it built the intent.
+    const both = await intentDecisionRow({
+      id: "row-both",
+      agentId: AGENT,
+      source: "class-route",
+      described: { action: "buy", symbol: "TDESCRIBED01", sizeUsdg: 5 },
+      known: { symbol: "TCLASS000001" },
+      name: async (_a, s) => {
+        asked.push(s);
+        return null;
+      },
+    });
+    assert.equal(both.symbol, "TCLASS000001");
+    assert.equal(asked.at(-1), "TCLASS000001");
+    const plain = await intentDecisionRow({
+      id: "row-plain",
+      agentId: AGENT,
+      source: "chat",
+      described: { action: "buy", symbol: "NVDA", sizeUsdg: 5 },
+      name: async (_a, s) => {
+        asked.push(s);
+        return null;
+      },
+    });
+    assert.equal(asked.at(-1), "NVDA");
+    assert.equal(plain.symbol, "NVDA");
+    assert.equal(plain.provenance, "owner-command");
+    assert.equal(plain.evidence_json, null);
+    assert.equal(plain.display_name, null);
+  });
+
+  it("A NAME NOBODY HAS YET IS NO WAIT, and a namer that throws costs the name — never the trade", async () => {
+    const names = new ChainCoinNames(() => new Promise<unknown>(() => {}));
+    const started = Date.now();
+    const r = await intentDecisionRow({
+      id: "row-hang",
+      agentId: AGENT,
+      source: "strategy:trencher",
+      described: { action: "sell", symbol: exitId, sizeUsdg: 1 },
+      known: { whyCode: "trench-exit" },
+      name: makeDecisionNamer({ watchTokens: () => [exitTok], ledger: async (_a, _s, _t, chain) => (chain ? chain() : null), chain: names }),
+    });
+    assert.ok(Date.now() - started < 100, `the row waited ${Date.now() - started}ms for a name`);
+    assert.equal(r.display_name, null);
+    assert.equal(r.provenance, "hard-risk-exit");
+    const thrown = await intentDecisionRow({
+      id: "row-throw",
+      agentId: AGENT,
+      source: "strategy:trencher",
+      described: { action: "sell", symbol: exitId, sizeUsdg: 1 },
+      name: async () => {
+        throw new Error("namer broke");
+      },
+    });
+    assert.equal(thrown.display_name, null);
+    assert.equal(thrown.action, "sell");
   });
 });
