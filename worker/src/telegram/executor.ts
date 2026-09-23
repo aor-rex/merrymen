@@ -34,7 +34,13 @@ export type PendingAction =
    * key — so a misread instruction was a permanent loss of funds. A transfer of
    * $5 asks first; ending the agent should too.
    */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "kill"; expiresAt: number }
+  /**
+   * A settings change the owner asked for by text, already parsed and
+   * range-checked (settings-chat.ts). Applied only on confirm, and the control
+   * switch is checked again then.
+   */
+  | { kind: "setting"; key: string; value: unknown; expiresAt: number };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -55,11 +61,20 @@ export interface CommandDeps {
     /** Liquidity depth for one ticker — a chain read, so always async. */
     depth(symbol: string): Promise<string>;
     pnl(): string;
-    trades(): string;
+    trades(): string | Promise<string>;
     report(): string | Promise<string>;
     why(): string | Promise<string>;
     brag(): string | Promise<string>;
+    /** `/settings` — optional so fixtures that predate it still typecheck. */
+    settings?(): string;
   };
+  /**
+   * Settings by text. `proposeSetting` turns the owner's words into either a
+   * question (and parks it) or a plain reply; `applySetting` saves a confirmed
+   * change. Optional so hosts without them answer honestly instead of failing.
+   */
+  proposeSetting?(setting: string, value: string): string;
+  applySetting?(key: string, value: unknown): string;
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
@@ -101,7 +116,13 @@ export interface CommandDeps {
   now?: () => number;
 }
 
-const CONFIRM_TTL_SEC = 90;
+export const CONFIRM_TTL_SEC = 90;
+/**
+ * A settings question waits longer than a transfer: nothing leaves the account
+ * and the owner may be answering from a phone later. Ten minutes, then it
+ * expires and has to be asked again.
+ */
+export const SETTING_CONFIRM_TTL_SEC = 600;
 
 /** Refuse a PC command when the master switch is off or its capability isn't
  * enabled. Returns the refusal string, or null when the command may proceed.
@@ -154,7 +175,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "pnl":
       return deps.reads.pnl();
     case "trades":
-      return deps.reads.trades();
+      return await deps.reads.trades();
     case "report":
       return await deps.reads.report();
     case "why":
@@ -234,6 +255,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "setting") {
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — nothing changed.";
+        }
       } else if (p.kind === "kill") {
         // Kill is a control command, not a PC capability — re-vet the control
         // switch rather than running it through pcRefusal, which knows nothing
@@ -263,6 +289,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.hotkey(p.combo);
         case "power":
           return await deps.pc.power(p.action);
+        case "setting":
+          return deps.applySetting ? deps.applySetting(p.key, p.value) : "settings can't be changed from chat here — nothing changed.";
         case "kill": {
           const r = deps.kill();
           if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
@@ -276,6 +304,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         }
       }
     }
+    case "set":
+      return deps.proposeSetting
+        ? deps.proposeSetting(cmd.setting, cmd.value)
+        : "settings can't be changed from chat on this deployment — use Settings on the dashboard.";
+    case "settings":
+      return deps.reads.settings ? deps.reads.settings() : "your settings live on the dashboard, under Settings.";
     case "cancel": {
       const had = deps.getPending() !== null;
       deps.clearPending();

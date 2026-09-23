@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { rememberChatSetting, type TelegramState } from "./state";
-import { CHAT_SETTABLE, promotedSettings } from "./chat-settings";
+import { CHAT_SETTABLE, promotedSettings, readChatSettings } from "./chat-settings";
 
 const base = { chatSettings: null } as unknown as TelegramState;
 
@@ -31,7 +31,7 @@ describe("the child records what chat changed", () => {
   it("writes the value and the time", () => {
     const r = ref();
     rememberChatSetting(r, { strategy: "dip-hunter" }, 1_000);
-    assert.deepEqual(r.current().chatSettings, { at: 1_000, patch: { strategy: "dip-hunter" } });
+    assert.deepEqual(r.current().chatSettings, { at: 1_000, patch: { strategy: "dip-hunter" }, keyAt: { strategy: 1_000 } });
   });
 
   it("MERGES TWO CHANGES RATHER THAN KEEPING THE LAST", () => {
@@ -43,6 +43,7 @@ describe("the child records what chat changed", () => {
     assert.deepEqual(r.current().chatSettings, {
       at: 1_005,
       patch: { strategy: "dip-hunter", telegramMaxActionUsdg: 25 },
+      keyAt: { strategy: 1_000, telegramMaxActionUsdg: 1_005 },
     });
   });
 
@@ -180,10 +181,125 @@ describe("a rename from chat survives the next tick", () => {
     assert.equal(out.telegramMaxActionUsdg, 25);
   });
 
-  it("stores exactly three settable fields, and no more", () => {
+  it("stores exactly the pinned settable fields, and no more", () => {
     // The allowlist is the boundary a bearer link code runs into. Widening it
     // is a security decision; this fails loudly when someone widens it without
-    // reading why, rather than quietly accepting the new field.
-    assert.deepEqual([...CHAT_SETTABLE].sort(), ["agentName", "strategy", "telegramMaxActionUsdg"]);
+    // reading why, rather than quietly accepting the new field. Widened on
+    // 2026-09-23 at the owner's request — see setting-spec.ts for the line.
+    assert.deepEqual([...CHAT_SETTABLE].sort(), [
+      "agentName",
+      "assetMode",
+      "basketSymbols",
+      "buyPerTickUsdg",
+      "classExitAtGraduationPct",
+      "classMaxHoldSec",
+      "classMaxPositions",
+      "classPerEntryUsdg",
+      "discoveryEnabled",
+      "discoveryIntervalMin",
+      "gapEnterBudgetUsdg",
+      "idleFloorUsdg",
+      "llmIntervalMin",
+      "llmMaxActionUsdg",
+      "memecoinMinFdvUsd",
+      "officialCoinsEnabled",
+      "slippageBps",
+      "strategistStopLossBps",
+      "strategy",
+      "takeProfitBps",
+      "telegramDigestHour",
+      "telegramMaxActionUsdg",
+      "telegramNotifyEveryMin",
+    ]);
+  });
+
+  it("never admits a real-money switch, a safety floor, a secret or a remote-execution field", () => {
+    const forbidden = [
+      "liveTradingEnabled",
+      "paperTradingEnabled",
+      "trencherLiveEnabled",
+      "trencherFastEnabled",
+      "scoutEnabled",
+      "scoutBudgetUsdg",
+      "classSnipeEnabled",
+      "minPoolLiquidityUsdg",
+      "maxPriceDivergenceBps",
+      "maxImpactBps",
+      "classMinDepthUsdg",
+      "customTokens",
+      "telegramEnabled",
+      // Silences EVERY owner alert (the Sign-now prompt, loss warnings), not
+      // just trade pings — so it is Telegram's own switch, dashboard-only.
+      "telegramNotifyEnabled",
+      "telegramControlEnabled",
+      "telegramAllowlist",
+      "telegramTransferEnabled",
+      "telegramTransferDailyUsdg",
+      "telegramPcControlEnabled",
+      "telegramAgentEnabled",
+      "telegramAgentAutoShell",
+      "telegramShellAllowlist",
+      "telegramFilesRoot",
+      "telegramSettingsAt",
+      "bundlerApiKey",
+      "groqApiKey",
+      "llmApiKey",
+      "anthropicApiKey",
+      "telegramBotToken",
+      "tickSeconds",
+      "swapVenue",
+    ];
+    for (const k of forbidden) assert.ok(!CHAT_SETTABLE.has(k), `${k} became chat-settable`);
+  });
+});
+
+describe("one change is applied once — never re-applied over a later dashboard save", () => {
+  it("a strategy chosen in chat does NOT come back when the owner later changes something else", () => {
+    // The bug: the patch accumulates, and the whole patch was promoted every
+    // time `at` moved. Chat picks a strategy, the dashboard changes it, chat
+    // changes the cap — and the old strategy was put back.
+    const r = ref();
+    rememberChatSetting(r, { strategy: "dip-hunter" }, 1_000);
+    const afterChat = promote({}, r.current().chatSettings)!;
+    const afterWeb = { ...afterChat, strategy: "even-keel" };
+    rememberChatSetting(r, { telegramMaxActionUsdg: 30 }, 2_000);
+    const next = promote(afterWeb, r.current().chatSettings)!;
+    assert.equal(next.strategy, "even-keel", "the dashboard's later choice stands");
+    assert.equal(next.telegramMaxActionUsdg, 30, "the new chat change lands");
+  });
+
+  it("a second change in the same second as a promoted first one still lands", () => {
+    const r = ref();
+    rememberChatSetting(r, { buyPerTickUsdg: 10 }, 1_000);
+    const first = promote({}, r.current().chatSettings)!;
+    rememberChatSetting(r, { buyPerTickUsdg: 12 }, 1_000);
+    assert.ok(r.current().chatSettings!.at > 1_000, "the stamp moved past the promoted one");
+    assert.equal(promote(first, r.current().chatSettings)?.buyPerTickUsdg, 12);
+  });
+
+  it("an older record with no per-key times still promotes as before", () => {
+    const out = promote({}, { at: 1_000, patch: { strategy: "dip-hunter", telegramMaxActionUsdg: 25 } })!;
+    assert.equal(out.strategy, "dip-hunter");
+    assert.equal(out.telegramMaxActionUsdg, 25);
+  });
+
+  it("the per-key times survive being read back from telegram.json", () => {
+    const read = readChatSettings({ at: 2, patch: { strategy: "x" }, keyAt: { strategy: 2, junk: "no" } });
+    assert.deepEqual(read, { at: 2, patch: { strategy: "x" }, keyAt: { strategy: 2 } });
+  });
+});
+
+describe("a value is checked again before it is stored", () => {
+  it("drops an out-of-range or wrong-typed value instead of storing it", () => {
+    // mergeSettings turns an out-of-range number into the DEFAULT without a
+    // word, so storing one would record the owner's choice as something else.
+    const out = promote({}, {
+      at: 1_000,
+      patch: { buyPerTickUsdg: 0, slippageBps: 5_000, discoveryEnabled: "yes", assetMode: "bonds", llmIntervalMin: 30 },
+    })!;
+    for (const k of ["buyPerTickUsdg", "slippageBps", "discoveryEnabled", "assetMode"]) {
+      assert.ok(!(k in out), `${k} was stored with a bad value`);
+    }
+    assert.equal(out.llmIntervalMin, 30);
   });
 });

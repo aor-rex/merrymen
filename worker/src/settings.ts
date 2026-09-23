@@ -597,5 +597,12 @@ export function strategyKey(cfg: ResolvedConfig): string {
     cfg.llmIntervalMin,
     cfg.trencherFastEnabled,
     cfg.llmMaxActionUsdg,
+    // BAKED INTO THE STRATEGY WHEN IT IS BUILT (makeStrategy), so without them
+    // here a change looked saved and did nothing until a restart. Chat can now
+    // change the first two, which is how it was noticed.
+    cfg.takeProfitBps,
+    cfg.strategistStopLossBps,
+    cfg.deskEnabled,
+    cfg.deskMaxSteps,
   ].join("|");
 }

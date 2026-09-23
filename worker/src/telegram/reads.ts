@@ -10,13 +10,14 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+import { loadTradeViews, renderTradeList, type TradeViewOpts } from "./trade-rows";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
 import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
-function openRO(): DatabaseSync | null {
+export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
   if (!existsSync(file)) return null;
   try {
@@ -80,7 +81,7 @@ function currentAgentId(db: DatabaseSync): string | null {
  * shared ledger returns null (→ a "no agent" answer) rather than leaking a
  * neighbour's book.
  */
-function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
+export function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
   if (passed) return passed;
   if (isHostedMode()) return null;
   return currentAgentId(db);
@@ -93,7 +94,7 @@ function resolveAgent(db: DatabaseSync, passed: string | null | undefined): stri
  * curve can contain a phantom crater from a failed balance read. Kept for
  * forensics, never mixed into a number anyone is shown.
  */
-function agentEpoch(db: DatabaseSync, agentId: string): number {
+export function agentEpoch(db: DatabaseSync, agentId: string): number {
   try {
     const row = db
       .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
@@ -129,7 +130,7 @@ function gasPaid(db: DatabaseSync, agentId: string, epoch: number): { usdg: numb
  * "the agent made money" — the two were the same number until 2026-08-26, which
  * is how /pnl came to report a 1,000 USDG deposit as a 1,000 USDG profit.
  */
-function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
+export function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
   try {
     const epoch = agentEpoch(db, agentId);
     const sql =
@@ -378,29 +379,19 @@ export function readPnl(passedId?: string | null): string {
   }
 }
 
-export function readTrades(agentId?: string | null): string {
+/**
+ * /trades — each row with the coin it was in, bought or sold, the dollars that
+ * actually moved, and its real time (trade-rows.ts). `opts.client` lets it ask
+ * the chain for names the ledger lacks and for rows re-recorded after a
+ * restart; without it, local names only.
+ */
+export async function readTrades(agentId?: string | null, opts: TradeViewOpts = {}): Promise<string> {
   const db = openRO();
   if (!db) return "no ledger yet.";
   try {
     const who = resolveAgent(db, agentId);
     if (!who) return "🧾 no trades yet.";
-    const rows = db
-      .prepare(
-        "SELECT kind, amount_usdg, status, reject_rule, datetime(created_at,'unixepoch') AS at FROM trades WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT 8",
-      )
-      .all(who) as { kind: string; amount_usdg: number; status: string; reject_rule: string | null; at: string }[];
-    if (!rows.length) return "🧾 no trades yet.";
-    const icon = (s: string) => (s === "landed" ? "✅" : s === "rejected" ? "🚫" : "⚠️");
-    const body = rows
-      // Words, not the slug — same vocabulary as the feed, the chat and the
-      // push. A list of refusals reading `(no-exit) (no-exit) (no-exit)` tells
-      // an owner how OFTEN it happened and nothing about what it was.
-      .map(
-        (r) =>
-          `${icon(r.status)} ${esc(r.kind)} ${r.amount_usdg.toFixed(2)} USDG ${r.status === "rejected" ? `(${esc(rejectRuleLabel(r.reject_rule) ?? r.reject_rule ?? "")})` : ""} · ${r.at}`,
-      )
-      .join("\n");
-    return `🧾 <b>recent trades</b>\n${body}`;
+    return renderTradeList(await loadTradeViews(db, who, { limit: 8, ...opts }));
   } catch {
     return "🧾 no trades yet.";
   } finally {
@@ -783,7 +774,7 @@ export function readRecentEvents(agentId?: string | null, limit = 5): string {
  * The full state pack for natural-language chat: status + positions + P&L +
  * recent trades + recent events, tags stripped (the model gets plain text).
  */
-export function readLlmState(ctx: StatusContext): string {
+export async function readLlmState(ctx: StatusContext): Promise<string> {
   const strip = (s: string) => s.replace(/<[^>]+>/g, "");
   return [
     strip(readStatus(ctx)),
@@ -792,7 +783,7 @@ export function readLlmState(ctx: StatusContext): string {
     "",
     strip(readPnl(ctx.agentId)),
     "",
-    strip(readTrades(ctx.agentId)),
+    strip(await readTrades(ctx.agentId)),
     "",
     "RECENT EVENTS:",
     readRecentEvents(ctx.agentId, 5),
@@ -891,29 +882,27 @@ export function readWallet(agentId?: string | null, dashboardUrl?: string): stri
 }
 
 export const HELP_TEXT = [
-  "🏹 <b>merryman — commands</b>",
-  "/status · /positions · /pnl · /trades — see what the band's doing",
-  "/depth &lt;SYM&gt; — where the money sits: liquidity, support and resistance, live from the chain",
-  "/report — today's campfire report · /brag — your scorecard",
-  "/why — why I made my last trade",
-  "/name &lt;name&gt; — christen your merryman · /soul — who I am &amp; what I know of you",
-  "/remember &lt;fact&gt; — tell me something to keep · /forget — wipe what I know",
-  "/pause · /resume — hold or ride",
-  "/strategy &lt;name&gt; — switch strategy (steady-basket, weekend-gap, llm-strategist, or your own)",
-  "/cap &lt;usdg&gt; — set the per-action ceiling for chat trades",
-  "/buy &lt;SYM&gt; &lt;usdg&gt; · /sell &lt;SYM&gt; &lt;usdg&gt; — trade (passes the policy wall)",
-  "/transfer &lt;0x…&gt; &lt;usdg&gt; — send USDG out (asks you to /confirm; enable in dashboard)",
+  "🏹 <b>just talk to me</b> — ask anything in plain words and I'll look it up:",
+  "“what did you buy today?” · “why did you lose money?” · “what is KIST?” · “why aren't you trading?”",
+  "",
+  "⚙️ <b>change a setting by saying it</b> — “make each buy $20”, “stop loss at 8%”, “trade messages once an hour”. I'll ask you to confirm with a button. /settings shows them all.",
+  "",
+  "<b>quick commands</b>",
+  "/status · /positions · /pnl · /trades — the exact reports",
+  "/why — why I made my last trade · /report — today's summary · /brag — your scorecard",
+  "/buy &lt;SYM&gt; &lt;usdg&gt; · /sell &lt;SYM&gt; &lt;usdg&gt; — trade (inside your safety limits)",
+  "/pause · /resume — stop or start new trades",
+  "/strategy &lt;name&gt; · /cap &lt;usdg&gt; — strategy, and the most one chat trade can use",
   "/alert &lt;SYM&gt; &gt; &lt;price&gt; — ping me at a price · /alerts · /unalert &lt;n&gt;",
-  "/wallet — create, restore, or recover a wallet (points you to the dashboard)",
-  "/kill — destroy the grant, stand the band down",
+  "/transfer &lt;0x…&gt; &lt;usdg&gt; — send USDG out (asks you to confirm; switch on in the dashboard)",
+  "/wallet — where your money is, and how to add or take it out",
+  "/name &lt;name&gt; · /soul · /remember &lt;fact&gt; · /forget — who I am and what I know of you",
+  "/kill — switch off my trading permission for good (asks you to confirm)",
   "",
-  "🖥️ <b>your PC</b> (enable in dashboard → remote control):",
-  "/shot — screenshot · /look &lt;q&gt; — what am I looking at? · /sys — system info",
-  "/open &lt;app|url&gt; · /vol &lt;up|down|mute&gt; · /media &lt;play|pause|next|prev&gt; · /notify &lt;msg&gt; · /lock",
-  "/ls [path] · /get &lt;path&gt; · /clip [text] — browse/send files, clipboard",
-  "/run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt; — shell/keyboard (allowlisted + /confirm)",
-  "/remind &lt;20m&gt; &lt;msg&gt; · /watch &lt;cpu&gt;80|file …|proc …&gt; · /pc — what's enabled",
-  "/agent &lt;task&gt; — or just ask in plain English: I work your PC in steps (code, build, fix, report) until done · say “stop” to halt",
+  "🖥️ <b>your PC</b> (self-hosted only, switch on in Settings → remote control):",
+  "/shot · /look &lt;q&gt; · /sys · /open &lt;app|url&gt; · /vol · /media · /notify · /lock",
+  "/ls [path] · /get &lt;path&gt; · /clip [text] · /run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt;",
+  "/remind &lt;20m&gt; &lt;msg&gt; · /watch · /pc · /agent &lt;task&gt; — or describe the task in plain words",
   "",
-  "…or just talk to me in plain English once an AI provider is set in Settings — voice notes work too.",
+  "Voice notes work too, once an AI provider is set in Settings.",
 ].join("\n");

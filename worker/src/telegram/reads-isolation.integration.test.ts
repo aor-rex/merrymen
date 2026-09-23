@@ -71,7 +71,7 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
   it("every scoped read shows Alice's rows and never Bob's", async () => {
     await seed();
 
-    const trades = readTrades(ALICE);
+    const trades = await readTrades(ALICE);
     assert.match(trades, /11\.11/, "Alice's trade");
     assert.doesNotMatch(trades, /22\.22/, "…never Bob's");
 
@@ -99,7 +99,7 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
   });
 
   it("and the mirror image holds for Bob", async () => {
-    const trades = readTrades(BOB);
+    const trades = await readTrades(BOB);
     assert.match(trades, /22\.22/);
     assert.doesNotMatch(trades, /11\.11/);
     const why = readWhyEvidence(BOB);
@@ -107,10 +107,10 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
     assert.doesNotMatch(why.text, /ALICE_REASONING_gap_open/);
   });
 
-  it("HOSTED: a read with no agent refuses — never the global guess", () => {
+  it("HOSTED: a read with no agent refuses — never the global guess", async () => {
     // Null agent in hosted mode must NOT fall back to currentAgentId (which
     // would return whichever agent traded last across the fleet — a leak).
-    const trades = readTrades(null);
+    const trades = await readTrades(null);
     assert.doesNotMatch(trades, /11\.11/);
     assert.doesNotMatch(trades, /22\.22/);
 

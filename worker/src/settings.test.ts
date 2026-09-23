@@ -190,6 +190,18 @@ describe("change fingerprints", () => {
     assert.notEqual(strategyKey(a), strategyKey(k1)); // gaining a key = rebuild
   });
 
+  it("strategy key moves on the four fields makeStrategy bakes in, so a change applies without a restart", () => {
+    const a = mergeSettings({}, {});
+    for (const patch of [
+      { takeProfitBps: 2_500 },
+      { strategistStopLossBps: 500 },
+      { deskEnabled: true },
+      { deskMaxSteps: 7 },
+    ]) {
+      assert.notEqual(strategyKey(a), strategyKey(mergeSettings(patch, {})), JSON.stringify(patch));
+    }
+  });
+
   it("telegram key moves on token, enable, allowlist — not on unrelated fields", () => {
     const a = mergeSettings({ telegramBotToken: "t", telegramEnabled: true, telegramAllowlist: [1] }, {});
     const tokenChanged = mergeSettings({ telegramBotToken: "t2", telegramEnabled: true, telegramAllowlist: [1] }, {});
