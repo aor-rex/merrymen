@@ -623,6 +623,8 @@ describe("settings by text — the classifier names, the code decides", () => {
     assert.deepEqual(parseSlash("/set stop loss 8%"), { kind: "set", setting: "stop loss", value: "8%" });
     assert.deepEqual(parseSlash("/settings"), { kind: "settings" });
     assert.equal(parseSlash("/set onlyoneword")?.kind, "unknown");
+    assert.deepEqual(parseSlash("/set basket QQQ NVDA"), { kind: "set", setting: "basket", value: "QQQ NVDA" });
+    assert.deepEqual(parseSlash("/set max hold 1 day"), { kind: "set", setting: "max hold", value: "1 day" });
   });
 
   it("\"set\" is a control command — gated like /strategy and /cap", async () => {

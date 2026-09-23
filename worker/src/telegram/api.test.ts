@@ -458,3 +458,27 @@ describe("publicBotCommands — what strangers see", () => {
     }
   });
 });
+
+describe("a refused request keeps Telegram's reason", () => {
+  it("reads the description on an HTTP 400, so the plain-text retry actually runs", async () => {
+    const bodies: string[] = [];
+    const f: FetchLike = async (_url, init) => {
+      bodies.push(init?.body ?? "");
+      const first = bodies.length === 1;
+      return {
+        ok: !first,
+        status: first ? 400 : 200,
+        json: async () => (first ? { ok: false, description: "Bad Request: can't parse entities: unsupported start tag \"$0.01\"" } : OK({ message_id: 9 })),
+      };
+    };
+    const r = await sendMessage({ token: "t", fetchFn: f }, 1, "sold X for <$0.01");
+    assert.equal(r.ok, true, "the reply is delivered as plain text, not lost");
+    assert.equal(bodies.length, 2);
+  });
+
+  it("still says HTTP <code> when there is no body to read", async () => {
+    const f: FetchLike = async () => ({ ok: false, status: 502, json: async () => { throw new Error("html"); } });
+    const { reason } = await getMe({ token: "t", fetchFn: f });
+    assert.match(reason!, /HTTP 502/);
+  });
+});

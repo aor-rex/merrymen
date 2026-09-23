@@ -104,6 +104,8 @@ export interface NotifierDeps {
 const LOOP_GAP_MS = 15_000;
 const IDLE_GAP_MS = 30_000;
 const CONDITION_COOLDOWN_SEC = 6 * 3600;
+/** How soon a sign prompt Telegram refused is tried again. */
+const SIGN_RETRY_SEC = 30 * 60;
 const LOW_GAS_WEI = 500_000_000_000_000n; // 0.0005 native — a few trades left
 
 function openRO(): DatabaseSync | null {
@@ -330,29 +332,42 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
   // intended size. A leftover worth a fraction of a cent reads "<$0.01", not
   // "0.00", which looked like a trade of nothing.
   const cash = t.fill_cash_usdg ?? t.amount_usdg;
+  // ESCAPED, ALWAYS: "<$0.01" is a tag to Telegram's HTML parser, and a
+  // refused parse used to cost the owner the whole message.
+  const usd = (n: number) => esc(dollars(n));
   const name = coin ? esc(coin.label) : null;
   const what = coin?.side === "buy" ? "Bought" : coin?.side === "sell" ? "Sold" : null;
+  // No coin — say what kind of move it was, not "a trade": a transfer out of
+  // the account must never read as a trade.
+  const other =
+    t.kind === "transfer" ? "transfer out of your account"
+    : t.kind === "vault-deposit" ? "move into your savings vault"
+    : t.kind === "vault-withdraw" ? "move out of your savings vault"
+    : t.kind === "equity-order" && t.target && !/^0x/i.test(t.target) ? `${esc(t.target)} order`
+    : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
+    : esc(t.kind);
   if (t.status === "landed") {
     const proof = t.tx_hash
       ? explorer
         ? `\n🔗 <a href="${explorer}/tx/${esc(t.tx_hash)}">see it on the explorer ↗</a>`
         : `\n<code>${esc(t.tx_hash)}</code>`
       : "";
+    const realized = t.realized_pnl_usdg ?? null;
     const result =
-      coin?.side === "sell" && t.realized_pnl_usdg != null
-        ? ` (${t.realized_pnl_usdg >= 0 ? "+" : "−"}${dollars(Math.abs(t.realized_pnl_usdg))})`
-        : "";
-    if (name && coin?.side === "sell" && cash > 0 && cash < 0.005) {
+      coin?.side === "sell" && realized !== null ? ` (${realized >= 0 ? "+" : "−"}${usd(Math.abs(realized))})` : "";
+    // A LEFTOVER only when nothing material was lost on it: a near-total-loss
+    // exit also sells for under a cent, and "the leftover" would hide the loss.
+    if (name && coin?.side === "sell" && cash > 0 && cash < 0.005 && Math.abs(realized ?? 0) < 0.005) {
       return `✅ Sold the leftover ${name} — worth less than a cent${proof}`;
     }
-    if (name && what) return `✅ ${what} ${name} for ${dollars(cash)}${result}${proof}`;
-    return `✅ A trade went through — ${dollars(cash)}${proof}`;
+    if (name && what) return `✅ ${what} ${name} for ${usd(cash)}${result}${proof}`;
+    return `✅ A ${other} went through — ${usd(cash)}${proof}`;
   }
   if (t.status === "paper") {
     if (name && what) {
-      return `📜 Practice: ${what.toLowerCase()} ${name} for ${dollars(cash)} at the live price — no real money moved`;
+      return `📜 Practice: ${what.toLowerCase()} ${name} for ${usd(cash)} at the live price — no real money moved`;
     }
-    return `📜 Practice trade of ${dollars(cash)} at the live price — no real money moved`;
+    return `📜 Practice ${other} of ${usd(cash)} — no real money moved`;
   }
   if (t.status === "rejected") {
     // A SPONSOR FAILURE IS NOT A WALL REFUSAL. The wall is the owner's own
@@ -608,13 +623,13 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       if (d.send && need) {
         const m = signMessage(need.reason, signInputs, getName(), dashboardBase());
         const sent = await sendMessage({ token }, chatId, m.text, m.keyboard ? { keyboard: m.keyboard } : {});
-        // Recorded only when it actually went out, so a transient send
-        // failure retries next pass instead of going quiet for a day.
-        if (sent.ok) {
-          console.log(`[notify] sign prompt sent — ${need.key}`);
-          const now2 = deps.stateRef.get();
-          deps.stateRef.set({ ...now2, firedAlerts: { ...now2.firedAlerts, [need.key]: now() } });
-        }
+        // A sent prompt waits out its repeat; a FAILED one retries in half an
+        // hour — not every 15-second pass (a blocked bot fails for ever), and
+        // not after a day (a blip should not cost the owner the prompt).
+        if (sent.ok) console.log(`[notify] sign prompt sent — ${need.key}`);
+        const stamp = sent.ok ? now() : now() - need.repeatSec + SIGN_RETRY_SEC;
+        const now2 = deps.stateRef.get();
+        deps.stateRef.set({ ...now2, firedAlerts: { ...now2.firedAlerts, [need.key]: stamp } });
       }
     }
     // ── A CEILING SO LOW THE AGENT HAS NOTHING WORTH DOING ─────────────────

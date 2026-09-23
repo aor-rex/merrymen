@@ -38,7 +38,8 @@ import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
 import { agentEpoch, netContributions, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
-import { signNeed } from "./sign-prompt";
+import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
+import { isActiveClassState, isQuoteTokenRow } from "../class-active";
 import { dollars, loadTradeViews, tradeViewLine, when } from "./trade-rows";
 
 export const TOOL_OUTPUT_MAX = 1_800;
@@ -122,6 +123,18 @@ function horizon(db: DatabaseSync, who: string): string {
   }
 }
 
+/**
+ * What needs signing, with the notifier's SETTLE rule applied: for a grant
+ * signed moments ago the child's blocker still describes the OLD one, and
+ * telling an owner who just signed to sign again — with a button — is the
+ * exact failure the settle window exists to prevent.
+ */
+function settledNeed(blocker: string | null, ctx: ToolContext): SignNeed | "just-signed" | null {
+  const need = signNeed({ blocker, grantExpiresAt: ctx.grant?.expiresAt ?? null, grantedAt: ctx.grant?.grantedAt ?? null, now: ctx.now });
+  if (need?.settles && ctx.grant && ctx.now - ctx.grant.grantedAt < settleFor(ctx.cfg.tickSeconds)) return "just-signed";
+  return need;
+}
+
 function lookupOpts(ctx: ToolContext) {
   return { customTokens: ctx.cfg.customTokens, book: ctx.book, client: ctx.client };
 }
@@ -160,7 +173,9 @@ const agentStatus: ChatTool = {
         } catch {
           /* older ledger */
         }
-        if (blocker) lines.push(`Not trading for real because: ${liveBlockerText(blocker as never) || blocker}.`);
+        // A just-signed grant's blocker still describes the OLD grant — don't hand it to the model.
+        const justSigned = settledNeed(blocker, ctx) === "just-signed";
+        if (blocker && !justSigned) lines.push(`Not trading for real because: ${liveBlockerText(blocker as never) || blocker}.`);
 
         // "Trading is paused." at the end of a launch-scan line means LAUNCH
         // BUYING IS OFF — not the pause button. Said here so it is never
@@ -169,8 +184,9 @@ const agentStatus: ChatTool = {
           lines.push("Buying brand-new launchpad coins is switched off in settings (my launch scanner may still report what it sees — that is not the pause button).");
         }
 
-        const need = signNeed({ blocker, grantExpiresAt: ctx.grant?.expiresAt ?? null, grantedAt: ctx.grant?.grantedAt ?? null, now: ctx.now });
-        if (need) lines.push(`My trading permission needs a new signature from the owner (${need.reason}). It's free; I can send them the button.`);
+        const need = settledNeed(blocker, ctx);
+        if (need === "just-signed") lines.push("The owner just signed a new trading permission; I'm still switching over to it.");
+        else if (need) lines.push(`My trading permission needs a new signature from the owner (${need.reason}). It's free; I can send them the button.`);
 
         if (s.grant) {
           lines.push(
@@ -288,7 +304,10 @@ const pnlBreakdown: ChatTool = {
         } catch {
           /* no equity */
         }
-        const flows = netContributions(db, who, since);
+        // Only money moved AFTER the opening mark: anything at or before it is
+        // already inside that mark, and counting it again turned a deposit
+        // made just before the period's first reading into a trading loss.
+        const flows = open ? netContributions(db, who, open.at + 1) : null;
         if (open && close && (open.mode ?? "") === (close.mode ?? "")) {
           const change = close.equity_usdg - open.equity_usdg;
           lines.push(`Account value went from ${dollars(open.equity_usdg)} (${when(open.at)}) to ${dollars(close.equity_usdg)} (${when(close.at)}): ${change >= 0 ? "+" : "−"}${dollars(Math.abs(change))}.`);
@@ -305,22 +324,28 @@ const pnlBreakdown: ChatTool = {
         }
 
         const views = await loadTradeViews(db, who, { ...lookupOpts(ctx), filter: "filled", since, limit: 50 });
-        const byCoin = new Map<string, { n: number; pnl: number }>();
+        // Real money and practice are different money: two buckets, never summed.
+        const real = new Map<string, { n: number; pnl: number }>();
+        const practice = new Map<string, { n: number; pnl: number }>();
         for (const v of views) {
-          if (v.side !== "sell" || v.realized === null || v.status !== "landed") continue;
-          const e = byCoin.get(v.label) ?? { n: 0, pnl: 0 };
+          if (v.side !== "sell" || v.realized === null) continue;
+          const m = v.status === "landed" ? real : v.status === "paper" ? practice : null;
+          if (!m) continue;
+          const e = m.get(v.label) ?? { n: 0, pnl: 0 };
           e.n += 1;
           e.pnl += v.realized;
-          byCoin.set(v.label, e);
+          m.set(v.label, e);
         }
-        if (byCoin.size) {
-          const rows = [...byCoin].sort((a, b) => a[1].pnl - b[1].pnl);
-          lines.push("Closed trades (real money):");
-          for (const [coin, e] of rows) lines.push(`  ${coin}: ${e.pnl >= 0 ? "+" : "−"}${dollars(Math.abs(e.pnl))} over ${e.n} sale${e.n === 1 ? "" : "s"}`);
-        } else {
-          lines.push("No sales with a known cost closed in this period.");
-        }
-        const buys = views.filter((v) => v.side === "buy" && v.status === "landed").length;
+        const emit = (title: string, m: Map<string, { n: number; pnl: number }>) => {
+          lines.push(title);
+          for (const [coin, e] of [...m].sort((a, b) => a[1].pnl - b[1].pnl)) {
+            lines.push(`  ${coin}: ${e.pnl >= 0 ? "+" : "−"}${dollars(Math.abs(e.pnl))} over ${e.n} sale${e.n === 1 ? "" : "s"}`);
+          }
+        };
+        if (real.size) emit("Closed trades (real money):", real);
+        if (practice.size) emit("Closed practice trades (no real money):", practice);
+        if (!real.size && !practice.size) lines.push("No sales with a known cost closed in this period.");
+        const buys = views.filter((v) => v.side === "buy" && (v.status === "landed" || v.status === "paper")).length;
         if (buys) lines.push(`Bought ${buys} time${buys === 1 ? "" : "s"} in this period (buys don't book a result until sold).`);
 
         try {
@@ -356,12 +381,24 @@ const positions: ChatTool = {
       async (db, who) => {
         const extra: string[] = [];
         try {
+          // "Held" is the shared definition (class-active.ts): open OR recovered,
+          // and never the vault's own cash row.
           const rows = db
-            .prepare("SELECT token, cost_usdg, first_seen FROM class_positions WHERE agent_id = ? AND state = 'open' ORDER BY first_seen DESC LIMIT 8")
-            .all(who) as { token: string; cost_usdg: number | null; first_seen: number }[];
+            .prepare(
+              "SELECT token, quote_token, state, cost_usdg, first_seen FROM class_positions WHERE agent_id = ? AND state IN ('open','recovered') ORDER BY first_seen DESC LIMIT 8",
+            )
+            .all(who) as { token: string; quote_token: string | null; state: string; cost_usdg: string | number | null; first_seen: number }[];
           for (const r of rows) {
+            if (!isActiveClassState(r.state) || isQuoteTokenRow({ token: r.token, quoteToken: r.quote_token, state: r.state })) continue;
             const l = await tokenLabel(db, who, r.token, { customTokens: ctx.cfg.customTokens, own: ctx.book, client: ctx.client });
-            extra.push(`  ${labelText(l)} — bought ${when(r.first_seen)}${r.cost_usdg !== null ? ` for ${dollars(r.cost_usdg)}` : ""}`);
+            // cost_usdg is stored as a raw 6-decimal INTEGER STRING, not dollars.
+            let cost: number | null = null;
+            try {
+              if (r.cost_usdg !== null && r.state !== "recovered") cost = Number(BigInt(r.cost_usdg)) / 1e6;
+            } catch {
+              cost = null;
+            }
+            extra.push(`  ${labelText(l)} — bought ${when(r.first_seen)}${cost !== null ? ` for ${dollars(cost)}` : " (cost unknown)"}`);
           }
         } catch {
           /* no class positions */
@@ -687,8 +724,14 @@ const permissionStatus: ChatTool = {
     if (ctx.status.grant) {
       lines.push(`Limits: $${ctx.status.grant.perTradeUsdg} per trade, $${ctx.status.grant.dailyUsdg} per day, loss breaker at ${ctx.status.grant.maxDrawdownPct}%. Only a new signature changes these.`);
     }
-    const need = signNeed({ blocker, grantExpiresAt: g.expiresAt, grantedAt: g.grantedAt, now: ctx.now });
-    lines.push(need ? `NEEDS A NEW SIGNATURE (${need.reason}). It's free; I'll send the owner a Sign now button.` : "It does not need a new signature right now.");
+    const need = settledNeed(blocker, ctx);
+    lines.push(
+      need === "just-signed"
+        ? "It was just signed and I'm still switching over to it — no new signature is needed."
+        : need
+          ? `NEEDS A NEW SIGNATURE (${need.reason}). It's free; I'll send the owner a Sign now button.`
+          : "It does not need a new signature right now.",
+    );
     return cap(lines.join("\n"));
   },
 };

@@ -74,6 +74,14 @@ export function shortAddr(a: string): string {
   return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
 }
 
+/**
+ * A ticker reduced to letters and digits for the impersonation check, so a
+ * coin calling itself "$USDG", "USDG." or "t-sla" is still caught.
+ */
+function guardKey(s: string): string {
+  return s.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
 /** Symbols an untrusted label may not borrow without being flagged. */
 function trustedTickers(custom: readonly CustomToken[]): Map<string, string> {
   const m = new Map<string, string>([
@@ -81,8 +89,8 @@ function trustedTickers(custom: readonly CustomToken[]): Map<string, string> {
     ["WETH", WETH],
     ["ETH", WETH],
   ]);
-  for (const t of STOCK_TOKENS) m.set(t.symbol.toUpperCase(), t.address.toLowerCase());
-  for (const t of custom) m.set(t.symbol.toUpperCase(), t.address.toLowerCase());
+  for (const t of STOCK_TOKENS) m.set(guardKey(t.symbol), t.address.toLowerCase());
+  for (const t of custom) m.set(guardKey(t.symbol), t.address.toLowerCase());
   return m;
 }
 
@@ -177,7 +185,7 @@ export function tokenLabelSync(db: LabelDb | null, agentId: string | null, input
 
   const guard = trustedTickers(custom);
   const untrusted = (ticker: string | null, name: string | null, source: LabelSource): TokenLabel => {
-    const owner = ticker ? guard.get(ticker.toUpperCase()) : undefined;
+    const owner = ticker ? guard.get(guardKey(ticker)) : undefined;
     return base({ ticker, name: name && name !== ticker ? name : null, source, trusted: false, clash: !!owner && owner !== a });
   };
 
@@ -276,7 +284,7 @@ export async function tokenLabel(
   if (local.source !== "none" || !local.address || !o.client) return local;
   const sym = await chainSymbol(o.client, local.address, o.timeoutMs);
   if (!sym) return local;
-  const owner = trustedTickers(o.customTokens ?? []).get(sym.toUpperCase());
+  const owner = trustedTickers(o.customTokens ?? []).get(guardKey(sym));
   return { ...local, ticker: sym, source: "chain", trusted: false, clash: !!owner && owner !== local.address };
 }
 
@@ -333,6 +341,7 @@ export async function receiptFacts(
     cashUsdg: leg.cashUsdg,
     blockTime: block ? Number(block.timestamp) : null,
   };
-  receiptCache.set(key, facts);
+  // Cached only with its time: a block read that timed out is not an answer either.
+  if (block) receiptCache.set(key, facts);
   return facts;
 }

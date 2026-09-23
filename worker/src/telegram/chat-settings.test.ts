@@ -209,7 +209,6 @@ describe("a rename from chat survives the next tick", () => {
       "takeProfitBps",
       "telegramDigestHour",
       "telegramMaxActionUsdg",
-      "telegramNotifyEnabled",
       "telegramNotifyEveryMin",
     ]);
   });
@@ -229,6 +228,9 @@ describe("a rename from chat survives the next tick", () => {
       "classMinDepthUsdg",
       "customTokens",
       "telegramEnabled",
+      // Silences EVERY owner alert (the Sign-now prompt, loss warnings), not
+      // just trade pings — so it is Telegram's own switch, dashboard-only.
+      "telegramNotifyEnabled",
       "telegramControlEnabled",
       "telegramAllowlist",
       "telegramTransferEnabled",

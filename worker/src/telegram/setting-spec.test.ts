@@ -7,7 +7,7 @@ const spec = (k: string) => specFor(k)!;
 
 describe("parseSettingValue — owner words in, stored value out", () => {
   it("reads dollars however they are written", () => {
-    for (const raw of ["20", "$20", "20 usdg", "20.00", "twenty is $20"]) {
+    for (const raw of ["20", "$20", "20 usdg", "20.00", "$ 20 dollars"]) {
       assert.deepEqual(parseSettingValue(spec("buyPerTickUsdg"), raw), { ok: true, value: 20 }, raw);
     }
     assert.deepEqual(parseSettingValue(spec("idleFloorUsdg"), "1,500"), { ok: true, value: 1500 });
@@ -41,7 +41,43 @@ describe("parseSettingValue — owner words in, stored value out", () => {
   });
 
   it("a whole-number setting refuses a fraction", () => {
-    assert.equal(parseSettingValue(spec("llmIntervalMin"), "2.5").ok, false);
+    assert.equal(parseSettingValue(spec("classExitAtGraduationPct"), "2.5").ok, false);
+  });
+
+  it("the WHOLE text must be the value — a plausible misreading is refused, not stored", () => {
+    for (const [k, raw] of [
+      ["takeProfitBps", "50 bps"],
+      ["takeProfitBps", "0,5%"],
+      ["buyPerTickUsdg", "2x"],
+      ["buyPerTickUsdg", "twenty is $20"],
+      ["classMaxHoldSec", "6h then sell"],
+    ] as const) {
+      const r = parseSettingValue(spec(k), raw);
+      assert.equal(r.ok, false, `${k} "${raw}" should be refused`);
+      assert.match((r as { reason: string }).reason, /didn't understand/);
+    }
+  });
+
+  it("minutes take the words people use for time", () => {
+    assert.deepEqual(parseSettingValue(spec("telegramNotifyEveryMin"), "once an hour"), { ok: true, value: 60 });
+    assert.deepEqual(parseSettingValue(spec("telegramNotifyEveryMin"), "every trade"), { ok: true, value: 0 });
+    assert.deepEqual(parseSettingValue(spec("telegramNotifyEveryMin"), "2h"), { ok: true, value: 120 });
+    assert.deepEqual(parseSettingValue(spec("llmIntervalMin"), "15 minutes"), { ok: true, value: 15 });
+    assert.equal(parseSettingValue(spec("llmIntervalMin"), "every trade").ok, false, "0 is below this one's floor");
+  });
+
+  it("the report hour takes am/pm", () => {
+    assert.deepEqual(parseSettingValue(spec("telegramDigestHour"), "6pm"), { ok: true, value: 18 });
+    assert.deepEqual(parseSettingValue(spec("telegramDigestHour"), "12am"), { ok: true, value: 0 });
+  });
+
+  it("'max launch coins held' refuses 0 — stored 0 means NO limit", () => {
+    const r = parseSettingValue(spec("classMaxPositions"), "0");
+    assert.equal(r.ok, false);
+  });
+
+  it("the basket is stored in the spelling the resolver matches exactly", () => {
+    assert.deepEqual(parseSettingValue(spec("basketSymbols"), "qqq and wbtc", ["QQQ", "wBTC"]), { ok: true, value: ["QQQ", "wBTC"] });
   });
 
   it("builds a basket only from tickers it can trade, and says which it could not", () => {

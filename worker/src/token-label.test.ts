@@ -201,3 +201,45 @@ describe("the trade list the owner reads", () => {
     assert.deepEqual(await loadTradeViews(db, AGENT, {}), []);
   });
 });
+
+describe("review fixes", () => {
+  it("a coin that dresses up a trusted ticker with punctuation is still flagged", async () => {
+    const db = ledger();
+    db.prepare("INSERT INTO discovered_pools (address, symbol) VALUES (?, '$USDG')").run(FAKE_USDG);
+    const l = tokenLabelSync(db, AGENT, FAKE_USDG);
+    assert.equal(l.clash, true);
+    const viaChain = await tokenLabel(null, AGENT, "0x2222222222222222222222222222222222222222", { client: fakeChain({ "0x2222222222222222222222222222222222222222": "TSLA." }) });
+    assert.equal(viaChain.clash, true);
+    assert.match(labelText(viaChain), /not the real/);
+  });
+
+  it("refusals past the limit never hide the real trades behind them", async () => {
+    const db = ledger();
+    db.prepare(
+      "INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_side, status, created_at) VALUES (?, 'swap', ?, ?, ?, 5, 'buy', 'landed', 100)",
+    ).run(AGENT, VAULT, CASH.USDG, CASHCAT);
+    for (let i = 0; i < 40; i++) {
+      db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, reject_rule, created_at) VALUES (?, 'swap', ?, 5, 'rejected', 'per-trade-cap', ?)").run(AGENT, VAULT, 200 + i);
+    }
+    const filled = await loadTradeViews(db, AGENT, { filter: "filled", limit: 5 });
+    assert.equal(filled.length, 1, "the one real buy is found under forty newer refusals");
+  });
+
+  it("vault moves and equity orders get real names, never 'a coin I can't name'", async () => {
+    const db = ledger();
+    db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'vault-deposit', ?, 50, 'landed', 1)").run(AGENT, VAULT);
+    db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'equity-order', 'aapl', 5, 'paper', 2)").run(AGENT);
+    const views = await loadTradeViews(db, AGENT, {});
+    const lines = views.map((v) => tradeViewLine(v, false)).join("\n");
+    assert.match(lines, /moved cash into your savings vault for \$50\.00/);
+    assert.match(lines, /AAPL/);
+    assert.doesNotMatch(lines, /can't name/);
+  });
+
+  it("the HTML list escapes '<$0.01'", async () => {
+    const db = ledger();
+    db.prepare("INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side, status, created_at) VALUES (?, 'swap', ?, ?, ?, 0.002, 0.002, 'sell', 'landed', 1)").run(AGENT, VAULT, CASHCAT, CASH.USDG);
+    const html = renderTradeList(await loadTradeViews(db, AGENT, {}));
+    assert.doesNotMatch(html, /<\$/);
+  });
+});

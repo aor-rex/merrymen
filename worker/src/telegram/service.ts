@@ -194,6 +194,19 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * holds one action, and /confirm runs whatever is in it).
    */
   const pendingMeta = new Map<string, { nonce: string; action: PendingAction; messageId?: number }>();
+  /**
+   * Senders whose LAST reply from the bot was a settings question. Only then
+   * does a typed "yes" answer it: "ok" said about something else, minutes
+   * later, must not confirm a change the owner has moved on from. The buttons
+   * and /confirm keep working until the question expires.
+   */
+  const typedAnswerable = new Set<string>();
+  /**
+   * The setting the bot just asked a value for ("stop loss is off right now.
+   * What should it be?"), so a bare "8%" or "20" answers it instead of being
+   * read as a trade with no ticker.
+   */
+  const awaitingValue = new Map<string, { key: string; expiresAt: number }>();
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
@@ -410,6 +423,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         if (p.kind === "reply") {
           if (p.button === "sign") extras.keyboard = signKeyboard(signUrl(dashboardBase(), "expiring"));
           if (p.button === "dashboard") extras.keyboard = [[{ text: "⚙️ Open Settings", url: `${dashboardBase()}/settings` }]];
+          if (p.awaitKey) awaitingValue.set(`${msg.chatId}:${msg.fromId}`, { key: p.awaitKey, expiresAt: now() + SETTING_CONFIRM_TTL_SEC });
           return p.text;
         }
         pending.set(`${msg.chatId}:${msg.fromId}`, {
@@ -812,6 +826,20 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // What the narrator recalled this turn — stored on the assistant's reply so
     // the thread survives a restart, not just a process lifetime.
     let turnMemoryIds: string[] | undefined;
+    // Conversation state from the bot's LAST reply is used up by this message,
+    // whatever it is — a later "yes" or "20" can only answer the reply right
+    // before it.
+    const senderKey = `${msg.chatId}:${msg.fromId}`;
+    const answerableNow = typedAnswerable.has(senderKey);
+    typedAnswerable.delete(senderKey);
+    const awaited = awaitingValue.get(senderKey);
+    awaitingValue.delete(senderKey);
+    if (!cmd && awaited && awaited.expiresAt > now()) {
+      // THE ANSWER TO "WHAT SHOULD IT BE?" — a short reply only; anything
+      // longer is a new message and goes through the classifier as usual.
+      const t = msg.text.trim();
+      if (t.length > 0 && t.length <= 40 && !t.startsWith("/")) cmd = { kind: "set", setting: awaited.key, value: t };
+    }
     if (!cmd) {
       // A BARE NUMBER NEVER REACHES THE CLASSIFIER — and never becomes a trade.
       //
@@ -839,7 +867,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // parked for this sender is a settings change: a transfer, a kill or a
       // shell command still needs /confirm or its button.
       const parked = pending.get(`${msg.chatId}:${msg.fromId}`);
-      if (parked?.kind === "setting") {
+      if (parked?.kind === "setting" && answerableNow) {
         const t = msg.text.trim();
         if (/^(yes|y|yep|yeah|ok|okay|sure|do it|confirm|go ahead|please do)[.!\s]*$/i.test(t)) cmd = { kind: "confirm" };
         else if (/^(no|n|nope|cancel|never ?mind|don'?t|leave it)[.!\s]*$/i.test(t)) cmd = { kind: "cancel" };
@@ -904,7 +932,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           if (ans) {
             answered = true;
             cmd = { kind: "chat", reply: ans.text };
-            if (ans.needsSignature) extras.keyboard = signKeyboard(signUrl(dashboardBase(), "dead-policy"));
+            if (ans.needsSignature) extras.keyboard = signKeyboard(signUrl(dashboardBase(), ans.signReason ?? "dead-policy"));
             console.log(`[telegram] answered from ${ans.used.length} lookup(s): ${[...new Set(ans.used)].join(", ") || "none"}`);
           } else if (cmd.kind === "agent") {
             // No answer and no PC: say what IS possible, in one breath.
@@ -950,6 +978,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           stickyIds.set(msg.chatId, new Set(recalled.ids));
           turnMemoryIds = recalled.ids;
         }
+        // MODEL TEXT GOES OUT ESCAPED — the same rule the agent path keeps.
+        // Every chat reply in this branch came from a model, and the answer
+        // loop reads text strangers wrote (a coin's own description, news):
+        // quoted faithfully, `<a href="…">tap to re-sign</a>` would render as a
+        // live, disguised link in the bot's own voice. No reply here asks for
+        // markup, so escaping costs nothing.
+        if (cmd.kind === "chat") cmd = { kind: "chat", reply: esc(cmd.reply) };
       } else {
         cmd = { kind: "chat", reply: "pick an AI provider and paste its key in the dashboard (Settings → AI provider) to chat in plain English — Groq, Google and Cerebras are free, or run Ollama locally. For now, try /help." };
       }
@@ -1037,6 +1072,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       keyboard ? { keyboard } : {},
     );
     if (meta && sent.messageId !== undefined) meta.messageId = sent.messageId;
+    // A typed "yes" may answer the NEXT message only if this reply was the
+    // settings question itself.
+    if (meta?.action.kind === "setting") typedAnswerable.add(pendingKey);
   };
 
   /**
@@ -1076,10 +1114,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
     if (meta.nonce !== parsed.nonce || !parked || parked !== meta.action || (meta.messageId !== undefined && meta.messageId !== cb.messageId)) {
       await answerCallbackQuery(opts, cb.id, "That question has expired — ask me again.");
-      if (meta.nonce !== parsed.nonce) await editMessageText(opts, cb.chatId, cb.messageId, "⌛ This question was replaced by a newer one.");
+      // Mark the pressed message stale only if its nonce is live for NOBODY —
+      // in a group it may be another member's open question.
+      if (meta.nonce !== parsed.nonce && ![...pendingMeta.values()].some((m) => m.nonce === parsed.nonce)) {
+        await editMessageText(opts, cb.chatId, cb.messageId, "⌛ This question was replaced by a newer one.");
+      }
       return;
     }
     pendingMeta.delete(key);
+    typedAnswerable.delete(key);
     let result: string;
     try {
       result = await executeCommand({ kind: parsed.yes ? "confirm" : "cancel" }, makeCmdDeps(cb, cfg, opts.token, {}));

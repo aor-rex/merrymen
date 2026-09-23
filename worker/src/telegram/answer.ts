@@ -22,6 +22,7 @@ import { llmAgentTurn, type AgentMsg, type AgentToolUse, type LlmCreds } from ".
 import { CHAT_TOOLS, toolByName, type ToolContext } from "./chat-tools";
 import { stripThinkingBlock } from "./interpreter";
 import { PLAIN_WORDS } from "./plain-words";
+import type { SignReason } from "./sign-prompt";
 
 /** Rounds of lookups before it must answer. */
 export const MAX_ROUNDS = 4;
@@ -51,6 +52,8 @@ export interface Answer {
   used: string[];
   /** A lookup found the trading permission needs a new signature. */
   needsSignature: boolean;
+  /** Why — so the button opens the right page (wrong-chain pins the network). */
+  signReason: SignReason | null;
 }
 
 export function answerSystem(name: string, identity: string): string {
@@ -95,12 +98,13 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
   const messages: AgentMsg[] = [{ role: "user", text: userBlock(i) }];
   const used: string[] = [];
   let needsSignature = false;
+  let signReason: SignReason | null = null;
   try {
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const t = await turn(i.creds, { system, messages, tools, maxTokens: 900 });
       if (!t.toolUses.length) {
         const text = stripThinkingBlock(t.text).trim();
-        return text ? { text, used, needsSignature } : null;
+        return text ? { text, used, needsSignature, signReason } : null;
       }
       const calls: AgentToolUse[] = t.toolUses.slice(0, MAX_CALLS_PER_ROUND);
       messages.push({ role: "assistant", text: t.text, toolUses: calls });
@@ -113,7 +117,11 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
         } catch (e) {
           output = `That lookup failed (${e instanceof Error ? e.message.slice(0, 120) : "unknown error"}). Say you couldn't check it.`;
         }
-        if (/NEEDS A NEW SIGNATURE|needs a new signature from the owner/.test(output)) needsSignature = true;
+        const sign = /(?:NEEDS A NEW SIGNATURE|needs a new signature from the owner) \((dead-policy|wrong-chain|grant-too-wide|expiring|expired|update)\)/.exec(output);
+        if (sign) {
+          needsSignature = true;
+          signReason ??= sign[1] as SignReason;
+        }
         used.push(call.name);
         results.push({ id: call.id, name: call.name, output });
       }

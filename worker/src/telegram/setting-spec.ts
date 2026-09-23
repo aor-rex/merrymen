@@ -85,12 +85,13 @@ export const SETTING_SPECS: readonly SettingSpec[] = Object.freeze([
   { key: "assetMode", label: "what I may buy", kind: "enum", values: ["all", "stocks", "crypto"], help: "all, stocks only, or crypto only" },
   { key: "basketSymbols", label: "basket", kind: "symbols", help: "the stock tokens the basket strategy buys" },
   { key: "officialCoinsEnabled", label: "official coins", kind: "bool", help: "trade the chain's official coins" },
-  { key: "classMaxPositions", label: "max launch coins held", kind: "int", min: 0, max: 1_000, help: "how many launchpad coins I hold at once" },
+  // min 1, not the resolver's 0: stored 0 means NO LIMIT, so a chat "0" meant
+  // as "none" would have removed the ceiling. "No limit" stays a dashboard act.
+  { key: "classMaxPositions", label: "max launch coins held", kind: "int", min: 1, max: 1_000, help: "how many launchpad coins I hold at once (0, set on the dashboard, means no limit)" },
   { key: "classMaxHoldSec", label: "longest launch-coin hold", kind: "hoursAsSec", min: 60, max: 30 * 86_400, help: "sell a launchpad coin after this long" },
   { key: "classExitAtGraduationPct", label: "sell launch coins at % to graduation", kind: "int", min: 1, max: 100, help: "sell before the coin leaves the launchpad" },
   { key: "discoveryEnabled", label: "new-coin scanning", kind: "bool", help: "look for newly launched coins" },
   { key: "discoveryIntervalMin", label: "minutes between new-coin scans", kind: "int", min: 1, max: 1_440, help: "how often I scan for new coins" },
-  { key: "telegramNotifyEnabled", label: "trade messages", kind: "bool", help: "message you here when I trade" },
   { key: "telegramNotifyEveryMin", label: "trade message batching (minutes)", kind: "int", min: 0, max: 1_440, help: "0 = a message per trade, otherwise one summary every N minutes" },
   { key: "telegramDigestHour", label: "daily report hour (server clock, UTC)", kind: "int", min: 0, max: 23, help: "when the daily report arrives" },
 ] as SettingSpec[]);
@@ -107,7 +108,7 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
   safetyFloors: "The safety checks that stop me buying at a manipulated price (pool depth, price jumps, price impact) are only changed in Settings on the dashboard.",
   customTokens: "Adding a token by its address is done in Settings on the dashboard.",
   aiProvider: "The AI provider and its key are set in Settings on the dashboard.",
-  telegram: "Telegram's own switches (on/off, who may control me, transfers) are only changed on the dashboard.",
+  telegram: "Telegram's own switches (on/off, turning ALL my messages off — including the warnings about your money — who may control me, transfers) are only changed on the dashboard. To get fewer trade messages, ask me to batch them, e.g. \"trade messages once an hour\".",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */
@@ -127,17 +128,29 @@ export function specFor(key: string): SettingSpec | null {
 
 /** Strategy names the settings resolver accepts (settings.ts `strategy`). */
 const STRATEGY_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const SYMBOL_RE = /^[A-Z0-9][A-Z0-9._$-]{0,15}$/;
+/**
+ * A ticker as the owner or a token's own settings spell it. Mixed case is
+ * allowed: a custom token keeps the symbol it was added with ("wBTC"), and the
+ * resolver matches the basket against that spelling exactly.
+ */
+const SYMBOL_RE = /^[A-Za-z0-9][A-Za-z0-9._$-]{0,15}$/;
 const MAX_BASKET = 10;
 
 export type Parsed = { ok: true; value: unknown } | { ok: false; reason: string };
 
-/** A number from owner text: "$20", "20 usdg", "1,500", "5%", "2h". */
-function numberIn(raw: string): number | null {
-  const m = raw.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
-  if (!m) return null;
-  const n = Number(m[0]);
-  return Number.isFinite(n) ? n : null;
+/**
+ * The WHOLE text must be the value — nothing left over. Taking "the first
+ * number in it" turned "50 bps" into 50%, "0,5%" into 5% and "2x" into 2%:
+ * a plausible reading, confirmed with a tap, and a different stored value.
+ */
+const USD_RE = /^\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(?:usdg?|dollars?|bucks)?$/i;
+const PCT_RE = /^(\d+(?:\.\d+)?)\s*(?:%|percent|pct)?$/i;
+const INT_RE = /^(\d+)\s*(?:m|mins?|minutes?)?$/i;
+const HOUR_RE = /^(\d{1,2})\s*(am|pm)?(?:\s*utc)?$/i;
+const TIME_RE = /^(\d+(?:\.\d+)?)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?)?$/i;
+
+function understood(text: string, spec: SettingSpec, example: string): Parsed {
+  return { ok: false, reason: `I didn't understand "${text}" for ${spec.label} — try something like ${example}` };
 }
 
 function range(spec: SettingSpec, stored: number, shown: string): Parsed {
@@ -172,38 +185,68 @@ export function parseSettingValue(spec: SettingSpec, raw: string, allowedSymbols
       return STRATEGY_RE.test(v) ? { ok: true, value: v } : { ok: false, reason: "that isn't a strategy name" };
     }
     case "symbols": {
-      const list = [...new Set(text.toUpperCase().split(/[\s,;+&]+|\band\b/i).map((s) => s.trim().replace(/^\$/, "")).filter(Boolean))];
+      const list = [...new Set(text.split(/[\s,;+&]+|\band\b/i).map((s) => s.trim().replace(/^\$/, "")).filter(Boolean))];
       if (list.length === 0) return { ok: false, reason: "name at least one ticker for the basket" };
       if (list.length > MAX_BASKET) return { ok: false, reason: `the basket holds at most ${MAX_BASKET} tickers` };
       const bad = list.filter((s) => !SYMBOL_RE.test(s));
       if (bad.length) return { ok: false, reason: `${bad.join(", ")} isn't a ticker` };
-      if (allowedSymbols) {
-        const ok = new Set(allowedSymbols.map((s) => s.toUpperCase()));
-        const unknown = list.filter((s) => !ok.has(s));
-        if (unknown.length) {
-          return { ok: false, reason: `I can't put ${unknown.join(", ")} in the basket — it takes stock tokens, or a token you added in Settings` };
-        }
+      if (!allowedSymbols) return { ok: true, value: [...new Set(list.map((s) => s.toUpperCase()))] };
+      // STORED IN THE SPELLING THE RESOLVER KNOWS. mergeSettings keeps a basket
+      // entry only if it matches a stock or custom-token symbol exactly, so an
+      // upper-cased "WBTC" for a token added as "wBTC" was silently dropped and
+      // the agent traded the default basket instead.
+      const canon = new Map(allowedSymbols.map((s) => [s.toUpperCase(), s]));
+      const unknown = list.filter((s) => !canon.has(s.toUpperCase()));
+      if (unknown.length) {
+        return { ok: false, reason: `I can't put ${unknown.join(", ")} in the basket — it takes stock tokens, or a token you added in Settings` };
       }
-      return { ok: true, value: list };
+      return { ok: true, value: [...new Set(list.map((s) => canon.get(s.toUpperCase())!))] };
     }
-    case "usd":
+    case "usd": {
+      const m = USD_RE.exec(text);
+      if (!m) return understood(text, spec, "$20");
+      return range(spec, Math.round(Number(m[1]!.replace(/,/g, "")) * 100) / 100, text);
+    }
     case "int": {
-      const n = numberIn(text);
-      if (n === null) return { ok: false, reason: `give me a number for ${spec.label}` };
-      if (spec.kind === "int" && !Number.isInteger(n)) return { ok: false, reason: `${spec.label} takes a whole number` };
-      const stored = spec.kind === "usd" ? Math.round(n * 100) / 100 : n;
-      return range(spec, stored, text);
+      if (spec.key === "telegramDigestHour") {
+        const h = HOUR_RE.exec(text);
+        if (!h) return understood(text, spec, "18 or 6pm");
+        let hour = Number(h[1]);
+        const ampm = h[2]?.toLowerCase();
+        if (ampm) {
+          if (hour < 1 || hour > 12) return understood(text, spec, "6pm");
+          hour = (hour % 12) + (ampm === "pm" ? 12 : 0);
+        }
+        return range(spec, hour, text);
+      }
+      // A setting counted in MINUTES takes the words people use for time.
+      if (/Min$/.test(spec.key)) {
+        const t = text.toLowerCase().replace(/^(every|once (an?|per)|each)\s+/, "").trim();
+        if (/^(trade|every trade|each trade|instantly|immediately|now|off|never|none|0)$/.test(t) && spec.min === 0) return range(spec, 0, text);
+        if (/^(hour|hourly|an hour)$/.test(t)) return range(spec, 60, text);
+        if (/^(day|daily|a day)$/.test(t)) return range(spec, 1_440, text);
+        const tm = TIME_RE.exec(text.replace(/^(every|once every)\s+/i, "").trim());
+        if (!tm) return understood(text, spec, "30, 2h or once an hour");
+        const unit = (tm[2] ?? "m").toLowerCase();
+        const mins = Number(tm[1]) * (unit.startsWith("h") ? 60 : unit.startsWith("d") ? 1_440 : 1);
+        if (!Number.isInteger(mins)) return understood(text, spec, "30 or 2h");
+        return range(spec, mins, text);
+      }
+      const m = INT_RE.exec(text);
+      if (!m) return understood(text, spec, "30");
+      return range(spec, Number(m[1]), text);
     }
     case "pct": {
-      const n = numberIn(text);
-      if (n === null) return { ok: false, reason: `give me a percentage for ${spec.label}, like 5%` };
-      return range(spec, Math.round(n * 100), text);
+      const m = PCT_RE.exec(text);
+      if (!m) return understood(text, spec, "5%");
+      return range(spec, Math.round(Number(m[1]) * 100), text);
     }
     case "hoursAsSec": {
-      const n = numberIn(text);
-      if (n === null) return { ok: false, reason: `give me a time for ${spec.label}, like 6h or 30m` };
-      const sec = /\d\s*m(in(ute)?s?)?\b/i.test(text) ? n * 60 : /\d\s*d(ays?)?\b/i.test(text) ? n * 86_400 : n * 3_600;
-      return range(spec, Math.round(sec), text);
+      const m = TIME_RE.exec(text);
+      if (!m) return understood(text, spec, "6h or 30m");
+      const unit = (m[2] ?? "h").toLowerCase();
+      const per = unit.startsWith("m") ? 60 : unit.startsWith("d") ? 86_400 : 3_600;
+      return range(spec, Math.round(Number(m[1]) * per), text);
     }
   }
 }

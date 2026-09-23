@@ -24,7 +24,8 @@ import {
 /** What the owner is shown. `button` names the keyboard the service attaches. */
 export type SettingProposal =
   | { kind: "ask"; key: string; value: unknown; text: string }
-  | { kind: "reply"; text: string; button?: "sign" | "dashboard" };
+  /** `awaitKey`: the reply asked for a value — the next short message answers it. */
+  | { kind: "reply"; text: string; button?: "sign" | "dashboard"; awaitKey?: string };
 
 export interface ProposalContext {
   /** Current resolved settings (ResolvedConfig), read by key. */
@@ -57,8 +58,12 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   memecoinMinFdvUsd: ["min fdv", "minimum fdv", "min market cap"],
   assetMode: ["asset mode", "what to buy"],
   basketSymbols: ["basket", "stocks list"],
-  telegramNotifyEnabled: ["notifications", "trade pings", "pings", "messages"],
-  telegramNotifyEveryMin: ["batching", "summary interval", "quiet mode"],
+  // "Turn off notifications" is Telegram's own master switch — it silences the
+  // Sign-now prompt and the loss warnings too — so it answers with the
+  // dashboard button (DASHBOARD_ONLY.telegram). Fewer TRADE messages is the
+  // batching setting, which leaves every warning coming through.
+  telegram: ["notifications", "all notifications", "alerts off"],
+  telegramNotifyEveryMin: ["batching", "summary interval", "quiet mode", "trade pings", "trade messages", "pings", "messages"],
   telegramDigestHour: ["report hour", "digest hour", "daily report"],
   discoveryEnabled: ["discovery", "scanning", "new coin scanning"],
   classMaxHoldSec: ["max hold", "hold time"],
@@ -133,7 +138,8 @@ export function proposeSettingChange(setting: string, value: string, ctx: Propos
   if (!value.trim()) {
     return {
       kind: "reply",
-      text: `${capitalise(spec.label)} is ${formatSettingValue(spec, ctx.current[key])} right now. What should it be?`,
+      text: `${capitalise(spec.label)} is ${esc(formatSettingValue(spec, ctx.current[key]))} right now. What should it be?`,
+      awaitKey: key,
     };
   }
   const parsed = parseSettingValue(spec, value, ctx.allowedSymbols);

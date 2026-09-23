@@ -25,6 +25,7 @@ import { llmText, llmToolCall, type LlmCreds } from "../llm";
 import { describeLlmFailure } from "../llm-failure";
 import { DASHBOARD_ONLY, SEALED_ASKS, SETTING_SPECS } from "./setting-spec";
 import { PLAIN_WORDS } from "./plain-words";
+import { resolveSettingName } from "./settings-chat";
 
 /** Every value the classifier may put in `setting` — a closed set, like `kind`. */
 export const SETTING_CHOICES: readonly string[] = [
@@ -259,6 +260,12 @@ export function parseSlash(text: string): Command | null {
       // so the value is the LAST word and the setting is everything before it.
       const parts = rest.filter(Boolean);
       if (parts.length < 2) return { kind: "unknown", text: "usage: /set &lt;setting&gt; &lt;value&gt; — /settings lists what can change" };
+      // The longest leading run of words that NAMES a setting, so a value can
+      // be several words ("/set basket QQQ NVDA", "/set max hold 1 day").
+      for (let i = parts.length - 1; i >= 1; i--) {
+        const name = parts.slice(0, i).join(" ");
+        if (resolveSettingName(name)) return { kind: "set", setting: name, value: parts.slice(i).join(" ") };
+      }
       return { kind: "set", setting: parts.slice(0, -1).join(" "), value: parts[parts.length - 1]! };
     }
     case "cap": {
@@ -438,7 +445,7 @@ other powers. Rules:
   memory promises powers this owner may not have enabled.
 - Control requests → pause/resume/strategy/cap/buy/sell/kill. For buy/sell, set symbol (a ticker)
   and usdg (a positive USDG amount). Never invent amounts the user didn't ask for.
-- Settings. To CHANGE one ("make each buy $20", "turn off trade messages", "stop loss at 8%",
+- Settings. To CHANGE one ("make each buy $20", "trade messages once an hour", "stop loss at 8%",
   "only buy stocks") → kind "set", with "setting" = the matching key from SETTINGS below and
   "value" = their value exactly as they wrote it. Nothing changes until they tap confirm, so map
   it even if it sounds big. To SEE them ("what are my settings") → kind "settings".

@@ -86,7 +86,8 @@ describe("resolveSettingName — /set takes words, not keys", () => {
   it("matches keys, labels and the words owners use", () => {
     assert.equal(resolveSettingName("stop loss"), "strategistStopLossBps");
     assert.equal(resolveSettingName("Amount per buy"), "buyPerTickUsdg");
-    assert.equal(resolveSettingName("notifications"), "telegramNotifyEnabled");
+    assert.equal(resolveSettingName("notifications"), "telegram", "all notifications is dashboard-only");
+    assert.equal(resolveSettingName("trade messages"), "telegramNotifyEveryMin", "fewer trade pings is batching");
     assert.equal(resolveSettingName("liveTrading"), "liveTrading");
     assert.equal(resolveSettingName("colour of the sky"), null);
   });
@@ -98,11 +99,24 @@ describe("resolveSettingName — /set takes words, not keys", () => {
   });
 });
 
+describe("a value asked for is remembered", () => {
+  it("'What should it be?' marks the setting so a bare reply answers it", () => {
+    const p = proposeSettingChange("strategistStopLossBps", "", ctx);
+    assert.equal((p as { awaitKey?: string }).awaitKey, "strategistStopLossBps");
+  });
+
+  it("turning ALL notifications off answers with the dashboard button", () => {
+    const p = proposeSettingChange("telegram", "off", ctx);
+    assert.equal((p as { button?: string }).button, "dashboard");
+    assert.match((p as { text: string }).text, /batch/);
+  });
+});
+
 describe("the list and the done message", () => {
   it("/settings shows every changeable setting with its value", () => {
     const t = settingsListText(ctx.current);
     assert.match(t, /amount per buy: <b>\$25\.00<\/b>/);
-    assert.match(t, /trade messages: <b>on<\/b>/);
+    assert.doesNotMatch(t, /trade messages: /, "the master notification switch is not listed");
   });
 
   it("says when it takes effect", () => {
@@ -153,6 +167,12 @@ describe("INVARIANT: a press answers only the question parked for the presser", 
   it("typed yes/no only ever confirms a SETTINGS question", () => {
     const i = src.indexOf('"YES" ANSWERS A SETTINGS QUESTION');
     const shortcut = src.slice(i, i + 1200);
-    assert.match(shortcut, /parked\?\.kind === "setting"/);
+    assert.match(shortcut, /parked\?\.kind === "setting" && answerableNow/);
+    assert.match(src, /typedAnswerable\.delete\(senderKey\)/, "every new message uses up the eligibility");
+    assert.match(src, /if \(meta\?\.action\.kind === "setting"\) typedAnswerable\.add\(pendingKey\)/);
+  });
+
+  it("a press never wipes another member's live question", () => {
+    assert.match(body, /!\[\.\.\.pendingMeta\.values\(\)\]\.some\(\(m\) => m\.nonce === parsed\.nonce\)/);
   });
 });

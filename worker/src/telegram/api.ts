@@ -103,23 +103,23 @@ async function call(
   } catch (e) {
     return { result: null, reason: `request failed: ${e instanceof Error ? e.message : String(e)}` };
   }
-  if (!res.ok && res.status !== 200) {
-    // Telegram returns 200 with {ok:false} for logical errors; other codes are transport-level.
-    return { result: null, reason: `HTTP ${res.status}` };
-  }
-
-  let body: unknown;
+  // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
+  // HTTP 400 AND a JSON description ("Bad Request: can't parse entities…",
+  // "…button URL … is invalid"). Returning "HTTP 400" before reading it meant
+  // every fallback keyed on that description — the plain-text retry when the
+  // markup is refused, the retry without a link button — never ran: the reply
+  // was simply lost.
+  let body: unknown = null;
   try {
     body = await res.json();
   } catch {
-    return { result: null, reason: "response is not JSON" };
+    body = null;
   }
-  if (!body || typeof body !== "object") return { result: null, reason: "malformed response" };
-  const env = body as { ok?: unknown; result?: unknown; description?: unknown };
-  if (env.ok !== true) {
-    return { result: null, reason: typeof env.description === "string" ? env.description : "bot API returned ok:false" };
-  }
-  return { result: env.result };
+  const env = (body && typeof body === "object" ? body : {}) as { ok?: unknown; result?: unknown; description?: unknown };
+  if (res.ok && env.ok === true) return { result: env.result };
+  if (typeof env.description === "string") return { result: null, reason: env.description };
+  if (!res.ok) return { result: null, reason: `HTTP ${res.status}` };
+  return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON" };
 }
 
 /** Validate a token and return the bot's identity (for the dashboard "test connection"). */

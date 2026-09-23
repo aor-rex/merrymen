@@ -14,6 +14,7 @@
  * only two shapes it is ever shown in.
  */
 
+import type { SQLInputValue } from "node:sqlite";
 import type { PublicClient } from "viem";
 
 import type { CustomToken } from "../../../packages/core/src/index";
@@ -96,15 +97,28 @@ const REFUSED = new Set(["rejected", "reverted"]);
 export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewOpts = {}): Promise<TradeView[]> {
   const limit = Math.max(1, Math.min(o.limit ?? 8, 50));
   let rows: RawRow[] = [];
+  // THE FILTERS GO IN THE SQL, before the LIMIT. Filtering the newest N rows
+  // afterwards meant an agent whose last dozen rows were refusals reported
+  // "no trades" while its real fills sat just past the cut.
+  const where = ["agent_id = ?", "created_at >= ?"];
+  const args: SQLInputValue[] = [agentId, o.since ?? 0];
+  if (o.filter === "filled") where.push("status IN ('landed','paper')");
+  else if (o.filter === "refused") where.push("status IN ('rejected','reverted')");
+  const tokenAddr = o.token?.trim().toLowerCase();
+  if (tokenAddr && /^0x[0-9a-f]{40}$/.test(tokenAddr)) {
+    // Leg-less rows stay candidates: a restart copy's coin is only in its receipt.
+    where.push("(lower(buy_token) = ? OR lower(sell_token) = ? OR (buy_token IS NULL AND sell_token IS NULL))");
+    args.push(tokenAddr, tokenAddr);
+  }
   try {
     rows = db
       .prepare(
         `SELECT id, agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side,
                 realized_pnl_usdg, status, reject_rule, tx_hash, decision_id, created_at
-           FROM trades WHERE agent_id = ? AND created_at >= ?
+           FROM trades WHERE ${where.join(" AND ")}
           ORDER BY created_at DESC, id DESC LIMIT ?`,
       )
-      .all(agentId, o.since ?? 0, o.token ? 200 : limit * 3) as unknown as RawRow[];
+      .all(...args, o.token ? 200 : limit * 3) as unknown as RawRow[];
   } catch {
     return [];
   }
@@ -145,6 +159,8 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
       }
     }
   }
+  // An equity order names its stock in `target` — the one row shape where it does.
+  const equityTicker = r.kind === "equity-order" && r.target && !/^0x/i.test(r.target) ? r.target.toUpperCase() : null;
   const lbl = token
     ? o.client
       ? await tokenLabel(db, agentId, token, { customTokens: o.customTokens, own, client: o.client })
@@ -155,8 +171,16 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
     side,
     kind: r.kind,
     token,
-    label: lbl ? labelText(lbl) : r.kind === "transfer" ? "a transfer out" : "a coin I can't name",
-    trusted: lbl?.trusted ?? false,
+    label: lbl
+      ? labelText(lbl)
+      : equityTicker
+        ? equityTicker
+        : r.kind === "vault-deposit" || r.kind === "vault-withdraw"
+          ? "your savings vault"
+          : r.kind === "transfer"
+            ? "a transfer out"
+            : "a coin I can't name",
+    trusted: equityTicker ? true : (lbl?.trusted ?? false),
     usdg: Number.isFinite(usdg as number) ? usdg : null,
     realized: r.realized_pnl_usdg,
     status: r.status,
@@ -193,6 +217,8 @@ export function when(unix: number): string {
 
 function verb(v: TradeView): string {
   if (v.kind === "transfer") return "sent out";
+  if (v.kind === "vault-deposit") return "moved cash into";
+  if (v.kind === "vault-withdraw") return "moved cash out of";
   if (v.side === "buy") return "bought";
   if (v.side === "sell") return "sold";
   return "traded";
@@ -205,12 +231,12 @@ export function tradeViewLine(v: TradeView, html: boolean): string {
   if (v.status === "rejected" || v.status === "reverted") {
     const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
     const why = v.refusal ? ` — ${e(v.refusal)}` : "";
-    return `${v.status === "rejected" ? "🚫 blocked" : "⚠️ failed"}: ${what}, ${dollars(v.usdg)}${why} · ${when(v.at)}`;
+    return `${v.status === "rejected" ? "🚫 blocked" : "⚠️ failed"}: ${what}, ${e(dollars(v.usdg))}${why} · ${when(v.at)}`;
   }
   const paper = v.status === "paper" ? " (practice)" : v.status === "submitted" ? " (waiting to confirm)" : "";
-  const result = v.realized !== null && v.side === "sell" ? ` (${signed(v.realized)})` : "";
+  const result = v.realized !== null && v.side === "sell" ? ` (${e(signed(v.realized))})` : "";
   const time = v.atIsRestart ? `recorded ${when(v.at)} after a restart` : when(v.at);
-  return `${v.status === "landed" ? "✅" : v.status === "paper" ? "📜" : "⏳"} ${verb(v)} ${coin} for ${dollars(v.usdg)}${result}${paper} · ${time}`;
+  return `${v.status === "landed" ? "✅" : v.status === "paper" ? "📜" : "⏳"} ${verb(v)} ${coin} for ${e(dollars(v.usdg))}${result}${paper} · ${time}`;
 }
 
 /** The /trades message. */

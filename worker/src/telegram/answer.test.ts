@@ -127,3 +127,18 @@ describe("the rules the answering model is given", () => {
     assert.match(sys, /You are Shogun/);
   });
 });
+
+describe("the Sign now button keeps its reason", () => {
+  it("the reason a lookup found reaches the button, instead of being flattened to dead-policy", async () => {
+    const turn = (async (_c: unknown, opts: { messages: AgentMsg[] }) =>
+      opts.messages.some((m) => m.role === "tools")
+        ? { text: "You need to sign again.", toolUses: [] }
+        : { text: "", toolUses: [{ id: "p", name: "permission_status", input: {} }] }) as never;
+    const tools2 = { ...tools, grant: { chainId: 46630, grantedAt: 1, expiresAt: 1_790_000_000 + 30 * 86_400 } } as unknown as ToolContext;
+    const a = await answerQuestion({ ...base(turn), tools: tools2 });
+    assert.ok(a);
+    // No ledger in this test, so no blocker: the old grant is flagged by the update marker.
+    assert.equal(a!.needsSignature, true);
+    assert.equal(a!.signReason, "update");
+  });
+});

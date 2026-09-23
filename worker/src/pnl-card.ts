@@ -232,7 +232,10 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
   // ticker only on an equity order, so it is used only when it is not an
   // address; the caller passes the resolved name (token-label.ts) otherwise.
   const fromTarget = (row.target ?? "").trim();
-  const symbol = (coin ?? "").trim() || (/^0x/i.test(fromTarget) ? "" : fromTarget);
+  const named = (coin ?? "").trim();
+  // Neither may be address-shaped: a resolver that could not name the coin
+  // falls back to a short address, and that is exactly what must never be drawn.
+  const symbol = (/^0x/i.test(named) ? "" : named) || (/^0x/i.test(fromTarget) ? "" : fromTarget);
   if (!symbol) return null;
 
   const proceeds = toBase(row.fill_cash_usdg);
@@ -240,9 +243,10 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
   const invested = proceeds - realised;
   // A LEFTOVER IS NOT A RESULT. Selling the last dust of a position prints
   // "invested 0.00 · position 0.00 · pnl -0.00" under a big "-6.5%" — the
-  // parent position's return, applied to a fraction of a cent. Anything that
-  // would print as 0.00 gets no card; the receipt line already says it.
-  if (proceeds < DUST_USDG || invested < DUST_USDG) return null;
+  // parent position's return, applied to a fraction of a cent. So a close with
+  // under a cent INVESTED gets no card. Proceeds alone are not the test: a
+  // near-total loss also sells for under a cent, and that card must be sent.
+  if (invested < DUST_USDG) return null;
   return { symbol, investedUsdg: invested, proceedsUsdg: proceeds, realisedUsdg: realised };
 }
 

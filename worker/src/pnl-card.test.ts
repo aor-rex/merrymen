@@ -216,6 +216,16 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.ok(pnlCardFromFill({ ...sell, fill_cash_usdg: 0.02, realized_pnl_usdg: 0.005 }, "musebook"), "two cents is a result");
   });
 
+  it("a near-total loss IS a result, even though it sold for under a cent", () => {
+    const card = pnlCardFromFill({ ...sell, fill_cash_usdg: 0.003, realized_pnl_usdg: -4.997 }, "RUGCOIN");
+    assert.ok(card);
+    assert.equal(card.investedUsdg, 5_000_000n);
+  });
+
+  it("a short address passed as the name still draws nothing", () => {
+    assert.equal(pnlCardFromFill({ ...sell, target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d" }, "0x020b…18b4"), null);
+  });
+
   it("treats a realised zero as a real close, not as absent", () => {
     // Breaking exactly even is a closed trade with a P&L of 0.00, and `0` is
     // falsy — the reason this is checked against null/undefined and not truth.

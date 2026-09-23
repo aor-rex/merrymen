@@ -128,3 +128,36 @@ describe("one owner never sees another's ledger", () => {
     assert.match(out, /No agent is set up yet/);
   });
 });
+
+describe("review fixes on a real ledger", () => {
+  const CAROL = "0x000000000000000000000000000000000000ca01";
+  const LAUNCH = "0x39dbed3a2bd333467115de45665cc57f813c4571";
+
+  it("pnl_breakdown never counts a deposit twice — money before the opening mark is already in it", async () => {
+    // Opening mark at T, a $100 deposit BEFORE it (already inside the mark),
+    // then +$1 of trading. Counting the deposit again read as "−$99 trading".
+    const T = NOW - 3_600;
+    const db = new DatabaseSync(homePaths.db());
+    db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 100, 0, 100, ?, 1, 'live')").run(CAROL, T);
+    db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 101, 0, 101, ?, 1, 'live')").run(CAROL, NOW - 60);
+    db.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, source, at, epoch) VALUES (?, 'in', 100, 'chain-log', ?, 1)").run(CAROL, T - 10);
+    const counted = db.prepare("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?").get(CAROL) as { n: number };
+    db.close();
+    assert.equal(counted.n, 1, "the deposit is really on the ledger — this test must not pass by accident");
+    const out = await run("pnl_breakdown", { period: "24h" }, CAROL);
+    assert.match(out, /\+\$1\.00/);
+    assert.doesNotMatch(out, /trading itself made −/, "a deposit before the mark must not read as a trading loss");
+  });
+
+  it("positions shows held launch coins, recovered ones included, with the cost read from its 6-decimal text", async () => {
+    const db = new DatabaseSync(homePaths.db());
+    db.prepare("INSERT INTO class_positions (agent_id, token, symbol, state, cost_usdg, first_seen) VALUES (?, ?, 'x', 'open', '5000000', ?)").run(SHOGUN, LAUNCH, NOW - 100);
+    db.prepare("INSERT INTO class_positions (agent_id, token, symbol, state, cost_usdg, first_seen) VALUES (?, ?, 'y', 'recovered', NULL, ?)").run(SHOGUN, CASHCAT, NOW - 50);
+    db.prepare("INSERT INTO class_positions (agent_id, token, symbol, state, first_seen) VALUES (?, ?, 'cash', 'open', ?)").run(SHOGUN, USDG.toLowerCase(), NOW - 10);
+    db.close();
+    const out = await run("positions");
+    assert.match(out, /for \$5\.00/, "the raw '5000000' is five dollars, not an unknown amount");
+    assert.match(out, /CASHCAT — bought .* \(cost unknown\)/, "a recovered position is held, cost unknown");
+    assert.doesNotMatch(out, /USDG — bought/, "the vault's own cash row is not a coin");
+  });
+});

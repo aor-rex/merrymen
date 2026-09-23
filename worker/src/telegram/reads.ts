@@ -885,7 +885,7 @@ export const HELP_TEXT = [
   "🏹 <b>just talk to me</b> — ask anything in plain words and I'll look it up:",
   "“what did you buy today?” · “why did you lose money?” · “what is KIST?” · “why aren't you trading?”",
   "",
-  "⚙️ <b>change a setting by saying it</b> — “make each buy $20”, “stop loss at 8%”, “turn off trade messages”. I'll ask you to confirm with a button. /settings shows them all.",
+  "⚙️ <b>change a setting by saying it</b> — “make each buy $20”, “stop loss at 8%”, “trade messages once an hour”. I'll ask you to confirm with a button. /settings shows them all.",
   "",
   "<b>quick commands</b>",
   "/status · /positions · /pnl · /trades — the exact reports",
