@@ -27,6 +27,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
@@ -292,6 +293,11 @@ export async function PUT(req: Request) {
   } catch {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
+  // THE OWNER WHO CONFIRMED, when a chat card sent this (lib/order-owner.ts).
+  // Not a setting: taken off before anything below reads the body, so it is
+  // never stored and never reported as an unknown key.
+  const claimedOwner = (body as { owner?: unknown } | null)?.owner;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -303,6 +309,11 @@ export async function PUT(req: Request) {
     // tenant still could.
     tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL — before any field is read
+    // or written. Another tab can sign a different wallet in unseen, and a
+    // chat card's change would otherwise be made to that wallet's agent. A
+    // body that names nobody (the Settings screen's own form) is judged as before.
+    if (ownerMismatch(claimedOwner, tenant)) return NextResponse.json({ errors: [OWNER_CHANGED_SETTING] }, { status: 409 });
     // Drop every house-key + remote-execution field before the handler sees it.
     // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
     // fields, and rejecting the whole payload for their mere presence would break

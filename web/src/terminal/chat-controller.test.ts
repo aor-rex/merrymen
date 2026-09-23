@@ -1062,6 +1062,28 @@ describe("a confirm places its order for the owner who tapped it, or not at all"
     assert.deepEqual(chat.messages.map((m) => m.text), []);
   });
 
+  it("A SETTING CONFIRMED FROM THE CHAT NAMES THE OWNER WHO TAPPED — another tab's session is refused, and 'Done' is never said", async () => {
+    // The same cross-tab window as the order: a go-live card in A's thread,
+    // tapped after B signed in on another tab, went out under B's cookie
+    // naming nobody — the route turned B's agent live and A's thread said
+    // "Done". The PUT now names A, and the route refuses B's session with
+    // this answer (settings/owner.test.ts).
+    routes["POST /api/chat"] = () => json({ reply: "I can switch you to real money.", command: { id: "go-live", args: {} } });
+    routes["PUT /api/settings"] = () =>
+      json({ errors: ["this browser is signed in with a different wallet now than the one that confirmed this, so nothing was changed. Sign back in with that wallet and ask again."] }, 409);
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("go live");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await until(() => /didn't go through/.test(text()), "the refusal");
+    const put = calls.find((c) => c.method === "PUT" && c.url === "/api/settings")!;
+    assert.deepEqual(put.body, { liveTradingEnabled: true, owner: A }, "the change it always carried, and whose it is");
+    assert.match(text(), /different wallet now than the one that confirmed this, so nothing was changed/, "said in A's thread, in the route's words");
+    assert.doesNotMatch(text(), /Done —/);
+    assert.equal(buttons("Yes, do it").length, 1, "nothing was changed, so the card stays");
+  });
+
   it("THE OWNER NAMED IS THE WALLET THE THREAD IS KEPT FOR — and self-hosted, nobody", () => {
     const mixed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
     assert.equal(ownerOfChatKey(chatKeyFor({ hosted: true, address: mixed })), mixed.toLowerCase());

@@ -442,11 +442,13 @@ export function Agent({
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
       // `commandPayload` drops everything the command did not declare, and
       // /api/settings strips every house-owned field again on the server — two
-      // independent gates, neither relying on the other.
+      // independent gates, neither relying on the other. And naming the owner
+      // who tapped, like an order: another tab can sign a different wallet in
+      // without this one knowing, and the route refuses that session.
       const put = await routeAnswer<{ errors?: string[] }>("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(commandPayload(cmd, proposal.args)),
+        body: JSON.stringify(ownedBy(on, commandPayload(cmd, proposal.args))),
       });
       // THE WRITE MAY HAVE LANDED. Said as unknown, and the settings are read
       // again so what the model is told catches up whichever it was. A setting

@@ -19,6 +19,10 @@
 export const OWNER_CHANGED =
   "this browser is signed in with a different wallet now than the one that confirmed this, so nothing was placed. Sign back in with that wallet and ask again.";
 
+/** The same refusal for a card that changes a setting (PUT /api/settings): nothing was written. */
+export const OWNER_CHANGED_SETTING =
+  "this browser is signed in with a different wallet now than the one that confirmed this, so nothing was changed. Sign back in with that wallet and ask again.";
+
 /**
  * Does the owner a request names differ from the session that sent it? A claim
  * that is not a string, or a claim with no session to hold it against, is a
