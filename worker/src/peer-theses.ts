@@ -23,6 +23,7 @@
  */
 import type { Db } from "./db";
 import { getIdentityStore, type IdentityStore } from "./identity-store";
+import { getSettingsStore } from "./settings-store";
 import {
   LANDED_STATUSES,
   PUBLISHABLE_SOURCES,
@@ -75,19 +76,21 @@ const MAX_SCAN = 960;
 async function resolvePeers(slugs: readonly string[], identity: Pick<IdentityStore, "bySlug">) {
   const accounts = new Set<`0x${string}`>();
   const slugFor = new Map<string, string>();
+  const tenantFor = new Map<string, `0x${string}`>();
   for (const slug of slugs) {
     try {
       const id = await identity.bySlug(slug);
       if (id) for (const account of id.accounts) {
         accounts.add(account.toLowerCase() as `0x${string}`);
         slugFor.set(account.toLowerCase(), id.slug);
+        tenantFor.set(account.toLowerCase(), id.tenant);
       }
     } catch {
       // A dangling follow is not an error — see follow-store.ts. It contributes
       // nothing and must not stop the other peers from being read.
     }
   }
-  return { accounts: [...accounts], slugFor };
+  return { accounts: [...accounts], slugFor, tenantFor };
 }
 
 export async function accountsForSlugs(slugs: readonly string[]): Promise<`0x${string}`[]> {
@@ -100,11 +103,16 @@ export async function accountsForSlugs(slugs: readonly string[]): Promise<`0x${s
  * Returns `[]` on any read failure, deliberately: a ledger written by an older
  * worker has no `decisions` table, and an empty peer file is the honest render of
  * "we could not learn anything" — never a 500 on the orchestrator's mirror pass.
+ *
+ * `bookIsPublic` says, per account (lowercased), whether its owner made the book
+ * public — the one bit read-theses decorates for the feed. Absent, every book is
+ * private, which is the default that publishes less.
  */
 export async function readPeerTheses(
   shared: Db,
   accounts: readonly `0x${string}`[],
   slugFor: ReadonlyMap<string, string> = new Map(),
+  bookIsPublic: (account: string) => boolean = () => false,
 ): Promise<PublicThesis[]> {
   if (accounts.length === 0) return [];
   const since = Math.floor(Date.now() / 1000) - PEER_WINDOW_SEC;
@@ -165,15 +173,22 @@ export async function readPeerTheses(
   ];
   // THE ONLY WAY OUT OF THIS MODULE. Everything above is a row shape; this is
   // the gate, and it is the same one the public feed publishes through.
-  // Dollars never ride along: `public_book` is not decorated here, so a
-  // realized figure reaches another agent's prompt as a percentage only — and,
-  // since a size is dollars too (thesis-policy.ts `sizeUsdg`), no post here
-  // carries a size or a sized head either. That includes the agent's OWN
-  // memory, which the orchestrator reads through this same gate so that memory
-  // and publication cannot disagree about what the agent said.
+  //
+  // THE BOOK'S PUBLICITY IS THE FEED'S, so "a peer file can only contain what
+  // the public feed publishes" holds for figures too: a PUBLIC book's post
+  // carries its size, its sized head and its realized dollars here exactly as
+  // it does on the feed (D1), and a private book's carries its percentages and
+  // nothing a size or a dollar can be read from. It was decorated nowhere, so
+  // every peer lost the sizes the public feed shows; peerThesesForSlugs reads
+  // the bit from settings the way read-theses does. A caller that passes no
+  // lookup — the orchestrator's read of an agent's OWN memory — gets the
+  // private default.
   const gate = (rows: ThesisRow[]) =>
     rows
-      .map((r) => ({ ...r, slug: slugFor.get((r.agent_id ?? "").toLowerCase()) ?? null }))
+      .map((r) => {
+        const account = (r.agent_id ?? "").toLowerCase();
+        return { ...r, slug: slugFor.get(account) ?? null, public_book: bookIsPublic(account) === true };
+      })
       .map(publishableThesis)
       .filter((t): t is PublicThesis => t !== null);
 
@@ -211,7 +226,24 @@ export async function peerThesesForSlugs(
   shared: Db,
   slugs: readonly string[],
   identity: Pick<IdentityStore, "bySlug"> = getIdentityStore(),
+  settings: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => getSettingsStore().get(tenant),
 ): Promise<PublicThesis[]> {
   const peers = await resolvePeers(slugs, identity);
-  return readPeerTheses(shared, peers.accounts, peers.slugFor);
+  // WHOSE BOOK IS PUBLIC, read per owner the way read-theses reads it: only an
+  // explicit `true` opens one, and an unreadable setting is private — the
+  // default that publishes less. Never spread: settings hold secrets, and this
+  // bit is the only one that leaves.
+  const open = new Set<string>();
+  await Promise.all(
+    [...new Set(peers.tenantFor.values())].map(async (tenant) => {
+      try {
+        const config = (await settings(tenant)) as { publicBook?: unknown } | null;
+        if (config?.publicBook !== true) return;
+        for (const [account, owner] of peers.tenantFor) if (owner === tenant) open.add(account);
+      } catch {
+        /* private */
+      }
+    }),
+  );
+  return readPeerTheses(shared, peers.accounts, peers.slugFor, (account) => open.has(account));
 }

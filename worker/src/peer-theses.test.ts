@@ -62,6 +62,59 @@ describe("peer publication from the real SQLite query", () => {
     assert.doesNotMatch(JSON.stringify(posts), /review 3:/);
   });
 
+  describe("a peer's book is as public as the feed makes it (D1)", () => {
+    // Two owners: `account`'s opted into a public book, `unrelated`'s did not.
+    const identity = {
+      bySlug: async (asked: string) =>
+        asked === slug
+          ? { tenant: account, slug, accounts: [account], createdAt: now, updatedAt: now }
+          : asked === "hr5k2m9q4w7x3z8n"
+            ? { tenant: unrelated, slug: "hr5k2m9q4w7x3z8n", accounts: [unrelated], createdAt: now, updatedAt: now }
+            : null,
+    };
+    const buy = async (id: number, agent: string) => {
+      await db
+        .prepare("INSERT INTO decisions VALUES (?, ?, ?, 'buy', 'TSLA', 5, 'brain', 'Adding under its average.', NULL, NULL, NULL)")
+        .run(id, agent, now - id);
+      await db.prepare("INSERT INTO trades VALUES (?, ?, 'landed', NULL)").run(id, id);
+    };
+
+    it("A PUBLIC BOOK'S PEERS READ ITS SIZE, as the feed shows it; a private one's read none", async () => {
+      await buy(1, account);
+      await buy(2, unrelated);
+      const settings = async (tenant: `0x${string}`) => ({ strategy: "custom", publicBook: tenant === account });
+      const posts = await peerThesesForSlugs(db, [slug, "hr5k2m9q4w7x3z8n"], identity, settings);
+      const open = posts.find((p) => p.slug === slug)!;
+      const shut = posts.find((p) => p.slug === "hr5k2m9q4w7x3z8n")!;
+      assert.equal(open.sizeUsdg, 5);
+      assert.equal(open.head, "buy TSLA 5.00 USDG");
+      assert.equal(shut.sizeUsdg, null);
+      assert.equal(shut.head, "buy TSLA");
+    });
+
+    it("only an explicit true opens it, and an unreadable setting is private", async () => {
+      await buy(1, account);
+      for (const settings of [
+        async () => ({ publicBook: "true" }),
+        async () => ({ publicBook: 1 }),
+        async () => null,
+        async () => {
+          throw new Error("settings store down");
+        },
+      ]) {
+        const [post] = await peerThesesForSlugs(db, [slug], identity, settings);
+        assert.equal(post!.sizeUsdg, null);
+        assert.equal(post!.head, "buy TSLA");
+      }
+    });
+
+    it("the agent's own memory, read with no lookup, keeps the private default", async () => {
+      await buy(1, account);
+      const [post] = await readPeerTheses(db, [account]);
+      assert.equal(post!.sizeUsdg, null);
+    });
+  });
+
   it("does not collapse a forced hold into a model hold with the same prose", async () => {
     const reason = "Depth held; I would wait for a new quote before adding.";
     await decision(1, { reason, holdKind: "GATE_FORCED_HOLD" });
