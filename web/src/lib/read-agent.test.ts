@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
 import { ownBookOf, profileOf } from "./read-agent";
-import { BASIS_REPLAY_ROWS } from "./profile-trades";
+import { BASIS_REPLAY_ROWS, OPENING_READ_LIMIT } from "./profile-trades";
 
 /**
  * ONE AGENT'S PUBLIC PAGE, read from a ledger built by the worker's own schema.
@@ -248,5 +248,55 @@ test("a coin traded more often than one cost replay reads leaves TOP TRADES unre
     assert.deepEqual(p.topTrades, []);
     assert.equal(p.activityRead, true);
     assert.ok(p.recentTrades.filter((t) => t.action === "sell").every((t) => t.realizedPnlBps === null), "and no return on a cost nobody checked");
+  } finally { raw.close(); }
+});
+
+test("a fill carried in that names no coin leaves the hold unknown, as it does inside the period", async () => {
+  // CP2, the reviewer's probe: the reconciler's row for an op the ledger had
+  // no row for — landed, no side, no legs — in the last period.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    await db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, basis_source) VALUES (?, 'swap', ?, 50, '0xorphan', 'landed', ?, 1, 'receipt')`)
+      .run(ACCOUNT, ACCOUNT, T0 - 86_400);
+    await fill(db, { side: "buy", coin: "MEME", qty: "10", at: T0 + 100 });
+    await fill(db, { side: "sell", coin: "MEME", qty: "10", at: T0 + 160, pnl: 0.1, cash: 5.1 });
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, null, "carried in");
+    await db.prepare("UPDATE trades SET epoch = 2, created_at = ? WHERE user_op_hash = '0xorphan'").run(T0 + 50);
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, null, "and in the period, as before");
+  } finally { raw.close(); }
+});
+
+test("a paper period is flat only when nothing was held at all — priced, or kept at cost", async () => {
+  // CP3 and CP4, the reviewer's probes: a paper book whose only holding is a
+  // coin the worker cannot price values `positions` at zero and carries the
+  // coin at cost inside the total; and a long-lived paper book whose earlier
+  // fills pass the opening read still opens flat when its valuation says so.
+  const ONE = "1000000000000000000";
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET mode = 'paper'").run();
+    const paperFill = (side: "buy" | "sell", at: number, epoch = 2) =>
+      fill(db, { side, coin: "MEME", qty: ONE, at, epoch, status: "paper", source: "paper", pnl: side === "sell" ? 1 : undefined, cash: side === "sell" ? 6 : 5 });
+    await paperFill("buy", T0 - 86_400, 1);
+    const valuation = db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', ?, 0, 0, ?, ?, 2, 'paper')`);
+    await valuation.run(ACCOUNT, 95, 100, T0 + 50);
+    await paperFill("buy", T0 + 100);
+    await paperFill("sell", T0 + 160);
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, null, "5 USDG held at cost: the carried share was sold first");
+    await db.prepare("UPDATE equity SET cash_usdg = 100 WHERE agent_id = ?").run(ACCOUNT);
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60, "nothing held at all: a reset, and a one-minute round trip");
+    // The same proof with more earlier fills than the opening read takes.
+    raw.exec("BEGIN");
+    const ins = raw.prepare(
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 1, ?, 'MEME', ?, 'paper')`,
+    );
+    for (let i = 0; i <= OPENING_READ_LIMIT; i++) {
+      const buy = i % 2 === 0;
+      ins.run(ACCOUNT, buy ? USDG : tokenOf("MEME"), buy ? tokenOf("MEME") : USDG, T0 - 80_000 + i, buy ? "buy" : "sell", ONE);
+    }
+    raw.exec("COMMIT");
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60, "a cut read of the past does not undo a valuation that proves the opening");
   } finally { raw.close(); }
 });

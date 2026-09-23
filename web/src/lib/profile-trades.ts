@@ -428,7 +428,7 @@ const ROUND_TRIP_COLUMNS = `t.id, t.fill_side, d.action, COALESCE(t.fill_symbol,
  * sell closes those units before any of the period's own buys. Null when it
  * could not be read — never "nothing was carried". The paper book needs one
  * more fact, because a paper RESET clears it without a single fill
- * (resetPaperLedger): see paperOpening.
+ * (resetPaperLedger): see paperOpeningMark, which is read first.
  */
 export async function readRoundTrips(
   db: Db,
@@ -456,6 +456,14 @@ export async function readRoundTrips(
   }
   let opening: Map<string, bigint | null> | null = null;
   try {
+    // THE PAPER BOOK'S VALUATION FIRST, because when it proves the book opened
+    // flat nothing the fills say can change that — and a long-lived paper book,
+    // whose fills pile up across resets, cuts the replay below short, which
+    // used to leave the proof unread and the hold refused for good.
+    // An unreadable valuation proves nothing either way: the fills then decide,
+    // and any coin they say was held is unknown (below).
+    const valued = book === "paper" ? await paperOpeningMark(db, account, epoch, fills[0]?.at ?? null).catch(() => "unknown" as const) : null;
+    if (valued === "flat") return { fills, truncated, opening: new Map(), dust };
     // Newest first under the cap, then turned round: a cut read loses the
     // OLDEST fills, and says so, rather than silently missing the newest.
     const prior = (await db.prepare(`
@@ -475,14 +483,20 @@ export async function readRoundTrips(
       }
       // No side: it moved one of its two tokens by an amount nobody recorded,
       // so from here both are unknown — not "a coin nobody knows", which would
-      // make every coin unknown.
+      // make every coin unknown. UNLESS a leg was never recorded: then the
+      // coin it moved could have been any of them (the reconciler writes its
+      // legs only when the receipt named them), and the fill goes in as a coin
+      // nobody knows, which openingOf reads as "nothing carried is known".
       for (const leg of [row.buy_token, row.sell_token]) {
-        if (typeof leg === "string" && leg.trim()) priorFills.push({ ...f, coin: leg.trim().toLowerCase() });
+        priorFills.push({ ...f, coin: typeof leg === "string" && leg.trim() ? leg.trim().toLowerCase() : null });
       }
     }
     opening = openingOf(priorFills, { complete, dust });
     if (opening && book === "paper" && [...opening.values()].some((q) => q !== 0n)) {
-      opening = await paperOpening(db, account, epoch, opening, fills[0]?.at ?? null);
+      // A paper book is only ever cleared all at once: with something held at
+      // the valuation it came over whole and the fills stand; otherwise every
+      // coin they say was held is unknown.
+      if (valued !== "carried") opening = new Map([...opening].map(([coin, q]) => [coin, q === 0n ? 0n : null] as const));
     }
   } catch (error) {
     console.error("[profile-trades] opening read failed", error instanceof Error ? error.name : "unknown");
@@ -492,36 +506,50 @@ export async function readRoundTrips(
 }
 
 /**
- * A PAPER CARRY, CHECKED AGAINST THE PERIOD'S FIRST PAPER VALUATION.
+ * Half a micro-USDG: the ledger's money columns are micro-USDG written as
+ * decimals, so two sums of them that agree differ by less than this.
+ */
+const HALF_MICRO_USDG = 0.000_000_5;
+
+/**
+ * WHAT THE PAPER BOOK HELD WHEN THE PERIOD OPENED, from its first valuation.
  *
  * A paper reset clears the book without a single fill and then opens the next
  * period, so the fills before a paper period cannot tell a reset from a carry.
- * The valuation can, when it was taken before the period's first fill: zero in
- * positions means nothing was carried, whatever the fills say (a reset, or a
- * book already flat); more than zero means the book came over whole — a paper
- * book is only ever cleared all at once — so what the fills say stands. With no
- * such valuation, every coin the fills say was held becomes unknown.
+ * The valuation can, when it was taken before the period's first fill:
+ *  - "flat": nothing held — nothing priced in `positions` AND nothing kept at
+ *    cost outside it. Nothing was carried, whatever the fills say (a reset, or
+ *    a book already flat).
+ *  - "carried": something priced was held. A paper book is only ever cleared
+ *    all at once, so it came over whole and what the fills say stands.
+ *  - "unknown": no such valuation, or one that cannot show either.
  *
- * Only the paper book: a funded book is never cleared that way, and its
- * valuation leaves out holdings it cannot price, so a zero there proves nothing.
+ * NOTHING KEPT AT COST, TOO. The worker leaves a holding it cannot price by
+ * design out of `positions` and carries it at cost inside the total
+ * (composeEquityUsdg is cash + vault + positions + quarantined cost), so a
+ * book holding only such coins values its positions at zero. What the total
+ * holds beyond cash, vault and positions is that cost; unless it is zero the
+ * zero in positions proves nothing.
+ *
+ * Only the paper book: a funded book is never cleared that way.
  */
-async function paperOpening(
+async function paperOpeningMark(
   db: Db,
   account: string,
   epoch: number,
-  replayed: Map<string, bigint | null>,
   firstFillAt: number | null,
-): Promise<Map<string, bigint | null>> {
-  const unknown = new Map([...replayed].map(([coin, q]) => [coin, q === 0n ? 0n : null] as const));
+): Promise<"flat" | "carried" | "unknown"> {
   const mark = (await db
     .prepare(
-      `SELECT positions_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'paper'
+      `SELECT cash_usdg, vault_usdg, positions_usdg, equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'paper'
         ORDER BY at ASC, id ASC LIMIT 1`,
     )
-    .get(account, epoch)) as { positions_usdg: number | null; at: number } | undefined;
-  if (!mark || mark.positions_usdg === null || mark.positions_usdg === undefined) return unknown;
-  const valued = Number(mark.positions_usdg);
-  if (!Number.isFinite(valued) || (firstFillAt !== null && Number(mark.at) > firstFillAt)) return unknown;
-  if (valued === 0) return new Map();
-  return valued > 0 ? replayed : unknown;
+    .get(account, epoch)) as Record<string, unknown> | undefined;
+  if (!mark || (firstFillAt !== null && Number(mark.at) > firstFillAt)) return "unknown";
+  const read = (v: unknown) => (v === null || v === undefined ? NaN : Number(v));
+  const positions = read(mark.positions_usdg);
+  if (!Number.isFinite(positions)) return "unknown";
+  if (positions > 0) return "carried";
+  const heldAtCost = read(mark.equity_usdg) - read(mark.cash_usdg) - read(mark.vault_usdg) - positions;
+  return positions === 0 && Math.abs(heldAtCost) < HALF_MICRO_USDG ? "flat" : "unknown";
 }
