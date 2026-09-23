@@ -35,6 +35,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import type { OrderReceipt } from "./order-receipt";
+
 /** One instruction, as it sits on disk. */
 export interface FileCommand {
   id: string;
@@ -96,6 +98,14 @@ export interface FileCommandResult {
   ok: boolean;
   line: string;
   at: number;
+  /**
+   * An ORDER's verdict as ledger facts, beside the sentence and never instead
+   * of it. Absent for anything that is not an order, for a result written
+   * before receipts existed, and for the two order states the contract has no
+   * honest status for (see order-receipt.ts). Every reader renders `line` when
+   * this is missing, so an old result and a new one both still say something.
+   */
+  receipt?: OrderReceipt;
 }
 
 const DIR = "commands";
@@ -216,6 +226,8 @@ function pendingCommands(dir: string): { n: string; cmd: FileCommand }[] {
 export interface CommandOutcome {
   ok: boolean;
   line: string;
+  /** Carried into the result file untouched. See FileCommandResult.receipt. */
+  receipt?: OrderReceipt;
 }
 
 /**
@@ -247,6 +259,15 @@ export async function runTickCommand(
     now: () => number;
     run: (cmd: FileCommand) => Promise<CommandOutcome>;
     told: (cmd: FileCommand, outcome: CommandOutcome) => Promise<void>;
+    /**
+     * The receipt for a command answered here as expired, when it has one.
+     *
+     * A HOOK, because this file must not learn what an order's arguments mean
+     * (see FileCommand.args): the worker knows an order from a probe and builds
+     * the facts; the drain only carries them. Absent, an expiry is answered
+     * with its sentence alone, exactly as before receipts existed.
+     */
+    expiredReceipt?: (cmd: FileCommand) => OrderReceipt | undefined;
   },
 ): Promise<void> {
   const dir = commandDir(home);
@@ -254,8 +275,13 @@ export async function runTickCommand(
     if (!claimFile(dir, n)) continue;
     const now = deps.now();
     if (isExpired(cmd, now)) {
-      const dead: CommandOutcome = { ok: false, line: expiredLine(cmd.expiresAt as number, now, "claim") };
-      writeCommandResult(home, { id: cmd.id, ok: dead.ok, line: dead.line, at: now });
+      const receipt = deps.expiredReceipt?.(cmd);
+      const dead: CommandOutcome = {
+        ok: false,
+        line: expiredLine(cmd.expiresAt as number, now, "claim"),
+        ...(receipt ? { receipt } : {}),
+      };
+      writeCommandResult(home, resultOf(cmd.id, dead, now));
       await deps.told(cmd, dead);
       continue;
     }
@@ -264,10 +290,15 @@ export async function runTickCommand(
     // who asked again mid-trade got a second fill.
     markRunning(home, cmd.id);
     const outcome = await deps.run(cmd);
-    writeCommandResult(home, { id: cmd.id, ok: outcome.ok, line: outcome.line, at: deps.now() });
+    writeCommandResult(home, resultOf(cmd.id, outcome, deps.now()));
     await deps.told(cmd, outcome);
     return;
   }
+}
+
+/** An outcome as it is written down — the receipt only when there is one, so an old reader sees the old shape. */
+function resultOf(id: string, o: CommandOutcome, at: number): FileCommandResult {
+  return { id, ok: o.ok, line: o.line, at, ...(o.receipt ? { receipt: o.receipt } : {}) };
 }
 
 /** An order the intent queue reached after its own deadline, and did not run. Not a ledger status: no row exists. */
@@ -392,6 +423,27 @@ function deadlineIn(raw: string): number | null {
     return typeof v === "number" && Number.isFinite(v) ? v : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The ids waiting in this home's queue — a LISTING, and nothing more.
+ *
+ * For the child's between-ticks watcher, which asks every couple of seconds
+ * whether anything has arrived. So nothing here parses, claims or marks: the
+ * claim is still the unlink inside the tick's drain, and a watcher that could
+ * take a command would be a second drain beside the one that enforces
+ * one-at-a-time. A half-written file is a dotfile ending `.tmp` and never
+ * matches; an unreadable directory is an empty list, because the worst a
+ * missed look costs is the next look two seconds later.
+ */
+export function queuedCommandIds(home: string): string[] {
+  try {
+    return readdirSync(commandDir(home))
+      .filter((n) => n.endsWith(".json") && !n.endsWith(".done.json") && !n.startsWith("."))
+      .map((n) => n.slice(0, -".json".length));
+  } catch {
+    return [];
   }
 }
 

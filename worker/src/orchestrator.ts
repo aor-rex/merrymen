@@ -89,7 +89,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
-import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
+import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -1275,9 +1275,78 @@ async function ferryCommands2(): Promise<void> {
   if (!url || children.size === 0) return;
   try {
     const shared = await makePgDb(url);
-    await ferryCommands(shared);
+    await oneFerryAtATime(() => ferryCommands(shared));
   } catch {
     /* shared db unavailable — the mirror logs that already */
+  }
+}
+
+/**
+ * HOW OFTEN AN ORDER CROSSES, in each direction.
+ *
+ * The reconcile pass ferries everything, but only after the reconcile, the
+ * mirror, the builder desk and the news desk have each had their turn, and then
+ * it sleeps fifteen seconds — so an owner's order could sit in the table for
+ * most of a minute before its file reached the child, and its answer sat on
+ * disk just as long on the way back. Orders get their own short clock. The
+ * cost is one indexed query per interval for the whole fleet, not one per
+ * tenant, and a directory listing per child for the answers.
+ */
+export const ORDER_FERRY_MS = 3_000;
+
+/**
+ * ONE FERRY AT A TIME, whichever clock started it.
+ *
+ * The claim is what makes a delivery at-most-once and it holds without this —
+ * `claimed_at IS NULL` on the UPDATE lets exactly one caller win. But two
+ * up-legs draining the same answer both write the row and both drop the file,
+ * and a pass that overlaps another is load nobody asked for.
+ *
+ * SKIPPED, NOT QUEUED. The reconcile loop awaits its ferry, and that loop is
+ * also the watchdog and the respawn; chaining it behind a short-loop pass that
+ * hung on the database would stall the whole fleet's supervision on an order
+ * ferry. A pass that finds another running simply comes back on its own clock —
+ * three seconds for orders, one reconcile pass for the rest — and a short-loop
+ * pass takes milliseconds, so the reconcile pass is almost never the one that
+ * waits.
+ */
+let ferrying = false;
+async function oneFerryAtATime(pass: () => Promise<void>): Promise<void> {
+  if (ferrying) return;
+  ferrying = true;
+  try {
+    await pass();
+  } finally {
+    ferrying = false;
+  }
+}
+
+/** The short loop's pass: every live child, orders only, both directions. */
+async function ferryOrdersNow(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url || children.size === 0) return;
+  try {
+    const shared = await makePgDb(url);
+    const targets = [...children.entries()].map(([tenant, child]) => ({
+      home: childHome(tenant),
+      smartAccount: child.smartAccount,
+      tag: tenant,
+    }));
+    await oneFerryAtATime(() => ferryOrders(shared, targets));
+  } catch {
+    /* shared db unavailable — the reconcile pass logs that already */
+  }
+}
+
+/**
+ * The short loop itself. Its own clock, so an order never waits on the mirror
+ * or a vendor pass; it stands down with the fleet on a halt or a stop.
+ */
+async function orderFerryLoop(): Promise<void> {
+  for (;;) {
+    if (stopping) return;
+    if (!haltRequested()) await ferryOrdersNow();
+    await new Promise((r) => setTimeout(r, ORDER_FERRY_MS));
   }
 }
 
@@ -1358,6 +1427,159 @@ async function ferryCommands(shared: Db): Promise<void> {
 }
 
 /**
+ * One command row, handed to its child.
+ *
+ * CLAIMED BEFORE THE FILE IS WRITTEN, and the write only happens if the claim
+ * actually took.
+ *
+ * These are two writes to two systems and there is no transaction across them,
+ * so one of the two orders has to be chosen. It used to write first: a crash —
+ * or a thrown UPDATE, whose catch is a comment — between the two re-wrote
+ * `<id>.json` into a home that had already claimed, run and answered it. For a
+ * probe that is a second approve of 0.000001 USDG. For a BUY it is a second
+ * position at a second price with a second gas bill, and a ledger showing two
+ * fills for one instruction — a claim about somebody's money they never made.
+ *
+ * So: at-most-once, deliberately, in the direction this codebase already
+ * accepts. A lost command is a button pressed again (command-files.ts says so
+ * about the unlink); a replayed order is not recoverable by anyone. The short
+ * order loop and the reconcile pass both deliver through here, so they share
+ * the one claim and cannot both hand the same order over.
+ */
+async function deliverCommand(
+  shared: Db,
+  home: string,
+  tenant: string,
+  r: { id: string; kind: string; args: string | null; created_at: number },
+): Promise<void> {
+  const claim = await shared
+    .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
+    .run(Date.now(), r.id);
+  if (claim.changes === 0) return; // another replica — or the other loop — took it
+  // `expiresAt` rides in the same payload and is LIFTED OUT here rather
+  // than given a column of its own. It is not part of what the order
+  // means — it is how long the order is willing to wait — and the worker
+  // checks it before it looks at a single argument.
+  const args = r.args ? parseArgs(r.args) : {};
+  const expiresAt = typeof args.expiresAt === "number" ? args.expiresAt : undefined;
+  delete args.expiresAt;
+  writeCommand(home, {
+    id: String(r.id),
+    kind: String(r.kind),
+    at: Number(r.created_at),
+    ...(Object.keys(args).length ? { args } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+  });
+  log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
+}
+
+/**
+ * THE RECEIPT'S COLUMN on the shared table: the C3 receipt as JSON, beside the
+ * `result` line it never replaces.
+ *
+ * Nullable with no default, the house rule: a row answered before this existed
+ * has no receipt, which is a different fact from an empty one. Added by this
+ * process because it is the one that writes it — the same reasoning the mirror
+ * gives for `last_stamp` — and every reader treats it as optional, because web
+ * and orchestrator deploy at the same moment and either may run first.
+ */
+export const COMMAND_RECEIPT_DDL = "ALTER TABLE agent_commands ADD COLUMN receipt TEXT";
+
+/**
+ * A receipt as the column holds it, or null. Re-serialised from the parsed
+ * result rather than copied as text, so nothing but the object the child wrote
+ * reaches the table, and bounded like every other status column here.
+ */
+function receiptJson(r: FileCommandResult): string | null {
+  if (!r.receipt || typeof r.receipt !== "object") return null;
+  const json = JSON.stringify(r.receipt);
+  return json.length <= 1_000 ? json : null;
+}
+
+/**
+ * One child's answers, written back as rows.
+ *
+ * ONE TRY PER RESULT, AND THE FILE IS DELETED ONLY AFTER ITS ROW LANDS.
+ * This was a single try around the whole loop, over a drain that unlinked
+ * every file as it read it — so one connection blip on the first result
+ * discarded every other tenant-visible receipt in the batch, permanently.
+ * For an order that loses the record of a trade that really happened, and
+ * an unanswered row is now what refuses the owner their next order.
+ *
+ * THE RECEIPT NEVER COSTS THE ANSWER. The write with the receipt is tried
+ * first; a table that has not grown the column yet refuses it, and the answer
+ * is written the way it always was. The owner then reads the line — which every
+ * surface already renders — rather than an order that never stops spinning.
+ */
+async function landResults(shared: Db, home: string, tenant: string): Promise<void> {
+  for (const r of drainCommandResults(home)) {
+    try {
+      const now = Date.now();
+      const line = r.line.slice(0, 500);
+      try {
+        await shared
+          .prepare("UPDATE agent_commands SET done_at = ?, result = ?, receipt = ? WHERE id = ?")
+          .run(now, line, receiptJson(r), r.id);
+      } catch {
+        await shared.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(now, line, r.id);
+      }
+      dropCommandResult(home, r.id);
+      log(`command ${r.id.slice(0, 8)} ← ${tenant.slice(0, 8)}: ${r.ok ? "ok" : "failed"}`);
+    } catch {
+      // Left on disk on purpose: the next pass retries it. A receipt that
+      // survives is worth more than a tidy directory.
+    }
+  }
+}
+
+/**
+ * THE SHORT LOOP'S PASS: orders down, answers up, for every child at once.
+ * EXPORTED SO THE SEAM CAN BE TESTED, for the reason ferryForChild is.
+ *
+ * TRADE ROWS ONLY on the way down. A probe or a paper reset waits for the
+ * reconcile pass exactly as it always has; what an owner sits watching is an
+ * order. One query for the whole fleet, bound to each child's SMART ACCOUNT —
+ * the identity `agent_id` means everywhere in this schema, and the join the
+ * reconcile pass once got wrong — and only for the children this replica
+ * runs, so an order for somebody else's agent is never claimed here.
+ *
+ * Every answer on disk goes back up, whatever its kind: the up-leg only moves
+ * finished results, so carrying a probe's result early costs nothing and
+ * saves it waiting on a slower clock.
+ */
+export async function ferryOrders(
+  shared: Db,
+  targets: readonly { home: string; smartAccount: string; tag: string }[],
+): Promise<void> {
+  if (targets.length === 0) return;
+  const byAccount = new Map(targets.map((t) => [t.smartAccount, t]));
+  try {
+    const accounts = [...byAccount.keys()];
+    const rows = (await shared
+      .prepare(
+        // ORDER BY (created_at, id) for the reason the reconcile pass gives:
+        // two orders really do land in the same millisecond.
+        `SELECT id, agent_id, kind, args, created_at FROM agent_commands
+          WHERE kind = 'trade' AND claimed_at IS NULL AND agent_id IN (${accounts.map(() => "?").join(", ")})
+          ORDER BY created_at ASC, id ASC LIMIT 50`,
+      )
+      .all(...accounts)) as { id: string; agent_id: string; kind: string; args: string | null; created_at: number }[];
+    for (const r of rows) {
+      const t = byAccount.get(String(r.agent_id));
+      if (!t) continue;
+      try {
+        await deliverCommand(shared, t.home, t.tag, r);
+      } catch {
+        /* this order waits for the next pass; the others still cross */
+      }
+    }
+  } catch {
+    /* the table did not answer — every order waits for the next pass */
+  }
+  for (const t of targets) await landResults(shared, t.home, t.tag);
+}
+
+/**
  * One child's two legs. EXPORTED SO THE SEAM CAN BE TESTED.
  *
  * The hosted half of this channel had no test at all — `agent-commands.
@@ -1377,7 +1599,6 @@ export async function ferryForChild(
   { home, smartAccount, tag }: { home: string; smartAccount: string; tag: string },
 ): Promise<void> {
   {
-    const tenant = tag;
     // ── down: unclaimed commands become files ──
     try {
       const rows = (await shared
@@ -1401,66 +1622,12 @@ export async function ferryForChild(
             WHERE agent_id = ? AND claimed_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 5`,
         )
         .all(smartAccount)) as { id: string; kind: string; args: string | null; created_at: number }[];
-      for (const r of rows) {
-        // CLAIMED BEFORE THE FILE IS WRITTEN, and the write only happens if the
-        // claim actually took.
-        //
-        // These are two writes to two systems and there is no transaction
-        // across them, so one of the two orders has to be chosen. It used to
-        // write first: a crash — or a thrown UPDATE, whose catch is a comment —
-        // between the two re-wrote `<id>.json` into a home that had already
-        // claimed, run and answered it. For a probe that is a second approve of
-        // 0.000001 USDG. For a BUY it is a second position at a second price
-        // with a second gas bill, and a ledger showing two fills for one
-        // instruction — a claim about somebody's money they never made.
-        //
-        // So: at-most-once, deliberately, in the direction this codebase
-        // already accepts. A lost command is a button pressed again
-        // (command-files.ts says so about the unlink); a replayed order is not
-        // recoverable by anyone.
-        const claim = await shared
-          .prepare("UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL")
-          .run(Date.now(), r.id);
-        if (claim.changes === 0) continue; // another replica took it
-        // `expiresAt` rides in the same payload and is LIFTED OUT here rather
-        // than given a column of its own. It is not part of what the order
-        // means — it is how long the order is willing to wait — and the worker
-        // checks it before it looks at a single argument.
-        const args = r.args ? parseArgs(r.args) : {};
-        const expiresAt = typeof args.expiresAt === "number" ? args.expiresAt : undefined;
-        delete args.expiresAt;
-        writeCommand(home, {
-          id: String(r.id),
-          kind: String(r.kind),
-          at: Number(r.created_at),
-          ...(Object.keys(args).length ? { args } : {}),
-          ...(expiresAt ? { expiresAt } : {}),
-        });
-        log(`command ${String(r.id).slice(0, 8)} → ${tenant.slice(0, 8)} (${r.kind})`);
-      }
+      for (const r of rows) await deliverCommand(shared, home, tag, r);
     } catch {
       /* a child that misses a command this pass gets it next pass */
     }
     // ── up: results become rows ──
-    //
-    // ONE TRY PER RESULT, AND THE FILE IS DELETED ONLY AFTER ITS ROW LANDS.
-    // This was a single try around the whole loop, over a drain that unlinked
-    // every file as it read it — so one connection blip on the first result
-    // discarded every other tenant-visible receipt in the batch, permanently.
-    // For an order that loses the record of a trade that really happened, and
-    // an unanswered row is now what refuses the owner their next order.
-    for (const r of drainCommandResults(home)) {
-      try {
-        await shared
-          .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?")
-          .run(Date.now(), r.line.slice(0, 500), r.id);
-        dropCommandResult(home, r.id);
-        log(`command ${r.id.slice(0, 8)} ← ${tenant.slice(0, 8)}: ${r.ok ? "ok" : "failed"}`);
-      } catch {
-        // Left on disk on purpose: the next pass retries it. A receipt that
-        // survives is worth more than a tidy directory.
-      }
-    }
+    await landResults(shared, home, tag);
 
     // ── and a row nothing will ever answer is closed, not left running ──
     //
@@ -4439,6 +4606,13 @@ async function mirrorLedgers(): Promise<void> {
     // creates what it writes, so a fresh deploy heals itself rather than
     // needing DDL run by hand.
     await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
+    // The command receipt, on the same clock and for the same reason: this
+    // process writes it (landResults), so this process creates it.
+    try {
+      await shared.exec(COMMAND_RECEIPT_DDL);
+    } catch {
+      /* already there */
+    }
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -4663,6 +4837,10 @@ export async function runOrchestrator(): Promise<void> {
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  // ORDERS ON THEIR OWN CLOCK, beside the reconcile loop below rather than
+  // inside it: that loop's pass is only as fast as its slowest step.
+  void orderFerryLoop();
 
   // The main loop: honour a fleet-halt, else reconcile + watchdog every tick.
   for (;;) {

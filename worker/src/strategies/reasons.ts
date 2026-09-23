@@ -155,6 +155,24 @@ export type Why =
    */
   | { code: "ops-spent" }
   /**
+   * THE DRAWDOWN BREAKER IS TRIPPED — the book sits at or past the loss limit
+   * sealed into the key, so the wall refuses every buy until it recovers.
+   *
+   * Before the snapshot carried the drawdown, this was a refusal a tick: the
+   * strategy proposed, the wall said `drawdown-breaker`, and a Trencher paid a
+   * Brain review for every entry it would never be allowed to make. Now the
+   * strategy stops proposing buys and says this once.
+   *
+   * THE OWNER'S SENTENCE ONLY. The refusal it replaces is account state and
+   * leaves the public feed; the same fact must not walk back in as a view —
+   * see `publishesIdle`.
+   *
+   * ONE FIGURE, AND IT DOES NOT MOVE: the limit sealed into the key. The
+   * drawdown itself changes every tick the book does, and a sentence that
+   * carried it would be news to the once-per-change idle channel every tick.
+   */
+  | { code: "breaker-tripped"; limitBps: number }
+  /**
    * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
    *
    * The default strategy could only ever buy — every intent it emitted had cash
@@ -399,6 +417,13 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
         (audience === "owner" ? `Raise it at /grant — that one needs a re-sign. ` : ``) +
         `Selling is never blocked by this`
       );
+    case "breaker-tripped":
+      return (
+        `nothing bought — the book is at least ${pct(w.limitBps)}% below its peak, the drawdown limit ` +
+        `in the signed key, so the breaker refuses buys until it recovers. ` +
+        (audience === "owner" ? `A wider limit needs a re-sign at /grant. ` : ``) +
+        `Selling is never blocked by this`
+      );
     case "under-one-buy":
       return (
         `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}` +
@@ -529,4 +554,19 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
       return exhaustive;
     }
   }
+}
+
+/**
+ * MAY THIS IDLE REASON BECOME A PUBLIC POST?
+ *
+ * The idle channel writes a `view` decision beside the owner's event, and a
+ * view is a post. Almost every reason is a fact about the strategy — stale
+ * feeds, a spent budget, cash short of one buy — and is fine in public. A
+ * tripped breaker is a fact about the ACCOUNT'S LOSSES: the refusal it stands
+ * in for is dropped from the public feed as account state, and publishing the
+ * same fact as a view would walk it straight back in. The owner still hears it,
+ * through the event.
+ */
+export function publishesIdle(w: Why): boolean {
+  return w.code !== "breaker-tripped";
 }
