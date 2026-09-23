@@ -109,13 +109,14 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
     return [];
   }
   const own = o.book ?? [agentId];
-  const views: TradeView[] = [];
-  for (const r of rows) {
-    if (o.filter === "filled" && !FILLED.has(r.status)) continue;
-    if (o.filter === "refused" && !REFUSED.has(r.status)) continue;
-    views.push(await view(db, agentId, r, own, o));
-    if (!o.token && views.length >= limit) break;
-  }
+  const kept = rows.filter(
+    (r) => !(o.filter === "filled" && !FILLED.has(r.status)) && !(o.filter === "refused" && !REFUSED.has(r.status)),
+  );
+  // IN PARALLEL. After a restart every recent row is a copy whose coin only
+  // its receipt knows — a receipt, a block and a symbol read each, with a
+  // timeout apiece. One after another, eight of them on a slow RPC was a
+  // minute of silence before /trades answered.
+  const views: TradeView[] = await Promise.all((o.token ? kept : kept.slice(0, limit)).map((r) => view(db, agentId, r, own, o)));
   const wanted = o.token?.trim().toLowerCase();
   const out = wanted
     ? views.filter((v) => v.token === wanted || v.label.toLowerCase() === wanted || v.label.toLowerCase().startsWith(`${wanted} `))
