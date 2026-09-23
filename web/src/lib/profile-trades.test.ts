@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { OPENING_READ_LIMIT, readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
+import { BASIS_REPLAY_ROWS, OPENING_READ_LIMIT, readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
 import { averageHoldSec } from "./hold-time";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
@@ -405,6 +405,101 @@ test("estimates ranked above a real trade cannot push it out of the list, past t
     rows.push(sellRow(300, 1, 11, { created_at: 2_000 }));
     await insert(db, rows);
     assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["300"]);
+  } finally { raw.close(); }
+});
+
+// ── CP1: a replay cut short says so, and one coin's volume cannot cut another's ──
+/**
+ * `pairs` receipt round trips of each coin — every buy 10 units for a cost of
+ * 10, every sell +1 on it, so +10% — with the coins INTERLEAVED in time, the
+ * way a basket trades them, so one page of ranked candidates holds all of them.
+ */
+function busyBook(raw: DatabaseSync, coins: readonly string[], pairs: number, firstId = 1) {
+  const ins = raw.prepare(`INSERT INTO trades (id, agent_id, epoch, kind, fill_side, status, created_at, amount_usdg, user_op_hash, fill_symbol,
+      buy_token, sell_token, realized_pnl_usdg, fill_cash_usdg, basis_source, fill_qty_raw)
+    VALUES (?, 'a', 1, 'swap', ?, 'landed', ?, 5, ?, ?, ?, ?, ?, ?, 'receipt', '10')`);
+  raw.exec("BEGIN");
+  let id = firstId - 1;
+  for (let i = 0; i < pairs; i++) {
+    for (const coin of coins) {
+      const symbol = coin.slice(2).toUpperCase();
+      id += 1;
+      ins.run(id, "buy", id, `0xbuy${id}`, symbol, coin, "0xusdg", null, 10);
+      id += 1;
+      ins.run(id, "sell", id, `0xsell${id}`, symbol, "0xusdg", coin, 1, 11);
+    }
+  }
+  raw.exec("COMMIT");
+}
+
+test("each coin's cost is replayed on its own, so a busy basket's coins are not cut short together", async () => {
+  // The replay read every coin of a page in one query under one cap, so a
+  // basket whose coins TOGETHER passed it vouched for nothing — and TOP TRADES
+  // came back an empty list read as true: "No closed trades yet" over hundreds.
+  const coins = ["0xa1", "0xa2", "0xa3"];
+  const pairs = Math.ceil(BASIS_REPLAY_ROWS / 4) + 1;
+  assert.ok(2 * pairs + 1 < BASIS_REPLAY_ROWS && 2 * pairs * coins.length > BASIS_REPLAY_ROWS, "each coin fits one replay; together they do not");
+  const { raw, db } = await sellsLedger();
+  try {
+    // A1's first lot was bought from the quote and never sold out, so every A1
+    // sell stands on that estimate — which only a replay of A1's WHOLE history
+    // can see: a cap shared across the coins would cut exactly that row off.
+    await insert(db, [buyRow(0, "0xa1", "10", { basis_source: "quote", created_at: 0, fill_symbol: "A1" })]);
+    busyBook(raw, coins, pairs);
+    const top = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(top.read, true);
+    assert.deepEqual(top.trades.map((t) => [t.symbol, t.realizedPnlBps]), [["A3", 1_000], ["A2", 1_000], ["A3", 1_000], ["A2", 1_000], ["A3", 1_000]]);
+    const list = await readProfileTrades(db, "a", 1, false);
+    const sells = list.trades.filter((t) => t.action === "sell");
+    assert.equal(sells.length, 50);
+    assert.ok(sells.every((t) => t.realizedPnlBps === (t.symbol === "A1" ? null : 1_000)), "every listed sell keeps the return its own coin's whole history gives it");
+  } finally { raw.close(); }
+});
+
+test("a coin with exactly as many fills as one replay reads was read whole", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    busyBook(raw, ["0xedge"], BASIS_REPLAY_ROWS / 2);
+    const top = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(top.read, true);
+    assert.equal(top.trades.length, 5);
+  } finally { raw.close(); }
+});
+
+test("a coin traded more often than one replay reads leaves TOP TRADES unread — never 'no closed trades'", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    busyBook(raw, ["0xbusy"], BASIS_REPLAY_ROWS / 2 + 1);
+    assert.deepEqual(await readTopTrades(db, "a", 1, false, "landed"), { trades: [], read: false });
+    // A checked trade ranked BELOW the unchecked ones cannot stand in for the
+    // list: any of them might belong above it.
+    await insert(db, [buyRow(20_001, "0xcalm", "10", { created_at: 20_001 }), sellRow(20_002, 0.5, 10.5, { sell_token: "0xcalm", fill_qty_raw: "10", created_at: 20_002 })]);
+    assert.deepEqual(await readTopTrades(db, "a", 1, false, "landed"), { trades: [], read: false });
+    // Buys & sells still lists every fill it read; the busy coin's sells carry
+    // no return, because their cost could not be checked — the checked one does.
+    const list = await readProfileTrades(db, "a", 1, false);
+    assert.equal(list.read, true);
+    assert.deepEqual(
+      list.trades.filter((t) => t.action === "sell").map((t) => t.realizedPnlBps),
+      [500, ...Array(49).fill(null)],
+    );
+  } finally { raw.close(); }
+});
+
+test("an unchecked sell ranked below five checked ones leaves the five exact", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    busyBook(raw, ["0xbusy"], BASIS_REPLAY_ROWS / 2 + 1);
+    // Five coins, each one +50% round trip, all ranked above every busy sell.
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 1; i <= 5; i++) {
+      rows.push(buyRow(20_000 + 2 * i, `0xgood${i}`, "10", { created_at: 20_000 + 2 * i }));
+      rows.push(sellRow(20_001 + 2 * i, 5, 15, { sell_token: `0xgood${i}`, fill_qty_raw: "10", created_at: 20_001 + 2 * i }));
+    }
+    await insert(db, rows);
+    const top = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(top.read, true, "nothing unchecked outranks the five");
+    assert.deepEqual(top.trades.map((t) => t.realizedPnlBps), [5_000, 5_000, 5_000, 5_000, 5_000]);
   } finally { raw.close(); }
 });
 

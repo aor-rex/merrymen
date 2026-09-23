@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
 import { ownBookOf, profileOf } from "./read-agent";
+import { BASIS_REPLAY_ROWS } from "./profile-trades";
 
 /**
  * ONE AGENT'S PUBLIC PAGE, read from a ledger built by the worker's own schema.
@@ -221,5 +222,31 @@ test("avg hold does not pair a trim of a carried position with the buy beside it
     // Sold out last period, the same two fills are a round trip of a minute.
     await fill(db, { side: "sell", coin: "CASH", qty: "1000", at: T0 - 10 * 86_400, epoch: 1 });
     assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60);
+  } finally { raw.close(); }
+});
+
+test("a coin traded more often than one cost replay reads leaves TOP TRADES unread, never 'no closed trades'", async () => {
+  // CP1, the reviewer's probe on the worker's own schema: 2,501 receipt round
+  // trips of one coin, every sell +10%. The replay was cut, vouched for
+  // nothing, and TOP TRADES came back an empty list read as true.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    raw.exec("BEGIN");
+    const ins = raw.prepare(
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol,
+                           fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, ?, 'landed', ?, 2, ?, 'TSLA', '10', ?, ?, 'receipt')`,
+    );
+    for (let i = 0; i <= BASIS_REPLAY_ROWS / 2; i++) {
+      ins.run(ACCOUNT, USDG, tokenOf("TSLA"), `0xb${i}`, T0 + 10 + i * 10, "buy", 10, null);
+      ins.run(ACCOUNT, tokenOf("TSLA"), USDG, `0xs${i}`, T0 + 15 + i * 10, "sell", 11, 1);
+    }
+    raw.exec("COMMIT");
+    const p = (await profileOf(db, identity, true))!;
+    assert.equal(p.topTradesRead, false, "a list that could not be checked was not read");
+    assert.deepEqual(p.topTrades, []);
+    assert.equal(p.activityRead, true);
+    assert.ok(p.recentTrades.filter((t) => t.action === "sell").every((t) => t.realizedPnlBps === null), "and no return on a cost nobody checked");
   } finally { raw.close(); }
 });

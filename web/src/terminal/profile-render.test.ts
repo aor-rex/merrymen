@@ -78,6 +78,21 @@ it("TOP TRADES rank by return, show dollars only when sent, and say when there a
   await render(agent({ topTrades: [], topTradesRead: false }));
   assert.match(text(), /Top trades could not be loaded/);
   assert.doesNotMatch(text(), /No closed trades yet/, "an unread list is not an empty one");
+  // Unread also means "its costs could not be checked", which no retry cures.
+  assert.doesNotMatch(text(), /Retrying shortly/);
+});
+
+it("a sale listed with no return says what that absence is", async () => {
+  // CP1: a sell whose cost was an estimate, or could not be checked at all
+  // (a coin traded more often than one replay reads), is listed with no
+  // figure. Unexplained, a column of sells with no return reads as a bug.
+  const now = nowSec();
+  const sale = (id: string, bps: number | null) =>
+    ({ id, action: "sell" as const, symbol: "CASHCAT", displayName: null, at: now - 60, paper: false, sizeUsdg: null, realizedPnlUsdg: null, realizedPnlBps: bps });
+  await render(agent({ recentTrades: [sale("2", null), sale("1", 1_000)] }));
+  assert.match(text(), /A sale with no return is one whose cost could not be confirmed\./);
+  await render(agent({ recentTrades: [sale("1", 1_000), { ...sale("0", null), action: "buy" as const }] }), { key: "all-read" });
+  assert.doesNotMatch(text(), /no return/, "every sale has its figure, and a buy realizes nothing");
 });
 
 it("the chart opens on ALL, and a window the history cannot back is disabled", async () => {
