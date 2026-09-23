@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AgentAvatar } from "@/components/AgentAvatar";
-import { badgeOf } from "@/lib/thesis-badge";
+import { badgeOf, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
@@ -129,7 +129,7 @@ export function AlertRow({ t }: { t: PublicThesis }) {
       <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
       <span className="who">
         <span className="nm">{t.name}</span>
-        <span className={`mm-chip ${badgeClass(b.kind)}${t.outcome === "pending" ? " unsettled" : ""}`}>
+        <span className={`mm-chip ${badgeClass(b.kind)}${inFlightOf(t) ? " unsettled" : ""}`}>
           {b.label}
         </span>
         <time className="mono">{timeAgo(t.at)}</time>
