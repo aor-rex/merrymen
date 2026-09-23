@@ -468,6 +468,14 @@ export async function editMessageText(
 }
 
 /**
+ * Show "typing…" in the chat while an answer is being looked up — the lookups
+ * take a few seconds, and silence reads as a dead bot. Best-effort.
+ */
+export async function sendChatAction(opts: TelegramOpts, chatId: number, action: "typing" = "typing"): Promise<void> {
+  await call(opts, "sendChatAction", { chat_id: chatId, action });
+}
+
+/**
  * Acknowledge a button press. Telegram shows a spinner on the button until
  * this is called, so it is called for EVERY press, including refused ones.
  * `text` appears as a small toast.

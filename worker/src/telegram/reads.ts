@@ -17,7 +17,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // fall back to the single-tenant guess, or must refuse.
 import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode } from "../../../packages/core/src/index";
 
-function openRO(): DatabaseSync | null {
+export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
   if (!existsSync(file)) return null;
   try {
@@ -81,7 +81,7 @@ function currentAgentId(db: DatabaseSync): string | null {
  * shared ledger returns null (→ a "no agent" answer) rather than leaking a
  * neighbour's book.
  */
-function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
+export function resolveAgent(db: DatabaseSync, passed: string | null | undefined): string | null {
   if (passed) return passed;
   if (isHostedMode()) return null;
   return currentAgentId(db);
@@ -94,7 +94,7 @@ function resolveAgent(db: DatabaseSync, passed: string | null | undefined): stri
  * curve can contain a phantom crater from a failed balance read. Kept for
  * forensics, never mixed into a number anyone is shown.
  */
-function agentEpoch(db: DatabaseSync, agentId: string): number {
+export function agentEpoch(db: DatabaseSync, agentId: string): number {
   try {
     const row = db
       .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
@@ -130,7 +130,7 @@ function gasPaid(db: DatabaseSync, agentId: string, epoch: number): { usdg: numb
  * "the agent made money" — the two were the same number until 2026-08-26, which
  * is how /pnl came to report a 1,000 USDG deposit as a 1,000 USDG profit.
  */
-function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
+export function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
   try {
     const epoch = agentEpoch(db, agentId);
     const sql =

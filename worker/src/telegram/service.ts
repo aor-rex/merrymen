@@ -34,6 +34,7 @@ import {
   getFileUrl,
   getMe,
   getUpdates,
+  sendChatAction,
   sendMessage,
   setMyCommands,
   publicBotCommands,
@@ -51,6 +52,8 @@ import { BUILTIN_STRATEGIES } from "../strategies/registry";
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import type { TradeViewOpts } from "./trade-rows";
+import { answerQuestion } from "./answer";
+import type { ToolContext } from "./chat-tools";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -90,6 +93,13 @@ import {
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+
+/**
+ * Commands that are really questions when they arrive as WORDS: answered by
+ * looking things up (answer.ts) rather than by dumping the matching report.
+ * As slash commands they still return the exact report.
+ */
+const ANSWER_KINDS: ReadonlySet<string> = new Set(["chat", "status", "positions", "pnl", "trades", "why"]);
 
 /** Buttons a command asked to have under its reply. */
 interface ReplyExtras {
@@ -278,6 +288,22 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       customTokens: cfg.customTokens,
       book: agentId ? bookAddresses(grant, agentId) : undefined,
       client: mainnetClient(),
+    };
+  };
+
+  /** What the answer loop's lookups read: this owner's agent, settings, permission and chain. */
+  const toolContext = (cfg: ResolvedConfig): ToolContext => {
+    const grant = loadGrantFile();
+    const status = deps.buildStatusContext();
+    const agentId = status.agentId ?? grant?.smartAccount ?? null;
+    return {
+      status,
+      cfg,
+      paused: isPaused(),
+      grant,
+      book: agentId ? bookAddresses(grant, agentId) : [],
+      client: mainnetClient(),
+      now: now(),
     };
   };
 
@@ -658,7 +684,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
-        await sendMessage({ token }, msg.chatId, "🤖 that's a multi-step task — turn on “remote control” + “agent mode” in the dashboard (settings) and I'll do it hands-on. For now I can answer questions and run single commands.");
+        await sendMessage(
+          { token },
+          msg.chatId,
+          isHostedMode()
+            ? "I can't work on your computer — I live on the merrymen servers. Ask me anything about your trades, coins or settings and I'll look it up."
+            : "I can only work on your computer when PC control and agent mode are switched on in Settings. Ask me anything about your trades, coins or settings and I'll look it up.",
+        );
         return;
       }
       const llm = resolveLlm(cfg);
@@ -841,8 +873,53 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // actually just said, so a fact from months back is reachable when it's
         // the one being asked about. Written AFTER the remember side-channel, so
         // something learned this turn can be recalled in the very same reply.
-        if (cmd.kind === "chat") {
-          const recalled = recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
+        // A QUESTION IS ANSWERED BY LOOKING IT UP (answer.ts).
+        //
+        // "What did you buy" used to be routed to the /trades dump; "why did
+        // you lose money" to a one-shot reply over a fixed paragraph of state.
+        // Every question — and the read commands when they arrive as words,
+        // not slashes — now goes to a model that can look things up before it
+        // answers. So does a "multi-step task" when PC control is off, which is
+        // every hosted owner: "use the brain to analyse these coins" is a
+        // question about coins, and the old reply ("turn on remote control +
+        // agent mode") was advice a hosted owner cannot even follow.
+        const pcAgentOn = cfg.telegramPcControlEnabled && cfg.telegramAgentEnabled;
+        const asked = ANSWER_KINDS.has(cmd.kind) || (cmd.kind === "agent" && !pcAgentOn);
+        let answered = false;
+        let recalledNow: { block: string; ids: string[] } | null = null;
+        if (asked) {
+          recalledNow = recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
+          const gap = describeGap(await lastChatTurnAt(msg.chatId), now());
+          void sendChatAction({ token }, msg.chatId);
+          const ans = await answerQuestion({
+            question: msg.text,
+            name: getName(),
+            identity: narratorIdentityBlock(st.linkedAt, st.messageCount, now()),
+            memory: recalledNow.block,
+            gap: gap ? `TIME SINCE THEIR LAST MESSAGE: ${gap}` : "",
+            history: await historyFor(msg.chatId),
+            tools: toolContext(cfg),
+            creds: llm,
+          });
+          if (ans) {
+            answered = true;
+            cmd = { kind: "chat", reply: ans.text };
+            if (ans.needsSignature) extras.keyboard = signKeyboard(signUrl(dashboardBase(), "dead-policy"));
+            console.log(`[telegram] answered from ${ans.used.length} lookup(s): ${[...new Set(ans.used)].join(", ") || "none"}`);
+          } else if (cmd.kind === "agent") {
+            // No answer and no PC: say what IS possible, in one breath.
+            cmd = {
+              kind: "chat",
+              reply: isHostedMode()
+                ? "I can't work on your computer — I live on the merrymen servers. Ask me anything about your trades, coins or settings and I'll look it up."
+                : "I can only work on your computer when PC control and agent mode are switched on in Settings. Ask me anything about your trades, coins or settings and I'll look it up.",
+            };
+          }
+          stickyIds.set(msg.chatId, new Set(recalledNow.ids));
+          turnMemoryIds = recalledNow.ids;
+        }
+        if (cmd.kind === "chat" && !answered) {
+          const recalled = recalledNow ?? recallForPrompt(msg.text, now(), stickyIds.get(msg.chatId));
           // Read BEFORE this turn is written, so it's the gap since they last
           // spoke rather than zero.
           const gap = describeGap(await lastChatTurnAt(msg.chatId), now());
