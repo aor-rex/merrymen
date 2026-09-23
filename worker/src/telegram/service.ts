@@ -534,8 +534,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
        * orchestrator replacing that file wholesale.
        *
        * `r.name` and not `name` — the NORMALISED form setName returned. The
-       * web tier stores soul-form for exactly this reason (route.ts shares
-       * NAME_RE and the NFC-plus-collapse with soul.ts), and storing the raw
+       * web tier stores soul-form for exactly this reason (both take the rule
+       * and the NFC-plus-collapse from packages/core/src/agent-name.ts), and storing the raw
        * input would leave cfg.agentName !== getName() true for ever, which
        * is the every-tick rewrite this fix exists to stop.
        */
