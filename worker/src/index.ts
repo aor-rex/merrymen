@@ -119,6 +119,7 @@ import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOu
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
 import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type TickReads } from "./order-gate";
+import { createFlowWitness, opsStillOut } from "./flow-witness";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -3124,6 +3125,8 @@ async function main() {
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
+    /** flowWitness.mark(), taken just before `cashUsdg` was read. See flow-witness.ts. */
+    flowMark: number,
     /** Present when flows can be READ instead of inferred. See scanChainFlows. */
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
@@ -3318,6 +3321,12 @@ async function main() {
       return true;
     };
 
+    // AN OP OUT WITH NO OUTCOME, read before anything is booked so a failed
+    // read aborts the whole pass (reconcileFlowsOrRetry retries it). Its landing
+    // time is unknown, so while one is out — and for the look after — no cash
+    // change can be called the owner's. See flow-witness.ts.
+    const opsOutstanding = opsStillOut(await listSubmittedOps(agentId), Date.now());
+
     // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
     // truth about money crossing the boundary, and inference must not book the
     // same movement a second time from the balance change it already explains.
@@ -3397,12 +3406,12 @@ async function main() {
       }
       // `resume-clean` is the remaining arm and it does nothing on purpose: a
       // funded account came back with the cash the anchor said it had.
-    } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
+    } else if (!covered && lastCashUsdg !== null && flowWitness.unexplained({ opsOutstanding })) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");
     }
 
     lastCashUsdg = cashUsdg;
-    ledgerWritesAtSnapshot = ledgerWrites;
+    flowWitness.settle({ mark: flowMark, opsOutstanding });
   };
 
   /**
@@ -3422,13 +3431,14 @@ async function main() {
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
+    flowMark: number,
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
   ): Promise<void> => {
     try {
-      await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+      await reconcileFlows(agentId, cashUsdg, equityUsdg, flowMark, scan);
     } catch (e) {
       console.log(
         `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
@@ -3706,8 +3716,13 @@ async function main() {
     cfg.browserUrl && cfg.browserToken
       ? { baseUrl: cfg.browserUrl, token: cfg.browserToken }
       : null;
-  let ledgerWrites = 0;
-  let ledgerWritesAtSnapshot = 0;
+  /**
+   * WHAT THIS PROCESS DID THAT CAN MOVE CASH, as flow inference reads it: every
+   * op sent and every landed or simulated row, counted, and whether an op is out
+   * with no outcome. See flow-witness.ts for the two ways the old count let an
+   * order's own debit be booked as the owner's withdrawal.
+   */
+  const flowWitness = createFlowWitness();
   /** The last row recordTrade wrote — see the comment there for why this exists. */
   let lastTradeOutcome = null as LedgerFacts | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
@@ -6624,7 +6639,7 @@ async function main() {
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
       const moneyMoving = row.status === "landed" || row.status === "paper" || row.status === "submitted";
-      if (moneyMoving) ledgerWrites += 1;
+      if (moneyMoving) flowWitness.wrote();
       if (!wrote && moneyMoving) {
         // FAIL-CLOSED. The fill happened (on-chain, or a simulated paper fill)
         // but its ledger row did NOT land — a network-backed write can fail
@@ -7079,6 +7094,10 @@ async function main() {
           // unreconcilable spend costs the notional and the ability to find out.
           submittedRow = wrote;
           if (!wrote) throw new NotRecorded(userOpHash);
+          // AND FROM HERE THE OP CAN MOVE CASH, before any outcome row does —
+          // counted now, because a receipt that cannot be read leaves no other
+          // write behind and the op may still land (flow-witness.ts).
+          flowWitness.wrote();
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -9032,6 +9051,10 @@ async function main() {
       symbols: [],
       tokens: [],
     };
+    // THE WRITE COUNT AS OF THIS CASH READ, taken before it. A trade whose row
+    // lands between the read and the reconcile is then seen by the next look,
+    // the first one whose cash includes it (flow-witness.ts).
+    const flowMark = flowWitness.mark();
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -9777,6 +9800,7 @@ async function main() {
         agentId,
         balances.cashUsdg,
         equityUsdg,
+        flowMark,
         cfg.depositScanEnabled
           ? {
               chain: makeReconcileChain(client),
