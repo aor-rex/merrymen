@@ -741,13 +741,23 @@ export async function mirrorTenant(args: {
       .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
       .get(tenant, "decisions")) as { last_id: number } | undefined;
     const since = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
-    const rows = (await child
-      .prepare(
-        `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name, at
-         FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
-      )
-      .all(since, batch)) as Record<string, unknown>[];
+    // THE MARK COLUMNS ARE READ WHEN THE CHILD HAS THEM. This handle is
+    // read-only, so the mirror cannot migrate a child ledger; one opened
+    // before its own worker has run the ALTER would fail a SELECT naming
+    // `mark_usd`, and the whole decisions copy would stall behind it —
+    // silently, since a stalled table and an idle one print the same line.
+    // So the row is copied without them instead: a post with no mark claims
+    // nothing, and a post that never arrives says nothing at all.
+    const read = (marks: boolean) =>
+      child
+        .prepare(
+          `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
+                  reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                  ${marks ? "mark_usd, mcap_usd," : ""} at
+           FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
+        )
+        .all(since, batch) as Promise<Record<string, unknown>[]>;
+    const rows = await read(true).catch(() => read(false));
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
@@ -765,9 +775,13 @@ export async function mirrorTenant(args: {
           // after the fill lands, say — must NOT be added to this statement; it
           // needs its own append-only table, inserted once, or it will pass
           // every test against a child sqlite and publish nothing in production.
+          //
+          // `mark_usd` and `mcap_usd` are safe here for the same reason: the
+          // writer puts them in the row's own INSERT, at decision time.
           `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                                  mark_usd, mcap_usd, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         );
         for (const r of rows) {
@@ -775,7 +789,7 @@ export async function mirrorTenant(args: {
             r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
             r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
             r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null,
-            r.provenance ?? null, r.display_name ?? null, r.at,
+            r.provenance ?? null, r.display_name ?? null, r.mark_usd ?? null, r.mcap_usd ?? null, r.at,
           );
         }
         // Same transaction as the rows, for the same reason the log tables do

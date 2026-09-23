@@ -51,6 +51,18 @@ export const VOICE_WINDOW = 6;
 export const POST_MAX = 220;
 
 /**
+ * THE LENGTH OF A TAKE — what the writer is asked for, and held to.
+ *
+ * The feed now renders the agent's own post as a row's PRIMARY line, with our
+ * deterministic sentence behind it as the "why". A primary line has to be one
+ * line: at the 220-character ceiling the writer used to be offered ("one
+ * sentence, or two or three if you have more to say") it was a paragraph, and
+ * a paragraph is a report. POST_MAX stays the ceiling every surface shares;
+ * this is the tighter budget a post is written to.
+ */
+export const TAKE_MAX = 100;
+
+/**
  * A post has to be a sentence, not a word.
  *
  * Both a length AND a word count, because either alone lets something through:
@@ -119,8 +131,13 @@ export interface WriterContext {
  * a bad sentence; it is twenty good sentences with the same skeleton, which is
  * what a feed of one agent printing "X is 0.27 USDG under its equal weight —
  * topping it up from cash" twenty-seven times actually looks like. So the prompt
- * asks for variation in LENGTH and SHAPE, shows no example to copy, and says
- * plainly that sometimes there is nothing worth saying.
+ * shows no example to copy, and says plainly that sometimes there is nothing
+ * worth saying.
+ *
+ * ONE LINE, A TAKE. It used to offer "one sentence, or two or three if you have
+ * more to say" under the 220-character ceiling, and asked for the basis AND the
+ * uncertainty — which is a report. The post is now a feed row's primary line,
+ * so it is asked for one line under TAKE_MAX, and `admitPost` holds it there.
  */
 export function writerPrompt(c: WriterContext): string {
   const bands = Object.values(c.evidence.bands);
@@ -143,23 +160,22 @@ export function writerPrompt(c: WriterContext): string {
       ? `You recently posted:\n${c.recent.map((r) => `- "${r}"`).join("\n")}\nDo not reuse their shape or their phrasing.`
       : "",
     "",
-    "Write a post saying what you make of it, the way a trader talks to other traders.",
+    // The budget itself is stated under Rules: this block is the one the model
+    // reads as what it was told, and it carries no figure of any kind.
+    "Write ONE line: your take on it, the way one trader says it to another.",
     "",
-    "MOST IMPORTANT: pick the ONE or TWO things that actually made up your mind and",
-    "talk about those. Leave the rest out. Do NOT walk through the list above — a post",
-    "that mentions every observation in order is a report, and nobody reads reports.",
-    "Say what you think, not what you measured.",
-    "",
-    "Vary the length. One sentence is often the whole post. Two or three only if you",
-    "genuinely have more to say.",
+    "MOST IMPORTANT: it is a take, not a report. Pick the ONE thing that actually made",
+    "up your mind and say what you make of it. Leave the rest out. Do NOT walk through",
+    "the list above — a line that recites what you observed is a report, and nobody",
+    "reads reports. Say what you think, not what you measured.",
     "",
     "Rules:",
     "- NO numbers, percentages, prices or amounts of any kind. Not one digit.",
     "- Say nothing you were not told above. No prediction, no price target.",
-    "- Explain the observed basis for the trade and the uncertainty in that view. If useful, say what change in those same observations would make you reconsider; never claim that change has happened.",
+    "- The take rests on what you observed. You may say what would change your mind; never claim that change has happened.",
     "- A completed order is not evidence the view was right. No operational error or inability-to-sell report in place of a thesis.",
     "- No hashtags, no emoji, no @mentions, no links.",
-    `- Under ${POST_MAX} characters.`,
+    `- ONE line, under ${TAKE_MAX} characters. No line breaks.`,
     "- Do not start with the ticker or with the word 'Just'.",
     "- Write in your own voice, not in the clipped register of a market summary.",
     "- If there is genuinely nothing worth saying, reply with exactly: PASS",
@@ -193,6 +209,7 @@ export type PostRefusal =
   | "empty"
   | "too-short"
   | "too-long"
+  | "not-one-line"
   | "has-digits"
   | "has-address"
   | "has-handle"
@@ -273,7 +290,15 @@ export function admitPost(raw: string, c: WriterContext): PostVerdict {
   // LENGTH BEFORE WORD COUNT. A 300-character single word is over the ceiling,
   // not under the floor, and filing it as "too-short" would send whoever reads
   // the refusal log looking in precisely the wrong direction.
-  if (body.length > POST_MAX) return { ok: false, refusal: "too-long" };
+  //
+  // THE TAKE'S BUDGET, not the surfaces' ceiling: the writer was asked for one
+  // line under TAKE_MAX, and a prompt instruction is not enforcement. Refused,
+  // not cut — the same rule as everything else here.
+  if (body.length > TAKE_MAX) return { ok: false, refusal: "too-long" };
+  // One line. A second line is a second thought, and a primary line that wraps
+  // into two is a paragraph. (The trim above has already taken a trailing
+  // newline off, so only a break INSIDE the post reaches this.)
+  if (/[\r\n]/.test(body)) return { ok: false, refusal: "not-one-line" };
   if (body.length < POST_MIN || body.split(/\s+/).filter(Boolean).length < POST_MIN_WORDS) {
     return { ok: false, refusal: "too-short" };
   }

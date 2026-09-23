@@ -52,7 +52,7 @@
  * owner's entire balance sheet — is not in the SELECT at all: absent, rather
  * than filtered.
  */
-import { publicationNarrowing } from "@merrymen/thesis";
+import { DERIVED_ID, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -93,6 +93,34 @@ const SHOW = 40;
  */
 const IS_ACTION = "(d.action IS NOT NULL AND d.action <> 'hold')";
 const IS_VIEW = "(d.action IS NULL OR d.action = 'hold')";
+
+/**
+ * WHAT THE CALL WAS WORTH, folded over the group's copies — or NULL. The fold
+ * lives beside the gate (thesis-policy's fillFigures/markFigures) because the
+ * peer files read groups too, and "when is a figure read" must have one answer:
+ * only when EVERY copy was, and never from a quoted fill. publishableThesis
+ * turns what survives into the post's figures, and a surface renders nothing
+ * for a null — never 0%.
+ */
+const FILLS = fillFigures("t");
+const MARKS = markFigures("d");
+
+/**
+ * WHICH OPTIONAL COLUMNS A READ ASKS FOR, richest first.
+ *
+ * `named` is the coin's name and the handle's proof; `fills` is the trade's
+ * evidence columns; `marks` is `decisions.mark_usd`/`mcap_usd`, which the
+ * writer's migration adds while this reader deploys beside it. Each attempt
+ * that fails drops what it cannot have and tries again, so the minute between
+ * the two deploys costs a post its figures, never the feed its posts.
+ */
+type Columns = { named: boolean; fills: boolean; marks: boolean };
+const ATTEMPTS: readonly Columns[] = [
+  { named: true, fills: true, marks: true },
+  { named: true, fills: true, marks: false },
+  { named: true, fills: false, marks: false },
+  { named: false, fills: false, marks: false },
+];
 
 // DERIVED, never listed again here. The SQL narrowing is an optimisation and
 // `publishableThesis` is the rule — but a second hand-maintained list makes the
@@ -254,10 +282,12 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // ONE GROUPED READ, TWO LANES. The column list, the joins and the group
     // key are shared text, so the lanes cannot drift into two ideas of what a
     // post is; only the lane predicate and the budget differ.
-    const grouped = (named: boolean, lane: string, other?: string) =>
-      `SELECT a.name AS name, a.x_handle AS x_handle, ${named ? "COALESCE(a.x_verified, 0) AS x_verified," : ""}
+    const grouped = (cols: Columns, lane: string, other?: string) =>
+      `SELECT a.name AS name, a.x_handle AS x_handle, ${cols.named ? "COALESCE(a.x_verified, 0) AS x_verified," : ""}
               d.agent_id AS agent_id, d.action AS action, d.symbol AS symbol, COALESCE(d.symbol, '') AS sym,
-              ${named ? "d.display_name AS display_name," : ""}
+              ${cols.named ? "d.display_name AS display_name," : ""}
+              ${cols.fills ? FILLS : ""}
+              ${cols.marks ? MARKS : ""}
               d.size_usdg AS size_usdg,
               d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
               d.hold_kind AS hold_kind,
@@ -289,7 +319,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         -- mix fake capital in. 'idle' stays out: an agent that has never
         -- heartbeat has not said anything.
         WHERE ${[...where, lane].join(" AND ")}
-        GROUP BY a.name, a.x_handle, ${named ? "a.x_verified," : ""} a.mode, d.agent_id, d.action, d.symbol, ${named ? "d.display_name," : ""} d.size_usdg,
+        GROUP BY a.name, a.x_handle, ${cols.named ? "a.x_verified," : ""} a.mode, d.agent_id, d.action, d.symbol, ${cols.named ? "d.display_name," : ""} d.size_usdg,
                  d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body`;
     // THE NEWEST WORD ABOUT EACH NAME IN A LANE, and nothing else: no words,
     // no outcome, no post. The same WHERE as the lane itself, so "something
@@ -323,16 +353,16 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // the view is already its own row; clearing the refusal's "since" put the
     // refusal back on top of the feed every tick, the all-day beat the "since"
     // exists to stop.
-    const placed = (named: boolean, lane: string, other?: string) =>
+    const placed = (cols: Columns, lane: string, other?: string) =>
       `SELECT g.*,
               ROW_NUMBER() OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS in_pair,
               LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at
-         FROM (${grouped(named, lane, other)}) g`;
+         FROM (${grouped(cols, lane, other)}) g`;
 
-    const actionPage = (named: boolean, offset: number) =>
+    const actionPage = (cols: Columns, offset: number) =>
       db
         .prepare(
-          `SELECT r.* FROM (${placed(named, IS_ACTION)}) r
+          `SELECT r.* FROM (${placed(cols, IS_ACTION)}) r
             ORDER BY r.last_at DESC, r.last_id DESC
             LIMIT ? OFFSET ?`,
         )
@@ -360,7 +390,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // — picks the word that is published. `agent_names` is the account's whole
     // count of names, read before the lane is cut, so a count cut by the lane
     // can say so.
-    const viewRead = (named: boolean) =>
+    const viewRead = (cols: Columns) =>
       db
         .prepare(
           `SELECT s.* FROM (
@@ -373,7 +403,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
                      SELECT r.*,
                             MAX(CASE WHEN r.in_pair = 1 AND r.next_at > r.first_at THEN r.next_at
                                      WHEN r.in_pair = 1 THEN r.first_at END) OVER (PARTITION BY r.agent_id, r.sym) AS changed_at
-                       FROM (${placed(named, IS_VIEW, IS_ACTION)}) r
+                       FROM (${placed(cols, IS_VIEW, IS_ACTION)}) r
                       WHERE r.in_pair <= ?
                    ) c
                ) q
@@ -390,12 +420,12 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // THE ACTION LANE PAGES until enough posts pass the gate or the window
     // runs out, and records which: an empty lane from a scan that stopped at
     // its bound is not "no trades", and the rail must not be told it is.
-    const readActions = async (named: boolean) => {
+    const readActions = async (cols: Columns) => {
       const out: Group[] = [];
       let exhausted = false;
       let passed = 0;
       for (let offset = 0; offset < ACTION_SCAN_MAX; offset += ACTION_PAGE) {
-        const page = await actionPage(named, offset);
+        const page = await actionPage(cols, offset);
         out.push(...page);
         passed += page.filter((r) => gate(r)).length;
         if (page.length < ACTION_PAGE) {
@@ -407,21 +437,71 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       return { rows: out, complete: exhausted && passed <= limit };
     };
 
-    let rows: { actions: Group[]; views: Group[]; tradesComplete: boolean };
-    const run = async (named: boolean) => {
-      const actions = await readActions(named);
-      return { actions: actions.rows, tradesComplete: actions.complete, views: await viewRead(named) };
+    let rows: { actions: Group[]; views: Group[]; tradesComplete: boolean } | null = null;
+    let named = false;
+    const run = async (cols: Columns) => {
+      const actions = await readActions(cols);
+      return { actions: actions.rows, tradesComplete: actions.complete, views: await viewRead(cols) };
     };
-    try {
-      rows = await run(true);
-    } catch {
-      // Second and last attempt, without the columns. A failure here is a real
-      // read failure and is reported as one.
+    for (const cols of ATTEMPTS) {
       try {
-        rows = await run(false);
+        rows = await run(cols);
+        named = cols.named;
+        break;
       } catch (error) {
-        console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
-        return { source: "none", theses: [], tradesComplete: false };
+        // The last attempt asks for no optional column at all, so a failure
+        // there is a real read failure and is reported as one.
+        if (cols === ATTEMPTS[ATTEMPTS.length - 1]) {
+          console.error("[read-theses] ledger read failed", error instanceof Error ? error.name : "unknown");
+          return { source: "none", theses: [], tradesComplete: false };
+        }
+      }
+    }
+    if (!rows) return { source: "none", theses: [], tradesComplete: false };
+
+    // ── A ROW WITH NO NAME BORROWS ITS AUTHOR'S NEWEST ONE FOR THE COIN ──
+    //
+    // Seen on the live feed 2026-09-23: "sell TA151B4A9E1B 5.01 USDG". A held
+    // coin drops off the tape's qualified list and discovery then labels it
+    // with its own id, so every exit and review written after that went into
+    // the ledger unnamed. The writer now carries the buy's name forward; this
+    // gives the rows already written theirs.
+    //
+    // THE SAME AUTHOR ACCOUNT, and only an address-derived id: one agent's
+    // label for an id is never another's, and a stock's name is its ticker.
+    // Bounded to the read's own window, so it never reads further back than
+    // the query above already did. A failure costs the name, never the post.
+    if (named) {
+      const unnamed = [...rows.actions, ...rows.views].filter(
+        (r) => !(r.display_name ?? "").trim() && typeof r.symbol === "string" && DERIVED_ID.test(r.symbol),
+      );
+      if (unnamed.length) {
+        const accounts = [...new Set(unnamed.map((r) => String(r.agent_id)))];
+        const symbols = [...new Set(unnamed.map((r) => String(r.symbol)))];
+        try {
+          const found = (await db
+            .prepare(
+              `SELECT d.agent_id AS agent_id, d.symbol AS symbol, d.display_name AS display_name, MAX(d.at) AS at
+                 FROM decisions d
+                WHERE d.agent_id IN (${accounts.map(() => "?").join(", ")})
+                  AND d.symbol IN (${symbols.map(() => "?").join(", ")})
+                  AND d.display_name IS NOT NULL AND d.display_name <> ''
+                  AND d.at > ?
+                GROUP BY d.agent_id, d.symbol, d.display_name`,
+            )
+            .all(...accounts, ...symbols, since)) as { agent_id: string; symbol: string; display_name: string; at: number }[];
+          const newest = new Map<string, { name: string; at: number }>();
+          for (const f of found) {
+            const key = `${f.agent_id}|${f.symbol}`;
+            if (Number(f.at) > (newest.get(key)?.at ?? -1)) newest.set(key, { name: f.display_name, at: Number(f.at) });
+          }
+          for (const r of unnamed) {
+            const hit = newest.get(`${String(r.agent_id)}|${String(r.symbol)}`);
+            if (hit) r.display_name = hit.name;
+          }
+        } catch {
+          /* the rows keep their ids: a post without its coin's name is a worse post, not a missing one */
+        }
       }
     }
 
@@ -433,6 +513,14 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // Resolve only authors in this response, once per tenant. Only this public
     // mode bit leaves the server; never spread settings (which contain secrets).
     const modeFor = new Map<string, boolean>();
+    // WHETHER THE OWNER MADE THE BOOK PUBLIC — the one other bit read here, and
+    // it gates DOLLARS only: a sell's realized percent is public for everyone,
+    // its dollars only when this is true. Read the way the profile cluster
+    // declares it (packages/core settings), without depending on the type, so
+    // a settings blob from before the field existed reads as private. An
+    // unreadable setting is private too: the default is the one that
+    // publishes less.
+    const bookFor = new Map<string, boolean>();
     const slugs = [...new Set([...rows.actions, ...rows.views].map(r => slugFor.get(String(r.agent_id).toLowerCase())).filter((s): s is string => !!s))];
     await Promise.all(slugs.map(async slug => {
       const tenant = tenantFor.get(slug);
@@ -440,11 +528,12 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       try {
         const config = await settings(tenant);
         modeFor.set(slug, config?.strategy === "trencher");
+        bookFor.set(slug, (config as { publicBook?: unknown } | null)?.publicBook === true);
       } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
     }));
     const gated = (r: Group, unchangedSince: number | null): FeedThesis | null => {
       const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
-      const post = publishableThesis({ ...r, slug });
+      const post = publishableThesis({ ...r, slug, public_book: slug ? bookFor.get(slug) === true : false });
       if (!post) return null;
       return {
         ...post,

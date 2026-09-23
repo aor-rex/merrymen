@@ -169,13 +169,15 @@ describe("the memecoin desk reads this on a different lens", () => {
 
 describe("memory is what this agent could have said in public", () => {
   it("carries the public post into both peer analysis and own outcome review", () => {
-    const p = post({ post: "Depth held but buyers narrowed; breadth recovery would change my view.", reason: "taking 5 USDG of NVDA", paper: true, slug: "0123456789abcdef", outcome: "refused", outcomeText: "past today's spending cap" });
+    // A LANDED trade: own memory keeps what the agent did (brain-memory.test.ts
+    // pins that a refusal is not remembered as a trade).
+    const p = post({ post: "Depth held but buyers narrowed; breadth recovery would change my view.", reason: "taking 5 USDG of NVDA", paper: true, slug: "0123456789abcdef", outcome: "landed", outcomeText: "filled on paper" });
     const peers = sentimentLine([p], "NVDA")!;
     const own = memoryLines([p], p.at + 300).join("\n");
     for (const material of [peers, own]) {
       assert.match(material, /Depth held but buyers narrowed/);
       assert.match(material, /breadth recovery would change my view/);
-      assert.match(material, /past today's spending cap/);
+      assert.match(material, /filled on paper/);
       assert.ok(material.indexOf("PAPER MONEY") < material.indexOf("Depth held"));
       assert.doesNotMatch(material, /taking 5 USDG/);
     }
@@ -202,9 +204,12 @@ describe("memory is what this agent could have said in public", () => {
     assert.match(line!, /\(said 38×\)/);
   });
 
-  it("is bounded to six, newest first, whatever it is handed", () => {
-    const rows = Array.from({ length: 40 }, (_, i) => post({ at: 1_800_000_000 - i }));
-    assert.equal(memoryLines(rows, 1_800_000_000).length, 6);
+  it("is bounded — three trades, newest first — whatever it is handed", () => {
+    const rows = Array.from({ length: 40 }, (_, i) => post({ at: 1_800_000_000 - i * 60, reason: `Fill ${i}.` }));
+    const lines = memoryLines(rows, 1_800_000_000);
+    assert.equal(lines.length, 3);
+    assert.match(lines[0]!, /Fill 0\./);
+    assert.match(lines[2]!, /Fill 2\./);
   });
 
   it("is empty when there is nothing, rather than inventing a first thought", () => {

@@ -392,6 +392,7 @@ import { applyFill } from "./basis";
 import {
   addDecision,
   addEquity,
+  displayNameFor,
   addEvent,
   addFeeAccrual,
   addPost,
@@ -6220,7 +6221,17 @@ async function main() {
       // T3AD…" for the same coin, minutes apart. Same column, same rule, and
       // it is a no-op for the issuer-backed tickers these strategies mostly
       // trade — see coin-name.ts.
-      display_name: displayNameOf(known?.symbol ?? d.symbol ?? ""),
+      //
+      // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN. A held coin
+      // drops off the qualified list and discovery then labels it with its
+      // own id, so an exit written after that carried no name and published
+      // "sell TA151B4A9E1B 5.01 USDG". The name its buy used is still in this
+      // ledger; see displayNameFor.
+      display_name: await displayNameFor(
+        active.agentId,
+        known?.symbol ?? d.symbol ?? "",
+        displayNameOf(known?.symbol ?? d.symbol ?? ""),
+      ),
       action: known?.action ?? d.action,
       size_usdg: d.sizeUsdg,
       reason,
@@ -9982,6 +9993,10 @@ async function main() {
       // line under every quiet agent every five minutes; see reviewSource.
       await addDecision({ id, agent_id: agentId,
         source: review ? reviewSource(review) : "research-unavailable", provenance: "deterministic-strategy",
+        // THE QUOTE THE REVIEW WAS WRITTEN AT, so a published one can say
+        // "+x% since posted". Only with a review: one exists only for a fresh,
+        // unstale quote, and "research unavailable" saw no market to mark.
+        mark_usd: review && quote ? quote.priceUsd : null,
         ...(review ?? { action: "hold", symbol: focus?.symbol,
           reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
           evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
@@ -10476,7 +10491,16 @@ async function main() {
                 tier: "pulse",
                 // The coin's own name, so the feed can say what was traded
                 // instead of printing eleven hex at a reader. Display only.
-                displayName: displayNameOf(focus.symbol),
+                // The tape's, or — for a held coin the tape no longer labels,
+                // whose every review went out unnamed — the one its buy used.
+                displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)),
+                // THE COIN'S SIZE, from the same tape this review just read, so
+                // a trade can say "at $3.1M MC". It is GeckoTerminal's fdv_usd
+                // — price times TOTAL supply — which is the figure a memecoin
+                // trader quotes as its cap; the tape carries no circulating
+                // count to do better with. Absent tape, absent figure — never
+                // a zero.
+                mcapUsd: tape?.fdvUsd ?? null,
                 triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
               }); },
               m => console.log(`[trencher] ${m}`));
@@ -10485,6 +10509,9 @@ async function main() {
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
+            // The coin's name when the focus is a discovered coin; a stock has
+            // none, and this is null for it. Display only.
+            { displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)) },
           );
           nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);

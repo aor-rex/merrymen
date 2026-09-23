@@ -24,7 +24,9 @@
 import type { Db } from "./db";
 import { getIdentityStore, type IdentityStore } from "./identity-store";
 import {
+  LANDED_STATUSES,
   PUBLISHABLE_SOURCES,
+  fillFigures,
   publicationNarrowing,
   publishableThesis,
   type PublicThesis,
@@ -49,6 +51,16 @@ const SOURCES: readonly string[] = PUBLISHABLE_SOURCES;
 
 /** At most this many theses reach one child, newest first. A prompt has a budget. */
 export const PEER_THESIS_LIMIT = 24;
+/**
+ * Of those, up to this many are LANDED trades, kept whatever was said since.
+ *
+ * The newest twenty-four posts of a Trencher are twelve minutes of its own
+ * reviews, so a buy that landed an hour ago was never in the file — and this
+ * file is the agent's own memory as well as its peers' view of it. A trade is
+ * the thing most worth remembering and the rarest thing written, so a few are
+ * held back from being pushed out by the chatter.
+ */
+export const PEER_LANDED = 6;
 const SCAN_BATCH = 96;
 /** Bound mirror work even if every row in a busy ledger fails publication. */
 const MAX_SCAN = 960;
@@ -102,15 +114,21 @@ export async function readPeerTheses(
   // the bounded scan below is not spent on a day of refused class entries. The
   // policy module builds it from its own constants, and the gate still decides.
   const narrow = publicationNarrowing("d", "t");
-  const published: PublicThesis[] = [];
-  try {
-    const query = shared
+  // THE LANDED LANE's extra predicate. Only a buy or a sell whose trade filled
+  // — on chain or on the paper book — is a trade worth remembering.
+  const landed = `AND d.action IN ('buy', 'sell') AND COALESCE(t.status, '') IN (${LANDED_STATUSES.map(() => "?").join(", ")})`;
+  // `fills` asks for the trade's own figures, so a closed trade is remembered
+  // with its result. The columns are the mirror's and long-standing, but a
+  // ledger without them still yields every post, only without figures.
+  const query = (fills: boolean, landedOnly: boolean) =>
+    shared
       .prepare(
         `SELECT a.name AS name, a.x_handle AS x_handle, d.agent_id AS agent_id,
                 d.action AS action, d.symbol AS symbol, d.size_usdg AS size_usdg,
                 d.source AS source, d.reason AS reason, d.dropped_rule AS dropped_rule,
                 d.hold_kind AS hold_kind,
                   p.body AS post,
+                ${fills ? fillFigures("t") : ""}
                 t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
                 COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at
            FROM decisions d
@@ -132,27 +150,56 @@ export async function readPeerTheses(
             AND (d.hold_kind IS NULL OR d.hold_kind <> 'GATE_FORCED_HOLD')
             AND (d.dropped_rule IS NULL OR d.dropped_rule NOT LIKE 'brain-%')
             AND ${narrow.sql}
+            ${landedOnly ? landed : ""}
           GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
                    d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body
           ORDER BY MAX(d.at) DESC, MAX(d.id) DESC
           LIMIT ? OFFSET ?`,
       );
+  const binds = (landedOnly: boolean) => [
+    ...accounts.map((a) => a.toLowerCase()),
+    since,
+    ...SOURCES,
+    ...narrow.args,
+    ...(landedOnly ? LANDED_STATUSES : []),
+  ];
+  // THE ONLY WAY OUT OF THIS MODULE. Everything above is a row shape; this is
+  // the gate, and it is the same one the public feed publishes through.
+  // Dollars never ride along: `public_book` is not decorated here, so a
+  // realized figure reaches another agent's prompt as a percentage only.
+  const gate = (rows: ThesisRow[]) =>
+    rows
+      .map((r) => ({ ...r, slug: slugFor.get((r.agent_id ?? "").toLowerCase()) ?? null }))
+      .map(publishableThesis)
+      .filter((t): t is PublicThesis => t !== null);
+
+  const read = async (fills: boolean): Promise<PublicThesis[]> => {
+    const published: PublicThesis[] = [];
+    const newest = query(fills, false);
     // Filter before applying the prompt limit. Otherwise 24 newer operational
     // rows hide every real thesis behind them and a followed desk looks silent.
     for (let offset = 0; offset < MAX_SCAN; offset += SCAN_BATCH) {
-      const rows = await query.all(...accounts.map((a) => a.toLowerCase()), since, ...SOURCES, ...narrow.args, SCAN_BATCH, offset) as ThesisRow[];
-      published.push(...rows
-        .map((r) => ({ ...r, slug: slugFor.get((r.agent_id ?? "").toLowerCase()) ?? null }))
-        .map(publishableThesis)
-        .filter((t): t is PublicThesis => t !== null));
+      const rows = (await newest.all(...binds(false), SCAN_BATCH, offset)) as ThesisRow[];
+      published.push(...gate(rows));
       if (published.length >= PEER_THESIS_LIMIT || rows.length < SCAN_BATCH) break;
     }
+    // THE LANDED LANE: the newest trades that filled, whatever was said since.
+    // A group the newest scan also returned is the same post, and is kept once.
+    const kept = gate((await query(fills, true).all(...binds(true), PEER_LANDED, 0)) as ThesisRow[]);
+    const same = (t: PublicThesis) => JSON.stringify([t.name, t.slug, t.head, t.reason, t.post, t.outcome, t.at, t.firstAt]);
+    const held = new Set(kept.map(same));
+    const rest = published.filter((t) => !held.has(same(t)));
+    return [...kept, ...rest.slice(0, Math.max(0, PEER_THESIS_LIMIT - kept.length))].sort((a, b) => b.at - a.at);
+  };
+  try {
+    return await read(true);
   } catch {
-    return [];
+    try {
+      return await read(false);
+    } catch {
+      return [];
+    }
   }
-  // THE ONLY WAY OUT OF THIS MODULE. Everything above is a row shape; this is
-  // the gate, and it is the same one the public feed publishes through.
-  return published.slice(0, PEER_THESIS_LIMIT);
 }
 
 /** Slugs → published theses, in one call. What the orchestrator actually wants. */

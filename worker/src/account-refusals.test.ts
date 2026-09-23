@@ -87,9 +87,11 @@ describe("the public feed", () => {
     }
   });
 
-  it("KEEPS a model's refused thesis, whatever the rule", () => {
+  it("KEEPS a model's refused thesis on a budget or arming rule", () => {
     // The strategist's reason is its own view; the refusal is its honest
     // outcome. That is a post, and thesis-policy says so at the TRADED_ONLY rule.
+    // (The one exception is a rule that halts every buy from every producer —
+    // the drawdown breaker — pinned in drawdown-halt.test.ts.)
     const post = publishableThesis(
       refused("ops-cap", { source: "strategist", reason: "NVDA held its level through the open; adding" }),
     );
