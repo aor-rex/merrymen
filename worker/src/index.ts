@@ -114,7 +114,9 @@ import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from 
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { isExpired, runTickCommand, unlessLate, type FileCommand, type LateOrder } from "./command-files";
+import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
+import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
+import { COMMAND_WAKE_EVERY_MS, commandTickReady, createCommandWake, createTickClock } from "./command-wake";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -3703,7 +3705,7 @@ async function main() {
   let ledgerWrites = 0;
   let ledgerWritesAtSnapshot = 0;
   /** The last row recordTrade wrote — see the comment there for why this exists. */
-  let lastTradeOutcome = null as { status: TradeRow["status"]; rejectRule?: string } | null;
+  let lastTradeOutcome = null as LedgerFacts | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
@@ -4656,9 +4658,16 @@ async function main() {
    * moves on in the same tick, so a fresh order behind a pile of stale ones is
    * reached while it can still fill. Nothing expired is ever run, and nothing
    * is drained anywhere but here, on the tick. See runTickCommand.
+   *
+   * "THE TICK" INCLUDES A COMMAND TICK. An order that lands between ticks no
+   * longer waits out the rest of a 240-second cadence: the watcher at the run
+   * loop wakes a tick that re-reads the market and the book and then drains
+   * here, under this same guard (see tick's `commandOnly`). Still one command
+   * at a time, still claimed by the unlink, and refused by name — never filled
+   * on old numbers — when either read fails.
    */
   let commandInFlight = false;
-  async function runQueuedCommand(agentId: string, marketUnreadable = false): Promise<void> {
+  async function runQueuedCommand(agentId: string, marketUnreadable = false, bookUnreadable = false): Promise<void> {
     if (commandInFlight || !active) return;
     commandInFlight = true;
     try {
@@ -4674,7 +4683,7 @@ async function main() {
         // The unlink WAS the claim, so a command reaching here is ours and
         // will not be replayed — a lost probe is a button pressed again, a
         // replayed one is gas nobody asked to spend twice.
-        run: (cmd) => runCommand(cmd, marketUnreadable),
+        run: (cmd) => runCommand(cmd, marketUnreadable, bookUnreadable),
         // LABELLED BY WHAT IT WAS. Every result used to be written into the
         // owner's event feed as `selftest: …` regardless of kind, which for an
         // order is a wrong claim about what the agent did, in the one log an
@@ -4682,6 +4691,9 @@ async function main() {
         told: async (cmd, outcome) => {
           await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
         },
+        // AN ORDER THAT EXPIRED IN THE QUEUE STILL GETS ITS RECEIPT. Only an
+        // order has one; a probe past its window is answered in words alone.
+        expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
       });
     } catch (e) {
       console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -4703,7 +4715,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
+  async function runCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<CommandOutcome> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -4716,12 +4728,25 @@ async function main() {
       return {
         ok: false,
         line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
+        ...(cmd.kind === "trade" ? { receipt: expiredOrderReceipt(cmd.args) } : {}),
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
     if (cmd.kind === "paper-reset") return runPaperReset();
-    if (cmd.kind === "trade") return runOrderCommand(cmd, marketUnreadable);
+    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, marketUnreadable, bookUnreadable));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
+  }
+
+  /**
+   * AN ORDER'S ANSWER, AS THE RESULT FILE CARRIES IT: the sentence and the
+   * verdict exactly as the order path produced them, and beside them a receipt
+   * templated from the ledger facts that came back with the verdict — never
+   * from the sentence, and never from a model. See order-receipt.ts for which
+   * figures it may print and the two states that get none.
+   */
+  function orderOutcome(cmd: FileCommand, reply: OrderReply): CommandOutcome {
+    const receipt = orderReceipt(orderSubject(cmd.args), reply.verdict);
+    return { ok: reply.ok, line: reply.line, ...(receipt ? { receipt } : {}) };
   }
 
   /**
@@ -4792,7 +4817,7 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
+  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<OrderReply> {
     // ANSWERED, NOT STARVED.
     //
     // The tick returns early when the market could not be read, and that return
@@ -4813,6 +4838,20 @@ async function main() {
         ok: false,
         line:
           "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
+          "not about your order. Ask again in a minute.",
+      };
+    }
+    // THE BOOK, FOR THE SAME REASON. A tick that could not read a balance or
+    // price a holding returns before equity is composed ("trading + equity
+    // paused"), so the figure the drawdown breaker would judge this order
+    // against is exactly the one missing. That return used to sit above the
+    // drain too, so the order was not refused — it starved until its window
+    // closed and was swept as "never ran". Refused now, by name, at once.
+    if (bookUnreadable) {
+      return {
+        ok: false,
+        line:
+          "I could not value your book this tick, so I did not place it — that is a fact about my reads, " +
           "not about your order. Ask again in a minute.",
       };
     }
@@ -6496,19 +6535,19 @@ async function main() {
     intent: TradeIntent,
     equityUsdg: bigint,
     equityKnown?: boolean,
-  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | null>;
+  ): Promise<LedgerFacts | null>;
   function processIntentReporting(
     intent: TradeIntent,
     equityUsdg: bigint,
     equityKnown: boolean,
     notAfterMs: number | undefined,
-  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | LateOrder | null>;
+  ): Promise<LedgerFacts | LateOrder | null>;
   function processIntentReporting(
     intent: TradeIntent,
     equityUsdg: bigint,
     equityKnown = true,
     notAfterMs?: number,
-  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | LateOrder | null> {
+  ): Promise<LedgerFacts | LateOrder | null> {
     const step = async () => {
       return unlessLate(notAfterMs, Date.now, async () => {
         lastTradeOutcome = null;
@@ -6574,7 +6613,11 @@ async function main() {
       // first `last*` in this file read from main()'s own body rather than from
       // inside another closure, and with only nested assignments TypeScript
       // keeps the initializer's narrowing and resolves the reads to `never`.
-      lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
+      //
+      // THE WHOLE ROW'S FACTS, not just its verdict: an owner's order carries
+      // them back as a receipt (order-receipt.ts), and a receipt read from this
+      // row and a sentence read from it cannot disagree about what happened.
+      lastTradeOutcome = ledgerFactsOf(row);
       const wrote = await addTrade({ ...row, decision_id });
       /**
        * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
@@ -8825,7 +8868,19 @@ async function main() {
     resetRpcMeters();
   }
 
+  /**
+   * Set by the command watcher for the ONE tick it wakes, and read once at the
+   * top of that tick — so nothing that happens mid-tick can change what kind of
+   * tick it is. See runCommandTick at the run loop.
+   */
+  let commandTick = false;
   async function tick() {
+    // A COMMAND TICK is this same tick with its producers left out: the same
+    // grant sync, the same market read, the same book read and equity — the
+    // reads an owner's order must not be placed without — then the drain, and
+    // nothing after it. No strategy, no Brain, no class route: an order that
+    // arrives between ticks must not also buy the basket a second time.
+    const commandOnly = commandTick;
     const tickStartedAt = Date.now();
     let brainOrderAccepted = false;
     const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
@@ -9311,6 +9366,12 @@ async function main() {
         "warn",
         `couldn't read ${unreadBook.join(", ")} this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`,
       );
+      // AND AN ORDER WAITING ON THIS TICK IS ANSWERED, not starved. The same
+      // rule the unreadable-market return learned: this return sits above the
+      // drain, so a queued order was skipped until its window closed. With the
+      // book unread there is no equity for the breaker to judge it against, so
+      // it is refused by name — see runOrderCommand.
+      await runQueuedCommand(agentId, false, true).catch(() => {});
       return;
     }
 
@@ -9321,6 +9382,8 @@ async function main() {
     if (missingPrice.length) {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
+      // Answered for the same reason as the unread book just above.
+      await runQueuedCommand(agentId, false, true).catch(() => {});
       return;
     }
 
@@ -9994,7 +10057,9 @@ async function main() {
       nextMarketReviewAt = clock.nextAt;
     };
 
-    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+    // Not on a command tick: the Brain keeps its own clock, and an owner's
+    // order arriving is not a reason to ask it anything.
+    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && !commandOnly) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
@@ -10731,6 +10796,10 @@ async function main() {
     // A dashboard-queued probe, before discovery: it is the thing somebody is
     // actively waiting on, and it is one operation.
     if (active) void runQueuedCommand(active.agentId).catch(() => {});
+    // A COMMAND TICK ENDS HERE. Everything below is a producer on its own
+    // clock or the strategy's per-tick cadence, and waking early for an order
+    // must not run either an extra time.
+    if (commandOnly) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -11156,9 +11225,17 @@ async function main() {
    * practice fill is not a success: the money did not move, and the owner needs
    * to know why more than they need a green tick.
    */
-  type OrderReply = { ok: boolean; line: string; executionStatus?: TradeRow["status"] };
+  type OrderReply = { ok: boolean; line: string; executionStatus?: TradeRow["status"]; verdict?: OrderVerdict };
   /** A refusal. Every path that does not reach the wall returns one of these. */
   const no = (line: string): OrderReply => ({ ok: false, line });
+  /**
+   * Where an order that reached the pipeline ended up, as DATA for its receipt:
+   * the row the ledger wrote, or no row at all. Never a guess. A refusal built
+   * with `no` alone carries none, and order-receipt.ts reads that absence as
+   * what it is — the worker said no before anything was built or sent.
+   */
+  const verdictOf = (outcome: LedgerFacts | null): OrderVerdict =>
+    outcome ? { kind: "ledger", facts: outcome } : { kind: "no-row" };
 
   async function submitChatCurveTrade(
     side: "buy" | "sell",
@@ -11332,7 +11409,7 @@ async function main() {
     if (!stamped.ok) return no(stamped.why);
     const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
     // Reached after its deadline: nothing was built or sent, and the line says so.
-    if (outcome?.status === "late") return no(outcome.line);
+    if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
     // discarded above — `amountInRaw` is the whole on-chain balance — so the
@@ -11340,7 +11417,7 @@ async function main() {
     // the note as "less than you asked for": a full liquidation annotated as
     // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status };
+    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
   }
 
   /**
@@ -11516,10 +11593,10 @@ async function main() {
       if (!stamped.ok) return no(stamped.why);
       const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
       // Reached after its deadline: nothing was built or sent, and the line says so.
-      if (outcome?.status === "late") return no(outcome.line);
+      if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
-      return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status };
+      return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
     });
   }
 
@@ -11717,13 +11794,53 @@ async function main() {
    * repo carries the incident where 1,242 identical rows told nobody anything.
    */
   let lastTickError = "";
-  const runLoop = () => {
+  // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
+  //
+  // The heartbeat is written at the TOP of the tick, before any network
+  // call, and `setAgentMode` rides it — deliberately, so a rate limit
+  // cannot get a healthy worker SIGKILLed by the watchdog. The cost of
+  // that decision is that liveness and correctness came apart: a throw in
+  // readPositions, the depth reader, the paper book, `strategy.tick()` or
+  // `processIntent` silently ended the tick and every intent after it,
+  // while the orchestrator's watchdog and the dashboard's mode chip both
+  // went on reporting the agent as fine. The only trace was a stderr line
+  // in a fleet log nobody tails.
+  //
+  // Every other failure on this path writes a row naming its rule. This
+  // is the one place a failure produced nothing at all, so it writes one.
+  // Shared by the regular tick and the command tick: a command tick that
+  // throws is the same silence, one owner's order closer to them.
+  const tickFailed = async (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[tick]", e);
+    if (active && msg !== lastTickError) {
+      lastTickError = msg;
+      await addEvent(active.agentId, "err", `tick failed: ${msg.slice(0, 300)}`).catch(() => {});
+    }
+  };
+  /**
+   * What follows a regular tick whether or not it threw, so a tick that failed
+   * still reports what it spent — the ticks that fail are exactly the ones
+   * whose RPC cost matters most. Its own function so the review deadlines the
+   * tick just wrote are read as the tick left them, not as runLoop reset them.
+   */
+  const afterTick = async (startedAt: number): Promise<number> => {
+    try { await quietReview?.(); } catch (e) { console.error("[market-review]", e); }
+    reportRpc();
+    const deadlines = [nextBrainReviewAt, nextMarketReviewAt].filter((v): v is number => v !== null);
+    const nextReview = deadlines.length ? Math.min(...deadlines) : null;
+    return nextTickDelayMs({ startedAt, now: Date.now(), tickSeconds: cfg.tickSeconds,
+      nextReviewAt: nextReview, preparationMs: reviewPreparationMs,
+      reviewIntervalSec: nextReview !== null && nextReview === nextBrainReviewAt ? scheduledInterval() : 300 });
+  };
+  /** One regular tick and everything after it; resolves to the wait before the next. */
+  const runLoop = async (): Promise<number> => {
     const startedAt = Date.now();
     // An early-returning tick must not retain an overdue deadline and spin.
     nextBrainReviewAt = null;
     nextMarketReviewAt = null;
     quietReview = null;
-    tick()
+    await tick()
       // CLEARED BY A HEALTHY TICK. The latch was only ever assigned on failure,
       // so a fault that came back after recovering was reported once and never
       // again — the same shape `lastIdleReason` and `lastLiveBlocker` both got
@@ -11732,40 +11849,63 @@ async function main() {
       .then(() => {
         lastTickError = "";
       })
-      .catch(async (e) => {
-        // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
-        //
-        // The heartbeat is written at the TOP of the tick, before any network
-        // call, and `setAgentMode` rides it — deliberately, so a rate limit
-        // cannot get a healthy worker SIGKILLed by the watchdog. The cost of
-        // that decision is that liveness and correctness came apart: a throw in
-        // readPositions, the depth reader, the paper book, `strategy.tick()` or
-        // `processIntent` silently ended the tick and every intent after it,
-        // while the orchestrator's watchdog and the dashboard's mode chip both
-        // went on reporting the agent as fine. The only trace was a stderr line
-        // in a fleet log nobody tails.
-        //
-        // Every other failure on this path writes a row naming its rule. This
-        // is the one place a failure produced nothing at all, so it writes one.
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("[tick]", e);
-        if (active && msg !== lastTickError) {
-          lastTickError = msg;
-          await addEvent(active.agentId, "err", `tick failed: ${msg.slice(0, 300)}`).catch(() => {});
-        }
-      })
-      // In the finally so a tick that threw still reports what it spent — the
-      // ticks that fail are exactly the ones whose RPC cost matters most.
-      .finally(async () => {
-        try { await quietReview?.(); } catch (e) { console.error("[market-review]", e); }
-        reportRpc();
-        const deadlines = [nextBrainReviewAt, nextMarketReviewAt].filter((v): v is number => v !== null);
-        const nextReview = deadlines.length ? Math.min(...deadlines) : null;
-        setTimeout(runLoop, nextTickDelayMs({ startedAt, now: Date.now(), tickSeconds: cfg.tickSeconds,
-          nextReviewAt: nextReview, preparationMs: reviewPreparationMs,
-          reviewIntervalSec: nextReview !== null && nextReview === nextBrainReviewAt ? scheduledInterval() : 300 }));
-      });
+      .catch(tickFailed);
+    return afterTick(startedAt);
   };
+
+  /**
+   * ONE COMMAND TICK, between two regular ones. See command-wake.ts for why
+   * this is a tick and not a side door, and tick's `commandOnly` for what it
+   * leaves out.
+   *
+   * The flag is raised only for the synchronous call: tick() reads it in its
+   * first statement, before its first await, so it cannot leak into any other
+   * tick. No review deadline is reset and no market review is run — those
+   * belong to the regular tick, which the clock puts back at exactly the moment
+   * it was due.
+   */
+  const runCommandTick = async (): Promise<void> => {
+    commandTick = true;
+    const run = tick();
+    commandTick = false;
+    await run
+      .then(() => {
+        lastTickError = "";
+      })
+      .catch(tickFailed);
+    reportRpc();
+  };
+
+  // THE CLOCK BOTH RUN ON. See createTickClock: a command tick takes the next
+  // regular tick off the clock while it runs and hands it back for the moment
+  // it was already due, so an order never shortens the strategy's cadence.
+  const tickClock = createTickClock({
+    now: Date.now,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    fallbackMs: tickIntervalMs(cfg.tickSeconds),
+    regular: runLoop,
+    command: runCommandTick,
+  });
+
+  // THE WATCHER. A directory listing every couple of seconds; it wakes a
+  // command tick for an order that has just landed, once, and only when no
+  // tick and no order is already running. Unref'd, so it never holds a
+  // process open that would otherwise exit.
+  const commandWake = createCommandWake({
+    pending: () => queuedCommandIds(merrymenHome()),
+    ready: () => commandTickReady({ ...tickClock.state(), commandInFlight }),
+    wake: () => {
+      tickClock.wakeCommand();
+    },
+  });
+  setInterval(() => {
+    try {
+      commandWake.poll();
+    } catch (e) {
+      console.error("[command-wake]", e);
+    }
+  }, COMMAND_WAKE_EVERY_MS).unref();
 
   // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────
   //
@@ -11813,7 +11953,7 @@ async function main() {
    * "idle" is the honest mode here — nothing is armed until the first tick.
    */
   beatFile("idle", gasSponsored());
-  setTimeout(runLoop, slot);
+  tickClock.start(slot);
 }
 
 

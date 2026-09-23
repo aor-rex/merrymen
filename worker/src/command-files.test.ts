@@ -13,6 +13,7 @@ import {
   isExpired,
   markRunning,
   openCommands,
+  queuedCommandIds,
   readCommandState,
   runTickCommand,
   unlessLate,
@@ -681,6 +682,138 @@ describe("the expiry sentence", () => {
     for (const where of ["claim", "queue"] as const) {
       assert.match(expiredLine(at, at + 1_000, where), /I will not fill it into a different market/);
       assert.match(expiredLine(at, at + 1_000, where), /Nothing was sent\. Ask again if you still want it\.$/);
+    }
+  });
+});
+
+/**
+ * THE RECEIPT RIDES THE RESULT FILE, beside the sentence and never instead of it.
+ *
+ * `{ ok, line }` is what every reader already understands, and an old reader
+ * must go on rendering `line` untouched. The receipt is the same verdict as
+ * data, so the chat can template "[Buy] $5.00 CASHCAT · Filled" from ledger
+ * fields instead of from prose — which is how `ok` once came to be read off an
+ * emoji.
+ */
+describe("the receipt, on its way back", () => {
+  const NOW = 1_800_000_000_000;
+  const filled = {
+    status: "filled" as const,
+    side: "buy" as const,
+    symbol: "TSLA",
+    token: "0x00000000000000000000000000000000000075a1",
+    usdgActual: 25,
+    txHash: "0x" + "cd".repeat(32),
+    rejectRule: null,
+  };
+
+  it("A RUN THAT RETURNS A RECEIPT LEAVES IT IN THE RESULT, beside the line it came with", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "o1", kind: "trade", at: NOW - 1_000, args: { side: "buy", symbol: "TSLA", usdgAmount: 25 }, expiresAt: NOW + 60_000 });
+      await runTickCommand(home, {
+        now: () => NOW,
+        run: async () => ({ ok: true, line: "✅ bought 25.00 USDG of TSLA. It is on your tape.", receipt: filled }),
+        told: async () => {},
+      });
+      const st = readCommandState(home, "o1");
+      assert.equal(st?.state, "done");
+      assert.equal(st?.result?.line, "✅ bought 25.00 USDG of TSLA. It is on your tape.", "the sentence is untouched");
+      assert.deepEqual(st?.result?.receipt, filled);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("and a run with none leaves no receipt key at all — a probe is not an order", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "p1", kind: "selftest", at: NOW - 1_000 });
+      await runTickCommand(home, { now: () => NOW, run: async () => ({ ok: true, line: "PASSED" }), told: async () => {} });
+      const st = readCommandState(home, "p1");
+      assert.equal(st?.result?.line, "PASSED");
+      assert.equal(Object.hasOwn(st?.result ?? {}, "receipt"), false);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("AN ORDER EXPIRED AT THE CLAIM IS ANSWERED WITH THE RECEIPT ITS OWNER'S HOOK BUILDS, and is still never run", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "late1", kind: "trade", at: NOW - 20 * 60_000, args: { side: "sell", symbol: "NVDA", usdgAmount: 5 }, expiresAt: NOW - 1 });
+      const asked: string[] = [];
+      let ran = 0;
+      await runTickCommand(home, {
+        now: () => NOW,
+        run: async () => {
+          ran += 1;
+          return { ok: true, line: "ran" };
+        },
+        told: async () => {},
+        expiredReceipt: (cmd) => {
+          asked.push(`${cmd.id}:${String(cmd.args?.symbol)}`);
+          return { status: "expired", side: "sell", symbol: "NVDA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+        },
+      });
+      assert.equal(ran, 0);
+      assert.deepEqual(asked, ["late1:NVDA"], "the hook sees the command it is answering");
+      const st = readCommandState(home, "late1");
+      assert.match(st?.result?.line ?? "", /^expired/);
+      assert.equal(st?.result?.receipt?.status, "expired");
+      assert.equal(st?.result?.receipt?.symbol, "NVDA");
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("without a hook an expired command is answered exactly as before", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "late2", kind: "trade", at: NOW - 20 * 60_000, expiresAt: NOW - 1 });
+      await runTickCommand(home, { now: () => NOW, run: async () => ({ ok: true, line: "ran" }), told: async () => {} });
+      const st = readCommandState(home, "late2");
+      assert.match(st?.result?.line ?? "", /^expired/);
+      assert.equal(Object.hasOwn(st?.result ?? {}, "receipt"), false);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+/**
+ * WHAT IS WAITING, WITHOUT TAKING ANY OF IT.
+ *
+ * The child's between-ticks watcher asks this every few seconds, so it must be
+ * a listing and nothing more: no parse, no claim, no marker. The claim stays
+ * the unlink inside the tick's drain, where one-at-a-time is enforced.
+ */
+describe("the queue, as a watcher sees it", () => {
+  it("LISTS THE QUEUED IDS and nothing that is answered, running or half-written", () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "q1", kind: "trade", at: 1 });
+      writeCommand(home, { id: "q2", kind: "selftest", at: 2 });
+      writeCommand(home, { id: "r1", kind: "trade", at: 3 });
+      markRunning(home, "r1");
+      claimCommandFile(home); // takes q1 — oldest — which is gone from the queue now
+      writeCommandResult(home, { id: "d1", ok: true, line: "done", at: 4 });
+      writeFileSync(path.join(commandDir(home), ".q9.tmp"), "{", "utf8");
+      assert.deepEqual(queuedCommandIds(home).sort(), ["q2", "r1"]);
+      assert.equal(readCommandState(home, "q2")?.state, "queued", "and listing claimed nothing");
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("an empty or missing queue is an empty list, never a throw", () => {
+    const home = tmpHome();
+    try {
+      assert.deepEqual(queuedCommandIds(home), []);
+      mkdirSync(commandDir(home), { recursive: true });
+      assert.deepEqual(queuedCommandIds(home), []);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

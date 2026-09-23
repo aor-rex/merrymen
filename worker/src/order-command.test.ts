@@ -164,7 +164,9 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     // no surface in this app renders, so an owner refused for being paused,
     // expired, over their ceiling or in an unwatched symbol saw nothing at all.
     assert.ok(!/\/\^\(🧱\|🤔\|↩️\)\//.test(CODE), "the emoji sniff is gone");
-    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string; executionStatus\?: TradeRow\["status"\] \};/);
+    // The verdict rides beside `ok` as DATA (order-receipt.ts builds the
+    // receipt from it); `ok` itself is still set by each path, never derived.
+    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string; executionStatus\?: TradeRow\["status"\]; verdict\?: OrderVerdict \};/);
     assert.match(CODE, /const no = \(line: string\): OrderReply => \(\{ ok: false, line \}\);/);
     // Both submitters return the verdict, and the dispatch passes it straight
     // through rather than re-deriving one.
@@ -224,6 +226,8 @@ describe("an unreadable market answers the order instead of starving it", () => 
     // that depends on a price, so an unreadable tick is no reason to refuse it.
     // The probe arm takes no flag; only the trade arm does.
     assert.match(RUN, /if \(cmd\.kind === "selftest"\) return runSelftestProbe\("dashboard"\);/);
-    assert.match(RUN, /if \(cmd\.kind === "trade"\) return runOrderCommand\(cmd, marketUnreadable\);/);
+    // The trade arm takes both read flags, and its reply is only wrapped —
+    // the sentence and the verdict pass through orderOutcome untouched.
+    assert.match(RUN, /if \(cmd\.kind === "trade"\) return orderOutcome\(cmd, await runOrderCommand\(cmd, marketUnreadable, bookUnreadable\)\);/);
   });
 });
