@@ -21,8 +21,10 @@ import {
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
-import type { ChatTurn } from "./account";
-import { chatKeyFor, clearTurns, loadTurns, saveTurns } from "./chat-store";
+import { chatKeyFor } from "./chat-store";
+import { useChatController } from "./chat-controller";
+import { chatTape } from "./chat-thread";
+import "./chat.css";
 import {
   fetchRead,
   liveOf,
@@ -195,46 +197,43 @@ export function App() {
   // Null until read — `String(caps ?? "")` rendered an unread key as "$0.00 per trade".
   const { perTrade, perDay } = capsOf(account);
   const stopped = account?.status.mode !== "live" && account?.status.mode !== "paper";
-  const [chatDraft, setChatDraft] = useState("");
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
   /**
    * WHERE THIS READER'S CHAT IS KEPT — see chat-store.ts.
    *
    * Null while the session is still loading, and null for a hosted visitor who
-   * is signed out. `lastChatKey` remembers whose it was, because sign-out
+   * is signed out. The controller remembers whose it was, because sign-out
    * clears the account first and the key of the owner LEAVING is the one that
    * has to be deleted.
    */
   const chatKey = chatKeyFor(account?.session ?? null);
-  const lastChatKey = useRef<string | null>(null);
+  /**
+   * THE CHAT, MOUNTED ONCE, HERE — see chat-controller.ts.
+   *
+   * It lived in the Agent screen, which exists only while the chat is on
+   * screen, so a reply in flight or an order being followed died when the dock
+   * closed or the tab changed. Both Agent mounts below draw this one.
+   * `open` is whether it is on screen, for the unread dot. `moves` is the
+   * owner's tape only when it was READ, so the agent's own fills can join the
+   * thread — never an empty stand-in for a read that failed. An answered order
+   * reads the account and the market again at once, rather than on the next
+   * minute's pass.
+   */
+  const chat = useChatController({
+    chatKey,
+    open: (screen.kind === "tab" && screen.tab === "agent") || (desktop && chatDocked),
+    moves: chatTape({ agentExists: account?.status.exists, read: live.reads.mine, moves: live.mine?.moves }),
+    // The account and the owner's book, read again now: the same two reads
+    // sign-in and a new agent ask for (refreshAccount, below).
+    onOutcome: () => refreshAccount(),
+  });
+  // The two names the refresh loop and sign-out already clear the chat with.
+  const setChatDraft = chat.setDraft;
+  const setTurns = (_cleared: []) => chat.clearThread();
 
   useLayoutEffect(() => {
     window.scrollTo(0, 0);
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [screen]);
-
-  /**
-   * LOAD ON ARRIVAL, FORGET ON DEPARTURE.
-   *
-   * Runs when the key changes, which is exactly the two moments that matter: a
-   * page load once the session is known, and a sign-out or a switch to a
-   * different wallet. The previous owner's transcript is deleted rather than
-   * merely hidden — leaving it in the browser for the next person to sign in on
-   * a shared machine is the thing keying it was meant to prevent.
-   */
-  useEffect(() => {
-    const previous = lastChatKey.current;
-    if (previous && previous !== chatKey) clearTurns(previous);
-    lastChatKey.current = chatKey;
-    setTurns(loadTurns(chatKey));
-  }, [chatKey]);
-
-  // Written back on every change rather than on unmount: a tab the phone
-  // reclaims in the background never gets an unmount, which is one of the ways
-  // the conversation was being lost in the first place.
-  useEffect(() => {
-    saveTurns(chatKey, turns);
-  }, [chatKey, turns]);
 
   /**
    * EVERY READ ON ITS OWN CLOCK — see live-clocks.ts and refresh-loop.ts.
@@ -569,10 +568,7 @@ export function App() {
             mine={mine}
             tokens={live.tokens}
             stopped={stopped}
-            turns={turns}
-            draft={chatDraft}
-            onDraft={setChatDraft}
-            onTurn={(turn) => setTurns((previous) => [...previous, turn])}
+            chat={chat}
             perTrade={perTrade}
             perDay={perDay}
             onToken={(id) => openScreen({ kind: "token", id })}
@@ -778,24 +774,32 @@ export function App() {
                 onClick={() => goTab(t.id)}
               >
                 <TabIcon id={t.id} />
+                {t.id === "agent" && chat.unread && <i className="tab-unread" aria-label="New in chat" />}
               </button>
             ))}
           </nav>
         )}
-      {/* THE SAME AGENT SCREEN, FLOATING. Not a second chat: identical props,
-          identical state, so there is one conversation and one draft however it
-          was opened. A second implementation would be a second place for the
-          agent's words to drift from what it actually did. */}
+      {/* THE SAME AGENT SCREEN, FLOATING. Not a second chat: identical props
+          and the one controller, so there is one conversation and one draft
+          however it was opened — and closing it ends nothing in flight. A second
+          implementation would be a second place for the agent's words to drift
+          from what it actually did. */}
+      {/* THE UNREAD DOT, ON DESKTOP. The tab bar that carries it is hidden at
+          this width, so an answer that landed while the dock was closed would
+          otherwise be told to nobody. One tap opens the dock on it. */}
+      {desktop && !chatDocked && mine && chat.unread && (
+        <button type="button" className="chat-unread-pill" onClick={() => setChatDocked(true)}>
+          <i className="tab-unread" aria-hidden="true" />
+          New from {mine.name}
+        </button>
+      )}
       {desktop && chatDocked && mine && (
         <ChatDock title={mine.name} onClose={() => setChatDocked(false)}>
           <Agent
             mine={mine}
             tokens={live.tokens}
             stopped={stopped}
-            turns={turns}
-            draft={chatDraft}
-            onDraft={setChatDraft}
-            onTurn={(turn) => setTurns((previous) => [...previous, turn])}
+            chat={chat}
             perTrade={perTrade}
             perDay={perDay}
             onToken={(id) => openScreen({ kind: "token", id })}

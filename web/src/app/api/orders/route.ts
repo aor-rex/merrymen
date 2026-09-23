@@ -242,6 +242,11 @@ export async function POST(req: Request) {
  *
  * An unreadable ledger is a 503, not "none": a read that failed is not a
  * record of nothing, and the card treats a failed poll as no answer yet.
+ *
+ * THE RECEIPT RIDES ALONG when the worker wrote one (C3): the side, coin,
+ * size, hash and refusing rule it read off the ledger, shape-checked in
+ * lib/order-state.ts and never composed here. The chat templates its receipt
+ * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
   const agent = await agentFor(req);

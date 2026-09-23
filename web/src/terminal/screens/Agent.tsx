@@ -4,7 +4,10 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
-import { followOrder as followOrderAnswer, followWindowMs } from "../order-follow";
+import { followWindowMs } from "../order-follow";
+import type { ChatContext, ChatController } from "../chat-controller";
+import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
+import type { OrderReceipt } from "@/lib/order-state";
 import {
   ArrowDown,
   ArrowUp,
@@ -19,7 +22,7 @@ import {
   positionFigures,
   positionsOf,
   spentToday,
-  type ChatTurn,
+  type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
 import { strategyName } from "../strategy";
@@ -33,16 +36,9 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-import { chatStateOf } from "../chat-payload";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
-
-const ASKS = [
-  { label: "My strategy", question: "Explain your trading strategy." },
-  { label: "My holdings", question: "What do you hold?" },
-  { label: "Trading limits", question: "Explain my trading limits." },
-];
 
 export function Agent({
   mine,
@@ -50,10 +46,7 @@ export function Agent({
   perTrade,
   perDay,
   stopped,
-  turns,
-  draft: ask,
-  onDraft: setAsk,
-  onTurn,
+  chat,
   onToken,
   onDeposit,
   onWithdraw,
@@ -68,10 +61,12 @@ export function Agent({
   perTrade: number | null;
   perDay: number | null;
   stopped: boolean;
-  turns: ChatTurn[];
-  draft: string;
-  onDraft: (value: string) => void;
-  onTurn: (turn: ChatTurn) => void;
+  /**
+   * THE CONVERSATION, owned by App (chat-controller.ts) and only drawn here —
+   * so closing this screen no longer ends a reply in flight or an order being
+   * followed. The phone tab and the desktop dock draw the same one.
+   */
+  chat: ChatController;
   onToken: (id: string) => void;
   onDeposit: () => void;
   onWithdraw: () => void;
@@ -104,21 +99,19 @@ export function Agent({
    */
   staleBlocker?: boolean;
 }) {
-  const [sending,setSending]=useState(false);
-  const [chatError,setChatError]=useState("");
+  const ask = chat.draft;
+  const setAsk = chat.setDraft;
   /**
    * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
    *
-   * Deliberately NOT part of a ChatTurn. Turns are persisted to this browser,
-   * and a confirmation card restored from storage would be an offer to act,
-   * made by nobody, on a page the owner reopened days later. A proposal lives
-   * as long as the conversation is on screen and no longer.
+   * Deliberately NOT part of a message. The thread is persisted to this
+   * browser, and a confirmation card restored from storage would be an offer to
+   * act, made by nobody, on a page the owner reopened days later. The
+   * controller holds it in memory only, and the next message clears it.
    */
-  const [pending,setPending]=useState<{id:string;args:Record<string,CommandArg>}|null>(null);
+  const pending: { id: string; args: Record<string, CommandArg> } | null = chat.proposal;
+  const setPending = chat.setProposal;
   const [running,setRunning]=useState(false);
-  /** Live while this screen is mounted, so a poll cannot outlive it. */
-  const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -146,7 +139,7 @@ export function Agent({
   };
   useLayoutEffect(() => {
     if (follow.current) scrollLatest();
-  }, [turns.length]);
+  }, [chat.messages.length, chat.streaming, chat.sending]);
   useLayoutEffect(() => {
     const node = input.current;
     if (!node) return;
@@ -217,26 +210,26 @@ export function Agent({
     (t) => t.symbol.toUpperCase() === latest?.symbol?.toUpperCase(),
   );
   const change = dailyChange(mine);
+  // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
+  // chat-payload.ts by the controller, from this screen's own view of it.
+  const context: ChatContext = { mine, liveBlocker, perTrade, perDay, stopped };
+  /**
+   * ASK, AND SHOW IT AT ONCE.
+   *
+   * The owner's line and a typing bubble appear the moment they press send,
+   * and the composer clears — the reply streams into the bubble as it is
+   * written (chat-controller.ts). It used to wait for a settings GET and then
+   * the whole reply before anything moved, and cleared the draft only on
+   * success.
+   *
+   * THE CURSOR GOES BACK ONLY WITH A MOUSE. Refocusing the textarea on a phone
+   * reopens the keyboard, and the answer arrived underneath it.
+   */
   const send = async (question: string) => {
-    if (!question.trim() || sending) return;
-    setSending(true);setChatError("");
+    if (!question.trim() || chat.sending) return;
     follow.current = true;
-    try {
-      const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
-      // chat-payload.ts, where a test can run it.
-      const state = chatStateOf({mine,settings,liveBlocker,perTrade,perDay,stopped});
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify(state),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
-      const data = await response.json();
-      if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
-      onTurn({question:question.trim(),answer:data.reply});
-      // VALIDATED AGAIN HERE. The route checks the id against the registry, and
-      // so does this — the client must not render a card for something it
-      // cannot describe, and `say` is where the description comes from.
-      setPending(data.command && commandFor(data.command.id) ? data.command : null);
-      setAsk("");
-    } catch(error) {setChatError(error instanceof Error ? error.message : "Could not send. Try again.");}
-    finally {setSending(false);input.current?.focus();}
+    await chat.send(question, context);
+    if (refocusAfterSend(window)) input.current?.focus();
   };
   /**
    * WAIT FOR THE ANSWER, AND SAY IT IN THE AGENT'S OWN WORDS.
@@ -245,25 +238,20 @@ export function Agent({
    * queued, ferried, claimed, put to the wall and signed — seconds to a minute
    * later — and until this existed the owner was told "placed it" and then
    * nothing, ever. A refusal that never reaches the wall writes no trade row,
-   * so the tape cannot carry it either: this poll is the ONLY way the reason
+   * so the tape cannot carry it either: this follow is the ONLY way the reason
    * reaches the person who asked.
    *
-   * The sentence comes from the WORKER, which read the ledger row. Nothing here
-   * infers an outcome — a browser guessing at what a trade did is exactly the
-   * claim this codebase refuses to make.
+   * The sentence comes from the WORKER, which read the ledger row, and the
+   * receipt beside it from the same row. Nothing here infers an outcome — a
+   * browser guessing at what a trade did is exactly the claim this codebase
+   * refuses to make.
    *
-   * Bounded and best-effort: it stops when the server answers, when the order
-   * outlives its OWN window and grace — carried back from the POST as a
-   * duration and counted on this browser's clock, never a constant here — or
-   * when the screen goes away. A poll that cannot end is a worse bug than a
-   * missing sentence. See order-follow.ts for why a fixed seven minutes told
-   * owners "nothing was sent" about orders that went on to fill.
+   * FOLLOWED BY THE APP, NOT BY THIS SCREEN. It used to die with this screen,
+   * so closing the dock mid-order lost the answer. The controller keeps the
+   * order and its deadline and follows it whatever the screens do — see
+   * order-follow.ts for the deadline and chat-controller.ts for the resume.
    */
-  const followOrder = (id: string, expiresInMs: number | null) =>
-    followOrderAnswer(id, expiresInMs, {
-      alive: () => alive.current,
-      say: (answer) => onTurn({ question: "", answer }),
-    });
+  const followOrder = (id: string, expiresInMs: number | null) => chat.followOrder(id, expiresInMs);
 
   /**
    * DO THE THING THE OWNER JUST CONFIRMED.
@@ -276,7 +264,6 @@ export function Agent({
     const cmd = pending && commandFor(pending.id);
     if (!cmd || running) return;
     setRunning(true);
-    setChatError("");
     try {
       if (cmd.via === "navigate") {
         window.location.href = cmd.to!;
@@ -317,17 +304,27 @@ export function Agent({
           const body = (await placed.json().catch(() => null)) as
             | { error?: string; duplicate?: boolean }
             | null;
-          if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
-          onTurn({
-            question: "✓ confirmed",
-            answer: body?.duplicate
+          const snipeBody = body as { error?: string; duplicate?: boolean; id?: string; expiresInMs?: number } | null;
+          if (!placed.ok) throw new Error(snipeBody?.error ?? `that was refused (${placed.status})`);
+          // FOLLOWED LIKE ANY ORDER. This placed an order and then said
+          // "however it ends it lands on your trades" — false for every refusal
+          // that returns before an intent is built, which writes no trade row —
+          // and never asked how it ended. It is the same order as a typed buy,
+          // so it gets the same follow and the same receipt.
+          chat.say({ role: "owner", text: "✓ Confirmed" });
+          chat.say({
+            role: "agent",
+            text: snipeBody?.duplicate
               ? `${out.say} I already had that one queued, so I have not placed it twice.`
-              : `${out.say} Placed, not filled — my key's limits still decide, and however it ends it lands on your trades.`,
+              : `${out.say} Placed, not filled — my key's limits still decide, and I will tell you which.`,
+            ...(snipeBody?.id ? { order: { id: snipeBody.id } } : {}),
           });
           setPending(null);
+          if (snipeBody?.id) followOrder(snipeBody.id, followWindowMs(snipeBody));
           return;
         }
-        onTurn({ question: "✓ confirmed", answer: out?.say ?? "I could not tell how that went." });
+        chat.say({ role: "owner", text: "✓ Confirmed" });
+        chat.say({ role: "agent", text: out?.say ?? "I could not tell how that went." });
         setPending(null);
         return;
       }
@@ -364,14 +361,16 @@ export function Agent({
         // What is true the moment the row exists is only that it was placed. So
         // that is what this says, and the outcome is fetched below and said in
         // its own turn — from the worker's own words, not from a guess here.
-        onTurn({
-          question: "✓ confirmed",
-          answer: body?.duplicate
+        chat.say({ role: "owner", text: "✓ Confirmed" });
+        chat.say({
+          role: "agent",
+          text: body?.duplicate
             ? `That exact order is already queued — I have not placed a second one.`
             : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+          ...(body?.id ? { order: { id: body.id } } : {}),
         });
         setPending(null);
-        if (body?.id) void followOrder(body.id, followWindowMs(body));
+        if (body?.id) followOrder(body.id, followWindowMs(body));
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
@@ -389,10 +388,16 @@ export function Agent({
       }
       // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
       // agent did on your instruction belongs in the record of what you asked.
-      onTurn({ question: "✓ confirmed", answer: `Done — ${cmd.say(pending!.args)}` });
+      chat.say({ role: "owner", text: "✓ Confirmed" });
+      chat.say({ role: "agent", text: `Done — ${cmd.say(pending!.args)}` });
       setPending(null);
+      // What the model is told about the settings has just changed.
+      chat.refreshSettings();
     } catch (e) {
-      setChatError(e instanceof Error ? e.message : "That did not go through.");
+      // NEVER A SILENT REFUSAL, and said in the thread where the owner is
+      // looking, with the route's own reason. The card stays, so asking again
+      // is one tap — and never automatic, because this may be an order.
+      chat.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
     } finally {
       setRunning(false);
     }
@@ -773,30 +778,39 @@ export function Agent({
           aria-live="polite"
           aria-relevant="additions"
         >
-          {turns.map((turn, i) => (
-            <div className="desk-turn" key={i}>
-              <div className="desk-question">{turn.question}</div>
-              <div className="desk-reply">
+          {chat.messages.map((m) => (
+            <ChatLine
+              key={m.id}
+              m={m}
+              name={mine.name}
+              slug={mine.slug}
+              tokens={tokens}
+              onToken={onToken}
+              onRetry={chat.sending ? undefined : () => void chat.retry(m.id, context)}
+            />
+          ))}
+          {/* THE TYPING BUBBLE, IN THE THREAD, the moment the owner sends — and
+              the reply grows inside it as it streams. It used to be a
+              "thinking…" line under the composer, and nothing in the thread
+              moved until the whole reply was back. Only what chat-stream.ts
+              lets through is ever in `streaming`: nothing of a marker. */}
+          {chat.sending && (
+            <div className="chat-msg chat-msg-agent">
+              <div className="desk-reply chat-typing">
                 <Face name={mine.name} slug={mine.slug} small />
                 <div>
                   <strong>{mine.name}</strong>
-                  {turn.trade && (
-                    <TradeTokenCard
-                      trade={turn.trade}
-                      token={tokens.find(
-                        (t) =>
-                          t.symbol.toUpperCase() ===
-                          turn.trade?.symbol?.toUpperCase(),
-                      )}
-                      onToken={onToken}
-                    />
+                  {chat.streaming ? (
+                    <p>{chat.streaming}</p>
+                  ) : (
+                    <p className="chat-typing-dots" role="status" aria-label={`${mine.name} is typing`}>
+                      <i /><i /><i />
+                    </p>
                   )}
-                  <p>{turn.answer}</p>
-                  <CopyReply text={turn.answer} />
                 </div>
               </div>
             </div>
-          ))}
+          )}
         </div>
       </section>
       <div className="desk-chat-bottom">
@@ -831,17 +845,27 @@ export function Agent({
             </div>
           </section>
         )}
-        {sending && <p role="status">{mine.name} is thinking…</p>}
-        {chatError && <p role="alert" className="flow-error">{chatError} {chatError.includes("Settings") && <a href="/settings">Open Settings</a>}</p>}
         {away && (
           <button type="button" className="chat-jump" onClick={scrollLatest}>
             <ArrowDown size={14} aria-hidden="true" /> Latest message
           </button>
         )}
-        {turns.length === 0 && (
+        {/* WHAT TO ASK NEXT, about THIS agent — not the same three on an empty
+            chat only. Sizes appear when the agent has just asked "how much?",
+            each inside the smaller of the sealed per-trade cap and the chat
+            ceiling. A chip only sends a message; a trade still needs the card. */}
+        {!chat.sending && !pending && (
           <div className="desk-prompts">
-            {ASKS.map((q) => (
-              <button type="button" key={q.label} disabled={sending} onClick={() => send(q.question)}>
+            {chatChips({
+              liveBlocker,
+              stopped,
+              latestSymbol: latest?.symbol ?? null,
+              holding: positions.map((p) => p.symbol),
+              lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,
+              perTrade,
+              ceiling: ceilingOf(chat.settings),
+            }).map((q) => (
+              <button type="button" key={q.label} onClick={() => send(q.message)}>
                 {q.label}
               </button>
             ))}
@@ -877,12 +901,107 @@ export function Agent({
           />
           <button
             type="submit"
-            disabled={!ask.trim() || sending}
+            disabled={!ask.trim() || chat.sending}
             aria-label="Send message"
           >
             <ArrowUp size={19} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The owner's ceiling on one chat order, as /api/settings reported it — the
+ * owner's own value over the house default, as the orders route resolves it.
+ * Null when the settings were not read: no chip may suggest a size against a
+ * limit nobody read.
+ */
+function ceilingOf(settings: ChatController["settings"]): number | null {
+  const own = settings?.values?.telegramMaxActionUsdg;
+  const fallback = settings?.defaults?.telegramMaxActionUsdg;
+  const v = typeof own === "number" ? own : fallback;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** A receipt's pill and line — templated from the worker's ledger facts, never written. */
+function ReceiptRow({ side, line }: { side: "Buy" | "Sell" | null; line: string }) {
+  return (
+    <p className="chat-receipt">
+      {side && <span className={`chat-pill ${side === "Buy" ? "is-buy" : "is-sell"}`}>{side}</span>}
+      <span>{line}</span>
+    </p>
+  );
+}
+
+/** One line of the thread, by who said it. */
+function ChatLine({
+  m,
+  name,
+  slug,
+  tokens,
+  onToken,
+  onRetry,
+}: {
+  m: ChatMessage;
+  name: string;
+  slug: string | null;
+  tokens: LiveToken[];
+  onToken: (id: string) => void;
+  onRetry?: () => void;
+}) {
+  const card = m.trade ? (
+    <TradeTokenCard
+      trade={m.trade}
+      token={tokens.find((t) => t.symbol.toUpperCase() === m.trade?.symbol?.toUpperCase())}
+      onToken={onToken}
+    />
+  ) : null;
+  if (m.role === "owner") {
+    return (
+      <div className="chat-msg chat-msg-owner">
+        <div className="desk-question">{m.text}</div>
+      </div>
+    );
+  }
+  if (m.role === "event") {
+    // Something that HAPPENED — one of the agent's own fills, off the tape.
+    // Templated from its row, so the same words the receipt would use.
+    const parts = m.trade ? fillParts(m.trade) : null;
+    const side = parts ? parts.side : (m.side ?? null);
+    return (
+      <div className="chat-msg chat-msg-event">
+        <div className="chat-event">
+          <ReceiptRow side={side === "buy" ? "Buy" : side === "sell" ? "Sell" : null} line={parts?.line ?? m.text} />
+          {card}
+        </div>
+      </div>
+    );
+  }
+  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
+  return (
+    <div className="chat-msg chat-msg-agent">
+      <div className="desk-reply">
+        <Face name={name} slug={slug} small />
+        <div>
+          <strong>{name}</strong>
+          {receipt && <ReceiptRow {...receiptParts(receipt)} />}
+          {card}
+          <p>{m.text}</p>
+          {m.failed ? (
+            <div className="chat-failed-actions">
+              {m.retry && onRetry && (
+                <button type="button" className="chat-retry" onClick={onRetry}>
+                  Retry
+                </button>
+              )}
+              {m.failed === "no-llm" && <a href="/settings">Open Settings</a>}
+            </div>
+          ) : (
+            <CopyReply text={m.text} />
+          )}
+        </div>
       </div>
     </div>
   );
