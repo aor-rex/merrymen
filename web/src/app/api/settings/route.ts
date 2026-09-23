@@ -597,6 +597,29 @@ export async function PUT(req: Request) {
     else errors.push("assetMode: must be all, stocks or crypto");
   }
 
+  /**
+   * ── the public book ──────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, not a line in `BOOL_FIELDS`, because it is a DISCLOSURE
+   * consent rather than a behaviour switch: turning it on puts this agent's
+   * sizes and dollar P&L on a public URL. read-agent.ts had read it for months
+   * while this handler had no branch, so an owner could not publish their book
+   * at all — the PUT said {ok:true} and dropped the field.
+   *
+   * A real boolean or nothing. "false" is truthy to any reader that forgets
+   * `=== true`, so a string is refused rather than coerced. Null clears back to
+   * the default, which is private.
+   *
+   * Tenant-settable on purpose, like liveTradingEnabled: it is the owner's
+   * decision about the owner's agent, and nothing the house may decide for them.
+   */
+  if ("publicBook" in body) {
+    const v = body.publicBook;
+    if (v === null || v === undefined) setOrClear("publicBook", undefined);
+    else if (typeof v === "boolean") setOrClear("publicBook", v);
+    else errors.push("publicBook: must be true or false");
+  }
+
   // ── booleans (telegram toggles) ─────────────────────────────────────────
   for (const key of BOOL_FIELDS) {
     if (!(key in body)) continue;

@@ -133,6 +133,20 @@ export interface MerrymenSettings {
    * changes — plain text, as before.
    */
   xHandle?: string;
+  /**
+   * PUBLISH THE BOOK: position sizes, dollar P&L and holdings on the agent's
+   * public page. OFF until the owner turns it on, from their own profile.
+   *
+   * Percentages are the public default and stay public either way; this only
+   * adds the dollars. A public URL listing what an agent holds and how big each
+   * fill was is the disclosure /api/scoreboard refuses when hosted, so it is the
+   * owner's call and nobody else's — never a default, never inferred.
+   *
+   * Read as `=== true` everywhere (read-agent.ts, and the feed through C4), so
+   * a missing or malformed value is private. The settings route accepts only a
+   * real boolean for the same reason: the string "false" is truthy.
+   */
+  publicBook?: boolean;
   v4AdapterAddress?: string;
   /**
    * The deployed PonsSelfTrade adapter for this chain, or absent.
@@ -800,6 +814,9 @@ export const SETTINGS_DEFAULTS = {
    * writes the flag explicitly for anyone already live BEFORE enforcement lands.
    */
   liveTradingEnabled: false,
+  // PRIVATE. The book is published only when its owner says so — see
+  // MerrymenSettings.publicBook.
+  publicBook: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,
