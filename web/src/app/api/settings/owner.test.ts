@@ -104,3 +104,52 @@ describe("PUT /api/settings from a chat card", () => {
     assert.equal("owner" in stored, false);
   });
 });
+
+/**
+ * THE SETTINGS SCREEN'S OWN FORM: it sends back the owner GET named, so its
+ * save lands on the wallet whose values it showed, or on nobody's.
+ */
+describe("the Settings form, read by GET and saved by PUT", () => {
+  let GET: (req: Request) => Promise<Response>;
+  before(async () => {
+    ({ GET } = await import("./route"));
+  });
+  const read = async (session: `0x${string}` | null) => {
+    const res = await GET(
+      new Request("https://app.example.test/api/settings", {
+        headers: session ? { cookie: `mm_session=${mintSession(session)}` } : {},
+      }),
+    );
+    return (await res.json()) as { owner: string | null };
+  };
+  /** The form's save, as Settings.tsx builds it. */
+  const formBody = (view: { owner: string | null }, edits: Record<string, unknown>) =>
+    view.owner !== null ? { ...edits, owner: view.owner } : edits;
+
+  it("READ FOR ONE WALLET, SAVED UNDER ANOTHER: refused, and nothing is written", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    const view = await read(TENANT);
+    assert.equal(view.owner?.toLowerCase(), TENANT);
+    const saved = await put(OTHER, formBody(view, { liveTradingEnabled: true }));
+    assert.equal(saved.status, 409);
+    assert.equal(await getSettingsStore().get(OTHER), null);
+  });
+
+  it("READ SIGNED OUT, SAVED ONCE A WALLET SIGNED IN: refused — a form that showed nobody's values writes to nobody", async () => {
+    // A 7-day session can lapse with the page open, and the Settings screen
+    // renders for a signed-out visitor with the defaults. Its save used to
+    // name nobody, and so land on whoever signed in before it went out.
+    process.env.MERRYMEN_HOSTED = "1";
+    const view = await read(null);
+    assert.equal(view.owner, "", "hosted and signed out names an owner no session is");
+    const saved = await put(OTHER, formBody(view, { liveTradingEnabled: true }));
+    assert.equal(saved.status, 409);
+    assert.equal(await getSettingsStore().get(OTHER), null, "the wallet that signed in was not turned live");
+  });
+
+  it("self-hosted the form names nobody, and saves", async () => {
+    const view = await read(null);
+    assert.equal(view.owner, null);
+    assert.equal("owner" in formBody(view, { liveTradingEnabled: true }), false);
+  });
+});

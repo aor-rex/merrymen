@@ -384,8 +384,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
         headers: { "Content-Type": "application/json" },
         // FOR THE WALLET THESE VALUES WERE READ FOR (SettingsView.owner): a
         // different wallet signed in by another tab since is refused by the
-        // route, not written to.
-        body: JSON.stringify(view?.owner ? { ...body, owner: view.owner } : body),
+        // route, not written to. Sent whenever the view names one — "" too,
+        // a form read signed out, which no session is.
+        body: JSON.stringify(view && view.owner !== null ? { ...body, owner: view.owner } : body),
       });
       const json = (await res.json()) as { ok?: boolean; errors?: string[] };
       if (!res.ok) {

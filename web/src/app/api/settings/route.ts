@@ -81,6 +81,10 @@ export interface SettingsView {
    * wallet's agent: "Trade for real" turned on for an agent its owner never
    * looked at, while this tab said "Changes saved". Carried in the same answer
    * as the values, so the claim is exactly whose values the form shows.
+   *
+   * "" when hosted and signed out: the form showed nobody's values, so its
+   * save names nobody, and the PUT refuses it for whichever wallet signs in
+   * before it goes out (a 7-day session can lapse with the page open).
    */
   owner: string | null;
 }
@@ -171,7 +175,7 @@ export async function GET(req: Request) {
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
-    owner: tenant,
+    owner: isHostedMode() ? (tenant ?? "") : null,
   };
   return NextResponse.json(view);
 }
