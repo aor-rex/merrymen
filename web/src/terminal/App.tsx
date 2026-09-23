@@ -66,6 +66,8 @@ import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
+import { useLiveNews, useSoundPref } from "./live-news";
+import { SoundToggle } from "./SoundToggle";
 import { ticksOf } from "./ticker";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
@@ -302,6 +304,17 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [epoch]);
+
+  /**
+   * A REAL-MONEY TRADE LANDING, SAID — see live-news.ts.
+   *
+   * A short tone if the reader turned sound on (off by default), and "(3)
+   * merrymen" in the tab title while the tab is hidden, both from the feed
+   * reads above and nothing else: no request of their own, never on the first
+   * read, and never for a hold, a paper fill or a refusal.
+   */
+  const [soundOn, toggleSound] = useSoundPref();
+  useLiveNews({ theses: live.theses, read: live.reads.theses, soundOn });
 
   const openScreen = (next: Screen) => {
     // There is nothing to fund before an agent exists, and the deposit panel
@@ -578,6 +591,14 @@ export function App() {
             mine={mine}
           />
         )}
+        {/* The trade chime's switch on every device; desktop also has it on
+            the tape. Its own row, not one of the session actions below: those
+            are drawn in the sign-out's red, and a preference is not a way out. */}
+        {screen.kind === "tab" && screen.tab === "you" && (
+          <div className="profile-sound">
+            <SoundToggle on={soundOn} onToggle={toggleSound} />
+          </div>
+        )}
         {/* WHO YOU ARE SIGNED IN AS, next to the way out.
             "I don't know my tenant/login wallet address offhand" — and nothing
             in the product showed it. It is a public address and the one thing
@@ -792,7 +813,9 @@ export function App() {
             halted: t.halted,
             stale: t.stale,
           }))}
-        />
+        >
+          <SoundToggle on={soundOn} onToggle={toggleSound} />
+        </TickerStrip>
       )}
     </div></div></WiredProvider>
   );

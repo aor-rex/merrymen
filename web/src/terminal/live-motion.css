@@ -1,4 +1,4 @@
-/* ══ WAVE 2 · LIVE — a figure that moves, the tape ═════════════════════════════
+/* ══ WAVE 2 · LIVE — a figure that moves, the tape, the sound switch ══════════
    Its own sheet rather than a hunk of terminal.css, which the feed's rows also
    extend this wave. Every selector here is new, and scoped to the terminal the
    way terminal.css scopes its own. */
@@ -130,6 +130,39 @@
   border: 1px dashed color-mix(in srgb, var(--down) 45%, transparent);
   border-radius: 4px;
   color: var(--down);
+}
+
+/* THE SOUND SWITCH, on the tape and on the You screen. */
+:where(.terminal-host) .sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .sound-toggle:hover,
+:where(.terminal-host) .sound-toggle[aria-pressed="true"] {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .sound-toggle[aria-pressed="true"] {
+  background: var(--raised);
+}
+
+/* On the You screen it is a control a thumb has to hit, so it takes the same
+   44px the session actions under it do. */
+:where(.terminal-host) .profile-sound {
+  display: flex;
+}
+
+:where(.terminal-host) .profile-sound .sound-toggle {
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
 }
 
 /* The slide is what moves; the colour only says which way. Under reduced
