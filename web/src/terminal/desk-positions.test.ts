@@ -19,30 +19,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { autonomyOf } from "@merrymen/core";
 import { positionFigures, positionsOf } from "./account";
+import { idleChat } from "./test-chat";
 import type { LiveMine, LiveToken } from "./live";
 
 // See wire-ring.test.ts: tsx compiles `.tsx` against a global React.
 (globalThis as unknown as { React: typeof React }).React = React;
 
 const noop = () => {};
-/** A conversation with nothing in it — this file is about the positions list beside it. */
-const idleChat = {
-  messages: [],
-  draft: "",
-  setDraft: noop,
-  sending: false,
-  streaming: null,
-  proposal: null,
-  setProposal: noop,
-  unread: false,
-  settings: null,
-  send: async () => false,
-  retry: async () => false,
-  say: noop,
-  followOrder: noop,
-  refreshSettings: noop,
-  clearThread: noop,
-};
 
 const mine = (positions: NonNullable<LiveMine["positions"]>): LiveMine => ({
   name: "Shogun",

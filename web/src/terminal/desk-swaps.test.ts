@@ -17,6 +17,7 @@ import { autonomyOf } from "@merrymen/core";
 import { Agent } from "./screens/Agent";
 import type { LiveMine, Thesis } from "./live";
 import { json, testDom } from "./test-dom";
+import { idleChat } from "./test-chat";
 
 let ui: ReturnType<typeof testDom>;
 const realFetch = globalThis.fetch;
@@ -51,8 +52,8 @@ const mine = (moves: Thesis[]): LiveMine => ({
 const noop = () => {};
 const render = (moves: Thesis[]) =>
   ui.render(React.createElement(Agent, {
-    mine: mine(moves), tokens: [], perTrade: 10, perDay: 50, stopped: false, turns: [], draft: "",
-    onDraft: noop, onTurn: noop, onToken: noop, onDeposit: noop, onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop,
+    mine: mine(moves), tokens: [], perTrade: 10, perDay: 50, stopped: false, chat: idleChat,
+    onToken: noop, onDeposit: noop, onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop,
   } as never));
 
 it("fills show as rows, refusals fold into one line per reason, and the count is of trades", async () => {
