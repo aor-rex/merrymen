@@ -981,10 +981,15 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
 }
 
 /**
- * When a child's own ledger began: its earliest account-value mark, flow or
- * trade row, or null when it holds none (a home a redeploy just wiped, or a
- * ledger that cannot be read — the caller then takes the spawn time). Read-only
- * and synchronous; the child may be writing to it.
+ * When a child's own ledger began: its earliest account-value mark, flow,
+ * trade row or decision (a book that cannot be valued writes decisions and
+ * nothing else), or null when it holds none (a home a redeploy just wiped, or
+ * a ledger that cannot be read — the caller then takes the spawn time).
+ * Read-only and synchronous; the child may be writing to it.
+ *
+ * One orchestrator replica is assumed: a ledger kept while ANOTHER replica ran
+ * the tenant would have a hole this start cannot see, and that run's trades
+ * would be neither carried nor in the ledger.
  */
 function ledgerStartOf(tenant: string): number | null {
   const file = path.join(childHome(tenant), "merrymen.db");
@@ -993,7 +998,7 @@ function ledgerStartOf(tenant: string): number | null {
   try {
     db = new DatabaseSync(file, { readOnly: true });
     const r = db
-      .prepare("SELECT MIN(t) AS t FROM (SELECT MIN(at) AS t FROM equity UNION ALL SELECT MIN(at) FROM flows UNION ALL SELECT MIN(created_at) FROM trades)")
+      .prepare("SELECT MIN(t) AS t FROM (SELECT MIN(at) AS t FROM equity UNION ALL SELECT MIN(at) FROM flows UNION ALL SELECT MIN(created_at) FROM trades UNION ALL SELECT MIN(at) FROM decisions)")
       .get() as { t: number | null } | undefined;
     return typeof r?.t === "number" ? r.t : null;
   } catch {

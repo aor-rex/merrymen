@@ -39,7 +39,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
 import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
-import { TRADE_LOOKBACK_SEC, accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
+import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
 import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
@@ -440,8 +440,11 @@ function periodStart(period: string, now: number): { since: number; label: strin
   return { since: now - (now % 86_400), label: "today (since 00:00 UTC)" };
 }
 
-/** Readings the P&L breakdown reads at most (about 50 days on a fifteen-second tick). */
+/** Readings the P&L breakdown reads at most (about nine days on a fifteen-second tick). */
 const LOCAL_MARKS_MAX = 50_000;
+
+/** When this process started — the chat runs in the process that trades, so its last restart. */
+const PROCESS_START_SEC = Math.floor(Date.now() / 1000 - process.uptime());
 
 /** A restart copy, over an unaliased trades row — isRestartCopy (token-label.ts). */
 const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) = lower(agent_id) AND decision_id IS NULL AND fill_side IS NULL)";
@@ -467,12 +470,10 @@ function accountChange(db: DatabaseSync, who: string, since: number): PeriodChan
     const firstFlow = scalar(db, "SELECT MIN(at) AS t FROM main.flows WHERE agent_id = ? AND epoch = ?", who, epoch);
     const firstLocal = firstMark === null ? firstFlow : firstFlow === null ? firstMark : Math.min(firstMark, firstFlow);
     const before = scalar(db, "SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ?", who, epoch, since);
-    const acct = before === null ? carriedHistory(who)?.account : null;
-    const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
     const from = before ?? 0;
-    // Newest LOCAL_MARKS_MAX readings at most: this runs inside the process
-    // that trades, and "all" on a long-lived ledger is every reading it holds.
-    // Cut short, the period opens at the oldest one read and says so below.
+    // Newest LOCAL_MARKS_MAX readings at most (about nine days on a fifteen-
+    // second tick): this runs inside the process that trades, and "all" on a
+    // long-lived ledger is every reading it holds.
     const local = (
       db
         .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?")
@@ -480,14 +481,23 @@ function accountChange(db: DatabaseSync, who: string, since: number): PeriodChan
     )
       .reverse()
       .map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
+    // Cut short, the period opens at the oldest reading read — and the carried
+    // record is not joined: its seam would be judged against that reading, a
+    // stretch of this ledger's own days folded into one step.
+    const cut = local.length >= LOCAL_MARKS_MAX && firstMark !== null && local[0]!.at > firstMark;
+    const acct = before === null && !cut ? carriedHistory(who)?.account : null;
+    const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
     const localFlows = (
       db
         .prepare("SELECT at, direction, amount_usdg, source FROM main.flows WHERE agent_id = ? AND epoch = ? AND at >= ?")
         .all(who, epoch, from) as { at: number; direction: string; amount_usdg: number; source: string }[]
     ).map((f) => ({ at: f.at, signed: f.direction === "out" ? -f.amount_usdg : f.amount_usdg, evidenced: isEvidencedFlow(f.source) }));
     // Trades on the carried history too: the step across the restart asks
-    // whether a trade explains its cash, and those trades are the old run's.
-    const tradeFrom = (carried ? carried.points[carried.points.length - 1]!.at : (local[0]?.at ?? from)) - TRADE_LOOKBACK_SEC;
+    // whether a trade explains its cash, and those are the old run's — from
+    // EACH book's last carried reading, not just the newest book's.
+    const lastByBook = new Map<string, number>();
+    for (const p of carried?.points ?? []) lastByBook.set(p.book, p.at);
+    const tradeFrom = carried ? Math.min(...lastByBook.values()) : (local[0]?.at ?? from);
     const trades = db
       .prepare(`SELECT created_at AS at, status FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','submitted','paper') AND ${NOT_A_COPY}`)
       .all(who, tradeFrom) as { at: number; status: string }[];
@@ -496,6 +506,8 @@ function accountChange(db: DatabaseSync, who: string, since: number): PeriodChan
       carriedTail: carried ? carried.tail : [],
       local,
       localFlows,
+      // A restart that kept this ledger (a crash, the watchdog) is a break in it.
+      localBreaks: [PROCESS_START_SEC],
       tradeTimes: { paper: trades.filter((t) => t.status === "paper").map((t) => t.at), live: trades.filter((t) => t.status !== "paper").map((t) => t.at) },
     });
     return periodChange(series, since);
@@ -538,12 +550,10 @@ const pnlBreakdown: ChatTool = {
           // ledger younger than the period, and no record carried across the
           // restart). Said only when the trades really do reach further back,
           // so the two are never read as covering the same stretch.
-          const firstTrade = scalar(
-            db,
-            "SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','paper')",
-            who,
-            since,
-          );
+          // This book's own trades: after a switch between practice and real
+          // money the other book's are no sign that readings are missing.
+          const statuses = close.book === "paper" ? "('paper')" : close.book === "live" ? "('landed','submitted')" : "('landed','paper')";
+          const firstTrade = scalar(db, `SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ${statuses}`, who, since);
           if (open.at > since + 3600 && firstTrade !== null && firstTrade < open.at - 3600) {
             lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The trades below go back further, to ${when(firstTrade)}.`);
           }

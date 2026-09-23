@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { MIN_BREAK_SEC, TRADE_LOOKBACK_SEC, accountSeries, attributeBook, breakGap, periodChange, stepAttribution, type AccountPoint, type BookMark } from "./period-pnl";
+import { MIN_BREAK_SEC, accountSeries, attributeBook, breakGap, periodChange, stepAttribution, type AccountPoint, type BookMark } from "./period-pnl";
 
 const mark = (at: number, equity: number, cash: number): BookMark => ({ at, equity, cash });
 const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
@@ -45,12 +45,19 @@ describe("a judged step (a break in the record)", () => {
     assert.deepEqual(over([mark(100, 100, 60), mark(900, 108, 60)], [], [], 0), { change: 8, flows: 0, unattributed: 0, trading: 8 });
   });
 
-  it("a trade explains the step it opens, and one stamped shortly before the opening mark too", () => {
+  it("a trade explains the step it opens — never one settled before the opening reading", () => {
     const m = [mark(1000, 100, 60), mark(1600, 99.5, 50)];
     assert.equal(over(m, [], [1000], 0).unattributed, 0);
-    assert.equal(over(m, [], [1000 - TRADE_LOOKBACK_SEC + 1], 0).unattributed, 0, "an order stamped before the mark its cash lands after");
-    assert.equal(over(m, [], [1000 - TRADE_LOOKBACK_SEC - 1], 0).unattributed, -0.5, "long before, it explains nothing");
+    assert.equal(over(m, [], [945], 0).unattributed, -0.5, "a trade before the opening reading is already in its cash");
     assert.equal(over(m, [], [1600], 0).unattributed, -0.5, "a trade AT the closing mark is the next step's");
+  });
+
+  it("a known restart inside the run is judged even when its gap is short", () => {
+    // A crash that kept the ledger, back within one tick: $50 deposited meanwhile, booked by nobody.
+    const m = [mark(0, 100, 60), mark(60, 100, 60), mark(120, 100, 60), mark(180, 150, 110), mark(240, 150, 110)];
+    const cum = attributeBook(m, [], [], undefined, undefined, [150]);
+    assert.equal(cum[4]!.unattributed, 50);
+    assert.equal(attributeBook(m, [], [])[4]!.unattributed, 0, "without the known restart the step reads as continuous");
   });
 
   it("a flow at the opening mark is already inside it; one at the closing mark belongs to the step", () => {
@@ -147,6 +154,19 @@ describe("accountSeries across a restart", () => {
     const pc = periodChange(series, 0);
     assert.ok(pc.kind === "change");
     if (pc.kind === "change") assert.deepEqual([pc.change, pc.flows, pc.unattributed, pc.trading], [1, 0, 0, 1]);
+  });
+
+  it("a trade already in the last carried reading does not excuse the seam: a deposit made while down stays unexplained", () => {
+    const series = accountSeries({
+      carried: [carried(1000, 100, 60)],
+      carriedTail: [],
+      local: [{ at: 5000, equity: 150, cash: 110, book: "live" }],
+      localFlows: [],
+      tradeTimes: { paper: [], live: [945] },
+    });
+    const pc = periodChange(series, 0);
+    assert.ok(pc.kind === "change");
+    if (pc.kind === "change") assert.deepEqual([pc.flows, pc.unattributed, pc.trading], [0, 50, 0]);
   });
 
   it("a trade the old run made just before shutting down explains the cash across the seam", () => {

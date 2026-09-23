@@ -9,12 +9,17 @@
  * again as a flow when it came back. Either way the difference landed in
  * "trading", as a gain or a loss the agent never made.
  *
- * So wherever the record is BROKEN — the step across a hosted redeploy, or any
- * step far longer than the book's usual spacing between marks (a crash, a
- * stall, a restart) — the step is judged from what its cash did:
+ * So wherever the record is known to be BROKEN, the step is judged from what
+ * its cash did. Known breaks are: the step across a hosted redeploy (the seam
+ * between the carried record and this ledger); the step containing this
+ * process's own start (a crash or watchdog restart that kept the ledger); and
+ * any step far longer than the book's usual spacing (an outage, a stall). An
+ * EARLIER restart shorter than that leaves no mark in the record — no run id
+ * is written — and is not judged; a deposit made during one counts as trading,
+ * as it always did.
  *
- *   - a trade in or just before the step explains any cash move: its flows are
- *     money in or out, the rest is trading;
+ *   - a trade in the step explains any cash move: its flows are money in or
+ *     out, the rest is trading;
  *   - cash that moved by exactly the recorded flows: they are money in or out;
  *   - cash that moved by exactly the EVIDENCED flows (a chain log, an epoch
  *     carry): those count, and a flow nobody saw the balance make — a
@@ -30,8 +35,9 @@
  *
  * Windows follow the tick's order — balances read, flows booked, mark written,
  * then trades — so a step's flows are those in (prev, cur] and its trades
- * those in [prev, cur); a judged step also looks TRADE_LOOKBACK_SEC back for
- * a trade stamped before its opening mark.
+ * those in [prev, cur). Never earlier: a trade stamped before the opening mark
+ * is already in its cash, and letting it excuse the step would put a deposit
+ * made while the agent was down into trading.
  *
  * Pure: no ledger, no clock. The orchestrator runs it over the shared ledger,
  * telegram/chat-tools.ts over the child's own and across the seam between.
@@ -39,8 +45,6 @@
 
 /** A cash move smaller than this is rounding, not money (the child's MATERIAL_DRIFT_USDG). */
 export const RECONCILE_TOLERANCE_USDG = 0.01;
-/** How far before a judged step's opening mark a trade may be stamped and still explain it. */
-export const TRADE_LOOKBACK_SEC = 300;
 /** No gap shorter than this is a break in the record, whatever the tick. */
 export const MIN_BREAK_SEC = 120;
 
@@ -92,15 +96,13 @@ export function breakGap(marks: readonly BookMark[]): number {
   return Math.max(MIN_BREAK_SEC, 3 * gaps[Math.floor((gaps.length - 1) / 2)]!);
 }
 
-/** Was there a trade that can explain a judged step from `from` to `to`? */
+/** Is there a trade in [from, to)? `sortedTrades` ascending. */
 function tradedIn(sortedTrades: readonly number[], from: number, to: number): boolean {
-  // First trade at or after the look-back start, by binary search.
   let lo = 0;
   let hi = sortedTrades.length;
-  const start = from - TRADE_LOOKBACK_SEC;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (sortedTrades[mid]! < start) lo = mid + 1;
+    if (sortedTrades[mid]! < from) lo = mid + 1;
     else hi = mid;
   }
   return lo < sortedTrades.length && sortedTrades[lo]! < to;
@@ -110,7 +112,8 @@ function tradedIn(sortedTrades: readonly number[], from: number, to: number): bo
  * Running attribution over one book's marks (ascending by time): entry i is
  * `start` plus every step up to mark i, so any period is a difference of two
  * entries. Flows at or before the first mark belong to whatever came before
- * and are skipped. Only a step longer than `gap` is judged (stepAttribution);
+ * and are skipped. Only a break is judged (stepAttribution) — a step longer
+ * than `gap`, or one containing a known restart in `breaks` (prev < b ≤ cur);
  * every other step counts its flows as money in or out.
  */
 export function attributeBook(
@@ -119,6 +122,7 @@ export function attributeBook(
   tradeTimes: readonly number[],
   start: Attribution = { flows: 0, unattributed: 0 },
   gap: number = breakGap(marks),
+  breaks: readonly number[] = [],
 ): Attribution[] {
   if (!marks.length) return [];
   const fl = [...flows].sort((a, b) => a.at - b.at);
@@ -131,10 +135,10 @@ export function attributeBook(
     const cur = marks[i]!;
     const inStep: BookFlow[] = [];
     while (fi < fl.length && fl[fi]!.at <= cur.at) inStep.push(fl[fi++]!);
-    const s =
-      cur.at - prev.at > gap
-        ? stepAttribution(prev, cur, inStep, tradedIn(tt, prev.at, cur.at))
-        : { flows: inStep.reduce((sum, f) => sum + f.signed, 0), unattributed: 0 };
+    const broken = cur.at - prev.at > gap || breaks.some((b) => b > prev.at && b <= cur.at);
+    const s = broken
+      ? stepAttribution(prev, cur, inStep, tradedIn(tt, prev.at, cur.at))
+      : { flows: inStep.reduce((sum, f) => sum + f.signed, 0), unattributed: 0 };
     const p = out[i - 1]!;
     out.push({ flows: p.flows + s.flows, unattributed: p.unattributed + s.unattributed });
   }
@@ -169,6 +173,8 @@ export interface SeriesInput {
   /** This ledger's marks, flows and trade times (restart copies excluded). */
   local: readonly (BookMark & { book: BookKey })[];
   localFlows: readonly BookFlow[];
+  /** Times this ledger is known to have been restarted (the running process's start). */
+  localBreaks?: readonly number[];
   /** Trade times by book: practice fills for the practice book, landed or submitted for the others. */
   tradeTimes: { paper: readonly number[]; live: readonly number[] };
 }
@@ -204,7 +210,7 @@ export function accountSeries(s: SeriesInput): AccountPoint[] {
       const seam = stepAttribution(last, first, seamFlows, tradedIn(trades, last.at, first.at));
       start = { flows: last.flows + seam.flows, unattributed: last.unattributed + seam.unattributed };
     }
-    const cum = attributeBook(L, flows, trades, start);
+    const cum = attributeBook(L, flows, trades, start, breakGap(L), s.localBreaks ?? []);
     L.forEach((m, i) => out.push({ at: m.at, equity: m.equity, cash: m.cash, book, ...cum[i]!, carried: false }));
   }
   // Carried points are all older than this ledger's (it began after they were
