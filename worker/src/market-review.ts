@@ -52,6 +52,68 @@ export function reviewSource(review: Pick<MarketReview, "publish">): string {
   return review.publish ? REVIEW_SOURCE : PRIVATE_REVIEW_SOURCE;
 }
 
+/** Filed when there was no review to write: private, and never a mark. */
+export const RESEARCH_UNAVAILABLE_SOURCE = "research-unavailable";
+
+/**
+ * THE DECISION ROW A QUIET REVIEW IS WRITTEN AS — built here, where a test can
+ * run it, and written by the tick's quietReview.
+ *
+ * ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED: an unchanged review is one
+ * shared oracle series restated, so it is filed under the private source (see
+ * reviewSource). With no review — no fresh quote, or no informative series —
+ * the row says so and is filed where nothing publishes it.
+ *
+ * THE MARK IS THE QUOTE THE REVIEW WAS WRITTEN AT, so a published one can say
+ * "+x% since posted". Only with a review: one exists only for a fresh, unstale
+ * quote, and "research unavailable" saw no market to mark.
+ */
+export function quietReviewRow(args: {
+  id: string;
+  agentId: string;
+  review: MarketReview | null;
+  quote: ReviewQuote | null;
+  /** The name chooseFocus picked, for the row that could not review it. */
+  focusSymbol?: string;
+  historyRead: boolean;
+}): {
+  id: string;
+  agent_id: string;
+  source: string;
+  provenance: "deterministic-strategy";
+  mark_usd: number | null;
+  action: "hold";
+  symbol: string | undefined;
+  reason: string;
+  evidence_json: string;
+} {
+  const { review, quote } = args;
+  const base = {
+    id: args.id,
+    agent_id: args.agentId,
+    provenance: "deterministic-strategy" as const,
+    action: "hold" as const,
+  };
+  if (review) {
+    return {
+      ...base,
+      source: reviewSource(review),
+      mark_usd: quote ? quote.priceUsd : null,
+      symbol: review.symbol,
+      reason: review.reason,
+      evidence_json: review.evidence_json,
+    };
+  }
+  return {
+    ...base,
+    source: RESEARCH_UNAVAILABLE_SOURCE,
+    mark_usd: null,
+    symbol: args.focusSymbol,
+    reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
+    evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: args.historyRead }),
+  };
+}
+
 const DIRECTIONS = new Set<string>(["upward", "downward", "range-bound"]);
 
 /** Read a baseline back out of a review's own evidence, or refuse to. */

@@ -214,6 +214,15 @@ export function sentimentLine(
  *   - its LATEST VIEW on each of MEMORY_VIEWS names, one line per name, so a
  *     name it reviewed forty times is one line and not forty.
  *
+ * NOT ITS OWN HOLDS, in either lane. The first cut of this counted a hold as
+ * a view and kept the newest one per name — and a Trencher reviewing three
+ * coins every thirty seconds still opened its memory with three lines of
+ * "edge unclear, so hold", newest first, which is the template it was being
+ * cured of. A hold is the absence of a decision; the Brain learns nothing from
+ * being shown it declined again. That drops a published market review too: it
+ * is filed as a hold, and it is one shared oracle series restated, not this
+ * agent's own word (market-review.ts says so of its own sentence).
+ *
  * A figure is printed only when it was read: an unread result is no figure,
  * never "0%". Newest first across both.
  */
@@ -222,13 +231,15 @@ export function memoryLines(
   now: number,
 ): string[] {
   const trades = own.filter((t) => (t.action === "buy" || t.action === "sell") && t.outcome === "landed").slice(0, MEMORY_TRADES);
-  // A view is a hold, a pure view, or a shadow agent's stated call — the
-  // agent's standing word on a name, as opposed to something it did.
+  // A view is a pure view about the book, or a shadow agent's stated call —
+  // the agent's standing word on a name, as opposed to something it did. A
+  // hold is neither; see above.
   const views: PublicThesis[] = [];
   const named = new Set<string>();
   for (const t of own) {
     if (views.length >= MEMORY_VIEWS) break;
     if (t.outcome !== "view" && t.outcome !== "shadow") continue;
+    if (t.action === "hold") continue;
     // `own` arrives newest first, so the first line per name is its latest.
     // A view about the whole book names nothing, and is one "name" of its own.
     const key = (t.symbol ?? "").toUpperCase();

@@ -335,6 +335,28 @@ export function openChildLedger(home: string): { db: Db; close: () => void } | n
 }
 
 /**
+ * IS THIS THE ERROR A LEDGER WITHOUT `mark_usd`/`mcap_usd` GIVES — AND ONLY THAT?
+ *
+ * The decisions copy falls back to a SELECT without the mark columns for a
+ * child ledger that predates them. That fallback is permanent for every row it
+ * copies: a decision reaches the shared ledger once, exactly as first written
+ * (see the ON CONFLICT note below). So it may only ever answer the one question
+ * it exists for. A locked file, a timeout or any other column's absence is a
+ * failed pass, which the next pass retries WITH the marks; swallowing it here
+ * would publish up to a batch of posts that can never say "since posted".
+ *
+ * SQLite says `no such column: mark_usd`; Postgres says undefined_column (42703)
+ * and names the column. The column name is required in both, so the absence of
+ * some OTHER column is still a failure and still visible.
+ */
+export function missingMarkColumn(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const names = /\b(mark_usd|mcap_usd)\b/.test(e.message);
+  if (!names) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
+}
+
+/**
  * Copy one tenant's ledger forward.
  *
  * Never throws: a tenant whose ledger is mid-write, corrupt, or simply absent
@@ -748,6 +770,9 @@ export async function mirrorTenant(args: {
     // silently, since a stalled table and an idle one print the same line.
     // So the row is copied without them instead: a post with no mark claims
     // nothing, and a post that never arrives says nothing at all.
+    //
+    // ONLY for that. Any other failure of the first read throws to the catch
+    // below and the pass retries with the marks — see missingMarkColumn.
     const read = (marks: boolean) =>
       child
         .prepare(
@@ -757,7 +782,10 @@ export async function mirrorTenant(args: {
            FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
         )
         .all(since, batch) as Promise<Record<string, unknown>[]>;
-    const rows = await read(true).catch(() => read(false));
+    const rows = await read(true).catch((e: unknown) => {
+      if (missingMarkColumn(e)) return read(false);
+      throw e;
+    });
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(

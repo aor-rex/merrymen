@@ -106,7 +106,8 @@ import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbo
 import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
-import { publishesIdle, renderWhy } from "./strategies/reasons";
+import { renderWhy } from "./strategies/reasons";
+import { idleNotice, idleViewRow, modeEmptiedFact } from "./idle-notice";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
@@ -123,14 +124,15 @@ import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeCons
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { publishesAView, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
-import { MarketReviewClock, reviewSource } from "./market-review";
+import { MarketReviewClock, quietReviewRow } from "./market-review";
+import { ChainCoinNames, makeDecisionNamer } from "./decision-name";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -6009,6 +6011,19 @@ async function main() {
     return coinDisplayName(watchTokens.find((t) => t.symbol === symbol));
   }
 
+  /**
+   * THE NAME EVERY DECISION ROW ABOUT A COIN IS WRITTEN WITH: the tape's, else
+   * the one this agent's buy used, else the coin's own contract — the one
+   * source a redeploy does not wipe. See decision-name.ts. Mainnet, like
+   * discovery's own reads of these tokens: a paper Trencher trades mainnet
+   * coins too. Bounded and cached there, so an exit waits at most once per
+   * coin for a word nobody prices against.
+   */
+  const coinNames = new ChainCoinNames((address) =>
+    mainnetClient().readContract({ address, abi: erc20Abi, functionName: "symbol" }),
+  );
+  const decisionName = makeDecisionNamer({ watchTokens: () => watchTokens, ledger: displayNameFor, chain: coinNames });
+
   async function maybePost(decisionId: string, status: string): Promise<void> {
     try {
       // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
@@ -6109,7 +6124,7 @@ async function main() {
         // spends its completion budget thinking BEFORE it writes: gpt-oss-120b
         // measured 198 reasoning tokens on this prompt and had nothing left, so
         // a 200 budget returned HTTP 200 with an empty completion on every
-        // call. The post itself is capped at POST_MAX either way.
+        // call. The post itself is capped at TAKE_MAX (social-post.ts) either way.
         maxTokens: 800,
       });
 
@@ -6220,13 +6235,9 @@ async function main() {
       // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN. A held coin
       // drops off the qualified list and discovery then labels it with its
       // own id, so an exit written after that carried no name and published
-      // "sell TA151B4A9E1B 5.01 USDG". The name its buy used is still in this
-      // ledger; see displayNameFor.
-      display_name: await displayNameFor(
-        active.agentId,
-        known?.symbol ?? d.symbol ?? "",
-        displayNameOf(known?.symbol ?? d.symbol ?? ""),
-      ),
+      // "sell TA151B4A9E1B 5.01 USDG" — and after a redeploy the buy's row
+      // is gone too. See decisionName.
+      display_name: await decisionName(active.agentId, known?.symbol ?? d.symbol ?? ""),
       action: known?.action ?? d.action,
       size_usdg: d.sizeUsdg,
       reason,
@@ -10036,19 +10047,11 @@ async function main() {
       const review = quote && fresh ? clock.prepare(quote, reviewPreparationMs,
         history?.read ? history.points.map(p => ({ at: p.at, priceUsd: p.px })) : [], now) : null;
       const id = newDecisionId();
-      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED. An unchanged review is
-      // one shared oracle series restated, and filing it publicly put the same
-      // line under every quiet agent every five minutes; see reviewSource.
-      await addDecision({ id, agent_id: agentId,
-        source: review ? reviewSource(review) : "research-unavailable", provenance: "deterministic-strategy",
-        // THE QUOTE THE REVIEW WAS WRITTEN AT, so a published one can say
-        // "+x% since posted". Only with a review: one exists only for a fresh,
-        // unstale quote, and "research unavailable" saw no market to mark.
-        mark_usd: review && quote ? quote.priceUsd : null,
-        ...(review ?? { action: "hold", symbol: focus?.symbol,
-          reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
-          evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
-      });
+      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED, and with the quote it
+      // was written at as its mark — see quietReviewRow, where a test runs it.
+      await addDecision(quietReviewRow({
+        id, agentId, review, quote, focusSymbol: focus?.symbol, historyRead: history?.read ?? false,
+      }));
       // Failed persistence leaves this decision due for the next tick.
       if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
         if (quote) clock.recorded(quote, review);
@@ -10113,7 +10116,9 @@ async function main() {
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
-        // none was looked at. The strategy's idle reason says why instead.
+        // none was looked at. The strategy's idle reason says why instead, as
+        // a WARNING written after this one, so it is the notice the desk shows
+        // (idle-notice.ts) — not a second Trencher line saying the same thing.
         if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
@@ -10547,17 +10552,11 @@ async function main() {
               {
                 tier: "pulse",
                 // The coin's own name, so the feed can say what was traded
-                // instead of printing eleven hex at a reader. Display only.
-                // The tape's, or — for a held coin the tape no longer labels,
-                // whose every review went out unnamed — the one its buy used.
-                displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)),
-                // THE COIN'S SIZE, from the same tape this review just read, so
-                // a trade can say "at $3.1M MC". It is GeckoTerminal's fdv_usd
-                // — price times TOTAL supply — which is the figure a memecoin
-                // trader quotes as its cap; the tape carries no circulating
-                // count to do better with. Absent tape, absent figure — never
-                // a zero.
-                mcapUsd: tape?.fdvUsd ?? null,
+                // instead of printing eleven hex at a reader, and its size
+                // from the same tape this review just read, so a trade can
+                // say "at $3.1M MC". Display only; see reviewRecord and
+                // decisionName.
+                ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol), tape }),
                 triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
               }); },
               m => console.log(`[trencher] ${m}`));
@@ -10567,8 +10566,8 @@ async function main() {
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
             // The coin's name when the focus is a discovered coin; a stock has
-            // none, and this is null for it. Display only.
-            { displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)) },
+            // none, and this is null for it. No tape on this path, so no size.
+            reviewRecord({ displayName: await decisionName(agentId, focus.symbol) }),
           );
           nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
@@ -10951,84 +10950,42 @@ async function main() {
     // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
     // this repo already carries the incident where 1,242 identical rows told
     // nobody anything. The same de-duplication the live-rail blocker uses.
-    /**
-     * A MODE THAT LEAVES NOTHING TO TRADE MUST SAY SO.
-     *
-     * The one way the asset mode could be worse than no feature at all: an
-     * owner picks "crypto only" with a basket of equities, every strategy
-     * resolves zero legs, and the agent goes quiet with nothing on any screen
-     * to connect the silence to the dropdown they just moved. That is the exact
-     * shape of the trencher incident this file already carries — "it didn't
-     * take any trades yet", then "I think I'm stuck in paper mode".
-     *
-     * Computed from the same inputs `makeStrategy` resolves legs from, so it
-     * cannot disagree with them, and only when the mode is actually narrowing
-     * something. It rides the once-per-change idle channel below rather than
-     * inventing a second one.
-     */
-    const modeEmptied =
-      cfg.assetMode !== "all" &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), cfg.assetMode)
-        .length === 0 &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
-        ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
-          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade`
-        : null;
-    /**
-     * TWO REGISTERS FROM ONE FACT. The owner's event log gets the remedy —
-     * they are the one person who can change the mode. The decision row is a
-     * public post, and "Change the mode in Settings" on a public feed is an
-     * instruction to a stranger about somebody else's account; it was live for
-     * weeks and is the exact texture of a worker log leaking onto a desk.
-     * `renderWhy` draws the same line for its own remedy-bearing arms.
-     */
-    const modeEmptiedRemedy = modeEmptied === null ? null : `${modeEmptied}. Change the mode in Settings, or add something it allows to your basket.`;
-    const idleNow = idle ? renderWhy(idle) : modeEmptiedRemedy;
-    const idlePublic = idle ? renderWhy(idle, "public") : modeEmptied;
-    if (idleNow !== lastIdleReason) {
-      lastIdleReason = idleNow;
-      if (idleNow) {
-        console.log(`[tick] idle — ${idleNow}`);
-        await addEvent(agentId, "ok", idleNow);
-        // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
-        //
-        // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED. A tick
-        // that proposes nothing writes its reason to `events` and nothing
-        // else — and only `decisions` can become a post. So an agent that
-        // thought about the market and concluded "not today, and here is
-        // why" was talking to a table nobody reads, while its owner watched
-        // a feed that said nothing at all. "The agents need to be social,
-        // talk a lot" is not a cadence problem; it is this.
-        //
-        // A DECISION WITH NO ACTION IS A `view`, which is a shape this
-        // product already has all the way through: thesis-policy classifies
-        // it, `outcome: "view"` exists for exactly "a decision the agent
-        // made, not a trade that failed to happen", and the feed grew a
-        // `view` arm that renders it from the publisher's own words.
-        //
-        // ONCE PER CHANGE, NOT ONCE PER TICK — the same de-duplication the
-        // event above uses, and it is load-bearing twice over. `renderWhy`
-        // is deterministic, so an unchanged reason would write an identical
-        // row every 240 seconds; read-theses would still group them into ONE
-        // post (the reason is part of its key), but the ledger would carry
-        // 12,000 rows a day saying the same sentence, and this repo already
-        // has the incident where 1,242 identical rows told nobody anything.
-        //
-        // renderWhy is the only producer of these strings — the same
-        // property that makes a deterministic strategy's trade reason safe
-        // to publish makes its SILENCE safe to publish.
-        //
-        // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
-        // account's losses, and the refusal it replaces leaves the public
-        // feed; the owner has the event above. See publishesIdle.
-        if (!idle || publishesIdle(idle)) await addDecision({
-          id: newDecisionId(),
-          agent_id: agentId,
-          source: publicationSourceFor(strategy.name),
-          // Non-null whenever idleNow is — both derive from the same Why or the
-          // same modeEmptied — but the type cannot see across the two ternaries.
-          reason: idlePublic ?? undefined,
-        });
+    //
+    // A MODE THAT LEAVES NOTHING TO TRADE rides the same channel rather than
+    // inventing a second one, counted from the same inputs `makeStrategy`
+    // resolves legs from so it cannot disagree with them (modeEmptiedFact).
+    const modeEmptied = modeEmptiedFact(
+      cfg.assetMode,
+      (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
+    );
+    // TWO REGISTERS FROM ONE FACT, once per change, and at a level the owner
+    // sees when the fact cannot be a post — all decided in idle-notice.ts,
+    // where a test runs it. This block only writes what it decided.
+    const notice = idleNotice({ idle, modeEmptied, last: lastIdleReason });
+    lastIdleReason = notice.last;
+    if (notice.event) {
+      console.log(`[tick] idle — ${notice.event.message}`);
+      await addEvent(agentId, notice.event.level, notice.event.message);
+      // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
+      //
+      // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
+      // `decisions` can become a post, so the silence is also written as a
+      // `view` (idleViewRow). Inside the same change gate as the event —
+      // renderWhy is deterministic, so an unchanged reason would otherwise
+      // write an identical row every 240 seconds, 12,000 a day.
+      //
+      // renderWhy is the only producer of these strings — the same
+      // property that makes a deterministic strategy's trade reason safe
+      // to publish makes its SILENCE safe to publish.
+      //
+      // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
+      // account's losses, and the refusal it replaces leaves the public
+      // feed; the owner has the event above, as a WARNING, because it is
+      // the only place they will read it. See publishesIdle.
+      if (notice.view !== null) {
+        await addDecision(
+          idleViewRow({ id: newDecisionId(), agentId, strategyName: strategy.name, reason: notice.view }),
+        );
       }
     }
 

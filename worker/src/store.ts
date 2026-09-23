@@ -1229,13 +1229,25 @@ export async function addDecision(row: DecisionRow): Promise<void> {
  * an address-derived id (DERIVED_ID), and only ever within this agent, so one
  * agent's label for an id can never become another's.
  *
+ * THIS LEDGER DOES NOT SURVIVE A REDEPLOY, so it cannot be the last word. A
+ * coin bought before the latest deploy has no named row here any more, and the
+ * default Trencher holds for up to three days. `fromChain` is asked after a
+ * miss — the coin's own contract, which is still there (decision-name.ts). It
+ * is asked last because the buy's own name is what the feed already showed.
+ *
  * Null on a miss or a read failure — absent, never a placeholder. The name was
  * sanitised by coin-name.ts when it was first written, and the publication gate
  * backstops it again.
  */
-export async function displayNameFor(agentId: string, symbol: string, fromTape: string | null): Promise<string | null> {
+export async function displayNameFor(
+  agentId: string,
+  symbol: string,
+  fromTape: string | null,
+  fromChain?: () => Promise<string | null>,
+): Promise<string | null> {
   if (fromTape) return fromTape;
   if (!DERIVED_ID.test(symbol)) return null;
+  let named: string | null = null;
   try {
     const r = (await getDb()
       .prepare(
@@ -1244,7 +1256,13 @@ export async function displayNameFor(agentId: string, symbol: string, fromTape: 
           ORDER BY at DESC LIMIT 1`,
       )
       .get(agentId, symbol)) as { display_name: string | null } | undefined;
-    return r?.display_name ?? null;
+    named = r?.display_name ?? null;
+  } catch {
+    named = null;
+  }
+  if (named || !fromChain) return named;
+  try {
+    return await fromChain();
   } catch {
     return null;
   }
