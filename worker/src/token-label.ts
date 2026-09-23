@@ -229,6 +229,21 @@ export function tokenLabelSync(db: LabelDb | null, agentId: string | null, input
       : undefined;
     const hSym = usable(h?.symbol);
     if (hSym) return untrusted(hSym, null, "position");
+    // 9. The symbol() the shared ledger read off a fill's receipt. Only rows
+    //    carried over from before a redeploy have it (history-files.ts), and
+    //    it is the coin's own word, exactly as a chain read would be.
+    const f = agentId
+      ? row<{ fill_symbol: string | null }>(
+          db,
+          `SELECT fill_symbol FROM trades WHERE agent_id = ? AND (lower(buy_token) = ? OR lower(sell_token) = ?)
+              AND fill_symbol IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
+          agentId,
+          a,
+          a,
+        )
+      : undefined;
+    const fSym = usable(f?.fill_symbol);
+    if (fSym) return untrusted(fSym, null, "chain");
   }
   return base({ ticker: null, name: null, source: "none", trusted: false });
 }

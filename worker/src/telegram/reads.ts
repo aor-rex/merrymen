@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
+import { overlayHistory } from "./history-overlay";
 import { loadTradeViews, renderTradeList, type TradeViewOpts } from "./trade-rows";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
@@ -391,6 +392,8 @@ export async function readTrades(agentId?: string | null, opts: TradeViewOpts = 
   try {
     const who = resolveAgent(db, agentId);
     if (!who) return "🧾 no trades yet.";
+    // Including the ones from before a hosted redeploy (history-overlay.ts).
+    overlayHistory(db, who);
     return renderTradeList(await loadTradeViews(db, who, { limit: 8, ...opts }));
   } catch {
     return "🧾 no trades yet.";

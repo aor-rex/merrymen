@@ -36,6 +36,7 @@ import type { ResolvedConfig } from "../settings";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
+import { overlayHistory } from "./history-overlay";
 import { agentEpoch, netContributions, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
@@ -78,13 +79,18 @@ function str(v: unknown, max = 64): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
 
-/** Open the ledger and resolve this owner's agent, or say why not. */
+/**
+ * Open the ledger and resolve this owner's agent, or say why not. The trades
+ * and decisions from before a hosted redeploy are laid over it
+ * (history-overlay.ts), so every lookup here sees the whole tape.
+ */
 function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T): T {
   const db = openRO();
   if (!db) return none;
   try {
     const who = resolveAgent(db, ctx.status.agentId);
     if (!who) return none;
+    overlayHistory(db, who);
     return fn(db, who);
   } finally {
     db.close();
@@ -97,6 +103,7 @@ async function withLedgerAsync(ctx: ToolContext, fn: (db: DatabaseSync, who: str
   try {
     const who = resolveAgent(db, ctx.status.agentId);
     if (!who) return none;
+    overlayHistory(db, who);
     return await fn(db, who);
   } finally {
     db.close();
@@ -321,6 +328,12 @@ const pnlBreakdown: ChatTool = {
           lines.push("I switched between practice and real money in this period, so the two values can't be compared.");
         } else {
           lines.push("I don't have enough account-value history for this period.");
+        }
+        // Account-value readings are the agent's own and a hosted redeploy
+        // restarts them; the closed trades below come from the whole tape. Said
+        // so the two are never read as covering the same stretch.
+        if (open && open.at > since + 3600) {
+          lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The closed trades below cover the whole period.`);
         }
 
         const views = await loadTradeViews(db, who, { ...lookupOpts(ctx), filter: "filled", since, limit: 50 });

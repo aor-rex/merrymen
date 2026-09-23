@@ -955,6 +955,29 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
   }
 }
 
+/**
+ * THE TRADES FROM BEFORE THE REDEPLOY, for the child's Telegram chat to answer
+ * from (history-files.ts). The child cannot read the shared database, and its
+ * own ledger just started empty, so without this "what did you buy yesterday"
+ * is answered from a tape that begins at the restart.
+ *
+ * NOT awaited by spawn, unlike the seeds above: nothing reads this file while
+ * arming — the chat reads it when asked — so a slow shared database must never
+ * hold a trading agent back for it. Nothing that trades or accounts reads it.
+ */
+async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return; // self-hosted: the child's own ledger is never wiped
+  try {
+    const { loadHistoryFromShared, writeHistoryFile } = await import("./history-files");
+    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, Math.floor(Date.now() / 1000));
+    writeHistoryFile(childHome(tenant), file);
+    log(`history: ${tenant} — ${file.trades.length} trades, ${file.decisions.length} decisions carried for the chat`);
+  } catch (e) {
+    log(`history: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 
 async function writeBootstrapForChild(
   tenant: `0x${string}`,
@@ -1069,6 +1092,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.
   await writeTelegramForChild(tenant);
+  void writeHistoryForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
   const firstBeatSec = firstBeatGraceSec(tickSeconds);
