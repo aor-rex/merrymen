@@ -69,6 +69,7 @@ function shell(opts: {
   answer?: (key: LiveReadKey) => Promise<RawRead> | RawRead;
   account?: () => Promise<void>;
   hidden?: () => boolean;
+  changes?: () => Promise<Map<string, number>>;
 } = {}) {
   const clock = fakeClock();
   let sources: LiveSources = seedSources();
@@ -83,12 +84,16 @@ function shell(opts: {
       asked.push("quotes");
       return new Map();
     },
-    loadChanges: async () => new Map(),
+    loadChanges: async () => {
+      asked.push("changes");
+      return opts.changes ? opts.changes() : new Map();
+    },
     update: (change) => {
       sources = change(sources);
     },
     readAccount: opts.account ?? (async () => {}),
     hidden: opts.hidden ?? (() => false),
+    now: clock.timers.now,
   });
   const clocks = startClocks(specs, (v) => (views = v), clock.timers);
   return {
@@ -144,6 +149,44 @@ describe("the shell's reads", () => {
     s.clocks.wake();
     await settle();
     assert.equal(s.count("market"), before.market + 1, "coming back reads what went stale at once");
+    s.clocks.stop();
+  });
+});
+
+describe("the session change beside each stock", () => {
+  // loadSessionChanges asks the chart venue once per stock, four at a time,
+  // and caches only an answer that read something. The market pass awaited it,
+  // so a hanging venue (10s timeout, about seven rounds) held the market and
+  // its quotes back for over a minute, and a failing one was asked for every
+  // stock every thirty seconds — twice the old rate, at the endpoint failing.
+  it("A HANGING CHART VENUE HOLDS NO MARKET READ — prices keep their thirty seconds", async () => {
+    const s = shell({ changes: () => new Promise<Map<string, number>>(() => {}) });
+    await settle();
+    await s.clock.advance(120_000);
+    assert.equal(s.count("market"), 5, "every market read ran on time");
+    assert.equal(s.count("changes"), 1, "and the hung change read was not asked again beside itself");
+    s.clocks.stop();
+  });
+
+  it("a venue that answers nothing is asked again in five minutes, not every market read", async () => {
+    const s = shell();
+    await settle();
+    await s.clock.advance(10 * 60_000);
+    assert.equal(s.count("market"), 21);
+    assert.ok(s.count("changes") <= 3, `asked ${s.count("changes")} times in ten minutes`);
+    assert.ok(s.count("changes") >= 2, "but asked again all the same");
+    s.clocks.stop();
+  });
+
+  it("the changes land when they arrive, after the prices", async () => {
+    let answer!: (m: Map<string, number>) => void;
+    const s = shell({ changes: () => new Promise<Map<string, number>>((r) => (answer = r)) });
+    await settle();
+    assert.equal(s.live().reads.market, "ok", "the market was applied without waiting");
+    const id = s.live().tokens.find((t) => t.kind !== "memecoin")!.id;
+    answer(new Map([[id, 1.25]]));
+    await settle();
+    assert.equal(s.live().tokens.find((t) => t.id === id)!.change24hPct, 1.25);
     s.clocks.stop();
   });
 });

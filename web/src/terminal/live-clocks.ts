@@ -52,7 +52,17 @@ export interface LiveClockDeps {
   readAccount(): Promise<void>;
   /** Is the tab hidden right now? */
   hidden(): boolean;
+  /** The wall clock, in ms. The session-change schedule is measured on it. */
+  now?(): number;
 }
+
+/**
+ * HOW OFTEN THE SESSION CHANGES ARE ASKED FOR: every five minutes, whatever the
+ * last answer was. A success is cached that long anyway (quotes.ts), and a
+ * failure is 25 chart requests at a venue that is failing, which the market's
+ * thirty-second clock asked for twice as often as the old minute did.
+ */
+export const CHANGES_EVERY_MS = 5 * 60_000;
 
 /**
  * Whether a public read's answer counts as read — and, when nothing answered
@@ -77,6 +87,33 @@ export type LiveClockKey = (typeof LIVE_CLOCK_KEYS)[number];
 export const ACCOUNT_READS = ["account", "feed"] as const satisfies readonly LiveClockKey[];
 
 export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey })[] {
+  const now = () => (d.now ? d.now() : Date.now());
+  /**
+   * THE SESSION CHANGES, BESIDE THE MARKET READ AND NOT INSIDE IT.
+   *
+   * The market pass awaited them. They are one chart request per stock, four at
+   * a time, each with a ten-second timeout, so a hanging venue held the market
+   * and its quotes back for over a minute (about seven rounds), and a failing
+   * one was asked for every stock on every market read. Now they are started
+   * and not awaited, applied through `update` when they land, one read at a
+   * time, and not asked again for CHANGES_EVERY_MS after the last one ended.
+   */
+  let changesInFlight = false;
+  let changesDueAt = -Infinity;
+  const readChanges = (tokens: LiveToken[]) => {
+    if (changesInFlight || now() < changesDueAt) return;
+    changesInFlight = true;
+    void d
+      .loadChanges(tokens)
+      .then(
+        (changes) => d.update((prev) => withChanges(prev, changes)),
+        () => {},
+      )
+      .finally(() => {
+        changesInFlight = false;
+        changesDueAt = now() + CHANGES_EVERY_MS;
+      });
+  };
   /** A public read: its answer applied, and kept past a later failure — see withRead. */
   const publicRead = (key: LiveReadKey) => async () => {
     const raw = await d.fetchRead(key);
@@ -96,8 +133,9 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
     {
       // THE MARKET AND THE QUOTES TOGETHER, ONCE. The quotes were read twice a
       // pass — once on their own and again inside the Promise.all — and both
-      // answers were applied. The market's own prices land first; the session
-      // change, which needs the stock list and nothing else, follows.
+      // answers were applied. The session change, which needs the stock list
+      // and nothing else, is started beside it and never waited for
+      // (readChanges, above).
       key: "market",
       half: "market",
       everyMs: MARKET_EVERY_MS,
@@ -105,8 +143,7 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
       pass: async () => {
         const [raw, quotes] = await Promise.all([d.fetchRead("market"), d.loadQuotes()]);
         d.update((prev) => withQuotes(withRead(prev, "market", raw, true), quotes));
-        const changes = await d.loadChanges(marketTokensOf(raw));
-        d.update((prev) => withChanges(prev, changes));
+        readChanges(marketTokensOf(raw));
         return verdict(raw);
       },
     },
