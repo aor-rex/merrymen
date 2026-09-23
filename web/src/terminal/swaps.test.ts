@@ -57,10 +57,23 @@ describe("the owner's tape becomes table rows without inventing anything", () =>
     assert.equal(swapItems(odd, "all").length, 1, "still listed under All");
   });
 
+  it("realized dollars reach the desk only when the tape vouches for the cost they were measured against (CP5)", () => {
+    // The worker books realized_pnl_usdg on a sell whose proceeds came from the
+    // quote, and on one whose cost a quoted buy built. Printed alone, the chip
+    // presented that estimate as a result: the dollars travel only when the
+    // tape says both halves were read (desk-trades.ts realized_vouched).
+    const sale = (over: Record<string, unknown>) => swapRowsOfDesk([{ ...move({ action: "sell" }), realizedPnlUsdg: 1.25, ...over } as Thesis])[0]!;
+    assert.equal(sale({}).realizedUsd, null, "a tape that does not say is not a vouch");
+    assert.equal(sale({ realizedVouched: false }).realizedUsd, null);
+    assert.equal(pnlChip(sale({ realizedVouched: false }), true), null, "so no chip, rather than an estimate dressed as a result");
+    assert.equal(sale({ realizedVouched: true }).realizedUsd, 1.25);
+    assert.equal(sale({ realizedVouched: "true" }).realizedUsd, null, "only the tape's own true");
+  });
+
   it("the tape's own name for a coin and its realized dollars travel (D3), never a guessed percentage", () => {
     const [sell, buy] = swapRowsOfDesk([
-      { ...move({ action: "sell", symbol: "T3139F043B88" }), displayName: " JUGGERNAUT ", realizedPnlUsdg: 1.25, txHash: "0xabc" } as Thesis,
-      { ...move({ action: "buy" }), displayName: "CASHCAT", realizedPnlUsdg: 0 } as Thesis,
+      { ...move({ action: "sell", symbol: "T3139F043B88" }), displayName: " JUGGERNAUT ", realizedPnlUsdg: 1.25, realizedVouched: true, txHash: "0xabc" } as Thesis,
+      { ...move({ action: "buy" }), displayName: "CASHCAT", realizedPnlUsdg: 0, realizedVouched: true } as Thesis,
     ]);
     assert.equal(sell!.displayName, "JUGGERNAUT");
     assert.equal(sell!.realizedUsd, 1.25);
@@ -72,7 +85,7 @@ describe("the owner's tape becomes table rows without inventing anything", () =>
     for (const bad of ["0x0123456789abcdef0123456789abcdef01234567", "a\u0007b", "x".repeat(65)]) {
       assert.equal(swapRowsOfDesk([{ ...move({}), displayName: bad } as Thesis])[0]!.displayName, null, JSON.stringify(bad));
     }
-    assert.equal(swapRowsOfDesk([{ ...move({ action: "sell" }), realizedPnlUsdg: Number.NaN } as Thesis])[0]!.realizedUsd, null);
+    assert.equal(swapRowsOfDesk([{ ...move({ action: "sell" }), realizedPnlUsdg: Number.NaN, realizedVouched: true } as Thesis])[0]!.realizedUsd, null);
   });
 
   it("a public fill keeps exactly what the server sent", () => {

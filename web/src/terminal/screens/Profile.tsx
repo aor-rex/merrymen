@@ -256,8 +256,11 @@ export function Profile({
       {topTrades !== undefined && (
         <section className="public-section" aria-label="Top trades">
           <div className="public-section-heading"><h2>Top trades</h2><span>{agent.mode === "paper" ? "Paper sells, by return" : "Closed sells, by return"}</span></div>
+          {/* UNREAD covers a list whose costs could not be checked, too — a
+              coin traded more often than one replay reads (profile-trades.ts
+              readTopTrades) — which a retry does not cure, so this promises none. */}
           {!own?.topTrades && agent.topTradesRead === false ? (
-            <p role="status" className="public-empty">Top trades could not be loaded. Retrying shortly.</p>
+            <p role="status" className="public-empty">Top trades could not be loaded.</p>
           ) : topTrades.length === 0 ? (
             <Empty compact title="No closed trades yet" />
           ) : (
@@ -305,6 +308,13 @@ export function Profile({
             : <p className="public-empty">Trade sizes are private.</p>)}
           {recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}
           {recentTrades.length > 0 && <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas.</p>}
+          {/* A SELL LISTED WITH NO RETURN IS NOT SILENT. Its cost was an
+              estimate, or could not be checked at all (profile-trades.ts): the
+              row stays, its figure does not, and this says which kind of
+              absence it is — not a zero, not a list that forgot. */}
+          {recentTrades.some((t) => t.action === "sell" && t.realizedPnlBps === null) && (
+            <p className="public-empty">A sale with no return is one whose cost could not be confirmed.</p>
+          )}
         </>}
       </section>
       <section className="public-section">

@@ -335,23 +335,29 @@ export async function ownBookOf(db: Db, identity: ProfileIdentity): Promise<OwnB
 }
 
 /**
+ * What anyone but the owner is told: the same as for an agent that does not
+ * exist. The owner's view is not confirmed to be here for anyone else.
+ */
+export const NOT_OWN_BOOK = { status: 404, error: "Agent not found" } as const;
+
+/**
  * The owner's view of `slug`, for the session's `tenant` — or why not.
  *
  * THE TENANT IS THE SESSION'S, and ownership is the identity store's record
- * that this slug belongs to it. Nothing in the request can name an owner.
+ * that this slug belongs to it. Nothing in the request can name an owner, and
+ * a slug that is somebody else's answers exactly as one that is nobody's.
  */
 export async function readOwnBook(
   slug: string,
   tenant: string,
-): Promise<{ status: 200; book: OwnBook } | { status: 403 | 404 | 503; error: string }> {
+): Promise<{ status: 200; book: OwnBook } | { status: 404 | 503; error: string }> {
   let identity;
   try {
     identity = await getIdentityStore().bySlug(slug);
   } catch {
     return { status: 503, error: "This agent could not be looked up right now." };
   }
-  if (!identity) return { status: 404, error: "Agent not found" };
-  if (identity.tenant.toLowerCase() !== tenant.toLowerCase()) return { status: 403, error: "This is not your agent." };
+  if (!identity || identity.tenant.toLowerCase() !== tenant.toLowerCase()) return NOT_OWN_BOOK;
   const found = identity;
   const book = await withReadDb(async (db) => (db ? ownBookOf(db, found) : null));
   return book ? { status: 200, book } : { status: 404, error: "No trades on record for this agent." };

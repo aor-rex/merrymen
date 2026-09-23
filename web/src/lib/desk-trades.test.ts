@@ -150,6 +150,66 @@ describe("the owner's desk and chat see every trade the agent made", () => {
   });
 });
 
+describe("the owner's tape says whether a sell's realized dollars are a measurement (CP5)", () => {
+  /** The real fill columns: the side, the quantity and how each was evidenced. */
+  async function booked() {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    await db.exec(`CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT, reason TEXT);
+      CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, sell_token TEXT, buy_token TEXT,
+        amount_usdg REAL, tx_hash TEXT, status TEXT, reject_rule TEXT, sim_quote_out TEXT, sim_min_out TEXT, sim_fee_tier INTEGER,
+        sim_gas TEXT, created_at INTEGER, user_op_hash TEXT, decision_id TEXT, fill_side TEXT, fill_symbol TEXT,
+        realized_pnl_usdg REAL, epoch INTEGER, fill_qty_raw TEXT, basis_source TEXT);`);
+    const ins = db.prepare(
+      `INSERT INTO trades (agent_id, kind, sell_token, buy_token, amount_usdg, status, created_at, user_op_hash, fill_side, fill_symbol,
+                           realized_pnl_usdg, epoch, fill_qty_raw, basis_source) VALUES ('0xA','swap',?,?,5,?,?,?,?,?,?,2,'10',?)`,
+    );
+    const buy = (coin: string, at: number, source: string, status = "landed") =>
+      ins.run("0xUSDG", coin, status, NOW - at, status === "paper" ? null : `0xb${coin}${at}`, "buy", coin, null, source);
+    const sell = (coin: string, at: number, pnl: number, source: string, status = "landed") =>
+      ins.run(coin, "0xUSDG", status, NOW - at, status === "paper" ? null : `0xs${coin}${at}`, "sell", coin, pnl, source);
+    await buy("0xRCPT", 900, "receipt");
+    await sell("0xRCPT", 800, 1, "receipt"); // both halves read off receipts
+    await buy("0xQUOTE", 700, "quote");
+    await sell("0xQUOTE", 600, 9, "receipt"); // proceeds read, cost built from the quote
+    await buy("0xOWN", 500, "receipt");
+    await sell("0xOWN", 400, 2, "quote"); // cost read, proceeds from the quote
+    await buy("0xPAPER", 300, "paper", "paper");
+    await sell("0xPAPER", 200, 3, "paper", "paper"); // a paper fill is exact
+    return { raw, db };
+  }
+
+  it("only a sell whose proceeds and cost were both read is marked, and nothing else about the row changes", async () => {
+    const { raw, db } = await booked();
+    try {
+      const rows = await readDeskTrades(db, "0xA", 2, NOW - WEEK);
+      const sells = Object.fromEntries(rows.filter((r) => r.fill_side === "sell").map((r) => [r.sell_token, r]));
+      assert.equal(sells["0xRCPT"]!.realized_vouched, true);
+      assert.equal(sells["0xQUOTE"]!.realized_vouched, false, "an estimated cost is not a measured one");
+      assert.equal(sells["0xOWN"]!.realized_vouched, false, "nor are estimated proceeds");
+      assert.equal(sells["0xPAPER"]!.realized_vouched, true);
+      assert.deepEqual(rows.filter((r) => r.fill_side === "sell").map((r) => r.realized_pnl_usdg), [3, 2, 9, 1], "the ledger's figure is still carried");
+      assert.ok(rows.every((r) => !("op_key" in r)), "the key the replay matched on does not go out on the wire");
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("a ledger the replay cannot read vouches for nothing, and still returns its tape", async () => {
+    // shogun() predates fill quantities and basis provenance.
+    const { raw, db } = await shogun();
+    try {
+      const rows = await readDeskTrades(db, "0xA", 2, NOW - WEEK);
+      assert.equal(rows.length, 4);
+      const sell = rows.find((r) => r.fill_side === "sell")!;
+      assert.equal(sell.realized_pnl_usdg, 1);
+      assert.notEqual(sell.realized_vouched, true);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
 describe("the desk's positions carry the % the terminal already computed", () => {
   it("a position with a recorded cost shows its return; one without says so; a stale mark shows no %", () => {
     const mine = mineOf(

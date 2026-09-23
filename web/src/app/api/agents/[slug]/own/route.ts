@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { readOwnBook } from "@/lib/read-agent";
+import { NOT_OWN_BOOK, readOwnBook } from "@/lib/read-agent";
 
 /**
  * THE OWNER'S OWN VIEW OF THEIR PROFILE: its trades with their sizes and
@@ -18,6 +18,12 @@ import { readOwnBook } from "@/lib/read-agent";
  * no owner's view to serve — the owner's desk shows those dollars there.
  *
  * Never cached: `private, no-store`, so no shared cache can keep it.
+ *
+ * ANYONE BUT THE OWNER GETS A 404, the same one an unknown slug gets: signed
+ * out, signed in as somebody else, or naming an owner in the request. It does
+ * not say "sign in" or "not yours", because either would confirm there is an
+ * owner's view here to be had. The owner's page falls back to the public
+ * figures on any refusal (profile-view.ts fetchOwnBook), so it needs no reason.
  */
 export const dynamic = "force-dynamic";
 
@@ -28,7 +34,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ slug: st
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(slug)) return NextResponse.json({ error: "Invalid agent" }, { status: 400, headers: PRIVATE });
   if (!isHostedMode()) return NextResponse.json({ error: "Not available on a self-hosted install." }, { status: 404, headers: PRIVATE });
   const tenant = tenantOf(req);
-  if (!tenant) return NextResponse.json({ error: "Sign in to see your own agent's figures." }, { status: 401, headers: PRIVATE });
+  if (!tenant) return NextResponse.json({ error: NOT_OWN_BOOK.error }, { status: NOT_OWN_BOOK.status, headers: PRIVATE });
   const r = await readOwnBook(slug, tenant);
   if (r.status !== 200) return NextResponse.json({ error: r.error }, { status: r.status, headers: PRIVATE });
   return NextResponse.json(r.book, { headers: PRIVATE });
