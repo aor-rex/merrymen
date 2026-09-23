@@ -8,17 +8,27 @@ import {
   money,
   pctBps,
   pctPts,
-  type LiveAgent,
   type LiveToken,
   type Thesis,
 } from "../live";
 import { strategyName } from "../strategy";
-import { Coin, Face } from "../ui";
+import { Coin, Face, Switch } from "../ui";
 import { Allocation } from "../studio";
 import { unrankedLabel } from "@/lib/rank-pnl";
 import { useAgentImageSrc } from "../agent-image-state";
 import { WireButton } from "@/components/WireButton";
 import { fullDateTime } from "@/lib/format";
+import { useNow } from "../clock";
+import {
+  chartWindows,
+  defaultWindow,
+  growthWindow,
+  saveBook,
+  statsParts,
+  topTradeFigures,
+  type ChartWindow,
+  type ProfileAgent,
+} from "../profile-view";
 
 export function Profile({
   agent,
@@ -28,12 +38,19 @@ export function Profile({
   onToken,
   isMine = false,
   activityError = "",
+  onBookChanged,
 }: {
-  agent: LiveAgent;
+  agent: ProfileAgent;
   theses: Thesis[];
   tokens: LiveToken[];
   onBack: () => void;
   onToken: (id: string) => void;
+  /**
+   * Re-read the profile after the owner publishes or closes the book, so the
+   * page shows the dollars (or stops showing them) now rather than at the next
+   * thirty-second refresh.
+   */
+  onBookChanged?: () => void;
   /**
    * Is this the viewer's OWN agent?
    *
@@ -84,6 +101,14 @@ export function Profile({
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
   ];
+  const stats = statsParts({
+    tradeCount: agent.tradeCount,
+    tradeCountFloor: agent.tradeCountFloor,
+    avgHoldSec: agent.avgHoldSec,
+    joinedAt: agent.joinedAt,
+    paper: agent.mode === "paper",
+    gasless: agent.gasless,
+  });
   /*
    * THE HANDLE AND THE OWNER WERE THE SAME STRING, PRINTED TWICE.
    *
@@ -117,8 +142,17 @@ export function Profile({
             owner={agent.owner}
             verified={agent.ownerVerified === true}
           />
+          {/* Each term only when it was read — statsParts leaves out the rest
+              rather than print a stand-in for it. */}
+          {stats.length > 0 && <p className="profile-stats">{stats.join(" · ")}</p>}
         </div>
       </header>
+      {/* THE OWNER'S OWN CALL, on the owner's own page, and only once we know
+          which way it stands: a switch drawn "off" for a profile that has not
+          loaded would be a claim about a setting nobody read. */}
+      {isMine && typeof agent.publicBook === "boolean" && (
+        <BookSwitch on={agent.publicBook} onChanged={onBookChanged} />
+      )}
       {/* ABOVE THE FIRST NUMBER, and that placement is the argument.
           WireButton.tsx:20-22 says an owner about to hand somebody else's
           reasoning to something that spends their money is owed the sentence
@@ -153,7 +187,13 @@ export function Profile({
         </div>
         {displayPnl == null && <p className="public-empty">{agent.mode === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
         {agent.mode === "paper" && displayPnl != null && <p className="public-empty">Change in paper equity since the first recorded valuation of this paper period.</p>}
-        {agent.mode !== "paper" && displayPnl != null && agent.gas && <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>}
+        {/* "Net of $0.00 in priced gas" under a sponsored agent's return was true
+            and read like a rounding error. When every landed operation was
+            sponsored — measured, never assumed (gasless.ts) — the sentence says
+            who paid instead. */}
+        {agent.mode !== "paper" && displayPnl != null && agent.gas && (agent.gasless === true
+          ? <p className="public-empty">No gas came out of this return: every trade was sponsored.</p>
+          : <p className="public-empty">Net of {money(agent.gas.usdg)} in priced gas.{agent.gas.unpricedTrades > 0 && <> {agent.gas.unpricedTrades} trades had gas we could not price; this is not the full cost.</>}</p>)}
         {/* THE GATE, BEFORE THE DRAW.
             Two things have to be true before a line goes under the words
             "Performance history": it must be the growth index (deposits divided
@@ -175,13 +215,7 @@ export function Profile({
             until the capital behind it is evidenced.
           </p>
         ) : agent.curve.length > 1 ? (
-          <div
-            className="public-chart"
-            aria-label={`Performance history. Reported return ${pctBps(displayPnl)}.`}
-          >
-            <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
-            <p className="public-empty">Chart: time-weighted return over the displayed history, adjusted for deposits and withdrawals. Its period and calculation differ from the net return above.</p>
-          </div>
+          <ProfileChart agent={agent} displayPnl={displayPnl} />
         ) : (
           <p className="public-empty">
             Performance history isn’t available yet.
@@ -195,6 +229,40 @@ export function Profile({
         </div>
         <p>{agent.thesis || "This agent hasn’t shared its approach yet."}</p>
       </section>
+      {/* TOP TRADES, by return and never by dollars — a dollar ranking ranks
+          position size and would leak the sizes a private book hides. Absent
+          entirely on the leaderboard fallback, which never read them. */}
+      {agent.topTrades !== undefined && (
+        <section className="public-section" aria-label="Top trades">
+          <div className="public-section-heading"><h2>Top trades</h2><span>{agent.mode === "paper" ? "Paper sells, by return" : "Closed sells, by return"}</span></div>
+          {agent.topTradesRead === false ? (
+            <p role="status" className="public-empty">Top trades could not be loaded. Retrying shortly.</p>
+          ) : agent.topTrades.length === 0 ? (
+            <Empty compact title="No closed trades yet" />
+          ) : (
+            <ol className="profile-top-trades">
+              {agent.topTrades.map((t, i) => {
+                const token = t.symbol ? tokens.find((k) => k.symbol.toUpperCase() === t.symbol!.toUpperCase()) : undefined;
+                const f = topTradeFigures(t);
+                return (
+                  <li key={t.id} className="profile-top-trade">
+                    <span className="profile-top-rank">#{i + 1}</span>
+                    <Coin symbol={t.symbol ?? "?"} logo={token?.logo ?? ""} />
+                    <span className="profile-top-name" title={fullDateTime(t.at * 1000)}>
+                      <strong>{t.symbol ?? "Token label unavailable"}</strong>
+                      {(t.displayName ?? token?.name) && <small>{t.displayName ?? token?.name}</small>}
+                    </span>
+                    <span className={`profile-top-figure ${f.tone}`}>
+                      {f.pct}
+                      {f.usd && <small> ({f.usd})</small>}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
+      )}
       <section className="public-section" aria-label="Trade history">
         <div className="public-section-heading"><h2>Buys & sells</h2><span>Latest fills</span></div>
         {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : agent.recentTrades.length === 0 ? <Empty compact title="No completed buys or sells recorded in this trading period."/> : <>
@@ -346,5 +414,107 @@ export function Profile({
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * THE CHART, IN THE WINDOWS ITS HISTORY CAN BACK.
+ *
+ * read-agent sends one close an hour over the whole period; this slices it.
+ * ALL is the default whenever the read reached the period's first reading,
+ * because ALL is the span the headline above measures — the old chart covered
+ * the newest two to eight hours and printed "0.00%" under "+21.5%". A window
+ * the history does not reach is disabled rather than drawn short under a
+ * longer name. See profile-view.ts, where each of those rules is tested.
+ */
+function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: number | null }) {
+  const nowSec = Math.floor(useNow(60_000) / 1000);
+  const [picked, setPicked] = useState<ChartWindow | null>(null);
+  const points = agent.growthPoints;
+  if (!points) {
+    // A server from before the windows: draw what it sent, and say only what
+    // is known about it.
+    return (
+      <div className="public-chart" aria-label={`Performance history. Reported return ${pctBps(displayPnl)}.`}>
+        <Boundary label="profile-chart"><PerformanceChart values={agent.curve} height={88} /></Boundary>
+        <p className="public-empty">Chart: time-weighted return over the displayed history, adjusted for deposits and withdrawals. Its period and calculation differ from the net return above.</p>
+      </div>
+    );
+  }
+  const windows = chartWindows(points, agent.growthComplete, nowSec);
+  const active = picked ?? defaultWindow(points, agent.growthComplete, nowSec);
+  const slice = growthWindow(points, active, nowSec, agent.growthComplete);
+  const words = windows.find((w) => w.id === active)!.words;
+  return (
+    <div className="public-chart" aria-label={`Performance history. Reported return ${pctBps(displayPnl)}.`}>
+      <div className="profile-chart-windows" role="group" aria-label="Chart period">
+        {windows.map((w) => (
+          <button
+            key={w.id}
+            type="button"
+            aria-pressed={w.id === active}
+            disabled={!w.available}
+            title={w.available ? undefined : w.id === "ALL" ? "Only the most recent part of this period was read." : `This agent's history does not reach back ${w.words.replace("the last ", "")}.`}
+            onClick={() => setPicked(w.id)}
+          >
+            {w.id}
+          </button>
+        ))}
+      </div>
+      {slice.state === "ok" ? (
+        <>
+          <Boundary label="profile-chart"><PerformanceChart values={slice.values} height={88} /></Boundary>
+          <p className="public-empty">
+            Chart: time-weighted return over {words}, adjusted for deposits and withdrawals.
+            {active === "ALL" ? " It covers the same period as the net return above; the two are calculated differently." : ""}
+          </p>
+        </>
+      ) : (
+        <p className="public-empty">
+          {slice.state === "empty" ? `No readings in ${words}.` : slice.state === "partial" ? "Only the most recent part of this period was read." : `This agent's history is shorter than ${words.replace("the last ", "")}.`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * THE OWNER'S SWITCH FOR THE PUBLIC BOOK — sizes and dollar P&L on this page.
+ *
+ * Off by default and off until the owner says otherwise. What it shows is what
+ * the SERVER last read, moved only after a save the server confirmed; a save
+ * that failed, or that an older server silently dropped, says so here instead
+ * of leaving a switch that moved over a page that did not.
+ */
+function BookSwitch({ on, onChanged }: { on: boolean; onChanged?: () => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState<boolean | null>(null);
+  // Once the page's own read agrees with the save, the read is the truth again.
+  useEffect(() => { if (saved === on) setSaved(null); }, [on, saved]);
+  const shown = saved ?? on;
+  const change = async (next: boolean) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    const r = await saveBook(next);
+    setSaving(false);
+    if (!r.ok) { setError(r.message); return; }
+    setSaved(next);
+    onChanged?.();
+  };
+  return (
+    <section className="profile-book" aria-label="Public book">
+      <div>
+        <strong>Public book</strong>
+        <small>
+          {shown
+            ? "Anyone can see this agent's trade sizes and dollar P&L. Percentages are public either way."
+            : "Only percentages are public. Turn this on to show trade sizes and dollar P&L too."}
+        </small>
+        {error && <small role="alert" className="profile-book-error">{error}</small>}
+      </div>
+      <Switch on={shown} onChange={saving ? () => {} : (next) => void change(next)} label="Show this agent's trade sizes and dollar P&L publicly" />
+    </section>
   );
 }

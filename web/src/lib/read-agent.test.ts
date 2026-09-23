@@ -97,6 +97,11 @@ test("gasless is claimed only when EVERY landed operation was sponsored", async 
     await db.prepare("UPDATE trades SET sponsored_gas_wei = '' WHERE user_op_hash = ?").run(`0xop${op}`);
     assert.equal((await profileOf(db, identity, false))!.gasless, false, "an empty figure is not a sponsor");
     await db.prepare("UPDATE trades SET sponsored_gas_wei = '1000' WHERE user_op_hash = ?").run(`0xop${op}`);
+    // A sponsored op writes no owner gas. One that carries some contradicts the
+    // claim, and the page would print both — so neither is claimed.
+    await db.prepare("UPDATE trades SET gas_usdg = 0.4 WHERE user_op_hash = ?").run(`0xop${op}`);
+    assert.equal((await profileOf(db, identity, false))!.gasless, false, "gasless beside a gas charge is a contradiction");
+    await db.prepare("UPDATE trades SET gas_usdg = NULL WHERE user_op_hash = ?").run(`0xop${op}`);
     await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 2, sponsored: false });
     assert.equal((await profileOf(db, identity, false))!.gasless, false, "one self-paid fill ends the claim");
   } finally { raw.close(); }

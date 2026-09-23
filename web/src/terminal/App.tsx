@@ -45,6 +45,8 @@ import Settings from "./screens/Settings";
 import Wallet from "./screens/Wallet";
 
 import { Profile } from "./screens/Profile";
+import { glanceOfHow, thesisOfHow, type ProfileAgent } from "./profile-view";
+import "./profile.css";
 import { Search } from "./screens/Search";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
@@ -354,7 +356,9 @@ export function App() {
     screen.kind === "profile"
       ? live.agents.find((a) => a.slug === screen.slug)
       : undefined;
-  const [profile,setProfile]=useState<import("./live").LiveAgent|null>(null);
+  const [profile,setProfile]=useState<ProfileAgent|null>(null);
+  /** The open profile's own re-read, for the owner's book switch — see Profile's onBookChanged. */
+  const profileRefresh=useRef<(() => void) | null>(null);
   const [profileTheses,setProfileTheses]=useState<import("./live").Thesis[]>([]);
   const [profileActivityError,setProfileActivityError]=useState("");
   const [profileError,setProfileError]=useState("");
@@ -368,11 +372,20 @@ export function App() {
       setProfileError("");
       setProfileTheses(p.theses ?? []);
       setProfileActivityError(p.thesesRead === false ? "Recent decisions could not be loaded." : "");
-      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:"",glance:{id:"custom",label:"Strategy",legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined}});
+      // HOW IT DECIDES, FROM ITS OWN DECISIONS. This was hard-coded thesis ""
+      // and glance "custom", so every profile read "Its own rules" — a claim
+      // about a Trencher or a steady basket that it wrote its own. read-agent
+      // already sends `how`; profile-view.ts turns it into words, and an agent
+      // that published none stays unpublished rather than guessed.
+      // The rest past `glance` is the profile's own: the chart's timestamps and
+      // whether they reach the whole period, TOP TRADES, and the stats line.
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
+        growthPoints:p.growth,growthComplete:p.growthComplete,topTrades:p.topTrades,topTradesRead:p.topTradesRead,tradeCount:p.tradeCount,tradeCountFloor:p.tradeCountFloor,avgHoldSec:p.avgHoldSec,joinedAt:p.joinedAt,gasless:p.gasless});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     void refresh();
+    profileRefresh.current = () => { void refresh(); };
     const timer = setInterval(refresh, 30_000);
-    return()=>{alive=false;clearInterval(timer);};
+    return()=>{alive=false;clearInterval(timer);profileRefresh.current=null;};
   },[profileSlug]);
   useEffect(()=>{if(pathname==="/agent" || pathname==="/chat")setSidebarSection("agents");},[pathname]);
   useEffect(() => {
@@ -686,6 +699,7 @@ export function App() {
             onBack={() => goTab(tab)}
             onToken={(id) => openScreen({ kind: "token", id })}
             isMine={mine?.slug === agent.slug}
+            onBookChanged={() => profileRefresh.current?.()}
           />
         )}
         {/* `account!` USED TO BE SAFE BY ACCIDENT. The only way in was

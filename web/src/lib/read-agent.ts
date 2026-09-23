@@ -627,6 +627,10 @@ export async function profileOf(
     tradeCountFloor: trips?.truncated === true,
     avgHoldSec: trips && !trips.truncated ? averageHoldSec(trips.fills) : null,
     joinedAt: joinedAtOf(identity.createdAt),
-    gasless,
+    // AND CONSISTENT WITH THE GAS THIS PAGE CHARGES. A sponsored op writes no
+    // owner gas at all (index.ts), so any priced or unpriced cost beside the
+    // claim means the two disagree — and "every trade sponsored" printed over
+    // "net of $0.40 in gas" would be a contradiction on one screen.
+    gasless: gasless && gasUsdg === 0 && unpricedTrades === 0,
   };
 }
