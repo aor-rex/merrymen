@@ -22,16 +22,23 @@
  * A file in a tenant-writable home is good enough to tell an owner what
  * happened; it is not good enough to decide what may happen next.
  *
- * Trades and decisions only. Account-value marks and deposits are deliberately
- * NOT carried: after a wipe the child can book its opening balance again as a
- * flow at the restart, and a pre-redeploy mark set against a post-redeploy flow
- * reads as a phantom trading loss of the whole balance.
+ * Trades and decisions — and the account's value over time, but never its raw
+ * marks and deposits: after a wipe the child could book its opening balance
+ * again as a flow at the restart, and a pre-redeploy mark set against a
+ * post-redeploy flow reads as a phantom trading loss of the whole balance. What
+ * is carried is each mark's value with the running attribution period-pnl.ts
+ * computed over the shared ledger at full resolution (money in or out,
+ * unattributed), sampled hourly — so the chat can join the two sides of the
+ * restart without ever re-deriving the pre-restart flows itself.
  */
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getAddress } from "viem";
 
+import { isEvidencedFlow } from "../../packages/core/src/index";
 import type { Db } from "./db";
+import { attributeBook, bookOf, type BookFlow, type BookKey, type CarriedTail } from "./period-pnl";
+import { isRestartCopy } from "./token-label";
 
 export const HISTORY_FILE = "trade-history.json";
 const SCHEMA = 1;
@@ -106,8 +113,37 @@ export interface TradeHistory {
    * ones a carried trade links to, so "my decisions start here" is this.
    */
   decisionsFrom: number;
+  /** The account's value before the restart, attributed (loadAccountFromShared). Null when unreadable. */
+  account?: HistoryAccount | null;
   trades: HistoryTrade[];
   decisions: HistoryDecision[];
+}
+
+/** One carried account-value point, with the running attribution up to it. */
+export interface HistoryAccountPoint {
+  at: number;
+  book: BookKey;
+  equity: number;
+  cash: number;
+  /** Running money in (+) / out (−) of this book, from its first carried mark. */
+  flows: number;
+  /** Running change no record explains, from its first carried mark. */
+  unattributed: number;
+}
+
+export interface HistoryAccount {
+  /** The accounting epoch the marks are from. The chat ignores a file from another. */
+  epoch: number;
+  /**
+   * Every mark carried is older than this, and the child's ledger must start at
+   * or after it for the two to join: a spawn draws it before the child exists.
+   */
+  until: number;
+  points: HistoryAccountPoint[];
+  /** Flows after each book's last carried mark: they belong to the step across the restart. */
+  tail: CarriedTail[];
+  /** False when the mark cap cut the window short. */
+  complete: boolean;
 }
 
 export function historyFilePath(home: string): string {
@@ -163,6 +199,7 @@ export function readHistory(home: string, agentId: string): TradeHistory | null 
       // Absent, claim nothing: the file's own time, never its 30-day reach —
       // a cut list would otherwise say "decisions start a month ago".
       decisionsFrom: num(raw.decisionsFrom) ?? writtenAt,
+      account: asAccount((raw as { account?: unknown }).account, writtenAt),
       trades: list(raw.trades, HISTORY_OPS_MAX + HISTORY_REFUSALS_MAX)
         .map(asTrade)
         .filter((t): t is HistoryTrade => t !== null && t.created_at > 0 && t.created_at <= latest),
@@ -226,7 +263,13 @@ function spellings(agentId: string): [string, string, string] {
  * that knows the outcome, then the one with fill evidence, then the one linked
  * to its decision, then the earliest. SQL both backends run.
  */
-export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec: number): Promise<TradeHistory> {
+export async function loadHistoryFromShared(
+  shared: Db,
+  agentId: string,
+  nowSec: number,
+  /** Where the carried account ends — the child's ledger starts there. Null: carry no account. */
+  o: { accountUntil?: number | null } = {},
+): Promise<TradeHistory> {
   const since = nowSec - HISTORY_DAYS * 86_400;
   const who = spellings(agentId);
   const cols = TRADE_COLS.join(", ");
@@ -286,6 +329,10 @@ export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec:
   }
   // Cut by the cap, the recent list reaches back only as far as its oldest row.
   const decisionsFrom = recent.length >= HISTORY_DECISIONS_MAX ? Math.min(...recent.map((r) => num(r.at) ?? nowSec)) : since;
+  // The account is the part most likely to be large, and the least essential:
+  // an unreadable one costs the P&L's reach across the restart, never the trades.
+  const until = o.accountUntil === undefined ? nowSec : o.accountUntil;
+  const account = until === null ? null : await loadAccountFromShared(shared, agentId, since, until).catch(() => null);
   return {
     schema: SCHEMA,
     agentId,
@@ -294,7 +341,118 @@ export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec:
     since,
     trades,
     decisions: [...decisions.values()].sort((a, b) => b.at - a.at),
+    account,
   };
+}
+
+/** Marks read per tenant, newest kept: 30 days at a one-minute tick is 43k. */
+const ACCOUNT_MARKS_MAX = 60_000;
+/** Points carried: hourly closes and each book's ends — 30 days is about 720 a book. */
+export const ACCOUNT_POINTS_MAX = 5_000;
+
+/**
+ * The account's value before `until`, attributed step by step at full
+ * resolution (period-pnl.ts attributeBook) and sampled at each book's first
+ * and last marks and each hour's close. Every running total is exact at the
+ * points kept; only the points between them are dropped.
+ *
+ * Flows are read de-duplicated by their chain identity (an account's two
+ * spellings can each hold the same log) and practice books take none. Trade
+ * times exclude the reconciler's restart copies: a copy is stamped at the
+ * restart, and would claim a trade happened across the downtime.
+ */
+export async function loadAccountFromShared(shared: Db, agentId: string, since: number, until: number): Promise<HistoryAccount | null> {
+  const who = spellings(agentId);
+  const e = (await shared.prepare("SELECT MAX(epoch) AS e FROM agents WHERE smart_account IN (?, ?, ?)").get(...who)) as { e: unknown } | undefined;
+  const epoch = num(e?.e);
+  if (epoch === null) return null;
+  const rows = (await shared
+    .prepare(
+      `SELECT at, mode, equity_usdg, cash_usdg FROM equity
+        WHERE agent_id IN (?, ?, ?) AND epoch = ? AND at >= ? AND at < ?
+        ORDER BY at DESC, id DESC LIMIT ?`,
+    )
+    .all(...who, epoch, since, until, ACCOUNT_MARKS_MAX)) as unknown as Record<string, unknown>[];
+  const complete = rows.length < ACCOUNT_MARKS_MAX;
+  const marks: { at: number; book: BookKey; equity: number; cash: number }[] = [];
+  for (const r of rows.reverse()) {
+    const at = num(r.at);
+    const equity = num(r.equity_usdg);
+    const cash = num(r.cash_usdg);
+    if (at !== null && equity !== null && cash !== null) marks.push({ at, book: bookOf(text(r.mode)), equity, cash });
+  }
+  if (!marks.length) return { epoch, until, points: [], tail: [], complete };
+  const from = marks[0]!.at;
+
+  const flowRows = (await shared
+    .prepare(
+      `SELECT at, direction, amount_usdg, source, tx_hash, log_index FROM flows
+        WHERE agent_id IN (?, ?, ?) AND epoch = ? AND at > ? AND at < ?`,
+    )
+    .all(...who, epoch, from, until)) as unknown as Record<string, unknown>[];
+  const seenLog = new Set<string>();
+  const flows: BookFlow[] = [];
+  for (const r of flowRows) {
+    const at = num(r.at);
+    const amount = num(r.amount_usdg);
+    if (at === null || amount === null) continue;
+    const tx = text(r.tx_hash, 80)?.toLowerCase() ?? null;
+    const li = num(r.log_index);
+    if (tx && li !== null) {
+      const k = `${tx}:${li}`;
+      if (seenLog.has(k)) continue;
+      seenLog.add(k);
+    }
+    flows.push({ at, signed: text(r.direction, 8) === "out" ? -amount : amount, evidenced: isEvidencedFlow(text(r.source, 40) ?? "") });
+  }
+
+  const tradeRows = (await shared
+    .prepare(
+      `SELECT created_at, status, kind, target, agent_id, decision_id, fill_side FROM trades
+        WHERE agent_id IN (?, ?, ?) AND created_at >= ? AND created_at < ? AND status IN ('landed','submitted','paper')`,
+    )
+    .all(...who, from, until)) as unknown as Record<string, unknown>[];
+  const times = { paper: [] as number[], live: [] as number[] };
+  for (const r of tradeRows) {
+    const at = num(r.created_at);
+    if (at === null) continue;
+    const copy = isRestartCopy({
+      kind: text(r.kind, 40) ?? "",
+      target: text(r.target, 80),
+      agent_id: text(r.agent_id, 80) ?? "",
+      decision_id: text(r.decision_id, 120),
+      fill_side: text(r.fill_side, 8),
+    });
+    if (!copy) (text(r.status, 16) === "paper" ? times.paper : times.live).push(at);
+  }
+
+  const points: HistoryAccountPoint[] = [];
+  const tail: CarriedTail[] = [];
+  for (const book of ["paper", "live", "unknown"] as const) {
+    const m = marks.filter((x) => x.book === book);
+    if (!m.length) continue;
+    const bookFlows = book === "paper" ? [] : flows;
+    const cum = attributeBook(m, bookFlows, book === "paper" ? times.paper : times.live);
+    m.forEach((x, i) => {
+      const next = m[i + 1];
+      if (i === 0 || !next || Math.floor(next.at / 3600) !== Math.floor(x.at / 3600)) {
+        points.push({ at: x.at, book, equity: x.equity, cash: x.cash, flows: cum[i]!.flows, unattributed: cum[i]!.unattributed });
+      }
+    });
+    if (book !== "paper") {
+      const last = m[m.length - 1]!.at;
+      let evidenced = 0;
+      let unevidenced = 0;
+      for (const f of bookFlows) {
+        if (f.at <= last) continue;
+        if (f.evidenced) evidenced += f.signed;
+        else unevidenced += f.signed;
+      }
+      if (evidenced || unevidenced) tail.push({ book, evidenced, unevidenced });
+    }
+  }
+  points.sort((a, b) => a.at - b.at);
+  return { epoch, until, points: points.slice(-ACCOUNT_POINTS_MAX), tail, complete: complete && points.length <= ACCOUNT_POINTS_MAX };
 }
 
 // ─────────────────────────────────────────────────────────── validation ──
@@ -366,4 +524,44 @@ function asDecision(v: unknown): HistoryDecision | null {
     display_name: text(r.display_name, 80),
     at,
   };
+}
+
+const BOOKS: readonly BookKey[] = ["paper", "live", "unknown"];
+
+/**
+ * A carried account, or null — and a bad one costs only the account, never the
+ * trades beside it. Every point must be finite, in a known book and from before
+ * both the account's bound and the file itself; the file is tenant-writable.
+ */
+function asAccount(v: unknown, writtenAt: number): HistoryAccount | null {
+  if (!v || typeof v !== "object") return null;
+  const r = v as Partial<HistoryAccount>;
+  const epoch = num(r.epoch);
+  const until = num(r.until);
+  if (epoch === null || !Number.isInteger(epoch) || until === null || until > writtenAt + 3600) return null;
+  if (!Array.isArray(r.points) || r.points.length > ACCOUNT_POINTS_MAX || !Array.isArray(r.tail) || r.tail.length > BOOKS.length) return null;
+  const points: HistoryAccountPoint[] = [];
+  for (const p of r.points as unknown[]) {
+    if (!p || typeof p !== "object") return null;
+    const q = p as Record<string, unknown>;
+    const at = num(q.at);
+    const equity = num(q.equity);
+    const cash = num(q.cash);
+    const flows = num(q.flows);
+    const unattributed = num(q.unattributed);
+    const book = BOOKS.find((b) => b === q.book);
+    if (at === null || at >= until || equity === null || cash === null || flows === null || unattributed === null || !book) return null;
+    points.push({ at, book, equity, cash, flows, unattributed });
+  }
+  const tail: CarriedTail[] = [];
+  for (const t of r.tail as unknown[]) {
+    if (!t || typeof t !== "object") return null;
+    const q = t as Record<string, unknown>;
+    const book = BOOKS.find((b) => b === q.book);
+    const evidenced = num(q.evidenced);
+    const unevidenced = num(q.unevidenced);
+    if (!book || book === "paper" || evidenced === null || unevidenced === null) return null;
+    tail.push({ book, evidenced, unevidenced });
+  }
+  return { epoch, until, points: points.sort((a, b) => a.at - b.at), tail, complete: r.complete === true };
 }

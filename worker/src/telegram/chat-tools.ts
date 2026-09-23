@@ -24,6 +24,7 @@ import type { PublicClient } from "viem";
 import {
   CASH,
   STOCK_TOKENS,
+  isEvidencedFlow,
   conceptsFor,
   liveBlockerText,
   renderConcepts,
@@ -37,8 +38,9 @@ import type { ResolvedConfig } from "../settings";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
-import { carriedDecisionsFrom, overlayHistory } from "./history-overlay";
-import { agentEpoch, netContributions, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
+import { carriedDecisionsFrom, carriedHistory, overlayHistory } from "./history-overlay";
+import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
+import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
@@ -431,6 +433,58 @@ function periodStart(period: string, now: number): { since: number; label: strin
   return { since: now - (now % 86_400), label: "today (since 00:00 UTC)" };
 }
 
+/** A restart copy, over an unaliased trades row — isRestartCopy (token-label.ts). */
+const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) = lower(agent_id) AND decision_id IS NULL AND fill_side IS NULL)";
+
+/**
+ * How the account's value moved since `since`, split into money in or out,
+ * trading and price moves, and what no record explains (period-pnl.ts) —
+ * across a hosted redeploy when the orchestrator carried the account over
+ * (history-files.ts HistoryAccount), else on this ledger alone.
+ *
+ * The carried part joins only a ledger that began after it was read — the
+ * ledger this spawn started with — and only in the same accounting epoch;
+ * anything else would count a stretch twice. When the ledger already holds a
+ * reading at or before `since`, the period opens there and the carried part
+ * is not needed at all.
+ */
+function accountChange(db: DatabaseSync, who: string, since: number): PeriodChange {
+  try {
+    const epoch = agentEpoch(db, who);
+    const firstLocal = scalar(db, "SELECT MIN(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ?", who, epoch);
+    const before = scalar(db, "SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ?", who, epoch, since);
+    const acct = before === null ? carriedHistory(who)?.account : null;
+    const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
+    const from = before ?? 0;
+    const local = (
+      db
+        .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at, id")
+        .all(who, epoch, from) as { at: number; mode: string | null; equity: number; cash: number }[]
+    ).map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
+    const localFlows = (
+      db
+        .prepare("SELECT at, direction, amount_usdg, source FROM main.flows WHERE agent_id = ? AND epoch = ? AND at >= ?")
+        .all(who, epoch, from) as { at: number; direction: string; amount_usdg: number; source: string }[]
+    ).map((f) => ({ at: f.at, signed: f.direction === "out" ? -f.amount_usdg : f.amount_usdg, evidenced: isEvidencedFlow(f.source) }));
+    // Trades on the carried history too: the step across the restart asks
+    // whether a trade explains its cash, and those trades are the old run's.
+    const tradeFrom = carried ? carried.points[carried.points.length - 1]!.at : from;
+    const trades = db
+      .prepare(`SELECT created_at AS at, status FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','submitted','paper') AND ${NOT_A_COPY}`)
+      .all(who, tradeFrom) as { at: number; status: string }[];
+    const series = accountSeries({
+      carried: carried ? carried.points : [],
+      carriedTail: carried ? carried.tail : [],
+      local,
+      localFlows,
+      tradeTimes: { paper: trades.filter((t) => t.status === "paper").map((t) => t.at), live: trades.filter((t) => t.status !== "paper").map((t) => t.at) },
+    });
+    return periodChange(series, since);
+  } catch {
+    return { kind: "none" };
+  }
+}
+
 const pnlBreakdown: ChatTool = {
   spec: {
     name: "pnl_breakdown",
@@ -447,35 +501,23 @@ const pnlBreakdown: ChatTool = {
       ctx,
       async (db, who) => {
         const { since, label } = periodStart(str(input.period) || "today", ctx.now);
-        const epoch = agentEpoch(db, who);
         const lines: string[] = [`Period: ${label}.`];
-        type Mark = { equity_usdg: number; at: number; mode: string | null };
-        let open: Mark | undefined;
-        let close: Mark | undefined;
-        try {
-          open =
-            (db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? AND at <= ? ORDER BY at DESC, id DESC LIMIT 1").get(who, epoch, since) as Mark | undefined) ??
-            (db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at ASC, id ASC LIMIT 1").get(who, epoch, since) as Mark | undefined);
-          close = db.prepare("SELECT equity_usdg, at, mode FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1").get(who, epoch) as Mark | undefined;
-        } catch {
-          /* no equity */
-        }
-        // Only money moved AFTER the opening mark: anything at or before it is
-        // already inside that mark, and counting it again turned a deposit
-        // made just before the period's first reading into a trading loss.
-        const flows = open ? netContributions(db, who, open.at + 1) : null;
-        if (open && close && (open.mode ?? "") === (close.mode ?? "")) {
-          const change = close.equity_usdg - open.equity_usdg;
-          lines.push(`Account value went from ${dollars(open.equity_usdg)} (${when(open.at)}) to ${dollars(close.equity_usdg)} (${when(close.at)}): ${change >= 0 ? "+" : "−"}${dollars(Math.abs(change))}.`);
-          if (flows !== null && Math.abs(flows) >= 0.005) {
-            const trading = change - flows;
-            lines.push(`Of that, ${flows > 0 ? `${dollars(flows)} was money put in` : `${dollars(-flows)} was money taken out`}, so trading itself made ${trading >= 0 ? "+" : "−"}${dollars(Math.abs(trading))}.`);
-          } else {
-            lines.push("No money was put in or taken out in this period, so the change is all trading and price moves.");
+        const pc = accountChange(db, who, since);
+        const signed = (n: number) => `${n >= 0 ? "+" : "−"}${dollars(Math.abs(n))}`;
+        if (pc.kind === "change") {
+          const { open, close } = pc;
+          lines.push(`Account value went from ${dollars(open.equity)} (${when(open.at)}) to ${dollars(close.equity)} (${when(close.at)}): ${signed(pc.change)}.`);
+          if (open.carried) lines.push("The first figure is from before my last restart; my records are joined across it.");
+          const parts: string[] = [];
+          if (Math.abs(pc.flows) >= 0.005) parts.push(pc.flows > 0 ? `${dollars(pc.flows)} was money put in` : `${dollars(-pc.flows)} was money taken out`);
+          if (Math.abs(pc.unattributed) >= 0.005) {
+            parts.push(`${signed(pc.unattributed)} changed where my records can't say why (usually money moved while I was restarting), so I don't count it as trading`);
           }
-          // Account-value readings are this ledger's own, and a hosted redeploy
-          // restarts them; trades from before one are carried. Said only when
-          // the trades below really do reach further back than the readings,
+          if (parts.length) lines.push(`Of that, ${parts.join(", and ")}, so trading and price moves made ${signed(pc.trading)}.`);
+          else lines.push("No money was put in or taken out in this period, so the change is all trading and price moves.");
+          // Account-value readings can start later than the trades below (a
+          // ledger younger than the period, and no record carried across the
+          // restart). Said only when the trades really do reach further back,
           // so the two are never read as covering the same stretch.
           const firstTrade = scalar(
             db,
@@ -486,7 +528,7 @@ const pnlBreakdown: ChatTool = {
           if (open.at > since + 3600 && firstTrade !== null && firstTrade < open.at - 3600) {
             lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The trades below go back further, to ${when(firstTrade)}.`);
           }
-        } else if (open && close) {
+        } else if (pc.kind === "switched") {
           lines.push("I switched between practice and real money in this period, so the two values can't be compared.");
         } else {
           lines.push("I don't have enough account-value history for this period.");

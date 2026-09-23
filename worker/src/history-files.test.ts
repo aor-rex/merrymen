@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 import { getAddress } from "viem";
 
 import { wrapSqlite } from "./db";
-import { HISTORY_REFUSALS_MAX, loadHistoryFromShared, readHistory, writeHistoryFile, type HistoryTrade } from "./history-files";
+import { HISTORY_REFUSALS_MAX, loadAccountFromShared, loadHistoryFromShared, readHistory, writeHistoryFile, type HistoryTrade } from "./history-files";
 import { applyLedgerSchema } from "./store";
 import { planHistoryMerge } from "./telegram/history-overlay";
 
@@ -166,5 +166,85 @@ describe("planHistoryMerge", () => {
     assert.deepEqual(plan.trades.map((t) => t.status), ["paper"]);
     const empty = planHistoryMerge([row({ status: "rejected", created_at: NOW - 60 })], A, { ops: new Map(), firstAt: null });
     assert.equal(empty.trades.length, 1, "an empty ledger holds nothing to overlap");
+  });
+});
+
+describe("loadAccountFromShared", () => {
+  const H = 3600;
+  const T0 = NOW - 2 * 86_400 - (NOW % H); // on an hour boundary
+
+  async function account() {
+    const { raw, db, t } = await ledger();
+    raw
+      .prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch) VALUES (?, 'o', 's', 4663, '{}', 0, 0, 2)")
+      .run(getAddress(A));
+    const m = (agent: string, at: number, equity: number, cash: number, epoch = 2, mode = "live") =>
+      raw
+        .prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', ?, 0, ?, ?, ?, ?)")
+        .run(agent, cash, equity, at, epoch, mode);
+    const f = (agent: string, at: number, dir: string, amount: number, source: string, tx: string | null = null, li: number | null = null, epoch = 2) =>
+      raw
+        .prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, source, at, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(agent, dir, amount, tx, li, source, at, epoch);
+    // Hour 0: three marks. An opening balance booked again with flat cash (a phantom).
+    m(A, T0 + 10, 100, 60);
+    m(A, T0 + 600, 101, 60);
+    f(A, T0 + 900, "in", 100, "inferred");
+    m(A, T0 + 1200, 102, 60);
+    // Hour 1: a real deposit, logged on chain — under BOTH spellings of the account.
+    f(A, T0 + H + 100, "in", 20, "chain-log", "0xDEP", 3);
+    f(getAddress(A), T0 + H + 100, "in", 20, "chain-log", "0xdep", 3);
+    m(getAddress(A), T0 + H + 200, 122, 80);
+    // Hour 2: cash falls with only a RESTART COPY in the step — a copy proves nothing, so unattributed.
+    t(A, { user_op_hash: "0xcopy", created_at: T0 + 2 * H + 50 });
+    m(A, T0 + 2 * H + 100, 112, 70);
+    // Hour 3: cash falls with a real trade in the step — trading.
+    t(A, { target: "0xvault", sell_token: USDG, buy_token: COIN, user_op_hash: "0xreal", fill_side: "buy", created_at: T0 + 3 * H + 10 });
+    m(A, T0 + 3 * H + 100, 110, 60);
+    // A deposit after the last mark, before the bound: the tail.
+    f(A, T0 + 3 * H + 500, "in", 7, "chain-log", "0xtail", 0);
+    // Never carried: another epoch, another tenant, at/after the bound.
+    m(A, T0 + 50, 999, 999, 1);
+    m(OTHER, T0 + 50, 999, 999);
+    const until = T0 + 4 * H;
+    m(A, until, 999, 999);
+    const acct = await loadAccountFromShared(db, A, T0 - 86_400, until);
+    raw.close();
+    return { acct: acct!, until };
+  }
+
+  it("carries each book's first and last marks and hourly closes, with the running attribution", async () => {
+    const { acct, until } = await account();
+    assert.equal(acct.epoch, 2);
+    assert.equal(acct.until, until);
+    assert.equal(acct.complete, true);
+    assert.deepEqual(
+      acct.points.map((p) => [p.at - T0, p.equity]),
+      [[10, 100], [1200, 102], [H + 200, 122], [2 * H + 100, 112], [3 * H + 100, 110]],
+      "the hour-0 middle mark is dropped; other epochs, tenants and marks at the bound never come",
+    );
+    const last = acct.points[acct.points.length - 1]!;
+    // +20 of chain-logged deposit (once, not twice); the phantom +100 dropped;
+    // the −10 with only a copy in its step unattributed; the −2 with a trade is trading.
+    assert.equal(last.flows, 20);
+    assert.equal(last.unattributed, -10);
+    assert.deepEqual(acct.tail, [{ book: "live", evidenced: 7, unevidenced: 0 }]);
+  });
+
+  it("round-trips through the file, and a malformed account costs only the account", async () => {
+    const { acct } = await account();
+    const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-histacct-"));
+    try {
+      const base = { schema: 1 as const, agentId: A, writtenAt: NOW, since: NOW - 30 * 86_400, decisionsFrom: NOW, trades: [], decisions: [] };
+      writeHistoryFile(home, { ...base, account: acct });
+      assert.deepEqual(readHistory(home, A)?.account, acct);
+      const bad = { ...acct, points: [...acct.points, { ...acct.points[0]!, at: acct.until + 5 }] };
+      writeHistoryFile(home, { ...base, account: bad, trades: [row({ created_at: NOW - 60 })] });
+      const back = readHistory(home, A)!;
+      assert.equal(back.account, null, "a point at or after the bound is not ours");
+      assert.equal(back.trades.length, 1, "the trades still come");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -141,6 +141,11 @@ function historyFor(agentId: string): TradeHistory | null {
   return parsed.file;
 }
 
+/** The carried history for `agentId` (cached while the file is the same file), or null. */
+export function carriedHistory(agentId: string): TradeHistory | null {
+  return historyFor(agentId);
+}
+
 const q = (c: string) => `"${c.replace(/"/g, '""')}"`;
 
 function columns(db: DatabaseSync, schema: "main" | "temp", table: string): string[] {

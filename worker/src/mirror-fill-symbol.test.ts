@@ -45,8 +45,8 @@ describe("the mirror carries the coin's name", () => {
     await child.prepare(`UPDATE trades SET status='landed', tx_hash='0xtx1', fill_side='buy', fill_symbol='CASHCAT' WHERE user_op_hash='0xop1'`).run();
     const r = await mirrorTenant({ tenant: "0xten", child, shared });
     // Only trades exist in this ledger; the other tables failing is expected.
-    assert.equal(r.failed.trades, undefined);
-    assert.equal(r.failed.trades_resolved, undefined);
+    assert.equal(r.failed?.trades, undefined);
+    assert.equal(r.failed?.trades_resolved, undefined);
     const row = (await shared.prepare("SELECT status, fill_symbol FROM trades WHERE user_op_hash='0xop1'").get()) as Record<string, unknown>;
     assert.deepEqual({ ...row }, { status: "landed", fill_symbol: "CASHCAT" });
   });

@@ -993,17 +993,25 @@ const historyRuns = new Map<string, number>();
  * arming — the chat reads it when asked — so a slow shared database must never
  * hold a trading agent back for it. Nothing that trades or accounts reads it.
  */
-async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
+async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string, refresh = false): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return; // self-hosted: the child's own ledger is never wiped
+  // BEFORE ANY AWAIT, and so before spawn(): every account-value mark the new
+  // child writes is at or after this, every carried one before it, and the
+  // chat joins the two only on that condition (history-files.ts HistoryAccount).
+  const nowSec = Math.floor(Date.now() / 1000);
   // Two spawns can overlap (a crash restart while the last read is still
   // running), and the older read must not land last — after a re-sign it would
   // be for the old account, and the chat would refuse it until the next spawn.
   const run = (historyRuns.get(tenant) ?? 0) + 1;
   historyRuns.set(tenant, run);
   try {
-    const { loadHistoryFromShared, writeHistoryFile } = await import("./history-files");
-    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, Math.floor(Date.now() / 1000));
+    const { loadHistoryFromShared, readHistory, writeHistoryFile } = await import("./history-files");
+    // A refresh keeps the bound its spawn drew: the child's ledger began then,
+    // and marks it has written since are in the shared ledger now too. No
+    // bound on record, no account — never one that overlaps the child's own.
+    const accountUntil = refresh ? (readHistory(childHome(tenant), smartAccount)?.account?.until ?? null) : nowSec;
+    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, nowSec, { accountUntil });
     if (historyRuns.get(tenant) !== run) return;
     // False when the home is gone: the tenant was removed while this was read.
     if (!writeHistoryFile(childHome(tenant), file)) return;
@@ -1027,7 +1035,7 @@ async function refreshHistoryForLiveChildren(): Promise<void> {
     const held = leases.get(tenant);
     if (!held || !held.healthy()) continue;
     if (children.get(tenant) !== child) continue;
-    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount);
+    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount, true);
   }
 }
 
