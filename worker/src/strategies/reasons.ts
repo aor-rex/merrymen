@@ -359,23 +359,44 @@ export type Why =
  *
  * `"owner"` is the default so every existing call site is byte-identical. The
  * public register is opt-in at the two places a sentence becomes a post.
+ *
+ * AND THE PUBLIC REGISTER CARRIES NO FIGURE OF THE BOOK — no size, no cost, no
+ * cash, no floor. A private book publishes no size (thesis-policy.ts
+ * `sizeUsdg`: a size is dollars), and this sentence is written into the row
+ * BEFORE anybody knows whose book will read it back, so it has to be safe for
+ * the book that shows least. It was not: "selling all 4.40 USDG of it against
+ * the 5.00 paid" is the realized P&L outright, "out of X with 6.00 USDG" beside
+ * a published return is the same P&L one division away, "5.00 USDG into TSLA"
+ * beside a published entry price is the holding, and "5.00 USDG idle above the
+ * 50.00 floor" is the cash balance — on steady-basket, the default, so on most
+ * of the feed. Percentages, counts, the coin, and the market's own figures (a
+ * pool's depth and FDV) stay: they are what the public default already shows.
+ * A public book loses nothing it needs, because its head and `sizeUsdg` still
+ * carry the size. The owner's copy keeps every figure.
  */
 export type WhyAudience = "owner" | "public";
 
 const capClause = (capped: boolean | undefined, audience: WhyAudience) =>
   !capped ? "" : audience === "owner" ? " — cut to what your signed key allows; re-sign to raise it" : " — cut to what the signed key allows";
 export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
+  // The owner's sentence names the book's figures; the public one never does.
+  const own = audience === "owner";
   switch (w.code) {
     case "dca-leg":
-      return (
-        `the schedule says buy — ${usdg(w.usdgRaw)} USDG into ${w.symbol}, ` +
-        `its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`
-      );
+      return own
+        ? `the schedule says buy — ${usdg(w.usdgRaw)} USDG into ${w.symbol}, ` +
+            `its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`
+        : `the schedule says buy — cash into ${w.symbol}, its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`;
     case "park":
       // The figure is the amount being parked. In the clamped case that is
       // LESS than what is idle above the floor, so the old sentence — "X idle
       // above the floor, parking what the budget allows" — stated the parked
       // amount as if it were the idle amount. Said the right way round.
+      if (!own) {
+        return w.clamped
+          ? `parking some of the cash idle above the floor — what today's budget still allows`
+          : `cash idle above the floor — parking it in the vault until the next buy`;
+      }
       return w.clamped
         ? `parking ${usdg(w.usdgRaw)} USDG of the cash idle above the ${usdg(w.floorRaw)} floor — ` +
             `what today's budget still allows`
@@ -399,8 +420,8 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
     case "budget-spent":
       return (
         `nothing bought — today's buying budget is spent. That is the daily cap in your ` +
-        `signature doing its job, not a fault: I buy ${usdg(w.capRaw)} USDG a tick, so a small ` +
-        `cap is gone quickly. ` +
+        `signature doing its job, not a fault` +
+        (own ? `: I buy ${usdg(w.capRaw)} USDG a tick, so a small cap is gone quickly. ` : `. `) +
         (audience === "owner"
           ? `Lower the size per tick in settings to spread it across the day, ` +
             `or raise the cap at /grant — that one needs a re-sign. `
@@ -426,15 +447,20 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
       );
     case "under-one-buy":
       return (
-        `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}` +
+        (own
+          ? `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}`
+          : `nothing bought — the cash on hand is short of one buy`) +
         (w.vaultRaw > 0n
-          ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
+          ? own
+            ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
+            : `. There is cash in the vault I can pull back, so this should clear itself`
           : `, and the vault is empty` + (audience === "owner" ? `. Add funds or lower the size per trade` : ``))
       );
     case "stop-floor":
       return (
-        `${w.symbol} is ${pct(w.lossBps)}% below what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
-        `against the ${usdg(w.costRaw)} paid. A floor, not a view: the rule fired, I did not change my mind` +
+        `${w.symbol} is ${pct(w.lossBps)}% below what it cost — ` +
+        (own ? `selling all ${usdg(w.usdgRaw)} USDG of it against the ${usdg(w.costRaw)} paid` : `selling all of it`) +
+        `. A floor, not a view: the rule fired, I did not change my mind` +
         // The graded clause, and ONLY when this position carried its own level.
         // An owner who never sees a grade should read exactly the sentence they
         // always read; one whose position was graded wider or tighter than
@@ -448,8 +474,9 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
       );
     case "take-profit":
       return (
-        `${w.symbol} is up ${pct(w.gainBps)}% on what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
-        `against the ${usdg(w.costRaw)} paid, and taking the profit rather than watching it`
+        `${w.symbol} is up ${pct(w.gainBps)}% on what it cost — ` +
+        (own ? `selling all ${usdg(w.usdgRaw)} USDG of it against the ${usdg(w.costRaw)} paid` : `selling all of it`) +
+        `, and taking the profit rather than watching it`
       );
     case "model-held":
       // "MORE" WAS WRONG: `dropped` comes out of the same proposal list as
@@ -466,38 +493,41 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
             `. A decision, not a quiet tick`;
     case "stale-fallback":
       return (
-        `all ${w.legs} equity feeds are shut, so putting ${usdg(w.usdgRaw)} USDG into ${w.symbol} — ` +
-        `a coin I hold a signed permission for, on a market that does not close`
+        `all ${w.legs} equity feeds are shut, so ` +
+        (own ? `putting ${usdg(w.usdgRaw)} USDG into ${w.symbol}` : `buying ${w.symbol}`) +
+        ` — a coin I hold a signed permission for, on a market that does not close`
       );
     case "unpark":
       return (
-        `cash is under one tick's buy — pulling ${usdg(w.usdgRaw)} USDG back from the vault ` +
+        `cash is under one tick's buy — pulling ${own ? `${usdg(w.usdgRaw)} USDG` : `some`} back from the vault ` +
         `so the next tick can trade`
       );
     case "gap-enter":
       return (
         `${w.symbol}'s feed has gone stale — its market is shut and the token keeps trading, ` +
-        `so ${usdg(w.usdgRaw)} USDG in at the close print`
+        `so ${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in at the close print`
       );
     case "gap-exit":
       // No P&L claim: the strategy proposes, and never learns what it filled at.
       return `${w.symbol}'s feed is live again — the market reopened, so the whole position goes back to cash`;
     case "keel-seed":
-      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}${capClause(w.capped, audience)}`;
+      return `nothing invested yet — laying down an equal-weight entry${own ? `, ${usdg(w.usdgRaw)} USDG` : ``} into each of ${w.legs}${capClause(w.capped, audience)}`;
     case "keel-trim":
-      return `${w.symbol} is ${usdg(w.overRaw)} USDG over its equal weight — trimming it back toward the line`;
+      return `${w.symbol} is ${own ? `${usdg(w.overRaw)} USDG ` : ``}over its equal weight — trimming it back toward the line`;
     case "keel-top":
-      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash${capClause(w.capped, audience)}`;
+      return `${w.symbol} is ${own ? `${usdg(w.underRaw)} USDG ` : ``}under its equal weight — topping it up from cash${capClause(w.capped, audience)}`;
     case "dip":
       return (
         `${w.symbol} is ${pct(w.dipBps)}% off its rolling high, the deepest of the ${w.priced} I priced — ` +
-        `${usdg(w.usdgRaw)} USDG in${capClause(w.capped, audience)}`
+        `${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in${capClause(w.capped, audience)}`
       );
     case "trench-enter":
+      // The depth and the FDV are the POOL's, read off a public tape, and stay;
+      // only the size of this buy is the book's.
       return (
         `${w.symbol}: ${Math.round(w.liqUsd).toLocaleString("en-US")} deep, ` +
         `FDV ${Math.round(w.fdvUsd).toLocaleString("en-US")}, ${Math.round(w.ageSec / 60)}m old — ` +
-        `inside every entry bound, ${usdg(w.usdgRaw)} USDG in`
+        `inside every entry bound, ${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in`
       );
     case "trench-exit": {
       const pct = w.pct === undefined ? null : Math.abs(Math.round(w.pct));
@@ -535,20 +565,19 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
             ? `${w.traders} different buyers have been through it`
             : `${w.trades} trades have gone through it`;
       const beat = w.field > 1 ? `, and it was the best of ${w.field} I priced` : "";
-      return busy === null
-        ? `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol} — early on the curve${beat}`
-        : `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol} — ${busy}${beat}`;
+      const taking = own ? `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol}` : `buying into ${w.symbol}`;
+      return busy === null ? `${taking} — early on the curve${beat}` : `${taking} — ${busy}${beat}`;
     }
-    case "class-exit":
+    case "class-exit": {
       // The cliff is the one worth explaining, because the reason is a contract
       // revert rather than a view about the price: once the curve graduates,
       // the vault cannot sell at all. An owner reading "sold at 85%" with no
       // explanation would reasonably think we took a profit target.
+      const out = own ? `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG` : `out of ${w.symbol}`;
       return w.cause === "cliff"
-        ? `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG — it is close enough to graduating that the ` +
-            `vault would soon not be able to sell it at all`
-        : `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG — ${Math.round(w.heldSec / 3600)}h is as long ` +
-            `as I hold one of these`;
+        ? `${out} — it is close enough to graduating that the vault would soon not be able to sell it at all`
+        : `${out} — ${Math.round(w.heldSec / 3600)}h is as long as I hold one of these`;
+    }
     default: {
       const exhaustive: never = w;
       return exhaustive;

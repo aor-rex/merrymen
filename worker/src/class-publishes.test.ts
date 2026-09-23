@@ -183,7 +183,9 @@ describe("the agent's own words travel beside ours, never instead of them", () =
       row({ post: "Buyers are finally sticking around instead of hitting it once and leaving. Small clip." }),
     )!;
     assert.match(t.post!, /sticking around/);
-    assert.match(t.reason!, /taking 5.00 USDG/, "our sentence must survive alongside it");
+    // Our sentence, as a private book publishes it — without the size its
+    // head withholds (private-book.test.ts).
+    assert.match(t.reason!, /^buying into MOON — 20 different buyers/, "our sentence must survive alongside it");
   });
 
   it("is null when the agent said nothing, which is the normal case", () => {
@@ -213,6 +215,6 @@ describe("the agent's own words travel beside ours, never instead of them", () =
     const t = publishableThesis(row({ post: "Following 0xdeadbeefcafe in on this one." }));
     assert.ok(t !== null, "the thesis itself must still publish");
     assert.equal(t.post, null, "but not the post");
-    assert.match(t.reason!, /taking 5.00 USDG/);
+    assert.match(t.reason!, /^buying into MOON — /);
   });
 });

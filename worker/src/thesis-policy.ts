@@ -945,6 +945,62 @@ export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayNam
   return t.head.replace(`${name} (${t.symbol})`, () => name);
 }
 
+/**
+ * A FIGURE OF THE BOOK IN OUR OWN SENTENCE — the backstop for rows already
+ * written.
+ *
+ * `renderWhy`'s public register now carries no size, cost, proceeds, cash or
+ * floor (reasons.ts), because the sentence is written before anybody knows
+ * whose book will read it back. The rows written before that change still say
+ * "selling all 4.40 USDG of it against the 5.00 paid" — the realized P&L a
+ * private book withholds — and they stay readable for a day on the feed and a
+ * month on a profile. So a PRIVATE book's STRATEGY reason loses its figures
+ * here.
+ *
+ * THIS IS THE ONE PLACE THIS MODULE REWRITES RATHER THAN DROPS, and the reason
+ * is the one the address backstop gives for dropping: redaction is safe only
+ * when the string is understood. A strategy reason is not prose — it is one of
+ * a closed set of templates we wrote, and each rule below turns one old
+ * public sentence into exactly the sentence `renderWhy(w, "public")` now
+ * writes for the same `Why` (private-book.test.ts replays the old register
+ * through it). Anything with a figure left afterwards — an older wording, or
+ * a template nobody listed — loses the reason, not the figure: that is a
+ * sentence we did NOT understand, and it fails closed. A model's reason is
+ * never touched here: it is prose, and none of these rules could claim to
+ * understand it.
+ *
+ * `AMT` is exactly what reasons.ts `usdg()` prints.
+ */
+const AMT = String.raw`-?\d[\d,]*\.\d{2}`;
+const BOOK_FIGURE = /\d\s*USDG\b/;
+const ANY_FIGURE = /\d\s*USDG\b|\d[\d,]*\.\d{2}\b/;
+const LEGACY_FIGURES: readonly (readonly [RegExp, string])[] = [
+  [new RegExp(`^the schedule says buy — ${AMT} USDG into `), "the schedule says buy — cash into "],
+  [new RegExp(`^parking ${AMT} USDG of the cash idle above the ${AMT} floor — `), "parking some of the cash idle above the floor — "],
+  [new RegExp(`^${AMT} USDG idle above the ${AMT} floor — `), "cash idle above the floor — "],
+  [new RegExp(`, not a fault: I buy ${AMT} USDG a tick, so a small cap is gone quickly\\. `), ", not a fault. "],
+  [new RegExp(`^nothing bought — ${AMT} USDG on hand and one buy costs ${AMT}`), "nothing bought — the cash on hand is short of one buy"],
+  [new RegExp(`\\. There is ${AMT} USDG in the vault I can pull back`), ". There is cash in the vault I can pull back"],
+  [new RegExp(` — selling all ${AMT} USDG of it against the ${AMT} paid`), " — selling all of it"],
+  [new RegExp(`, so putting ${AMT} USDG into (\\S+) — `), ", so buying $1 — "],
+  [new RegExp(` — pulling ${AMT} USDG back from the vault `), " — pulling some back from the vault "],
+  [new RegExp(`laying down an equal-weight entry, ${AMT} USDG into each of `), "laying down an equal-weight entry into each of "],
+  [new RegExp(`^(\\S+) is ${AMT} USDG (over|under) its equal weight — `), "$1 is $2 its equal weight — "],
+  [new RegExp(`^taking ${AMT} USDG of (\\S+) — `), "buying into $1 — "],
+  [new RegExp(`^out of (\\S+) with ${AMT} USDG — `), "out of $1 — "],
+  // dip, trench-enter and gap-enter, after the vault sentence above has
+  // taken the one "N USDG in the vault" that is not a buy.
+  [new RegExp(`${AMT} USDG in(?= at the close print$| — |$)`), "buying in"],
+];
+
+/** The reason as a private book may publish it, or null when a figure could not be taken out. */
+export function withoutBookFigures(reason: string): string | null {
+  if (!BOOK_FIGURE.test(reason)) return reason;
+  let s = reason;
+  for (const [was, now] of LEGACY_FIGURES) s = s.replace(was, now);
+  return ANY_FIGURE.test(s) ? null : s;
+}
+
 /** Known operational templates, not a classifier of market sentiment. */
 function operationalNotice(text: string): boolean {
   return /^(?:no decision\s*\(|(?:error|failed|refused|unavailable)\s*:|(?:strategist|brain|model|provider|driver|rpc) (?:call )?(?:failed|error|unavailable)\b|nothing bought\s*[—–-]|nothing in your basket\b|(?:there (?:was|is) )?nothing held to sell\b|(?:i |we )?(?:cannot|can't|unable to) (?:sell|trade|submit)\b|couldn't submit\b)/i.test(text.trim());
@@ -969,11 +1025,19 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   if (!policy) return null;
   if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
+  // Strictly `=== true`, the same test the dollars take below: a settings blob
+  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
+  // publish their book.
+  const bookPublic = row.public_book === true;
+
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
   if (row.reason && row.reason.trim()) {
     reason = policy === "model" ? clip(row.reason) : row.reason.trim();
   }
+  // OUR SENTENCE, WITHOUT THE BOOK'S FIGURES, for a book that keeps them —
+  // see `withoutBookFigures`. A public book's sentence is its owner's choice.
+  if (reason && policy === "strategy" && !bookPublic) reason = withoutBookFigures(reason);
 
   /**
    * THE AGENT'S OWN WORDS, IN THEIR OWN FIELD — and never in `reason`.
@@ -1036,10 +1100,6 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
-  // Strictly `=== true`, the same test the dollars take below: a settings blob
-  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
-  // publish their book.
-  const bookPublic = row.public_book === true;
   const head = headOf(row, shadow, bookPublic);
 
   // DECIDED, versus FAILED TO HAPPEN.

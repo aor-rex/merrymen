@@ -175,10 +175,11 @@ describe("a vault move is an action, not a view a newer row can replace", () => 
   // Vault moves have no symbol, so as "views" they shared ONE (agent, '') pair
   // with each other and with every pure thesis, and only the newest survived.
   // Heads without their sizes: this author's book is private (private-book.test.ts).
-  const parked: Row = { id: "v1", action: "vault-deposit", symbol: null, size: 25, source: "strategy:steady-basket", reason: "Parking 25.00 USDG idle above the 50.00 floor.", at: NOW - 7200 };
+  // The park sentence as the old public register wrote it; a private book reads it back without its figures.
+  const parked: Row = { id: "v1", action: "vault-deposit", symbol: null, size: 25, source: "strategy:steady-basket", reason: "25.00 USDG idle above the 50.00 floor — parking it in the vault until the next buy", at: NOW - 7200 };
 
   it("A LANDED DEPOSIT SURVIVES A LATER REFUSED ONE", async () => {
-    const again: Row = { ...parked, id: "v2", size: 3, reason: "Parking 3.00 USDG idle above the 50.00 floor.", at: NOW - 60 };
+    const again: Row = { ...parked, id: "v2", size: 3, reason: "3.00 USDG idle above the 50.00 floor — parking it in the vault until the next buy", at: NOW - 60 };
     const r = await read([parked, again], [{ decision: "v1", status: "landed" }, { decision: "v2", status: "rejected" }]);
     assert.deepEqual(r.theses.map((t) => [t.head, t.outcome]), [["vault-deposit", "landed"]]);
   });
