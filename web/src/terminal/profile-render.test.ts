@@ -112,3 +112,29 @@ it("turning the book on saves a boolean, re-reads the profile, and a failure is 
   assert.match(ui.container.querySelector(".profile-book [role=alert]")!.textContent!, /nothing changed/);
   assert.equal(refreshed, 1, "nothing to re-read after a save that did not happen");
 });
+
+it("Buys & sells is the swaps table: pills, a P&L chip on sells only, and no dollar a private book hides", async () => {
+  const fill = (id: string, action: "buy" | "sell", at: number, bps: number | null, size: number | null, usd: number | null = null) =>
+    ({ id, action, symbol: "CASHCAT", displayName: "Cash Cat", at, paper: false, sizeUsdg: size, realizedPnlUsdg: usd, realizedPnlBps: bps });
+  const now = nowSec();
+  // Sizes and dollars on a PRIVATE book: the server withholds them, and the
+  // table must not print them even if a row arrives carrying them.
+  const trades = [fill("2", "sell", now - 60, 1_234, 12, 3.1), fill("1", "buy", now - 3 * H, null, 9)];
+  await render(agent({ recentTrades: trades, publicBook: false }));
+  const table = () => ui.container.querySelector("[aria-label='Trade history'] .swaps")!;
+  assert.deepEqual([...table().querySelectorAll(".swap-pill")].map((p) => p.textContent), ["Sell", "Buy"]);
+  assert.deepEqual([...table().querySelectorAll(".swap-pnl")].map((p) => p.textContent), ["+12.3%"], "only the sell carries a chip");
+  assert.doesNotMatch(table().textContent!, /\$/, "a private book prints no dollar");
+  assert.doesNotMatch(text(), /Not realized on a buy/);
+  assert.deepEqual([...table().querySelectorAll(".swap-age")].map((a) => a.textContent), ["1m", "3h"]);
+  assert.ok(table().querySelector(".swap-age")!.getAttribute("title"), "the full date is on hover");
+  assert.match(table().textContent!, /Cash Cat/, "the coin's own name travels with the fill");
+
+  await render(agent({ recentTrades: [fill("2", "sell", now - 60, 1_234, 12, 3.1), fill("1", "buy", now - 3 * H, null, 9)], publicBook: true }));
+  assert.match(table().textContent!, /\$12\.00/);
+  assert.match(table().textContent!, /\+12\.3% · \+\$3\.10/);
+
+  // The tabs filter the same rows.
+  await act(async () => { (Array.from(table().querySelectorAll(".swaps-tabs button")).find((b) => b.textContent === "Buys") as HTMLElement).click(); });
+  assert.deepEqual([...table().querySelectorAll(".swap-pill")].map((p) => p.textContent), ["Buy"]);
+});

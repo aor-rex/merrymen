@@ -29,6 +29,8 @@ import {
   type ChartWindow,
   type ProfileAgent,
 } from "../profile-view";
+import { SwapsTable } from "../SwapsTable";
+import { swapRowsOfProfile } from "../swaps";
 
 export function Profile({
   agent,
@@ -70,7 +72,6 @@ export function Profile({
   activityError?: string;
 }) {
   const [showAll, setShowAll] = useState(false);
-  const [showTrades, setShowTrades] = useState(false);
   /**
    * MOST AGENTS HAVE NO BANNER, and that is not a failure to report.
    *
@@ -265,27 +266,22 @@ export function Profile({
       )}
       <section className="public-section" aria-label="Trade history">
         <div className="public-section-heading"><h2>Buys & sells</h2><span>Latest fills</span></div>
-        {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : agent.recentTrades.length === 0 ? <Empty compact title="No completed buys or sells recorded in this trading period."/> : <>
-          <div className="public-activity">
-            {agent.recentTrades.slice(0, showTrades ? undefined : 6).map(trade => <article key={trade.id} className="public-event">
-              <span className={`public-event-mark ${trade.action}`} aria-hidden>{trade.action === "buy" ? "↗" : trade.action === "sell" ? "↘" : "↔"}</span>
-              <div><div className="public-event-heading"><strong>{trade.action === "buy" ? "Bought" : trade.action === "sell" ? "Sold" : "Swapped"} {trade.symbol ?? "token"}</strong><span>{trade.sizeUsdg == null ? "" : money(trade.sizeUsdg)}</span></div>
-                {trade.displayName != null && <small style={{ display: "block" }}>{trade.displayName}</small>}
-                {trade.symbol == null && <small style={{ display: "block" }}>Token label unavailable in this historical record.</small>}
-                <small>{fullDateTime(trade.at * 1000)} · {trade.paper ? "Paper trade" : "Completed"}</small>
-                <p className={trade.realizedPnlBps != null ? trade.realizedPnlBps < 0 ? "down" : "up" : "public-empty"}>
-                  Realized P&L: {trade.action === "buy" ? "Not realized on a buy" : trade.realizedPnlBps != null || trade.realizedPnlUsdg != null ? <>
-                    {trade.realizedPnlBps != null && pctBps(trade.realizedPnlBps)}
-                    {trade.realizedPnlUsdg != null && <>{trade.realizedPnlBps != null ? " · " : ""}{trade.realizedPnlUsdg >= 0 ? "+" : "−"}{money(Math.abs(trade.realizedPnlUsdg))}</>}
-                  </> : "Unavailable — recorded cost basis or fill data missing"}
-                </p>
-              </div>
-            </article>)}
-          </div>
-          {agent.recentTrades.length > 6 && <button type="button" className="public-more" aria-expanded={showTrades} onClick={() => setShowTrades(value => !value)}>{showTrades ? "Show fewer trades" : `Show latest ${agent.recentTrades.length} trades`}</button>}
-          {agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
-          <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>
-          <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas. Buys realize no profit until sold; open-position returns appear under Positions when shared.</p>
+        {/* THE SAME TABLE THE OWNER'S DESK USES (SwapsTable.tsx, rules in
+            swaps.ts). It replaced a four-line article per fill that printed a
+            full date, "Not realized on a buy" under every buy and no coin.
+            Dollars only on a published book: the server withholds a private
+            book's sizes, and the table refuses to print one it was handed. */}
+        {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : <>
+          <SwapsTable
+            rows={swapRowsOfProfile(agent.recentTrades)}
+            tokens={tokens}
+            showMoney={agent.publicBook === true}
+            emptyTitle="No completed buys or sells recorded in this trading period."
+            onToken={onToken}
+          />
+          {agent.recentTrades.length > 0 && agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
+          {agent.recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}
+          {agent.recentTrades.length > 0 && <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas.</p>}
         </>}
       </section>
       <section className="public-section">

@@ -27,6 +27,8 @@ import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
+import { SwapsTable } from "../SwapsTable";
+import { DESK_TAPE_ROWS, isTrade, swapRowsOfDesk } from "../swaps";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
@@ -562,7 +564,11 @@ export function Agent({
                 aria-pressed={view === "trades"}
                 onClick={() => setView("trades")}
               >
-                Trades · {trades.length}
+                {/* FILLS AND ORDERS ON THEIR WAY, not refusals — those fold into
+                    one line in the list below, and counting them here called
+                    thirty ops-cap refusals "Trades · 30". "+" when the tape
+                    came back full: there may be more past its end. */}
+                Trades · {swapRowsOfDesk(mine.moves).filter(isTrade).length}{mine.moves.length >= DESK_TAPE_ROWS ? "+" : ""}
               </button>
             </div>
             {view === "positions" ? (
@@ -613,24 +619,18 @@ export function Agent({
               </>
             ) : (
               <div className="desk-trades">
-                {trades.length === 0 && (
-                  <Empty compact title="No trades yet."/>
-                )}
-                {trades.map((t, i) => (
-                  <article className="desk-trade" key={`${t.at}-${i}`}>
-                    <div>
-                      <strong>
-                        {t.action === "buy" ? "Buy" : "Sell"} {t.symbol}
-                      </strong>
-                      <strong>{money(t.sizeUsdg)}</strong>
-                    </div>
-                    <p>{t.reason ?? "No explanation available."}</p>
-                    <small>
-                      {ageOf(t)} ago · {t.outcome ?? "Recorded"}
-                      {t.paper ? " · Paper trade" : ""}
-                    </small>
-                  </article>
-                ))}
+                {/* THE SWAPS TABLE THE PUBLIC PROFILE USES (rules in swaps.ts),
+                    with the owner's own dollars. Every refusal is still here
+                    and still says why — folded into one line per reason, so
+                    thirty ops-cap refusals no longer push the fills away. */}
+                <SwapsTable
+                  rows={swapRowsOfDesk(mine.moves)}
+                  tokens={tokens}
+                  showMoney
+                  tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
+                  emptyTitle="No trades yet."
+                  onToken={onToken}
+                />
               </div>
             )}
             <button

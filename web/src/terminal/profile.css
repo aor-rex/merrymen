@@ -127,3 +127,142 @@
   font-weight: 400;
   color: var(--tx-2);
 }
+
+/* ── the swaps table (SwapsTable.tsx) — the profile's and the desk's ──────── */
+:where(.terminal-host) .swaps-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+:where(.terminal-host) .swaps-tabs button {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--tx-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+:where(.terminal-host) .swaps-tabs button[aria-pressed="true"] {
+  background: var(--raised);
+  color: var(--tx);
+}
+:where(.terminal-host) .swaps-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+:where(.terminal-host) .swap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+:where(.terminal-host) .swap-row:last-child {
+  border-bottom: 0;
+}
+:where(.terminal-host) .swap-pill {
+  flex-shrink: 0;
+  min-width: 44px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  background: var(--raised);
+  color: var(--tx-2);
+}
+:where(.terminal-host) .swap-pill.buy {
+  background: #13251c;
+  color: var(--up);
+}
+:where(.terminal-host) .swap-pill.sell {
+  background: #2d1920;
+  color: var(--down);
+}
+:where(.terminal-host) .swap-pill.tried {
+  color: var(--faint);
+}
+:where(.terminal-host) .swap-token {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+:where(.terminal-host) .swap-token .coin {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+:where(.terminal-host) .swap-coin {
+  min-width: 0;
+}
+:where(.terminal-host) .swap-coin strong,
+:where(.terminal-host) .swap-coin small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) .swap-coin strong {
+  font-weight: 600;
+}
+:where(.terminal-host) .swap-coin small {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .swap-coin .swap-why {
+  color: var(--faint);
+}
+:where(.terminal-host) .swap-figures {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+:where(.terminal-host) .swap-figures strong {
+  font-weight: 600;
+}
+:where(.terminal-host) .swap-pnl {
+  font-size: 11px;
+  font-weight: 600;
+}
+:where(.terminal-host) .swap-pnl.up {
+  color: var(--up);
+}
+:where(.terminal-host) .swap-pnl.down {
+  color: var(--down);
+}
+:where(.terminal-host) .swap-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+  min-width: 34px;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .swap-meta em {
+  font-style: normal;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .swap-tried {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .swap-age {
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+}
