@@ -108,7 +108,7 @@ import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } 
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
-import { classEntryGate, classRouteLooks } from "./class-entry-gate";
+import { classRouteLooks, idleAndClassGate } from "./class-entry-gate";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
@@ -10991,12 +10991,21 @@ async function main() {
       cfg.assetMode,
       (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
     );
-    // THE CLASS ROUTE'S ENTRY GATE, decided before the idle write because it
-    // can be the reason: under a tripped breaker no class entry is proposed,
-    // and when that silenced a route that would have looked — and the
-    // strategy, with no legs of its own, gave no reason — the owner is told
-    // the breaker's (class-entry-gate.ts). The entries themselves are below.
-    const classGate = classEntryGate({
+    // THE CLASS ROUTE'S ENTRY GATE AND THE IDLE WRITE, in one call where a
+    // test runs them (class-entry-gate.ts idleAndClassGate). The gate comes
+    // first because it can be the reason: under a tripped breaker no class
+    // entry is proposed, and the owner is told the breaker's reason whenever
+    // anything would have bought. Then TWO REGISTERS FROM ONE FACT, once per
+    // change, at a level the owner sees when the fact cannot be a post, kept on
+    // the owner's notice while it stands and taken down when the breaker
+    // measures clear — IdleChannel (idle-notice.ts). The view it writes is
+    // renderWhy's public register, the only producer of these strings, which
+    // is what makes a silence safe to publish; a tripped breaker is account
+    // state and is never a post. The entries themselves are below.
+    const classGate = await idleAndClassGate({
+      channel: idleChannel,
+      agentId,
+      strategyName: strategy.name,
       snap,
       routeLooks: classRouteLooks({
         paper: paperActive(),
@@ -11004,14 +11013,8 @@ async function main() {
         vault: grantPonsClassVault(active?.grant),
       }),
       idle,
+      modeEmptied,
     });
-    // TWO REGISTERS FROM ONE FACT, once per change, at a level the owner sees
-    // when the fact cannot be a post, and kept on the owner's notice while it
-    // stands — decided AND written by IdleChannel (idle-notice.ts), where a
-    // test runs it. The view it writes is renderWhy's public register, the
-    // only producer of these strings, which is what makes a silence safe to
-    // publish; a tripped breaker is account state and is never a post.
-    await idleChannel.tell({ agentId, strategyName: strategy.name, idle: classGate.idle, modeEmptied });
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -11096,8 +11099,9 @@ async function main() {
     }
     // Not while the breaker is tripped: every class entry is a buy the wall
     // would refuse. The exits above are never withheld. The same gate gave the
-    // owner the reason, above.
-    const entries: Tick = classGate.propose ? await proposeClassEntries() : { intents: [], why: [] };
+    // owner the reason, above. (Spelled as a call: the exits-first tests find
+    // this line by `await proposeClassEntries()`.)
+    const entries: Tick = await classGate.entries(async () => await proposeClassEntries());
     for (const [at, intent] of entries.intents.entries()) {
       const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       if (!stamped.ok) continue;

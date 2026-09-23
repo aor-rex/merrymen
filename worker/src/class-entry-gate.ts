@@ -11,14 +11,15 @@
  * exact symptom the idle channel's breaker warning exists to end.
  *
  * So the gate decides both halves in one place: whether class entries are
- * proposed this tick, and the idle reason the tick hands the owner. When the
- * breaker is what closed a route that would have looked, and the strategy gave
- * no reason of its own, the reason is the breaker's — the same Why, so it rides
- * the same once-per-change warning (idle-notice.ts) and never becomes a post.
+ * proposed this tick, and the idle reason the tick hands the owner. Under a
+ * tripped breaker that reason is the breaker's whenever anything would have
+ * bought — the same Why, so it rides the same warning (idle-notice.ts) and
+ * never becomes a post.
  */
 import type { AssetMode } from "../../packages/core/src/index";
+import type { IdleChannel } from "./idle-notice";
 import type { Why } from "./strategies/reasons";
-import { breakerIdle, breakerTripped, type Snapshot } from "./strategies/types";
+import { breakerIdle, breakerTripped, type Snapshot, type Tick } from "./strategies/types";
 
 /**
  * Would the class route look for an entry at all? The same first gates
@@ -41,7 +42,53 @@ export function classEntryGate(input: {
   idle: Why | null | undefined;
 }): { propose: boolean; idle: Why | null | undefined } {
   if (!breakerTripped(input.snap)) return { propose: true, idle: input.idle };
-  // A strategy's own reason wins: every built-in one already puts the breaker
-  // first when it has legs, and a reason it chose is not ours to replace.
-  return { propose: false, idle: input.idle ?? (input.routeLooks ? breakerIdle(input.snap) : undefined) };
+  // TRIPPED, THE BREAKER'S REASON WINS over any other a strategy gave. Not
+  // every builtin ranks it first: even-keel says its feeds are stale, and
+  // dip-hunter that the cash is short of one buy or the day's count is spent,
+  // before either reads the brake — so an owner was told, at ok and as a
+  // public post, "Add funds or lower the size per trade", which would not have
+  // bought anything: the wall refuses every buy until the book recovers. A
+  // reason the strategy gave means it would have bought; with none, only a
+  // class route that would have looked is a buyer the breaker stopped.
+  return { propose: false, idle: input.idle || input.routeLooks ? breakerIdle(input.snap) : undefined };
+}
+
+/**
+ * THE TICK'S IDLE WRITE AND THE CLASS ROUTE'S ENTRY GATE, AS ONE CALL.
+ *
+ * main() ran the gate, handed the idle channel the gate's reason, and asked
+ * the class route for entries only when the gate allowed it — three argument
+ * lists no test could reach, so reverting any of them left every test green.
+ * This is those lines: main() calls it where the idle write was, and calls
+ * `entries` where the class entries are proposed, after the exits, which
+ * spend the tick's budget first.
+ *
+ * The breaker as this tick measured it goes to the channel too, so a trip the
+ * owner was told about is taken down on the tick it measures clear.
+ */
+export async function idleAndClassGate(input: {
+  channel: Pick<IdleChannel, "tell">;
+  agentId: string;
+  strategyName: string;
+  snap: Pick<Snapshot, "drawdown">;
+  /** classRouteLooks, for this tick. */
+  routeLooks: boolean;
+  /** The strategy's own idle reason, if it gave one. */
+  idle: Why | null | undefined;
+  /** modeEmptiedFact, for this tick. */
+  modeEmptied: string | null;
+}): Promise<{ entries(propose: () => Promise<Tick>): Promise<Tick> }> {
+  const gate = classEntryGate({ snap: input.snap, routeLooks: input.routeLooks, idle: input.idle });
+  await input.channel.tell({
+    agentId: input.agentId,
+    strategyName: input.strategyName,
+    idle: gate.idle,
+    modeEmptied: input.modeEmptied,
+    drawdown: input.snap.drawdown,
+  });
+  return {
+    // Not while the breaker is tripped: every class entry is a buy the wall
+    // would refuse. The exits are never withheld.
+    entries: async (propose) => (gate.propose ? propose() : { intents: [], why: [] }),
+  };
 }
