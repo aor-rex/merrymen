@@ -772,8 +772,13 @@ const KEY_PRIORITY: Record<string, number> = {
  * WHICH ROW HOLDS EACH RENDER KEY, and back. Module-level for the reason the
  * seen set in feed-fresh.ts is: it has to outlive a Feed that switching tabs
  * unmounts. Presentation state per page load — nothing here is stored or sent.
+ *
+ * A holder is remembered with what it said (`base`: post, outcome, sentence),
+ * whether it was an order in flight, and its newest copy, in seconds — which
+ * is what decides who may take its key once it has gone.
  */
-const keyOwner = new Map<string, string>();
+type Holder = { ident: string; base: string; pending: boolean; last: number };
+const keyOwner = new Map<string, Holder>();
 const ownedKey = new Map<string, string>();
 /** A long session is bounded: past this, keys are dealt afresh from the current read. */
 const KEYS_MAX = 5_000;
@@ -813,14 +818,31 @@ const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * key is free: an order that lands takes over the element it was drawn under
  * while in flight, because it is the same trade.
  *
- * Two rows that say exactly the same thing (two unrecognised rules both read
- * "the wall turned it back") are told apart by their first copy, which moves
- * only when the window ages a copy out.
+ * A ROW IS ITS WORDS AND ITS FIRST COPY. Two rows that say exactly the same
+ * thing — "twins": two unrecognised rules that both read "the wall turned it
+ * back", or a private book's fills of one coin that differ only in the size it
+ * no longer publishes — were told apart by an ORDINAL over their first copies,
+ * so when the oldest left the read every other twin took its neighbour's key
+ * (CF3). Now each row is known by its first copy, which never moves for a
+ * one-copy row and moves for any other only when its own oldest copies age
+ * out; an ordinal breaks a tie only between twins first said in the same
+ * second.
+ *
+ * WHO MAY TAKE A KEY THAT IS FREE. Never a key the page has seen drawn over a
+ * row that is not this one: a key last held by the same words is taken only by
+ * the same row whose early copies aged out (its first copy is one the holder
+ * already covered), and a key last held by other words only when the holder
+ * was an order in flight — the trade settling. A new twin, or a new order where
+ * a fill used to be, is a new row, gets a key nobody has shown, and slides in.
  */
 function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
   if (ownedKey.size > KEYS_MAX) dealAfresh();
-  const ident: (string | null)[] = beats.map((b) =>
+  const base: (string | null)[] = beats.map((b) =>
     b.postId ? [b.postId, b.outcome ?? "", b.outcomeText ?? ""].join(SEP) : null,
+  );
+  // Fixed width, so a byte order of idents is the order of their first copies.
+  const ident: (string | null)[] = base.map((id, i) =>
+    id === null ? null : `${id}${SEP}${String(Math.max(0, Math.floor(firstOf[i]!))).padStart(12, "0")}`,
   );
   const same = new Map<string, number[]>();
   ident.forEach((id, i) => {
@@ -828,11 +850,17 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
   });
   for (const [id, rows] of same) {
     if (rows.length < 2) continue;
-    rows.sort((x, y) => firstOf[x]! - firstOf[y]! || byText(beats[x]!.id, beats[y]!.id));
+    rows.sort((x, y) => byText(beats[x]!.id, beats[y]!.id));
     rows.forEach((i, n) => {
       if (n > 0) ident[i] = `${id}${SEP}${n}`;
     });
   }
+  const holderOf = (i: number): Holder => ({
+    ident: ident[i]!,
+    base: base[i]!,
+    pending: beats[i]!.outcome === "pending",
+    last: beats[i]!.atMs / 1000,
+  });
 
   const used = new Set<string>();
   const keys: (string | null)[] = beats.map(() => null);
@@ -842,8 +870,17 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
     if (had !== undefined && !used.has(had)) {
       keys[i] = had;
       used.add(had);
+      keyOwner.set(had, holderOf(i));
     }
   });
+  // May newcomer `i` be drawn under `key`? Only if no row that is not this one
+  // was last drawn under it — see above.
+  const mayTake = (key: string, i: number): boolean => {
+    if (used.has(key)) return false;
+    const was = keyOwner.get(key);
+    if (was === undefined) return true;
+    return was.base === base[i] ? firstOf[i]! <= was.last : was.pending;
+  };
   // Newcomers, in an order that is not the clock's.
   const newcomers = beats
     .map((_, i) => i)
@@ -859,11 +896,13 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
     let key: string;
     if (b.postId && id !== null) {
       const full = `${b.postId}:${b.outcome ?? ""}:${b.outcomeText ?? ""}`;
-      key = [b.postId, `${b.postId}:${b.outcome ?? ""}`, full].find((k) => !used.has(k)) ?? full;
-      for (let n = 2; used.has(key); n++) key = `${full}#${n}`;
+      key = [b.postId, `${b.postId}:${b.outcome ?? ""}`, full].find((k) => mayTake(k, i)) ?? full;
+      for (let n = 2; !mayTake(key, i); n++) key = `${full}#${n}`;
+      // The row that held it before has gone; its claim goes with it, or it
+      // would take the key back from this one if it were ever read again.
       const before = keyOwner.get(key);
-      if (before !== undefined) ownedKey.delete(before);
-      keyOwner.set(key, id);
+      if (before !== undefined) ownedKey.delete(before.ident);
+      keyOwner.set(key, holderOf(i));
       ownedKey.set(id, key);
     } else {
       // No postId (a server from before it): the old id, as it always was.
