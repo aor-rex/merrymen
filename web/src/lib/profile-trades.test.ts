@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { BASIS_REPLAY_ROWS, OPENING_READ_LIMIT, readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
+import { BASIS_REPLAY_ROWS, OPENING_READ_LIMIT, TOP_TRADES_SCAN_ROWS, readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
 import { averageHoldSec } from "./hold-time";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
@@ -513,6 +513,68 @@ test("an unchecked sell ranked below five checked ones leaves the five exact", a
     await insert(db, rows);
     const top = await readTopTrades(db, "a", 1, false, "landed");
     assert.equal(top.read, true, "nothing unchecked outranks the five");
+    assert.deepEqual(top.trades.map((t) => t.realizedPnlBps), [5_000, 5_000, 5_000, 5_000, 5_000]);
+  } finally { raw.close(); }
+});
+
+// ── R3P-1: a scan cut by its own page bound says so too ─────────────────────
+/**
+ * A core lot bought from the QUOTE and never sold out, then `trims` receipt
+ * round trips of the same coin at +10%: every one of those sells stands on
+ * the estimate, so none is vouched for — and every one ranks above a +5%.
+ * Each is an unvouched candidate, NOT a cut coin: the coin's whole history
+ * fits one replay, so only the page bound can stop the scan.
+ */
+function estimatedCore(raw: DatabaseSync, trims: number, firstId: number) {
+  raw.prepare(`INSERT INTO trades (id, agent_id, epoch, kind, fill_side, status, created_at, amount_usdg, user_op_hash, fill_symbol,
+      buy_token, sell_token, realized_pnl_usdg, fill_cash_usdg, basis_source, fill_qty_raw)
+    VALUES (?, 'a', 1, 'swap', 'buy', 'landed', ?, 5, ?, 'CORE', '0xcore', '0xusdg', NULL, 10, 'quote', '1000')`).run(firstId, firstId, `0xcorelot${firstId}`);
+  busyBook(raw, ["0xcore"], trims, firstId + 1);
+}
+
+test("a TOP TRADES scan that stops at its page bound is unread — never 'no closed trades'", async () => {
+  // The page loop read at most TOP_TRADES_SCAN_ROWS ranked candidates and then
+  // answered read:true with whatever it had. With more unvouched sells than
+  // that ranked above every checked one, the checked trades were never reached
+  // and the page printed "No closed trades yet" over them.
+  assert.ok(2 * (TOP_TRADES_SCAN_ROWS + 1) + 1 < BASIS_REPLAY_ROWS, "the core coin is replayed whole: nothing here is a cut coin");
+  const { raw, db } = await sellsLedger();
+  try {
+    // One candidate short of the bound, plus the checked +5%: exactly the
+    // bound, every candidate read, so the list is whole and says so.
+    estimatedCore(raw, TOP_TRADES_SCAN_ROWS - 1, 1);
+    await insert(db, [buyRow(90_001, "0xcalm", "10", { created_at: 90_001 }), sellRow(90_002, 0.5, 10.5, { sell_token: "0xcalm", fill_qty_raw: "10", created_at: 90_002 })]);
+    const whole = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(whole.read, true, "a scan that read every candidate answered");
+    assert.deepEqual(whole.trades.map((t) => [t.id, t.realizedPnlBps]), [["90002", 500]]);
+
+    // One more unvouched sell above it: the checked trade is now past the
+    // bound, unread. The list cannot be stated, and must not read as empty.
+    busyBook(raw, ["0xcore"], 1, 95_001);
+    assert.deepEqual(await readTopTrades(db, "a", 1, false, "landed"), { trades: [], read: false });
+
+    // Nor as a short list: two checked trades ranked first are not the five
+    // when the scan stopped with candidates left below them.
+    await insert(db, [
+      buyRow(96_001, "0xgood1", "10", { created_at: 96_001 }), sellRow(96_002, 5, 15, { sell_token: "0xgood1", fill_qty_raw: "10", created_at: 96_002 }),
+      buyRow(96_003, "0xgood2", "10", { created_at: 96_003 }), sellRow(96_004, 5, 15, { sell_token: "0xgood2", fill_qty_raw: "10", created_at: 96_004 }),
+    ]);
+    assert.deepEqual(await readTopTrades(db, "a", 1, false, "landed"), { trades: [], read: false });
+  } finally { raw.close(); }
+});
+
+test("five checked trades found before the page bound are the five, whatever lies past it", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    estimatedCore(raw, TOP_TRADES_SCAN_ROWS + 5, 1);
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 1; i <= 5; i++) {
+      rows.push(buyRow(90_000 + 2 * i, `0xgood${i}`, "10", { created_at: 90_000 + 2 * i }));
+      rows.push(sellRow(90_001 + 2 * i, 5, 15, { sell_token: `0xgood${i}`, fill_qty_raw: "10", created_at: 90_001 + 2 * i }));
+    }
+    await insert(db, rows);
+    const top = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(top.read, true, "the five rank above everything the bound left unread");
     assert.deepEqual(top.trades.map((t) => t.realizedPnlBps), [5_000, 5_000, 5_000, 5_000, 5_000]);
   } finally { raw.close(); }
 });
