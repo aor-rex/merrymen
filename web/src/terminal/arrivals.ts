@@ -10,8 +10,9 @@
  * and it fills on every proposal, so it would be the loudest thing on the feed
  * and the least news. Refusals and pending orders are not fills.
  *
- * A FILL, NOT A POST: each post's landed row is remembered as it was last read
- * — its `at` and its `said` — and it is news when either says a copy joined.
+ * A FILL, NOT A POST: each post's landed rows, folded into one reading (its
+ * newest `at`, its total `said` — see `byPost`), are remembered as they were
+ * last read, and it is news when either says a copy joined.
  * The id is stable across reads (lib/post-id.ts leaves the outcome and the time
  * out of it on purpose), so a pending trade that lands keeps its id, which is
  * why only LANDED rows are remembered: the landing is the news. But the id
@@ -98,6 +99,38 @@ function joined(before: Last, at: number | null, said: number | null): number {
   return Math.max(0, grew);
 }
 
+/**
+ * ONE POST, ONE READING (R3L-1). The feed groups by size as well as words, and
+ * a private book publishes no size, so the post id — which hashes the
+ * published size — is one id over every size: a steady-basket leg clamped by
+ * cash or the day's headroom lands in a second row under the same id. Each
+ * read's landed rows are folded by post before anything is compared: the
+ * newest `at` (and its row, which is what the chime is for) and the total
+ * `said`, unknown if any row's count is. Compared row by row, one new fill
+ * counted as one group's count minus another's, and an order landing late
+ * into the older group was never counted.
+ */
+function byPost(theses: readonly Thesis[]): Map<string, Last & { row: Thesis }> {
+  const out = new Map<string, Last & { row: Thesis }>();
+  for (const t of theses) {
+    if (!isLandedTrade(t)) continue;
+    const id = t.postId as string;
+    const at = finite(t.at);
+    const said = finite(t.said);
+    const had = out.get(id);
+    if (!had) {
+      out.set(id, { at, said, row: t });
+      continue;
+    }
+    if (at !== null && (had.at === null || at > had.at)) {
+      had.at = at;
+      had.row = t;
+    }
+    had.said = had.said === null || said === null ? null : had.said + said;
+  }
+  return out;
+}
+
 export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
   const freshSec = opts.freshSec ?? FRESH_SEC;
   const cap = opts.cap ?? 2_000;
@@ -112,11 +145,7 @@ export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
     take(theses: readonly Thesis[], nowSec: number): Arrivals {
       const rows: Thesis[] = [];
       let fills = 0;
-      for (const t of theses) {
-        if (!isLandedTrade(t)) continue;
-        const id = t.postId as string;
-        const at = finite(t.at);
-        const said = finite(t.said);
+      for (const [id, { at, said, row: t }] of byPost(theses)) {
         const before = last.get(id);
         // A row whose time went BACK is another grouping of this post, not a
         // fill; the row it was is what the next read is measured against.

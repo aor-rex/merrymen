@@ -183,3 +183,104 @@ describe("arrivals, read by read", () => {
     assert.equal(a.size(), 3);
   });
 });
+
+/**
+ * ONE POST, SEVERAL LANDED ROWS IN ONE READ (R3L-1). The feed groups by size
+ * as well as words, and a private book publishes no size, so its post id
+ * (which hashes the published size) is one id for every size: a steady-basket
+ * leg clamped by cash or the day's headroom lands in a second row under the
+ * same id. Remembering one {at, said} per id compared one row's count with
+ * another's: one new fill counted as the difference of two groups' counts,
+ * and an order that landed late into the older group was never counted.
+ * Built from the real reader over the real ledger schema.
+ */
+describe("one post, several landed rows in one read (R3L-1)", () => {
+  const SLUG = "ems76d3cncwbt3dz";
+  const A = "0xAaAa000000000000000000000000000000000001";
+  const USDG = "0x05d0000000000000000000000000000000000005";
+  const TSLA = "0x7e5a000000000000000000000000000000007e5a";
+
+  async function ledger() {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { wrapSqlite } = await import("../../../worker/src/db");
+    const { applyLedgerSchema } = await import("../../../worker/src/store");
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    await applyLedgerSchema(db);
+    const now = Math.floor(Date.now() / 1000);
+    raw
+      .prepare(
+        `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at, name, mode, beat_at)
+         VALUES (?, '0x0000000000000000000000000000000000000abc', '0x0000000000000000000000000000000000000def', 4663, '{}', ?, ?, 'armed', ?, 'Shogun', 'live', ?)`,
+      )
+      .run(A, now - 86400, now + 86400, now - 86400, now - 30);
+    // The public sentence the dca leg wrote before CF1 — the reader scrubs a
+    // private book's figure out of it, so every size reads the same.
+    const decide = (id: string, size: number, ago: number, status: "landed" | "submitted") => {
+      raw
+        .prepare(`INSERT INTO decisions (id, agent_id, source, action, symbol, size_usdg, reason, at) VALUES (?, ?, 'strategy:steady-basket', 'buy', 'TSLA', ?, ?, ?)`)
+        .run(id, A, size, `the schedule says buy — ${size.toFixed(2)} USDG into TSLA, its 50% of a 2-leg basket`, now - ago);
+      raw
+        .prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, decision_id, created_at) VALUES (?, 'swap', '0x0', ?, ?, ?, ?, ?, ?)`)
+        .run(A, USDG, TSLA, size, status, id, now - ago);
+    };
+    const land = (id: string) => raw.prepare(`INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, decision_id, created_at) VALUES (?, 'swap', '0x0', ?, ?, 1, 'landed', ?, ?)`).run(A, USDG, TSLA, id, now);
+    const { readTheses } = await import("../lib/read-theses");
+    const identities = async () => [{ tenant: "0x1" as const, slug: SLUG, accounts: [A.toLowerCase() as `0x${string}`], createdAt: 1, updatedAt: 1 }];
+    const privateBook = (async () => ({ strategy: "steady" })) as never;
+    const read = async () => (await readTheses({}, (fn) => fn(db), identities, privateBook)).theses as unknown as Thesis[];
+    return { raw, decide, land, read, now };
+  }
+
+  it("A NEW FILL IS ONE FILL, AND AN ORDER LANDING LATE INTO THE OTHER SIZE'S ROW IS ONE FILL — nothing is none", async () => {
+    const L = await ledger();
+    try {
+      for (let i = 0; i < 5; i++) L.decide(`a${i}`, 10, 600 - i * 60, "landed");
+      L.decide("b0", 3.7, 300, "landed");
+      L.decide("c0", 3.7, 250, "submitted");
+      const a = createArrivals();
+      const seed = await L.read();
+      const landed = seed.filter(isLandedTrade);
+      assert.equal(landed.length, 2, "two landed rows");
+      assert.equal(new Set(landed.map((t) => t.postId)).size, 1, "under one post id");
+      assert.deepEqual(a.take(seed, L.now), { rows: [], fills: 0 }, "the first read is the page");
+
+      L.decide("a5", 10, 200, "landed");
+      const one = a.take(await L.read(), L.now);
+      assert.equal(one.fills, 1, "one new 10.00 leg is one fill");
+      assert.equal(one.rows.length, 1);
+      assert.equal(one.rows[0]!.at, L.now - 200, "chimed for the post's newest row");
+
+      L.land("c0"); // the 3.70 order decided at -250 lands after the -200 leg
+      const late = a.take(await L.read(), L.now);
+      assert.equal(late.fills, 1, "the order that landed late, in the other size's row");
+      assert.equal(late.rows.length, 1);
+
+      assert.deepEqual(a.take(await L.read(), L.now), { rows: [], fills: 0 }, "and read again, nothing");
+    } finally {
+      L.raw.close();
+    }
+  });
+
+  it("folded by post: two rows' counts add, the newest time leads, and one row leaving is not news", () => {
+    const a = createArrivals();
+    const id = "f".repeat(32);
+    const big = row({ postId: id, at: NOW - 400, said: 5, sizeUsdg: null });
+    const small = row({ postId: id, at: NOW - 300, said: 1, sizeUsdg: null });
+    a.take([big, small], NOW);
+    // Read in either order, a fill in the older row is one fill.
+    assert.deepEqual(a.take([small, { ...big, said: 6 }], NOW).fills, 1);
+    assert.deepEqual(a.take([{ ...big, said: 6 }, small], NOW).fills, 0, "the same read again");
+    const newer = { ...big, at: NOW - 100, said: 7 };
+    assert.deepEqual(a.take([small, newer], NOW), { rows: [newer], fills: 1 }, "a new copy moves the post's newest time");
+    assert.deepEqual(a.take([newer], NOW).fills, 0, "the other size's row left the read: fewer copies, no fill");
+  });
+
+  it("a folded post with any row of unknown count grows by nothing — only a newer time is a fill", () => {
+    const a = createArrivals();
+    const id = "e".repeat(32);
+    a.take([row({ postId: id, at: NOW - 400, said: 2 }), row({ postId: id, at: NOW - 300, said: undefined })], NOW);
+    assert.deepEqual(a.take([row({ postId: id, at: NOW - 400, said: 5 }), row({ postId: id, at: NOW - 300, said: undefined })], NOW).fills, 0);
+    assert.deepEqual(a.take([row({ postId: id, at: NOW - 100, said: 5 }), row({ postId: id, at: NOW - 300, said: undefined })], NOW).fills, 1);
+  });
+});
