@@ -1238,6 +1238,12 @@ export async function addDecision(row: DecisionRow): Promise<void> {
  * Null on a miss or a read failure — absent, never a placeholder. The name was
  * sanitised by coin-name.ts when it was first written, and the publication gate
  * backstops it again.
+ *
+ * A TIE IS BROKEN ON THE NAME. `at` is whole seconds, so a buy and its review
+ * routinely share one, and `ORDER BY at DESC` alone returns whichever row the
+ * engine reaches first — SQLite and Postgres need not agree, and neither
+ * promises the same row twice. The name an exit is written with must not
+ * depend on that.
  */
 export async function displayNameFor(
   agentId: string,
@@ -1253,7 +1259,7 @@ export async function displayNameFor(
       .prepare(
         `SELECT display_name FROM decisions
           WHERE agent_id = ? AND symbol = ? AND display_name IS NOT NULL AND display_name <> ''
-          ORDER BY at DESC LIMIT 1`,
+          ORDER BY at DESC, display_name LIMIT 1`,
       )
       .get(agentId, symbol)) as { display_name: string | null } | undefined;
     named = r?.display_name ?? null;

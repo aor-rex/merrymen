@@ -56,3 +56,42 @@ test("a coin nobody named stays unnamed, and a stock is never looked up", async 
   await store.addDecision({ id: "stock-named", agent_id: AGENT, source: "brain", symbol: "TSLA", action: "hold", display_name: "Tesla" });
   assert.equal(await store.displayNameFor(AGENT, "TSLA", null), null);
 });
+
+test("TWO NAMES IN ONE SECOND: the same answer whichever row was written first", async () => {
+  // `at` is whole seconds, so a buy and its review, or two reviews, routinely
+  // share one. `ORDER BY at DESC LIMIT 1` alone then returns whichever row the
+  // engine happens to reach first — SQLite and Postgres need not agree, and
+  // neither promises the same row twice — so the name an exit was written with
+  // could differ between two identical runs. The tie is broken on the name.
+  const { DatabaseSync } = await import("node:sqlite");
+  const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+  try {
+    const AT = 1_800_000_000;
+    for (const [coin, first, second] of [
+      ["TB0B0B0B0B0B", "ZEDCOIN", "ALPHACAT"],
+      ["TC0C0C0C0C0C", "ALPHACAT", "ZEDCOIN"],
+    ] as const) {
+      await store.addDecision({ id: `${coin}-1`, agent_id: AGENT, source: "brain", symbol: coin, action: "buy", display_name: first });
+      await store.addDecision({ id: `${coin}-2`, agent_id: AGENT, source: "brain", symbol: coin, action: "hold", display_name: second });
+      raw.prepare("UPDATE decisions SET at = ? WHERE symbol = ?").run(AT, coin);
+    }
+    assert.equal(await store.displayNameFor(AGENT, "TB0B0B0B0B0B", null), "ALPHACAT");
+    assert.equal(await store.displayNameFor(AGENT, "TC0C0C0C0C0C", null), "ALPHACAT");
+  } finally {
+    raw.close();
+  }
+});
+
+test("a newer name still wins over an older one — the tiebreak is only for a tie", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+  try {
+    await store.addDecision({ id: "renamed-old", agent_id: AGENT, source: "brain", symbol: "TD0D0D0D0D0D", action: "buy", display_name: "ALPHACAT" });
+    await store.addDecision({ id: "renamed-new", agent_id: AGENT, source: "brain", symbol: "TD0D0D0D0D0D", action: "hold", display_name: "ZEDCOIN" });
+    raw.prepare("UPDATE decisions SET at = ? WHERE id = ?").run(1_800_000_000, "renamed-old");
+    raw.prepare("UPDATE decisions SET at = ? WHERE id = ?").run(1_800_000_060, "renamed-new");
+    assert.equal(await store.displayNameFor(AGENT, "TD0D0D0D0D0D", null), "ZEDCOIN");
+  } finally {
+    raw.close();
+  }
+});
