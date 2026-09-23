@@ -35,7 +35,7 @@ import {
   type Tab,
   type TokenTab,
 } from "./live";
-import { liveClocks, type LiveClockKey } from "./live-clocks";
+import { ACCOUNT_READS, liveClocks, type LiveClockKey } from "./live-clocks";
 
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
@@ -144,11 +144,13 @@ export function App() {
   };
   /**
    * THE ACCOUNT AND THE OWNER'S BOOK, AGAIN, NOW — for a retry the owner
-   * pressed, a sign-in, an agent just created, or anything that knows the
-   * owner's position just changed. It used to restart every read, the
-   * two-minute launchpad sweep included, to refresh one account.
+   * pressed, a sign-in, an agent just created, an order that answered, or
+   * anything that knows the owner's position just changed. It used to restart
+   * every read, the two-minute launchpad sweep included, to refresh one
+   * account. A pass already in flight began before the change, so it is
+   * followed by one more rather than taken as the answer (refresh-loop.ts).
    */
-  const refreshAccount = () => refreshReads("account", "feed");
+  const refreshAccount = () => refreshReads(...ACCOUNT_READS);
   /**
    * EVERYTHING, FROM NOTHING — for a sign-out. The reads in flight belong to
    * the owner leaving, so restarting the clocks (the effect below is keyed on

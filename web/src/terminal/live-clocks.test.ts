@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { liveOf, seedSources, type LiveReadKey, type LiveSources, type RawRead } from "./live";
-import { liveClocks } from "./live-clocks";
+import { ACCOUNT_READS, liveClocks } from "./live-clocks";
 import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 
 function fakeClock() {
@@ -137,6 +137,37 @@ describe("the shell's reads", () => {
     s.clocks.wake();
     await settle();
     assert.equal(s.count("market"), before.market + 1, "coming back reads what went stale at once");
+    s.clocks.stop();
+  });
+});
+
+describe("asking for the owner's reads again", () => {
+  it("AN ORDER THAT ANSWERED MID-PASS IS STILL READ — the account and the book run again after the pass in flight", async () => {
+    // What the chat's onOutcome, a sign-in and a new agent all call. The pass
+    // in flight began before the fill, so its grants and its tape are the old
+    // ones; dropping the ask left the fill off the desk for up to a minute.
+    const pending: Array<() => void> = [];
+    let accountReads = 0;
+    let bookReads = 0;
+    const s = shell({
+      account: () => {
+        accountReads++;
+        return accountReads === 1 ? new Promise<void>((r) => void pending.push(r)) : Promise.resolve();
+      },
+      answer: (key) => {
+        if (key !== "feed") return ok(BODIES[key]);
+        bookReads++;
+        return bookReads === 1 ? new Promise<RawRead>((r) => void pending.push(() => r(ok(BODIES.feed)))) : ok(BODIES.feed);
+      },
+    });
+    await settle();
+    assert.deepEqual([accountReads, bookReads], [1, 1]);
+    for (const key of ACCOUNT_READS) s.clocks.retryNow(key);
+    await settle();
+    assert.deepEqual([accountReads, bookReads], [1, 1], "not beside the passes in flight");
+    for (const release of pending) release();
+    await settle();
+    assert.deepEqual([accountReads, bookReads], [2, 2], "but straight after them, not a minute later");
     s.clocks.stop();
   });
 });

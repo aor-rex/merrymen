@@ -17,6 +17,13 @@
  * here, and a second pass started while one is in flight would race it to
  * setState with an older answer.
  *
+ * BUT A RETRY ASKED FOR MID-PASS IS NOT DROPPED. It is how an order that
+ * answered, a sign-in or a new agent says "read the account again, now", and
+ * the pass in flight started before that change, so its answer is the old
+ * state. The ask is queued, and exactly one more pass runs the moment the one
+ * in flight ends, however many times it was asked. The old shell restarted
+ * every read to get the same effect.
+ *
  * The timers are injected so the schedule can be executed in a test; the shell
  * passes the window's.
  */
@@ -148,6 +155,8 @@ export function startRefreshLoop(opts: {
   /** When the booked pass fires; null while none is booked. */
   let bookedAt: number | null = null;
   let inFlight = false;
+  /** A retry was asked for while a pass was in flight: run once more after it. */
+  let again = false;
   let stopped = false;
 
   const book = (ms: number) => {
@@ -181,6 +190,10 @@ export function startRefreshLoop(opts: {
     lastSilent = silent;
     const nextAt = book(nextReadIn(failuresInARow, every()));
     opts.report({ failuresInARow, nextAt, lastOkAt, silent });
+    if (again) {
+      again = false;
+      void run();
+    }
   };
 
   function tick() {
@@ -198,7 +211,14 @@ export function startRefreshLoop(opts: {
 
   void run();
   return {
-    retryNow: () => void run(),
+    /** Run now — or, if a pass is in flight, once more as soon as it ends. */
+    retryNow: () => {
+      if (inFlight) {
+        again = true;
+        return;
+      }
+      void run();
+    },
     /**
      * RUN NOW IF A PASS IS DUE, otherwise leave the booked one alone.
      *

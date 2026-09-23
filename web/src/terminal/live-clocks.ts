@@ -63,6 +63,14 @@ function verdict(raw: RawRead): boolean {
 export const LIVE_CLOCK_KEYS = ["theses", "market", "board", "discoveries", "account", "feed"] as const;
 export type LiveClockKey = (typeof LIVE_CLOCK_KEYS)[number];
 
+/**
+ * THE OWNER'S OWN READS — session and grants, and the book — which everything
+ * that changes the owner's position asks for again at once: an order that
+ * answered, a sign-in, a new agent (App.tsx refreshAccount). A pass already in
+ * flight when they ask is followed by one more (refresh-loop.ts retryNow).
+ */
+export const ACCOUNT_READS = ["account", "feed"] as const satisfies readonly LiveClockKey[];
+
 export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey })[] {
   /** A public read: its answer applied, and kept past a later failure — see withRead. */
   const publicRead = (key: LiveReadKey) => async () => {
