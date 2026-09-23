@@ -163,3 +163,61 @@ describe("refusals collapse into one line per reason, where the newest of them s
     assert.equal(triedLine(swapItems(cutToday, "all")[0] as Extract<SwapItem, { kind: "tried" }>, NOON, day), `Refused ${DESK_TAPE_ROWS}× today: ops cap`);
   });
 });
+
+/**
+ * THE DESK'S P&L CHIP, END TO END (R3P-2). desk-trades.ts marks each sell
+ * `realized_vouched` and /api/feed spreads it onto the wire, and the table
+ * prints dollars only for `realizedVouched === true`. But mineOf, between the
+ * two, carried `realizedPnlUsdg` and never the flag, so it always arrived
+ * undefined and the owner's desk showed no chip on any sell — the vouched
+ * ones included. Driven here through every piece in order: the ledger read,
+ * the route's row, the terminal's mapping, the table's rows.
+ */
+describe("the owner's desk prints realized dollars for a sell the tape vouches for, and only for one", () => {
+  it("A SELL WHOSE PROCEEDS AND COST WERE BOTH READ GETS ITS CHIP; ONE WITH A COST BUILT FROM A QUOTE DOES NOT", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { wrapSqlite } = await import("../../../worker/src/db");
+    const { readDeskTrades } = await import("../lib/desk-trades");
+    const { fmtEpoch } = await import("../lib/ledger");
+    const { mineOf } = await import("./live");
+    const now = Math.floor(Date.now() / 1000);
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    try {
+      await db.exec(`CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT, reason TEXT);
+        CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, sell_token TEXT, buy_token TEXT,
+          amount_usdg REAL, tx_hash TEXT, status TEXT, reject_rule TEXT, sim_quote_out TEXT, sim_min_out TEXT, sim_fee_tier INTEGER,
+          sim_gas TEXT, created_at INTEGER, user_op_hash TEXT, decision_id TEXT, fill_side TEXT, fill_symbol TEXT,
+          realized_pnl_usdg REAL, epoch INTEGER, fill_qty_raw TEXT, basis_source TEXT);`);
+      const ins = db.prepare(
+        `INSERT INTO trades (agent_id, kind, sell_token, buy_token, amount_usdg, status, created_at, user_op_hash, fill_side, fill_symbol,
+                             realized_pnl_usdg, epoch, fill_qty_raw, basis_source) VALUES ('0xA','swap',?,?,5,'landed',?,?,?,?,?,2,'10',?)`,
+      );
+      await ins.run("0xUSDG", "0xRCPT", now - 900, "0xb1", "buy", "0xRCPT", null, "receipt");
+      await ins.run("0xRCPT", "0xUSDG", now - 800, "0xs1", "sell", "0xRCPT", 1.25, "receipt"); // both halves read off receipts
+      await ins.run("0xUSDG", "0xQUOTE", now - 700, "0xb2", "buy", "0xQUOTE", null, "quote");
+      await ins.run("0xQUOTE", "0xUSDG", now - 600, "0xs2", "sell", "0xQUOTE", 9, "receipt"); // cost built from the quote
+
+      const tape = await readDeskTrades(db, "0xA", 2, now - 86_400);
+      // What /api/feed puts on the wire (route.ts: the row spread, the time formatted).
+      const wire = tape.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
+      const mine = mineOf({ agent: { name: "Shogun", strategy: "trencher", slug: null }, trades: wire }, [])!;
+      const sells = swapRowsOfDesk(mine.moves).filter((r) => r.side === "sell");
+      const chipAt = (ago: number) => sells.find((r) => r.at === now - ago)?.realizedUsd;
+      assert.equal(sells.length, 2);
+      assert.equal(chipAt(800), 1.25, "the vouched sell shows what it realized");
+      assert.equal(chipAt(600), null, "an estimated cost is not a result");
+      const moved = mine.moves as (Thesis & { realizedVouched?: boolean })[];
+      assert.deepEqual(moved.filter((m) => m.action === "sell").map((m) => m.realizedVouched).sort(), [false, true]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("a tape that does not say — a server from before the flag — vouches for nothing", async () => {
+    const { mineOf } = await import("./live");
+    const sell = { kind: "swap", sell_token: "0xRCPT", buy_token: "0xUSDG", amount_usdg: 5, tx_hash: "0xs", status: "landed", created_at: "2026-09-23 12:00:00", fill_side: "sell", realized_pnl_usdg: 1.25 };
+    const mine = mineOf({ agent: { name: "Shogun", strategy: "trencher", slug: null }, trades: [sell] }, [])!;
+    assert.deepEqual(swapRowsOfDesk(mine.moves).map((r) => [r.side, r.realizedUsd]), [["sell", null]]);
+  });
+});

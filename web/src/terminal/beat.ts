@@ -774,10 +774,10 @@ const KEY_PRIORITY: Record<string, number> = {
  * unmounts. Presentation state per page load — nothing here is stored or sent.
  *
  * A holder is remembered with what it said (`base`: post, outcome, sentence),
- * whether it was an order in flight, and its newest copy, in seconds — which
- * is what decides who may take its key once it has gone.
+ * whether it was an order in flight, and its first and newest copies, in
+ * seconds — which is what decides who may take its key once it has gone.
  */
-type Holder = { ident: string; base: string; pending: boolean; last: number };
+type Holder = { ident: string; base: string; pending: boolean; first: number; last: number };
 const keyOwner = new Map<string, Holder>();
 const ownedKey = new Map<string, string>();
 /** A long session is bounded: past this, keys are dealt afresh from the current read. */
@@ -795,6 +795,77 @@ export function forgetKeysForTest(): void {
 }
 
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** A departed key a newcomer could be drawn under, and how well it fits: 0 is the best (`fitOf`). */
+export type Fit = { key: string; rank: 0 | 1 | 2 };
+
+/**
+ * COULD A ROW FIRST SAID AT `row.first` AND LAST AT `row.last` (seconds) BE
+ * THE ROW `was` — the same words, read again with its oldest copies gone?
+ *
+ * Never unless its first copy is one the holder covered (`first <= was.last`):
+ * a row whose every copy the page saw has aged out is, by anything the read
+ * can show, a new row. Then, best first:
+ *  0 — it still has the holder's newest copy, a copy the page knows that row
+ *      had: its newest copy is exactly there (only old copies left, nothing
+ *      said — or an older body served stale, where the first copy went back),
+ *      or its first copy is (said again, and everything before it left).
+ *  1 — its span only moved forward: said again since, as well.
+ *  2 — anything else inside that cover.
+ */
+export function fitOf(row: { first: number; last: number }, was: { first: number; last: number }): 0 | 1 | 2 | null {
+  if (row.first > was.last) return null;
+  if (row.last === was.last || row.first === was.last) return 0;
+  if (was.first <= row.first && row.last > was.last) return 1;
+  return 2;
+}
+
+/**
+ * WHICH NEWCOMER TAKES WHICH DEPARTED KEY OF ITS OWN WORDS (R3F-1), as a
+ * matching rather than first come, first served: handed out in list order, the
+ * first twin asked took whichever key it fitted, even one the next twin fitted
+ * better or was the only one it fitted.
+ *
+ * By rank: every pair of rank 0 is settled first — the strongest evidence a
+ * row is the one that held a key — then rank 1 among what is left, then rank 2,
+ * and a rank never unsettles a pair an earlier one made. Within a rank it is a
+ * maximum matching (augmenting paths), so as many rows as can keep a key do.
+ * Where the spans cannot tell two twins apart, the answer is only stable:
+ * newcomers are tried in the order `fits` lists them, each its keys in the
+ * order given.
+ *
+ * Returns key -> newcomer. Pure; the sizes are a handful of twins per post.
+ */
+export function matchTwins(fits: ReadonlyMap<number, readonly Fit[]>): Map<string, number> {
+  const settled = new Map<string, number>();
+  const placed = new Set<number>();
+  for (const rank of [0, 1, 2] as const) {
+    const edges = new Map<number, string[]>();
+    for (const [i, all] of fits) {
+      const mine = placed.has(i) ? [] : all.filter((f) => f.rank === rank && !settled.has(f.key)).map((f) => f.key);
+      if (mine.length > 0) edges.set(i, mine);
+    }
+    const holder = new Map<string, number>();
+    const assign = (i: number, tried: Set<string>): boolean => {
+      for (const key of edges.get(i)!) {
+        if (tried.has(key)) continue;
+        tried.add(key);
+        const j = holder.get(key);
+        if (j === undefined || assign(j, tried)) {
+          holder.set(key, i);
+          return true;
+        }
+      }
+      return false;
+    };
+    for (const i of edges.keys()) assign(i, new Set());
+    for (const [key, i] of holder) {
+      settled.set(key, i);
+      placed.add(i);
+    }
+  }
+  return settled;
+}
 
 /**
  * C2: EACH BEAT'S RENDER KEY IS ITS POSTID — unique, stable across refreshes,
@@ -834,6 +905,18 @@ const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * already covered), and a key last held by other words only when the holder
  * was an order in flight — the trade settling. A new twin, or a new order where
  * a fill used to be, is a new row, gets a key nobody has shown, and slides in.
+ *
+ * THE SAME WORDS' KEYS GO TO THE BEST FIT, NOT THE FIRST ASKER (R3F-1). When
+ * two twins' first copies both age out between two reads, their order by first
+ * copy can flip, and "its first copy is one the holder covered" is then true
+ * of the wrong twin as well: handed out in list order, the first twin asked
+ * took its neighbour's key and the neighbour slid in as news. So these keys
+ * are dealt as a matching (`matchTwins`), before any other key is: every
+ * departed holder of the same words a newcomer could be, ranked by how well
+ * the spans agree (`fitOf`: it still has the holder's newest copy, then a span
+ * that only moved forward, then the bare cover), best fits paired first. So an
+ * order still in flight keeps its element when an earlier send of it lands:
+ * it is the same row, and the fill is the new one.
  */
 function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
   if (ownedKey.size > KEYS_MAX) dealAfresh();
@@ -859,6 +942,7 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
     ident: ident[i]!,
     base: base[i]!,
     pending: beats[i]!.outcome === "pending",
+    first: firstOf[i]!,
     last: beats[i]!.atMs / 1000,
   });
 
@@ -873,13 +957,47 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
       keyOwner.set(had, holderOf(i));
     }
   });
+  // Newcomer `i` is drawn under `key` from now on.
+  const take = (i: number, key: string): void => {
+    // The row that held it before has gone; its claim goes with it, or it
+    // would take the key back from this one if it were ever read again.
+    const before = keyOwner.get(key);
+    if (before !== undefined) ownedKey.delete(before.ident);
+    keyOwner.set(key, holderOf(i));
+    ownedKey.set(ident[i]!, key);
+    used.add(key);
+    keys[i] = key;
+  };
+  // THE SAME WORDS' DEPARTED KEYS, DEALT AS A MATCHING — see above.
+  const departed = new Map<string, [string, Holder][]>();
+  for (const [key, was] of keyOwner) {
+    if (used.has(key)) continue;
+    const same = departed.get(was.base);
+    if (same) same.push([key, was]);
+    else departed.set(was.base, [[key, was]]);
+  }
+  const fits = new Map<number, Fit[]>();
+  const waiting = beats
+    .map((_, i) => i)
+    .filter((i) => keys[i] === null && base[i] !== null)
+    .sort((x, y) => byText(ident[x]!, ident[y]!));
+  for (const i of waiting) {
+    const mine: Fit[] = [];
+    for (const [key, was] of departed.get(base[i]!) ?? []) {
+      const rank = fitOf({ first: firstOf[i]!, last: beats[i]!.atMs / 1000 }, was);
+      if (rank !== null) mine.push({ key, rank });
+    }
+    if (mine.length > 0) fits.set(i, mine.sort((x, y) => byText(x.key, y.key)));
+  }
+  for (const [key, i] of matchTwins(fits)) take(i, key);
   // May newcomer `i` be drawn under `key`? Only if no row that is not this one
-  // was last drawn under it — see above.
+  // was last drawn under it — see above. A key of the same words that is still
+  // free fits no newcomer: the matching gave out every one that did.
   const mayTake = (key: string, i: number): boolean => {
     if (used.has(key)) return false;
     const was = keyOwner.get(key);
     if (was === undefined) return true;
-    return was.base === base[i] ? firstOf[i]! <= was.last : was.pending;
+    return was.base === base[i] ? false : was.pending;
   };
   // Newcomers, in an order that is not the clock's.
   const newcomers = beats
@@ -892,26 +1010,20 @@ function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
     );
   for (const i of newcomers) {
     const b = beats[i]!;
-    const id = ident[i];
     let key: string;
-    if (b.postId && id !== null) {
+    if (b.postId && ident[i] !== null) {
       const full = `${b.postId}:${b.outcome ?? ""}:${b.outcomeText ?? ""}`;
       key = [b.postId, `${b.postId}:${b.outcome ?? ""}`, full].find((k) => mayTake(k, i)) ?? full;
       for (let n = 2; !mayTake(key, i); n++) key = `${full}#${n}`;
-      // The row that held it before has gone; its claim goes with it, or it
-      // would take the key back from this one if it were ever read again.
-      const before = keyOwner.get(key);
-      if (before !== undefined) ownedKey.delete(before.ident);
-      keyOwner.set(key, holderOf(i));
-      ownedKey.set(id, key);
+      take(i, key);
     } else {
       // No postId (a server from before it): the old id, as it always was.
       const legacy = b.id;
       key = legacy;
       for (let n = 2; used.has(key); n++) key = `${legacy}#${n}`;
+      used.add(key);
+      keys[i] = key;
     }
-    used.add(key);
-    keys[i] = key;
   }
   beats.forEach((b, i) => {
     b.id = keys[i]!;
