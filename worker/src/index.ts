@@ -119,7 +119,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
-import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type TickReads } from "./order-gate";
+import { createTickBook, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { createFlowWitness, opsStillOut } from "./flow-witness";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -3748,7 +3748,12 @@ async function main() {
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
   let notedUnpriced = false;
-  let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
+  // THE BOOK AS THE LATEST TICK LEFT IT — what it read and the last equity it
+  // composed — and the one gate every order placed between ticks meets, the
+  // app's and Telegram's alike. Every way a tick ends states its reads here;
+  // see order-gate.ts createTickBook for the two globals this replaced and the
+  // Telegram buy they let through after a tick that could not read.
+  const tickBook = createTickBook();
   let nextBrainReviewAt: number | null = null;
   let nextMarketReviewAt: number | null = null;
   let quietReview: (() => Promise<void>) | null = null;
@@ -3765,10 +3770,6 @@ async function main() {
   // from an intent, so a strategy can't declare its own target priceable.
   let lastUnpriceable: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
-  // Whether that figure is the WHOLE book. False while a held asset can't be
-  // valued — the total is then a partial sum, and judging a drawdown on it would
-  // read the missing asset as a loss and refuse the very sell that clears it.
-  let lastEquityKnown = true;
   // ETH held by the smart account, as of the last tick that could read it.
   //
   // NULL means "not read yet", which is different from zero — and the
@@ -4701,7 +4702,7 @@ async function main() {
    * say when it frees as well as whether it is held.
    */
   const commandInFlight = createOrderInFlight();
-  async function runQueuedCommand(agentId: string, reads: TickReads): Promise<void> {
+  async function runQueuedCommand(agentId: string, reads: StatedReads): Promise<void> {
     if (!active) return;
     await commandInFlight.run(async () => {
       try {
@@ -4748,7 +4749,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand, reads: TickReads): Promise<CommandOutcome> {
+  async function runCommand(cmd: FileCommand, reads: StatedReads): Promise<CommandOutcome> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -4850,7 +4851,7 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand, reads: TickReads): Promise<OrderReply> {
+  async function runOrderCommand(cmd: FileCommand, reads: StatedReads): Promise<OrderReply> {
     // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
     // runs it: the unreadable market and the unread book (both drained with
     // their flag by the tick that could not read them — answered, not
@@ -4858,8 +4859,9 @@ async function main() {
     // skip the drawdown breaker for it), the owner's pause, the arguments, and
     // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
     // other surface and meaning the same thing in both. `reads` is what the
-    // draining tick read, stated at its drain site (order-gate.ts tickReads)
-    // and carried here whole: never a default, never a global beside it.
+    // draining tick read, stated to the tick book at its drain site (order-gate.ts
+    // createTickBook) and carried here whole: never a default, never a global
+    // beside it, and the same record a Telegram order is judged against.
     return placeOrder(
       cmd.args,
       orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
@@ -8978,7 +8980,8 @@ async function main() {
       // no market data at all), and a trade is refused BY NAME rather than
       // filled — see runOrderCommand for why filling it would switch the
       // drawdown breaker off.
-      if (active) await runQueuedCommand(active.agentId, tickReads.marketUnread()).catch(() => {});
+      const marketUnread = tickBook.unread("market");
+      if (active) await runQueuedCommand(active.agentId, marketUnread).catch(() => {});
       return;
     }
 
@@ -9377,8 +9380,9 @@ async function main() {
       // rule the unreadable-market return learned: this return sits above the
       // drain, so a queued order was skipped until its window closed. With the
       // book unread there is no equity for the breaker to judge it against, so
-      // it is refused by name — see runOrderCommand.
-      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
+      // it is refused by name — see runOrderCommand. And so is a Telegram
+      // order until a tick composes again: the book says so for both.
+      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
       return;
     }
 
@@ -9390,7 +9394,7 @@ async function main() {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
       // Answered for the same reason as the unread book just above.
-      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
+      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
       return;
     }
 
@@ -10035,9 +10039,10 @@ async function main() {
       }
     }
 
-    // Brain execution uses this tick's book, including on the first tick.
-    lastEquityUsdg = equityUsdg;
-    lastEquityKnown = !bookIncomplete;
+    // Brain execution uses this tick's book, including on the first tick; so
+    // does every order until the next tick states its own — and the drain
+    // below is handed this same statement: the book valued, and totalled or not.
+    const drainReads = tickBook.composed(equityUsdg, !bookIncomplete);
     if (!paper) lastGasWei = balances.ethWei;
     // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
     // peak and equity settled above and read twice: by the Trencher's entry
@@ -10793,8 +10798,6 @@ async function main() {
       depth: await depthReader.read(watchTokens.map((t) => t.symbol)),
     };
 
-    lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks
-    lastEquityKnown = !bookIncomplete;
     // NOT ON PAPER. The paper tick hardcodes balances.ethWei to 0n instead of
     // reading the chain — honest for the snapshot, since a paper book holds no
     // ETH — but copying it here published a FABRICATED zero as the account's
@@ -10855,8 +10858,7 @@ async function main() {
     // strategy's per-tick cadence, and waking early for an order must not run
     // either an extra time. A regular tick drains beside its strategy, as it
     // always has. See command-wake.ts drainOnTick.
-    // With what this tick read: the book valued, and totalled or not.
-    const drainReads = tickReads.composed(!bookIncomplete);
+    // With what this tick read and stated to the book above.
     if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId, drainReads) : Promise.resolve())))) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
@@ -11256,6 +11258,8 @@ async function main() {
     symbol: string,
     token: `0x${string}`,
     usdgAmount: number,
+    /** The book submitChatTrade's gate judged this order on — the equity it goes to the wall with. */
+    book: { equityUsdg: bigint; equityKnown: boolean },
     // Threaded through so a curve buy carries the same provenance a pool buy
     // does — memecoins are exactly where a reasoner other than the owner is
     // most likely to be the one asking, and where a pre-trade thesis most
@@ -11421,7 +11425,7 @@ async function main() {
     // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
     // nothing, could not be read, or belongs to another agent. Nothing is sent.
     if (!stamped.ok) return no(stamped.why);
-    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
+    const outcome = await processIntentReporting(intent, book.equityUsdg, book.equityKnown, asked.notAfterMs);
     // Reached after its deadline: nothing was built or sent, and the line says so.
     if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
@@ -11558,15 +11562,19 @@ async function main() {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
       // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is resolved or
-      // sized (order-gate.ts chatOrderGate, where a test runs it). Before the
-      // first tick equity is its 0n initialiser and the drawdown check would
-      // judge garbage; and with a holding that has neither a price nor a cost
-      // the book cannot be totalled, checkPolicy skips the breaker, and a BUY
-      // would go out with the loss limit off. That refusal lived only in the
-      // app order's gate, so a buy typed in Telegram got through. It is here now,
-      // where the app, Telegram and the Brain all pass, in the app's own words.
-      const unjudged = chatOrderGate(side, { equityUsdg: lastEquityUsdg, equityKnown: lastEquityKnown });
-      if (unjudged) return no(unjudged);
+      // sized — the latest tick's, as it stated it (order-gate.ts createTickBook
+      // and chatOrderGate, where a test runs both). Before the first tick equity
+      // is its 0n initialiser and the drawdown check would judge garbage; after
+      // a tick that could not read the market, a balance or a price there is no
+      // equity to judge against at all; and with a holding that has neither a
+      // price nor a cost the book cannot be totalled, checkPolicy skips the
+      // breaker, and a BUY would go out with the loss limit off. Those refusals
+      // lived only in the app order's gate, so a buy typed in Telegram got
+      // through them. They are here now, where the app, Telegram and the Brain
+      // all pass, in the app's own words — and the equity the order goes to the
+      // wall with is the one this same call judged.
+      const judged = tickBook.judge(side);
+      if (!judged.ok) return no(judged.line);
       // Resolve against the watch set, not the shipped registry — otherwise a
       // memecoin the owner added, covered by their grant and priced from its pool
       // still came back "unknown symbol" when they asked for it by name.
@@ -11578,7 +11586,7 @@ async function main() {
       // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
       // graduates, so routing it to the swap router would build an operation
       // against a pool that does not exist. Asked before anything is sized.
-      if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, asked);
+      if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, judged, asked);
 
       const router = swapRouterFor(cfg);
       let intent: TradeIntent;
@@ -11612,7 +11620,7 @@ async function main() {
       // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
       // nothing, could not be read, or belongs to another agent. Nothing is sent.
       if (!stamped.ok) return no(stamped.why);
-      const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
+      const outcome = await processIntentReporting(intent, judged.equityUsdg, judged.equityKnown, asked.notAfterMs);
       // Reached after its deadline: nothing was built or sent, and the line says so.
       if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
@@ -11623,7 +11631,10 @@ async function main() {
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
-    if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
+    // A transfer is an exit the breaker exempts, so only the first-tick check
+    // applies; the book's latest state is what it goes to the wall with.
+    const book = tickBook.latest();
+    if (book.equityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
     // Worker-side daily transfer budget, on top of the grant's per-trade/daily
     // caps (checkPolicy) and the on-chain transfer amount cap.
     const transferredToday = await getTransferredTodayUsdg(active.agentId);
@@ -11638,7 +11649,7 @@ async function main() {
     };
     const stamped = await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
     if (!stamped.ok) return `Transfer refused: ${stamped.why}.`;
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    await processIntent(intent, book.equityUsdg, book.reads.equityKnown);
     return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
   }
 
@@ -11758,13 +11769,13 @@ async function main() {
       maxActionUsdg: active
         ? Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6)
         : null,
-      // Real cash only. `lastEquityUsdg` includes positions, and a ceiling is
+      // Real cash only. The book's equity includes positions, and a ceiling is
       // judged against what can actually be DEPLOYED — an agent fully invested
       // in one holding is not being throttled by its cap.
       cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
-        drawdownPeak() > 0n && lastEquityUsdg > 0n
-          ? Math.max(0, Number(((drawdownPeak() - lastEquityUsdg) * 10_000n) / drawdownPeak()))
+        drawdownPeak() > 0n && tickBook.latest().equityUsdg > 0n
+          ? Math.max(0, Number(((drawdownPeak() - tickBook.latest().equityUsdg) * 10_000n) / drawdownPeak()))
           : null,
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       // Pass ZERO through. It used to be mapped to null here AND filtered again
@@ -11861,7 +11872,9 @@ async function main() {
     nextBrainReviewAt = null;
     nextMarketReviewAt = null;
     quietReview = null;
-    await tick()
+    // Through the tick book: a tick that fails before it states what it read
+    // cannot vouch for the book, and no order is placed on it until one does.
+    await tickBook.during(tick)
       // CLEARED BY A HEALTHY TICK. The latch was only ever assigned on failure,
       // so a fault that came back after recovering was reported once and never
       // again — the same shape `lastIdleReason` and `lastLiveBlocker` both got
@@ -11886,7 +11899,8 @@ async function main() {
    */
   const runCommandTick = async (): Promise<void> => {
     commandTick = true;
-    const run = tick();
+    // during() calls tick() before its first await, so the flag is still read synchronously.
+    const run = tickBook.during(tick);
     commandTick = false;
     await run
       .then(() => {

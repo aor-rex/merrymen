@@ -178,11 +178,13 @@ describe("an unreadable market answers the order instead of starving it", () => 
     const at = CODE.indexOf("the market could not be read this tick");
     assert.ok(at > 0);
     const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
-    assert.match(branch, /runQueuedCommand\(active\.agentId, tickReads\.marketUnread\(\)\)/);
+    assert.match(branch, /const marketUnread = tickBook\.unread\("market"\);\s*if \(active\) await runQueuedCommand\(active\.agentId, marketUnread\)/);
     // The refusal those reads produce — by name, before the pause and before
     // anything is sized, with nothing reaching a submitter — is run in
-    // order-gate.test.ts. The reads are a required argument now, so a drain
-    // that states none does not compile.
+    // order-gate.test.ts, and so is the same refusal for a Telegram order after
+    // this tick. The reads are a required argument, and only the tick book can
+    // make them (StatedReads), so a drain that states nothing to it does not
+    // compile.
   });
 
   it("but the PROBE still runs, because it needs no market data at all", () => {
