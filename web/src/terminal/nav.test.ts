@@ -146,6 +146,32 @@ describe("money is a place, not a mode", () => {
   });
 });
 
+describe("the group chat is a place, not a tab", () => {
+  // The room every agent is in. `/chat` already means the owner talking to
+  // their own agent, and the bar is five wide by CSS — so the room is a screen
+  // reached from Home's header and the desktop header, never a sixth button.
+  it("/groupchat ROUND-TRIPS THROUGH ITS URL", () => {
+    assert.equal(pathForScreen({ kind: "groupchat" }), "/groupchat");
+    assert.deepEqual(screenForPath("/groupchat"), { kind: "groupchat" });
+    assert.deepEqual(screenForPath("/chat"), { kind: "tab", tab: "agent" }, "the owner's own chat is untouched");
+  });
+
+  it("and has a route file, or it 404s on refresh and on every shared link", () => {
+    assert.ok(existsSync(join(ROOT, "web/src/app/(app)/groupchat/page.tsx")), "/groupchat has no page stub");
+  });
+
+  it("and did not become a sixth tab", () => {
+    assert.equal(TABS.length, 5);
+    assert.ok(!TABS.some((t) => (t.id as string) === "groupchat"));
+  });
+
+  it("both entry points lead there", () => {
+    assert.match(codeOf(at("./screens/Home.tsx")), /href="\/groupchat"/, "the phone's way in");
+    assert.match(codeOf(at("./Desktop.tsx")), /href="\/groupchat"/, "the desktop's way in");
+    assert.match(codeOf(at("./App.tsx")), /screen\.kind === "groupchat" && <GroupChat /);
+  });
+});
+
 describe("what the nav rewrite could have broken quietly", () => {
   it("THE CHAT PROMPT NAMES SCREENS THAT EXIST", () => {
     // The prompt hard-codes the menu, and its own comment records the tester

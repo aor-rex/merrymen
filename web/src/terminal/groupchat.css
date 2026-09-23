@@ -1,0 +1,830 @@
+/*
+ * The group chat screen — see screens/GroupChat.tsx.
+ *
+ * Its own file, imported once by the root layout and never by the component,
+ * because the test runner renders components under node and node cannot
+ * import CSS. Every class is `gc-`, every rule sits under `.terminal-host`,
+ * and the colours are the terminal's own tokens, so the room reads as part of
+ * the product rather than a widget dropped into it.
+ */
+
+/* ── ONE SCROLLER: THE LOG ────────────────────────────────────────────────
+   On every other screen `.body` grows with its content and the document
+   scrolls. A chat cannot work that way: the composer has to stay put while the
+   log moves under it, and a log inside a scrolling page is two scrollers
+   fighting over one thumb. So on this screen `.body` is exactly the viewport,
+   and the log is the one thing that scrolls.
+
+   `overflow-y: auto` on `.body`, NOT `hidden`. The shell can mount things
+   above the screen (the sign-in entry on a phone, the outage banner, the
+   re-sign prompt), and the log keeps a floor so they cannot squeeze it to
+   nothing. If they ever add up to more than the screen, the page scrolls
+   instead of clipping the composer out of reach — the trap desk-scroll.test.ts
+   records, where three defensible rules together made content unreachable.
+
+   The bottom padding clears the phone's floating tab bar (14px off the edge,
+   52px tall) plus the home indicator. */
+:where(.terminal-host) .app[data-screen="groupchat"] > .body {
+  flex: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow-y: auto;
+  padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  gap: 12px;
+}
+
+:where(.terminal-host) .gc-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+:where(.terminal-host) .gc-page > * {
+  flex: 0 0 auto;
+}
+
+/* ── header: the title, and who is here ─────────────────────────────────── */
+:where(.terminal-host) .gc-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+:where(.terminal-host) .gc-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+:where(.terminal-host) .gc-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tx-2);
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-presence:disabled {
+  cursor: default;
+}
+:where(.terminal-host) .gc-presence[aria-expanded="true"] .gc-chev,
+:where(.terminal-host) .gc-owner[open] > summary .gc-chev {
+  transform: rotate(180deg);
+}
+:where(.terminal-host) .gc-chev {
+  flex-shrink: 0;
+  transition: transform 160ms var(--ease);
+}
+:where(.terminal-host) .gc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--up);
+  box-shadow: 0 0 0 3px rgb(61 214 140 / 0.16);
+  animation: gc-breathe 2.4s ease-in-out infinite;
+}
+:where(.terminal-host) .gc-dot.off {
+  background: var(--faint);
+  box-shadow: none;
+  animation: none;
+}
+:where(.terminal-host) .gc-who {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 34dvh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .gc-who button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  background: var(--raised);
+  font-size: 12px;
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-who button:disabled {
+  cursor: default;
+}
+:where(.terminal-host) .gc-zz {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* ── the owner's corner ─────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-owner {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+:where(.terminal-host) .gc-owner > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--tx-2);
+  cursor: pointer;
+  list-style: none;
+}
+:where(.terminal-host) .gc-owner > summary::-webkit-details-marker {
+  display: none;
+}
+:where(.terminal-host) .gc-owner > summary > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .gc-owner > summary:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+:where(.terminal-host) .gc-owner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 12px 12px;
+}
+:where(.terminal-host) .gc-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-zone select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--tx);
+  font-size: 16px;
+}
+:where(.terminal-host) .gc-mute {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+:where(.terminal-host) .gc-mute strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-mute small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-mute .switch {
+  flex-shrink: 0;
+}
+:where(.terminal-host) .gc-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* ── states that are not a conversation ─────────────────────────────────── */
+:where(.terminal-host) .gc-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+:where(.terminal-host) .gc-retry,
+:where(.terminal-host) .gc-foot-note button {
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-stale {
+  margin: 0;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+
+/* ── the log ────────────────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-page > .gc-log-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  /* A FLOOR, so a banner the shell mounts above the screen cannot squeeze the
+     conversation to a sliver — the chat is what this screen is for. */
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+:where(.terminal-host) .gc-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* A swiped bubble slides right; it must not open a sideways scroll. */
+  overflow-x: hidden;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+:where(.terminal-host) .gc-log:focus-visible {
+  outline: 1px solid var(--line);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+:where(.terminal-host) .gc-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 10px;
+}
+:where(.terminal-host) .gc-earlier button {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-origin {
+  margin: 4px 0 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-day::before,
+:where(.terminal-host) .gc-day::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+:where(.terminal-host) .gc-system {
+  margin: 12px auto;
+  max-width: 82%;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+/* ── a line ─────────────────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 3px;
+}
+:where(.terminal-host) .gc-row.gc-first {
+  margin-top: 14px;
+}
+:where(.terminal-host) .gc-row-mine {
+  justify-content: flex-end;
+}
+:where(.terminal-host) .gc-avatar {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  margin-top: 19px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .gc-avatar:disabled {
+  cursor: default;
+}
+:where(.terminal-host) span.gc-avatar {
+  height: 0;
+  margin: 0;
+}
+:where(.terminal-host) .gc-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 84%;
+}
+:where(.terminal-host) .gc-row-mine .gc-stack {
+  align-items: flex-end;
+  max-width: 86%;
+}
+:where(.terminal-host) .gc-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 15px;
+  margin: 0 0 4px 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tx-2);
+  max-width: 100%;
+}
+:where(.terminal-host) .gc-name > button,
+:where(.terminal-host) .gc-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+:where(.terminal-host) .gc-name > button:hover {
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-tag.mine {
+  border-color: rgb(165 206 31 / 0.35);
+  color: var(--lime);
+}
+
+/* The swipe: a still row holding the reply glyph, and a slide that moves. */
+:where(.terminal-host) .gc-swipe {
+  position: relative;
+  max-width: 100%;
+  /* Vertical movement belongs to the browser, so the log still scrolls from
+     anywhere on a bubble; horizontal movement comes to the swipe. */
+  touch-action: pan-y;
+}
+:where(.terminal-host) .gc-swipe-icon {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--lime);
+  opacity: 0;
+  transform: translateY(-50%) scale(0.6);
+  pointer-events: none;
+}
+:where(.terminal-host) .gc-slide {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: transform 200ms var(--ease);
+}
+:where(.terminal-host) .gc-row-mine .gc-slide {
+  flex-direction: row-reverse;
+}
+:where(.terminal-host) .gc-bubble {
+  min-width: 0;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 6px 18px 18px 18px;
+  background: var(--card);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+:where(.terminal-host) .gc-row:not(.gc-first) .gc-bubble {
+  border-radius: 6px 18px 18px 6px;
+}
+:where(.terminal-host) .gc-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Distinct but calm. The reader's own words: a lime wash, on the right. */
+:where(.terminal-host) .gc-row-mine .gc-bubble {
+  border-color: rgb(165 206 31 / 0.3);
+  border-radius: 18px 6px 18px 18px;
+  background: rgb(165 206 31 / 0.13);
+}
+:where(.terminal-host) .gc-row-mine:not(.gc-first) .gc-bubble {
+  border-radius: 18px 6px 6px 18px;
+}
+/* Another owner: a person among the agents, so a raised card and a quieter edge. */
+:where(.terminal-host) .gc-row-owner .gc-bubble {
+  background: var(--raised);
+  border-color: rgb(255 255 255 / 0.1);
+}
+:where(.terminal-host) .gc-row-owner .gc-name {
+  color: var(--tx);
+}
+/* gm and gn: the lightest touch — a warm or cool edge and a glyph. */
+:where(.terminal-host) .gc-gm .gc-bubble {
+  border-color: rgb(247 196 92 / 0.32);
+}
+:where(.terminal-host) .gc-gn .gc-bubble {
+  border-color: rgb(150 160 255 / 0.3);
+}
+:where(.terminal-host) .gc-daymark {
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: -1px;
+  color: rgb(247 196 92 / 0.9);
+}
+:where(.terminal-host) .gc-gn .gc-daymark {
+  color: rgb(170 178 255 / 0.9);
+}
+:where(.terminal-host) .gc-mention {
+  color: var(--lime);
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-mention.me {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgb(165 206 31 / 0.16);
+}
+:where(.terminal-host) .gc-pending .gc-bubble {
+  opacity: 0.66;
+}
+:where(.terminal-host) .gc-meta {
+  margin: 4px 4px 0;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* The quote above a reply. Tapping it goes to the original. */
+:where(.terminal-host) .gc-quote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 4px;
+  padding: 5px 10px;
+  border-left: 2px solid var(--lime);
+  border-radius: 4px 10px 10px 4px;
+  background: rgb(255 255 255 / 0.035);
+  font-size: 12px;
+  color: var(--tx-2);
+  text-align: left;
+}
+:where(.terminal-host) .gc-quote > strong {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-quote > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-quote.gone {
+  border-left-color: var(--line);
+  font-style: italic;
+  color: var(--faint);
+}
+:where(.terminal-host) button.gc-quote:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+/* A call: side, coin, paper — the structured half of the line. */
+:where(.terminal-host) .gc-call {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--up);
+  border-radius: 10px;
+  background: var(--bg);
+}
+:where(.terminal-host) .gc-call.sell {
+  border-left-color: var(--down);
+}
+:where(.terminal-host) .gc-side {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgb(61 214 140 / 0.14);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--up);
+}
+:where(.terminal-host) .gc-call.sell .gc-side {
+  background: rgb(255 92 113 / 0.14);
+  color: var(--down);
+}
+:where(.terminal-host) .gc-coin {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+:where(.terminal-host) .gc-coin strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .gc-coin small {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-paper {
+  padding: 1px 7px;
+  border: 1px dashed var(--faint);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--lime);
+  text-decoration: none;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-view:hover {
+  text-decoration: underline;
+}
+:where(.terminal-host) .gc-view:focus-visible,
+:where(.terminal-host) .gc-foot-note a:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Reply and remove: shown on hover or focus for a mouse and a keyboard. */
+:where(.terminal-host) .gc-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+:where(.terminal-host) .gc-row:hover .gc-actions,
+:where(.terminal-host) .gc-row:focus-within .gc-actions {
+  opacity: 1;
+}
+:where(.terminal-host) .gc-act {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-act:hover {
+  background: var(--raised);
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-hide.on {
+  padding: 0 9px;
+  background: rgb(255 92 113 / 0.14);
+  color: var(--down);
+}
+/* A touch screen has no hover, so an invisible button there would only catch
+   stray taps: the swipe is the gesture, and the button stays reachable to a
+   keyboard without taking any room. */
+@media (hover: none) {
+  :where(.terminal-host) .gc-actions:not(:focus-within) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
+/* The pill that says the reader is missing something below. */
+:where(.terminal-host) .gc-new {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 13px;
+  border: 1px solid rgb(165 206 31 / 0.4);
+  border-radius: 999px;
+  background: var(--raised);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  font-size: 12px;
+  color: var(--tx);
+  white-space: nowrap;
+  animation: gc-in 200ms var(--ease) both;
+}
+
+/* ── the composer ───────────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+:where(.terminal-host) .gc-replying {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-left: 2px solid var(--lime);
+  border-radius: 4px 12px 12px 4px;
+  background: var(--card);
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-replying > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-replying strong {
+  color: var(--tx);
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-replying em {
+  margin-left: 6px;
+  font-style: normal;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-replying button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+}
+:where(.terminal-host) .gc-composer:focus-within {
+  border-color: var(--tx-2);
+}
+:where(.terminal-host) .gc-composer textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  max-height: 120px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--tx);
+  /* 16px, not 14: iOS zooms the whole page into any smaller field on focus. */
+  font: inherit;
+  font-size: 16px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .gc-composer textarea:focus-visible {
+  outline: none;
+}
+:where(.terminal-host) .gc-composer button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--lime);
+  color: var(--ink);
+}
+:where(.terminal-host) .gc-composer button:disabled {
+  background: var(--raised);
+  color: var(--faint);
+  cursor: default;
+}
+:where(.terminal-host) .gc-count {
+  align-self: center;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+:where(.terminal-host) .gc-count.over {
+  color: var(--down);
+}
+:where(.terminal-host) .gc-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--down);
+}
+:where(.terminal-host) .gc-foot-note {
+  margin: 0;
+  padding: 10px 2px 2px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-foot-note a {
+  color: var(--tx-2);
+  text-decoration: underline;
+}
+
+/* ── motion ─────────────────────────────────────────────────────────────── */
+@keyframes gc-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes gc-flash {
+  0%,
+  35% {
+    box-shadow: 0 0 0 2px var(--lime);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+@keyframes gc-breathe {
+  50% {
+    box-shadow: 0 0 0 5px rgb(61 214 140 / 0.06);
+  }
+}
+:where(.terminal-host) .gc-enter {
+  animation: gc-in 260ms var(--ease) both;
+}
+:where(.terminal-host) .gc-row-mine.gc-enter {
+  transform-origin: right bottom;
+}
+:where(.terminal-host) .gc-flash .gc-bubble {
+  animation: gc-flash 1.5s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .gc-enter,
+  :where(.terminal-host) .gc-new,
+  :where(.terminal-host) .gc-dot {
+    animation: none;
+  }
+  :where(.terminal-host) .gc-slide,
+  :where(.terminal-host) .gc-chev,
+  :where(.terminal-host) .gc-actions {
+    transition: none;
+  }
+  :where(.terminal-host) .gc-flash .gc-bubble {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--lime);
+  }
+}
+
+/* ── desktop: the centre column, and the room sized to it ───────────────── */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .app[data-screen="groupchat"] > .body {
+    height: auto;
+    max-height: none;
+    padding: 18px 28px;
+  }
+  :where(.terminal-host) .gc-page {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  :where(.terminal-host) .gc-stack {
+    max-width: 72%;
+  }
+}

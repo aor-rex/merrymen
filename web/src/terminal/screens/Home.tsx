@@ -1,7 +1,9 @@
 import { Board } from "./Board";
 import { PerformanceChart } from "../DitherChart";
 import { useState } from "react";
-import { Search } from "lucide-react";
+import Link from "next/link";
+import { MessagesSquare, Search } from "lucide-react";
+import { useGroupChatSupported } from "../groupchat";
 import {
   coinPrice,
   quoteTitle,
@@ -62,6 +64,9 @@ export function Home({
   // it is also not evidence that anybody bought anything, so an unread row does
   // not get to sit at the top of "most bought".
   const [showAll, setShowAll] = useState(false);
+  // The phone's way into the group chat. Hidden only on an install that said
+  // it has no room (self-hosted answers 404), never merely while unknown.
+  const room = useGroupChatSupported();
   const count = (n: number | null) => n ?? 0;
   /**
    * COINS ABOVE STOCKS, everywhere this screen ranks anything.
@@ -122,7 +127,7 @@ export function Home({
   return (
     <div className="home-page">
       <header className="top home-overview">
-        <div className="home-heading"><h1 className="top-title">Home</h1></div>
+        <div className="home-heading"><h1 className="top-title">Home</h1>{room && <Link href="/groupchat" className="icon-btn" aria-label="Group chat" title="Group chat"><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></Link>}</div>
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>
