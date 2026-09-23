@@ -204,6 +204,41 @@ export function topTradeFigures(t: ProfileTrade, showMoney: boolean): { pct: str
   };
 }
 
+// ── the owner's own view ──────────────────────────────────────────────────────
+
+/** The owner's own trades with their money in — see read-agent.ts ownBookOf. */
+export interface OwnBookView {
+  recentTrades: ProfileTrade[] | null;
+  topTrades: ProfileTrade[] | null;
+}
+
+/**
+ * THE OWNER'S OWN FIGURES, from the session-checked /api/agents/<slug>/own.
+ *
+ * The spec's rule for a profile's money is "the book is public OR it is the
+ * owner's own view", and the public read withholds a private book's sizes from
+ * everyone — the owner included. The page asks for this only on the owner's
+ * own page of a private book; the SERVER decides whether the session owns the
+ * slug, so a page that wrongly thought it was the owner's gets a refusal.
+ *
+ * Null on any failure — signed out, not theirs, unreachable, a malformed
+ * answer — and the page then shows the public figures, which carry no money.
+ * A list the server could not read comes back null rather than empty.
+ */
+export async function fetchOwnBook(slug: string): Promise<OwnBookView | null> {
+  try {
+    const r = await requestJson<{ recentTrades?: unknown; activityRead?: unknown; topTrades?: unknown; topTradesRead?: unknown }>(
+      `/api/agents/${encodeURIComponent(slug)}/own`,
+    );
+    return {
+      recentTrades: r.activityRead === true && Array.isArray(r.recentTrades) ? (r.recentTrades as ProfileTrade[]) : null,
+      topTrades: r.topTradesRead === true && Array.isArray(r.topTrades) ? (r.topTrades as ProfileTrade[]) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── the owner's switch ────────────────────────────────────────────────────────
 
 /**
