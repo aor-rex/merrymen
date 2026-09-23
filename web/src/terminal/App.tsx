@@ -484,7 +484,7 @@ export function App() {
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null}/>}
+        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home

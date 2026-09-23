@@ -49,7 +49,8 @@ function Field(props: {
   );
 }
 
-export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: string | null}) {
+/** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
+export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -390,6 +391,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
         return;
       }
       setStatus("Changes saved");
+      onSaved?.();
       setDraft({});
       setSymbols(null);
       setTgEnabled(null);
