@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { readTheses } from "./read-theses";
+import { newestNames, readTheses } from "./read-theses";
 
 const SLUG = "ems76d3cncwbt3dz";
 const OTHER = "hr5k2m9q4w7x3z8n";
@@ -143,6 +143,28 @@ describe("a sell names the coin its buy named", () => {
     const exit = r.theses.find((t) => t.action === "sell")!;
     assert.equal(exit.displayName, null);
     assert.equal(exit.head, "sell TSLA");
+  });
+
+  it("TWO NAMES IN ONE SECOND: the pick is the first by name, whatever order the rows come back in", async () => {
+    const rows = [
+      { agent_id: "0xabc", symbol: COIN, display_name: "ZEBRA", at: NOW - 7200 },
+      { agent_id: "0xabc", symbol: COIN, display_name: "JUGGERNAUT", at: NOW - 7200 },
+      { agent_id: "0xabc", symbol: COIN, display_name: "OLDER", at: NOW - 9000 },
+    ];
+    for (const order of [rows, [...rows].reverse(), [rows[1]!, rows[2]!, rows[0]!]]) {
+      assert.equal(newestNames(order).get(`0xabc|${COIN}`), "JUGGERNAUT");
+    }
+    // A newer name still wins over the tie, whatever its spelling.
+    assert.equal(newestNames([...rows, { agent_id: "0xabc", symbol: COIN, display_name: "ZZZ", at: NOW - 60 }]).get(`0xabc|${COIN}`), "ZZZ");
+    // And through the real read, both ways round in the ledger.
+    for (const [first, second] of [["ZEBRA", "JUGGERNAUT"], ["JUGGERNAUT", "ZEBRA"]]) {
+      const r = await read([
+        buy("b1", { display: first, at: NOW - 7200 }),
+        buy("b2", { display: second, at: NOW - 7200, reason: "Entry b2: a second look." }),
+        { id: "s1", action: "sell", symbol: COIN, size: 5, display: null, reason: "Exit: the stop fired.", source: "strategy:trencher", at: NOW - 60 },
+      ], [{ decision: "s1", status: "landed", side: "sell", basis: "receipt" }]);
+      assert.equal(r.theses.find((t) => t.action === "sell")!.displayName, "JUGGERNAUT", `${first} first`);
+    }
   });
 
   it("and a coin nobody ever named stays unnamed — absent, never a placeholder", async () => {

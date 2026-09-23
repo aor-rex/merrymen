@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { PublicThesis } from "@/lib/thesis";
-import { badgeOf, hasTrade } from "@/lib/thesis-badge";
+import { badgeOf, hasTrade, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { usd } from "@/lib/format";
@@ -43,8 +43,9 @@ export function ThesisCard({
   const turned = t.outcome === "refused" || t.outcome === "reverted";
   // THE CHIP'S OWN BORDER IS THE FILL STATUS. "buying" carries a dashed edge
   // that goes solid the moment the trade lands. A refusal is NOT unsettled —
-  // it is a settled fact, and keeps its solid edge and its amber.
-  const unsettled = t.outcome === "pending";
+  // it is a settled fact, and keeps its solid edge and its amber — and nor is
+  // a decision nothing was sent for, which is over (`inFlightOf`).
+  const unsettled = inFlightOf(t);
 
   const who = (
     <span className="mm-who">

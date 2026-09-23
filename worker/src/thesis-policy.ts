@@ -559,6 +559,11 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
  * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
  * it sold" is the cash, which no figure here reads: only a sell's P&L is
  * published.) See `estimatedBasis`.
+ *
+ * SO A READER THAT SELECTS THESE puts `basisScope` in front of its statement
+ * and `basisJoin(t)` among its joins. One that forgets gets a missing-column
+ * error, which every reader here already answers by retrying without figures
+ * — a post loses its figures, never the feed its posts, and no guess is shown.
  */
 export function fillFigures(t: string): string {
   const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
@@ -584,17 +589,68 @@ export function fillFigures(t: string): string {
  * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
  * later round trip its figure — nothing is shown — and never shows a guess.
  * A paper fill closes the paper book, which no quote ever priced, so it is
- * never estimated here. No index is added for this: `trades_agent_time`
- * already leads with the account. Every column is one the base schema or the
- * fill migration created, on both engines.
+ * never estimated here. Every column is one the base schema or the fill
+ * migration created, on both engines.
+ *
+ * READ ONCE PER STATEMENT, NOT ONCE PER ROW. This was a correlated EXISTS, and
+ * with no quote buy to find — the common case — it walked the account's whole
+ * earlier history for every receipt copy in the read: refusals are trade rows,
+ * a basket writes hundreds a day, and 40 sells over 200k rows took five
+ * seconds a read on the feed, the profile and every tenant's peer file. It now
+ * reads the joins `basisJoin` adds, over the set `basisScope` builds once, in
+ * front of the statement. A row whose account is not in that set is counted an
+ * ESTIMATE: the scope is a bound on the work, and a bound that could publish a
+ * guess would be the wrong way round.
  */
 export function estimatedBasis(t: string): string {
-  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
-      SELECT 1 FROM trades q
-       WHERE q.agent_id = ${t}.agent_id
-         AND q.basis_source = 'quote'
-         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
-         AND q.created_at <= ${t}.created_at))`;
+  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND (basis_r.agent_id IS NULL OR (
+      basis_q.first_at IS NOT NULL AND basis_q.first_at <= ${t}.created_at)))`;
+}
+
+/**
+ * THE QUOTE-BOOKED BUYS A READ'S SELLS COULD HAVE CLOSED, as a WITH clause the
+ * reader puts in front of its statement, with its arguments first.
+ *
+ * `basis_read` is every account with a receipt-read sell in the read's window —
+ * the only accounts whose figures `estimatedBasis` is asked about. `basis_quote`
+ * is, for each of those accounts and each coin, its FIRST quote-booked buy: a
+ * sell is estimated exactly when that first one is at or before it, which is
+ * the EXISTS this replaced. One pass over those accounts' histories, through
+ * `trades_agent_time`, per statement — no index is added (the rule on
+ * `trades`), and none is needed.
+ *
+ * `since` is the read's own window, widened by a day so a trade written a
+ * moment before its decision's clock is still in scope (and one that is not
+ * reads as an estimate, never as a figure). `accounts`, when the read is for
+ * known agents, narrows it through `agents` — the ledger may spell an account
+ * in either case, and the index needs the spelling it holds.
+ */
+const BASIS_MARGIN_SEC = 24 * 3600;
+export function basisScope(opts: { since: number; accounts?: readonly string[] | null }): { sql: string; args: unknown[] } {
+  const since = Math.floor(Number(opts.since)) - BASIS_MARGIN_SEC;
+  const accounts = (opts.accounts ?? []).map((a) => a.toLowerCase());
+  const only = accounts.length
+    ? `AND br.agent_id IN (SELECT ba.smart_account FROM agents ba WHERE LOWER(ba.smart_account) IN (${accounts.map(() => "?").join(", ")}))`
+    : "";
+  return {
+    sql: `WITH basis_read AS (
+        SELECT DISTINCT br.agent_id AS agent_id FROM trades br
+         WHERE br.basis_source = 'receipt' AND COALESCE(br.fill_side, 'sell') <> 'buy' AND br.created_at > ?
+           ${only}
+      ), basis_quote AS (
+        SELECT bq.agent_id AS agent_id, LOWER(bq.buy_token) AS tok, MIN(bq.created_at) AS first_at
+          FROM trades bq
+         WHERE bq.basis_source = 'quote' AND bq.agent_id IN (SELECT agent_id FROM basis_read)
+         GROUP BY bq.agent_id, LOWER(bq.buy_token)
+      ) `,
+    args: [Number.isFinite(since) ? since : 0, ...accounts],
+  };
+}
+
+/** The two joins `estimatedBasis` reads, for the trades alias `t`. At most one row each. */
+export function basisJoin(t: string): string {
+  return `LEFT JOIN basis_read basis_r ON basis_r.agent_id = ${t}.agent_id
+         LEFT JOIN basis_quote basis_q ON basis_q.agent_id = ${t}.agent_id AND basis_q.tok = LOWER(${t}.sell_token)`;
 }
 
 /**
@@ -945,6 +1001,62 @@ export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayNam
   return t.head.replace(`${name} (${t.symbol})`, () => name);
 }
 
+/**
+ * A FIGURE OF THE BOOK IN OUR OWN SENTENCE — the backstop for rows already
+ * written.
+ *
+ * `renderWhy`'s public register now carries no size, cost, proceeds, cash or
+ * floor (reasons.ts), because the sentence is written before anybody knows
+ * whose book will read it back. The rows written before that change still say
+ * "selling all 4.40 USDG of it against the 5.00 paid" — the realized P&L a
+ * private book withholds — and they stay readable for a day on the feed and a
+ * month on a profile. So a PRIVATE book's STRATEGY reason loses its figures
+ * here.
+ *
+ * THIS IS THE ONE PLACE THIS MODULE REWRITES RATHER THAN DROPS, and the reason
+ * is the one the address backstop gives for dropping: redaction is safe only
+ * when the string is understood. A strategy reason is not prose — it is one of
+ * a closed set of templates we wrote, and each rule below turns one old
+ * public sentence into exactly the sentence `renderWhy(w, "public")` now
+ * writes for the same `Why` (private-book.test.ts replays the old register
+ * through it). Anything with a figure left afterwards — an older wording, or
+ * a template nobody listed — loses the reason, not the figure: that is a
+ * sentence we did NOT understand, and it fails closed. A model's reason is
+ * never touched here: it is prose, and none of these rules could claim to
+ * understand it.
+ *
+ * `AMT` is exactly what reasons.ts `usdg()` prints.
+ */
+const AMT = String.raw`-?\d[\d,]*\.\d{2}`;
+const BOOK_FIGURE = /\d\s*USDG\b/;
+const ANY_FIGURE = /\d\s*USDG\b|\d[\d,]*\.\d{2}\b/;
+const LEGACY_FIGURES: readonly (readonly [RegExp, string])[] = [
+  [new RegExp(`^the schedule says buy — ${AMT} USDG into `), "the schedule says buy — cash into "],
+  [new RegExp(`^parking ${AMT} USDG of the cash idle above the ${AMT} floor — `), "parking some of the cash idle above the floor — "],
+  [new RegExp(`^${AMT} USDG idle above the ${AMT} floor — `), "cash idle above the floor — "],
+  [new RegExp(`, not a fault: I buy ${AMT} USDG a tick, so a small cap is gone quickly\\. `), ", not a fault. "],
+  [new RegExp(`^nothing bought — ${AMT} USDG on hand and one buy costs ${AMT}`), "nothing bought — the cash on hand is short of one buy"],
+  [new RegExp(`\\. There is ${AMT} USDG in the vault I can pull back`), ". There is cash in the vault I can pull back"],
+  [new RegExp(` — selling all ${AMT} USDG of it against the ${AMT} paid`), " — selling all of it"],
+  [new RegExp(`, so putting ${AMT} USDG into (\\S+) — `), ", so buying $1 — "],
+  [new RegExp(` — pulling ${AMT} USDG back from the vault `), " — pulling some back from the vault "],
+  [new RegExp(`laying down an equal-weight entry, ${AMT} USDG into each of `), "laying down an equal-weight entry into each of "],
+  [new RegExp(`^(\\S+) is ${AMT} USDG (over|under) its equal weight — `), "$1 is $2 its equal weight — "],
+  [new RegExp(`^taking ${AMT} USDG of (\\S+) — `), "buying into $1 — "],
+  [new RegExp(`^out of (\\S+) with ${AMT} USDG — `), "out of $1 — "],
+  // dip, trench-enter and gap-enter, after the vault sentence above has
+  // taken the one "N USDG in the vault" that is not a buy.
+  [new RegExp(`${AMT} USDG in(?= at the close print$| — |$)`), "buying in"],
+];
+
+/** The reason as a private book may publish it, or null when a figure could not be taken out. */
+export function withoutBookFigures(reason: string): string | null {
+  if (!BOOK_FIGURE.test(reason)) return reason;
+  let s = reason;
+  for (const [was, now] of LEGACY_FIGURES) s = s.replace(was, now);
+  return ANY_FIGURE.test(s) ? null : s;
+}
+
 /** Known operational templates, not a classifier of market sentiment. */
 function operationalNotice(text: string): boolean {
   return /^(?:no decision\s*\(|(?:error|failed|refused|unavailable)\s*:|(?:strategist|brain|model|provider|driver|rpc) (?:call )?(?:failed|error|unavailable)\b|nothing bought\s*[—–-]|nothing in your basket\b|(?:there (?:was|is) )?nothing held to sell\b|(?:i |we )?(?:cannot|can't|unable to) (?:sell|trade|submit)\b|couldn't submit\b)/i.test(text.trim());
@@ -969,11 +1081,19 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   if (!policy) return null;
   if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
+  // Strictly `=== true`, the same test the dollars take below: a settings blob
+  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
+  // publish their book.
+  const bookPublic = row.public_book === true;
+
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
   if (row.reason && row.reason.trim()) {
     reason = policy === "model" ? clip(row.reason) : row.reason.trim();
   }
+  // OUR SENTENCE, WITHOUT THE BOOK'S FIGURES, for a book that keeps them —
+  // see `withoutBookFigures`. A public book's sentence is its owner's choice.
+  if (reason && policy === "strategy" && !bookPublic) reason = withoutBookFigures(reason);
 
   /**
    * THE AGENT'S OWN WORDS, IN THEIR OWN FIELD — and never in `reason`.
@@ -1036,10 +1156,6 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
-  // Strictly `=== true`, the same test the dollars take below: a settings blob
-  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
-  // publish their book.
-  const bookPublic = row.public_book === true;
   const head = headOf(row, shadow, bookPublic);
 
   // DECIDED, versus FAILED TO HAPPEN.

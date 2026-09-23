@@ -271,3 +271,169 @@ describe("the row", () => {
     assert.ok(!html.includes("wire-new"));
   });
 });
+
+/**
+ * TWINS: ROWS THAT SAY EXACTLY THE SAME THING (CF3).
+ *
+ * Same postId, outcome and outcome sentence — two refusals under rules the
+ * publisher renders alike, or, since D1, a private book's fills of one coin
+ * that differ only in the size it no longer publishes. They were told apart by
+ * an ORDINAL over their first copies, so when the oldest left the read (the
+ * window, or the action lane's page bound) every other twin took its
+ * neighbour's key: landed twins flashed as new fills when nothing had arrived,
+ * and a refusal that DID arrive slid in under a key the page had already seen.
+ * A twin is now known by its first copy, which moves only when its own oldest
+ * copies age out.
+ */
+describe("twins keep their own keys (CF3)", () => {
+  beforeEach(() => {
+    forgetKeysForTest();
+    forgetSeenForTest();
+  });
+  // Each twin found by its newest copy, which is distinct in every fixture here.
+  const refusal = (first: number, last = first + 30) =>
+    row({ outcome: "refused", outcomeText: "the wall turned it back", at: last, firstAt: first, said: 2, unchangedSince: first });
+  const fill = (first: number) => row({ outcome: "landed", outcomeText: "landed", sizeUsdg: null, head: "buy TSLA", at: first, firstAt: first });
+  const read = (rows: FeedRow[]) => {
+    const beats = beatsOf(rows, agents);
+    const keys = beats.map(freshKeyOf);
+    const fresh = freshAmong(keys);
+    markSeen(keys);
+    return new Map(beats.map((b) => [b.atMs / 1000, { key: b.id, fresh: isFresh(b, fresh) }]));
+  };
+
+  it("THE OLDEST OF THREE REFUSED TWINS LEAVES: the other two keep their keys and are not news", () => {
+    const [a, b, c] = [NOW - 300, NOW - 200, NOW - 100];
+    const before = read([refusal(a), refusal(b), refusal(c)]);
+    const after = read([refusal(b), refusal(c)]);
+    for (const t of [b + 30, c + 30]) {
+      assert.equal(after.get(t)!.key, before.get(t)!.key, `the twin last said at ${t} kept its key`);
+      assert.equal(after.get(t)!.fresh, false);
+    }
+  });
+
+  it("LANDED TWINS: a re-read moves nothing, and the oldest leaving flashes nothing", () => {
+    const [a, b, c] = [NOW - 3000, NOW - 2000, NOW - 1000];
+    const first = read([fill(a), fill(b), fill(c)]);
+    const again = read([fill(a), fill(b), fill(c)]);
+    assert.ok([...again.values()].every((r) => !r.fresh), "nothing arrived");
+    const after = read([fill(b), fill(c)]);
+    for (const t of [b, c]) {
+      assert.equal(after.get(t)!.key, first.get(t)!.key);
+      assert.equal(after.get(t)!.fresh, false, "no fill arrived");
+    }
+  });
+
+  it("A NEW TWIN ARRIVING AS THE OLDEST LEAVES IS NEWS — it takes no key the page has shown", () => {
+    const [a, b, c, d] = [NOW - 300, NOW - 200, NOW - 100, NOW];
+    const before = read([refusal(a), refusal(b), refusal(c)]);
+    const after = read([refusal(b), refusal(c), refusal(d)]);
+    const shown = new Set([...before.values()].map((r) => r.key));
+    const arrived = after.get(d + 30)!;
+    assert.ok(!shown.has(arrived.key), `the new twin was drawn under ${arrived.key}, a key already shown`);
+    assert.equal(arrived.fresh, true);
+    for (const t of [b + 30, c + 30]) assert.equal(after.get(t)!.key, before.get(t)!.key);
+  });
+
+  it("a twin whose own oldest copies age out keeps its key: the same row, fewer copies", () => {
+    const [a, b] = [NOW - 3000, NOW - 2000];
+    const before = read([refusal(a, a + 30), refusal(b, b + 60)]);
+    // The second twin's first copy (b) left the window; its next one (b + 20) is its first now.
+    const after = read([refusal(a, a + 30), refusal(b + 20, b + 60)]);
+    assert.equal(after.get(b + 60)!.key, before.get(b + 60)!.key);
+    assert.equal(after.get(b + 60)!.fresh, false);
+    assert.equal(after.get(a + 30)!.key, before.get(a + 30)!.key);
+  });
+
+  it("and so does one that was said again, then aged past the copies it was first read with", () => {
+    const [a, b] = [NOW - 3000, NOW - 2000];
+    const first = read([refusal(a, a + 30), refusal(b, b + 10)]);
+    read([refusal(a, a + 30), refusal(b, b + 100)]); // said again: its newest copy is b + 100
+    const aged = read([refusal(a, a + 30), refusal(b + 50, b + 100)]); // and its copies before b + 50 left
+    assert.equal(aged.get(b + 100)!.key, first.get(b + 10)!.key);
+    assert.equal(aged.get(b + 100)!.fresh, false);
+  });
+});
+
+/**
+ * THE DCA SEQUENCE (CF4): a leg is sent, lands, and the next leg of the same
+ * post is sent while the landed row is on screen. The landed row must keep the
+ * bare postId and stay seen; the new order in flight is the news.
+ */
+describe("the next leg of a post already on screen (CF4)", () => {
+  beforeEach(() => {
+    forgetKeysForTest();
+    forgetSeenForTest();
+  });
+  const leg = (outcome: "pending" | "landed", t: number) =>
+    row({ outcome, outcomeText: outcome === "pending" ? "sent, waiting on the chain" : "landed", at: t, firstAt: t, sizeUsdg: null, head: "buy TSLA" });
+  const read = (rows: FeedRow[]) => {
+    const beats = beatsOf(rows, agents);
+    const keys = beats.map(freshKeyOf);
+    const fresh = freshAmong(keys);
+    markSeen(keys);
+    return beats.map((b) => ({ outcome: b.outcome, key: b.id, fresh: isFresh(b, fresh) }));
+  };
+
+  it("LEG SENT, LANDED, NEXT LEG SENT: the landed row keeps the bare id and is not new; the order in flight is", () => {
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW - 9000, firstAt: NOW - 9000 })]); // the page, primed
+    read([leg("pending", NOW - 3000)]);
+    const landed = read([leg("landed", NOW - 3000)]);
+    assert.deepEqual(landed, [{ outcome: "landed", key: PID, fresh: true }], "the fill is news, under the element it was sent under");
+    const next = read([leg("pending", NOW - 60), leg("landed", NOW - 3000)]);
+    assert.deepEqual(next.find((b) => b.outcome === "landed"), { outcome: "landed", key: PID, fresh: false });
+    const sent = next.find((b) => b.outcome === "pending")!;
+    assert.notEqual(sent.key, PID);
+    assert.equal(sent.fresh, true);
+    assert.ok(read([leg("pending", NOW - 60), leg("landed", NOW - 3000)]).every((b) => !b.fresh), "and read again, nothing is");
+  });
+
+  it("A STALE READ that shows the settled order in flight again does not take its key back", () => {
+    // /api/theses is served stale-while-revalidate, so an older body can
+    // follow a newer one. The order that landed keeps the element its fill
+    // was drawn in: the hand-over released the in-flight row's claim.
+    read([leg("pending", NOW - 3000)]);
+    read([leg("landed", NOW - 3000)]);
+    const stale = read([leg("pending", NOW - 3000), leg("landed", NOW - 3000)]);
+    assert.equal(stale.find((b) => b.outcome === "landed")!.key, PID);
+    assert.equal(stale.find((b) => b.outcome === "landed")!.fresh, false);
+  });
+
+  it("a landed row pushed out and replaced by a new order does not lend the order its key", () => {
+    // Not the same trade settling: the new order is news, and the old fill
+    // keeps its key for when it comes back.
+    const first = read([leg("landed", NOW - 3000)]);
+    const next = read([leg("pending", NOW - 60)]);
+    assert.notEqual(next[0]!.key, first[0]!.key);
+    assert.equal(next[0]!.fresh, true);
+    const back = read([leg("pending", NOW - 60), leg("landed", NOW - 3000)]);
+    assert.equal(back.find((b) => b.outcome === "landed")!.key, first[0]!.key);
+  });
+});
+
+/**
+ * THE FEED ITSELF PAIRS THE KEYS (CF5). `useFresh` must build the fresh set
+ * with the key `isFresh` looks up — `freshKeyOf`, the fill's time for a
+ * landed row — or no landed trade is ever new again. The tests above build
+ * the set by hand; this renders <Feed>.
+ */
+describe("the rendered feed marks a new fill new (CF5)", () => {
+  beforeEach(() => {
+    forgetKeysForTest();
+    forgetSeenForTest();
+  });
+
+  it("A LANDED ROW WHOSE NEWEST FILL MOVED CARRIES wire-new; the same row unchanged does not", async () => {
+    const { Feed } = await import("./screens/Feed");
+    const render = (theses: FeedRow[]) =>
+      renderToStaticMarkup(
+        createElement(Feed, { theses: theses as never, tokens: [], agents, onToken: () => {}, onProfile: () => {}, onDesk: () => {} }),
+      );
+    const first = [row({ said: 1, at: NOW })];
+    // What the page marked when it drew the first read (the effect a static
+    // render does not run), keyed the way a correct page keys it.
+    markSeen(beatsOf(first, agents).map(freshKeyOf));
+    assert.doesNotMatch(render(first), /wire-new/, "nothing arrived");
+    assert.match(render([row({ said: 2, at: NOW + 3600 })]), /wire-beat[^"]*wire-new/, "the second leg arrived");
+  });
+});

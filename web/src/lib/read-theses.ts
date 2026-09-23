@@ -52,7 +52,7 @@
  * owner's entire balance sheet — is not in the SELECT at all: absent, rather
  * than filtered.
  */
-import { DERIVED_ID, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
+import { DERIVED_ID, basisJoin, basisScope, fillFigures, markFigures, publicationNarrowing } from "@merrymen/thesis";
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
@@ -211,6 +211,27 @@ type Group = ThesisRow & {
   agent_names?: number;
 };
 
+/**
+ * EACH (ACCOUNT, COIN)'S NEWEST NAME — and at a tie, the first by name.
+ *
+ * Two names for one coin written in the same second (a deployer who changed
+ * `symbol()`, a tape that relabelled it) left the pick to whichever row the
+ * engine returned first, which SQLite and Postgres need not agree on and
+ * Postgres need not repeat. The tie is broken the way the writer's own lookup
+ * breaks it (store.ts `displayNameFor`: newest, then by name), so the feed
+ * names a coin the same on both engines, read after read.
+ */
+export function newestNames(found: readonly { agent_id: string; symbol: string; display_name: string; at: number }[]): Map<string, string> {
+  const newest = new Map<string, { name: string; at: number }>();
+  for (const f of found) {
+    const key = `${f.agent_id}|${f.symbol}`;
+    const at = Number(f.at);
+    const had = newest.get(key);
+    if (!had || at > had.at || (at === had.at && f.display_name < had.name)) newest.set(key, { name: f.display_name, at });
+  }
+  return new Map([...newest].map(([key, v]) => [key, v.name]));
+}
+
 export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore().get(tenant)): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
@@ -265,6 +286,13 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       where.push("d.symbol = ?");
       args.push(opts.symbol);
     }
+    // THE QUOTE-BOOKED BUYS THIS READ'S SELLS COULD HAVE CLOSED, read once in
+    // front of each statement that asks for figures (thesis-policy.ts
+    // `basisScope`) rather than once per sell copy, which walked an account's
+    // whole history for every one. Scoped to the read's own window and, for one
+    // agent's read, to its accounts.
+    const basis = basisScope({ since, accounts: only });
+    const scoped = (cols: Columns) => (cols.fills ? basis : { sql: "", args: [] as unknown[] });
     // ── THE NAME IS OPTIONAL TO READ, ON PURPOSE ─────────────────────────
     //
     // `decisions.display_name` and `agents.x_verified` are created by the
@@ -304,6 +332,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
          -- The LAST trade for this decision. A correlated MAX(id) keeps this
          -- join to one row per decision on both backends.
          LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
+         ${cols.fills ? basisJoin("t") : ""}
          -- THE AGENT'S OWN WORDS, when it had any. A LEFT JOIN because
          -- almost no decision has a post: one is written only for a class
          -- trade that actually filled and whose writer cleared its gate,
@@ -362,11 +391,11 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const actionPage = (cols: Columns, offset: number) =>
       db
         .prepare(
-          `SELECT r.* FROM (${placed(cols, IS_ACTION)}) r
+          `${scoped(cols).sql}SELECT r.* FROM (${placed(cols, IS_ACTION)}) r
             ORDER BY r.last_at DESC, r.last_id DESC
             LIMIT ? OFFSET ?`,
         )
-        .all(...args, ACTION_PAGE, offset) as Promise<Group[]>;
+        .all(...scoped(cols).args, ...args, ACTION_PAGE, offset) as Promise<Group[]>;
 
     // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
     // re-said every tick always had the freshest time, so any agent with forty
@@ -393,7 +422,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const viewRead = (cols: Columns) =>
       db
         .prepare(
-          `SELECT s.* FROM (
+          `${scoped(cols).sql}SELECT s.* FROM (
              SELECT q.*,
                     MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
                     DENSE_RANK() OVER (ORDER BY q.agent_turn, q.changed_at DESC, q.agent_id, q.sym) AS turn
@@ -411,7 +440,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
            WHERE s.turn <= ?
            ORDER BY s.turn, s.in_pair`,
         )
-        .all(...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+        .all(...scoped(cols).args, ...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
 
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.
@@ -487,17 +516,14 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
                   AND d.symbol IN (${symbols.map(() => "?").join(", ")})
                   AND d.display_name IS NOT NULL AND d.display_name <> ''
                   AND d.at > ?
-                GROUP BY d.agent_id, d.symbol, d.display_name`,
+                GROUP BY d.agent_id, d.symbol, d.display_name
+                ORDER BY MAX(d.at) DESC, d.display_name`,
             )
             .all(...accounts, ...symbols, since)) as { agent_id: string; symbol: string; display_name: string; at: number }[];
-          const newest = new Map<string, { name: string; at: number }>();
-          for (const f of found) {
-            const key = `${f.agent_id}|${f.symbol}`;
-            if (Number(f.at) > (newest.get(key)?.at ?? -1)) newest.set(key, { name: f.display_name, at: Number(f.at) });
-          }
+          const newest = newestNames(found);
           for (const r of unnamed) {
             const hit = newest.get(`${String(r.agent_id)}|${String(r.symbol)}`);
-            if (hit) r.display_name = hit.name;
+            if (hit) r.display_name = hit;
           }
         } catch {
           /* the rows keep their ids: a post without its coin's name is a worse post, not a missing one */
