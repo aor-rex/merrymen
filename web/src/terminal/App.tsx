@@ -502,6 +502,7 @@ export function App() {
             onDeposit={() => openScreen({ kind: "deposit" })}
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
+            onGroupChat={() => openScreen({ kind: "groupchat" })}
             hasAgent={account?.status.exists === true}
           />
         )}

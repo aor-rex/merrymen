@@ -1,7 +1,6 @@
 import { Board } from "./Board";
 import { PerformanceChart } from "../DitherChart";
 import { useState } from "react";
-import Link from "next/link";
 import { MessagesSquare, Search } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
 import {
@@ -32,6 +31,7 @@ export function Home({
   onDeposit,
   onSearch,
   onDesk,
+  onGroupChat,
   hasAgent,
   read,
   retired = null,
@@ -47,6 +47,13 @@ export function Home({
   onDeposit: () => void;
   onSearch: () => void;
   onDesk: () => void;
+  /**
+   * Opens the group chat. A CALLBACK, like every other way off this screen,
+   * and not a next/link: Home renders in node tests, where a Link falls back to
+   * requestIdleCallback on a global only a browser has (`self`). Optional, so a
+   * caller with no room — and every existing test — is unaffected.
+   */
+  onGroupChat?: () => void;
   /**
    * Has the SERVER said this owner has an agent?
    *
@@ -127,7 +134,7 @@ export function Home({
   return (
     <div className="home-page">
       <header className="top home-overview">
-        <div className="home-heading"><h1 className="top-title">Home</h1>{room && <Link href="/groupchat" className="icon-btn" aria-label="Group chat" title="Group chat"><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></Link>}</div>
+        <div className="home-heading"><h1 className="top-title">Home</h1>{room && onGroupChat && <button type="button" className="icon-btn" aria-label="Group chat" title="Group chat" onClick={onGroupChat}><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></button>}</div>
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>

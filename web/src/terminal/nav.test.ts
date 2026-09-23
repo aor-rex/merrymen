@@ -166,7 +166,13 @@ describe("the group chat is a place, not a tab", () => {
   });
 
   it("both entry points lead there", () => {
-    assert.match(codeOf(at("./screens/Home.tsx")), /href="\/groupchat"/, "the phone's way in");
+    // THE PHONE'S WAY IN IS A CALLBACK, like every other way off Home. A
+    // next/link there crashed a node test that renders Home (market-flip): with
+    // no IntersectionObserver a Link falls back to requestIdleCallback on
+    // `self`, which only a browser has.
+    assert.match(codeOf(at("./screens/Home.tsx")), /onClick=\{onGroupChat\}/, "the phone's way in");
+    assert.doesNotMatch(codeOf(at("./screens/Home.tsx")), /from "next\/link"/, "Home stays link-free");
+    assert.match(codeOf(at("./App.tsx")), /onGroupChat=\{\(\) => openScreen\(\{ kind: "groupchat" \}\)\}/, "and App wires it");
     assert.match(codeOf(at("./Desktop.tsx")), /href="\/groupchat"/, "the desktop's way in");
     assert.match(codeOf(at("./App.tsx")), /screen\.kind === "groupchat" && <GroupChat /);
   });
