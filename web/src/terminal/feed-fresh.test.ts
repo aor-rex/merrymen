@@ -13,7 +13,7 @@
  * it has not shown. That is what the slide-in is drawn from.
  */
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -21,6 +21,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beatsOf, fitOf, forgetKeysForTest, lanesOf, matchTwins, pillBeats, type Beat, type FeedRow, type Fit } from "./beat";
 import { forgetSeenForTest, freshAmong, freshKeyOf, isFresh, markSeen } from "./feed-fresh";
 import type { LiveAgent } from "./live";
+import { testDom } from "./test-dom";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 
@@ -614,5 +615,68 @@ describe("the rendered feed marks a new fill new (CF5)", () => {
     markSeen(beatsOf(first, agents).map(freshKeyOf));
     assert.doesNotMatch(render(first), /wire-new/, "nothing arrived");
     assert.match(render([row({ said: 2, at: NOW + 3600 })]), /wire-beat[^"]*wire-new/, "the second leg arrived");
+  });
+});
+
+/**
+ * THE MARKING HALF, RUN (R3F-2). The render above primes the seen set by hand,
+ * because a static render runs no effect — so what the mounted page MARKS after
+ * it draws a read was never executed. If that marked the bare ids while the
+ * lookup uses `freshKeyOf`, every landed row would read new on every refresh
+ * and the whole feed of fills would flash. Here the real <Feed> is mounted and
+ * nothing is primed by hand: the page marks what it drew, itself.
+ */
+describe("the mounted feed marks what it drew (R3F-2)", () => {
+  let ui: ReturnType<typeof testDom>;
+  const realFetch = globalThis.fetch;
+  beforeEach(() => {
+    forgetKeysForTest();
+    forgetSeenForTest();
+    // The likes store asks the server once; it never answers here.
+    globalThis.fetch = (() => new Promise<Response>(() => {})) as typeof fetch;
+    ui = testDom();
+  });
+  afterEach(async () => {
+    await ui.close();
+    globalThis.fetch = realFetch;
+  });
+
+  const feed = async (theses: FeedRow[]) => {
+    const { Feed } = await import("./screens/Feed");
+    return createElement(Feed, { theses: theses as never, tokens: [], agents, onToken: () => {}, onProfile: () => {}, onDesk: () => {} });
+  };
+  // Symbol -> whether its row carries wire-new.
+  const drawn = () =>
+    new Map(
+      [...ui.container.querySelectorAll(".wire-beat")].map((el) => [
+        ["TSLA", "NVDA", "AAPL"].find((s) => el.textContent?.includes(s)) ?? "?",
+        el.classList.contains("wire-new"),
+      ]),
+    );
+  const fill = row({ said: 1, at: NOW });
+  const nvda = row({ postId: "e".repeat(32), symbol: "NVDA", head: "buy NVDA 5.00 USDG", at: NOW + 60, firstAt: NOW + 60 });
+
+  it("A LANDED ROW ALREADY DRAWN IS NOT NEW WHEN ANOTHER ROW ARRIVES BESIDE IT; the arrival is", async () => {
+    await ui.render(await feed([fill]));
+    assert.deepEqual([...drawn()], [["TSLA", false]], "the first read is the page");
+    await ui.render(await feed([fill, nvda]));
+    assert.deepEqual(drawn(), new Map([["NVDA", true], ["TSLA", false]]));
+    await ui.render(await feed([fill, nvda, row({ postId: "a".repeat(32), symbol: "AAPL", head: "buy AAPL 5.00 USDG", at: NOW + 90, firstAt: NOW + 90 })]));
+    assert.deepEqual(drawn(), new Map([["AAPL", true], ["NVDA", false], ["TSLA", false]]), "what arrived last read is seen now");
+  });
+
+  it("SWITCHING TABS AND BACK REPLAYS NOTHING — a landed row drawn before the feed unmounted is not new", async () => {
+    await ui.render(await feed([fill]));
+    await ui.render(await feed([fill, nvda]));
+    await ui.remount(await feed([fill, nvda]));
+    assert.deepEqual(drawn(), new Map([["NVDA", false], ["TSLA", false]]));
+  });
+
+  it("a new fill of a landed row already drawn is new, once", async () => {
+    await ui.render(await feed([fill, nvda]));
+    await ui.render(await feed([row({ said: 2, at: NOW + 3600 }), nvda]));
+    assert.deepEqual(drawn(), new Map([["TSLA", true], ["NVDA", false]]));
+    await ui.render(await feed([row({ said: 2, at: NOW + 3600 }), nvda, row({ postId: "a".repeat(32), symbol: "AAPL", head: "buy AAPL 5.00 USDG", at: NOW + 90, firstAt: NOW + 90 })]));
+    assert.equal(drawn().get("TSLA"), false, "and drawn once, it is seen");
   });
 });
