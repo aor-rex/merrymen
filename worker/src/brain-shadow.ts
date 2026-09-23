@@ -192,6 +192,20 @@ export function recordedHoldKind(
 }
 
 /**
+ * THE MARK THE LEDGER RECORDS for a decision: the price it was made against, or
+ * null when that price was stale or was not a price at all.
+ *
+ * Same seam as recordedHoldKind and for the same reason: the staleness is known
+ * here and nowhere a public reader can see, so a stale mark written as a number
+ * would later be measured against as though somebody had read it.
+ */
+export function markOf(market: { priceUsd: string | null; priceStale: boolean }): number | null {
+  if (market.priceStale || market.priceUsd === null) return null;
+  const n = Number(market.priceUsd);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
  * DID THIS DECISION PUT A VIEW ON THE PUBLIC FEED? Asked before the quiet
  * review is pushed back, because that review exists so a quiet agent still
  * says something in public.
@@ -242,6 +256,12 @@ export async function runShadow(
      * prices, routes, matches or settles against it.
      */
     displayName?: string | null;
+    /**
+     * A memecoin's market cap from the tape the caller already read, USD —
+     * recorded with the decision so a trade can say what size of coin it was.
+     * Passed in for the same reason as the name: the caller holds the tape.
+     */
+    mcapUsd?: number | null;
   } = {},
 ): Promise<ShadowOutcome> {
   const idle: TriggerVerdict = { fire: false, reason: null, detail: "brain not configured", candidates: [] };
@@ -364,7 +384,7 @@ export async function runShadow(
     tier: options.tier ?? "research",
   });
 
-  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log, options.displayName);
+  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log, options.displayName, options.mcapUsd);
   return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now, options.triggers) };
 }
 
@@ -429,6 +449,8 @@ export async function persistBrainDecision(
    * traded instead of printing an address-derived id at a reader.
    */
   displayName?: string | null,
+  /** A memecoin's market cap from the caller's tape, USD. See runShadow's options. */
+  mcapUsd?: number | null,
 ): Promise<void> {
   if (!result.ok) {
     // A REFUSAL IS A RESULT, and it is recorded. The runs that produced nothing
@@ -519,6 +541,12 @@ export async function persistBrainDecision(
     source,
     provenance: "brain",
     display_name: displayName ?? null,
+    // WHAT IT SAW, as columns a public reader may select — the copy in
+    // signals_json below is the owner's and is never published. A stale mark
+    // is recorded as no mark: the author saw the absence of a market, and a
+    // "since posted" measured from it would be a figure nobody read.
+    mark_usd: markOf(market),
+    mcap_usd: typeof mcapUsd === "number" && Number.isFinite(mcapUsd) && mcapUsd > 0 ? mcapUsd : null,
     strategy: "brain",
     provider: d.models[0]?.provider,
     model: d.models[0]?.model,

@@ -9993,6 +9993,10 @@ async function main() {
       // line under every quiet agent every five minutes; see reviewSource.
       await addDecision({ id, agent_id: agentId,
         source: review ? reviewSource(review) : "research-unavailable", provenance: "deterministic-strategy",
+        // THE QUOTE THE REVIEW WAS WRITTEN AT, so a published one can say
+        // "+x% since posted". Only with a review: one exists only for a fresh,
+        // unstale quote, and "research unavailable" saw no market to mark.
+        mark_usd: review && quote ? quote.priceUsd : null,
         ...(review ?? { action: "hold", symbol: focus?.symbol,
           reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
           evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: history?.read ?? false }) }),
@@ -10490,6 +10494,13 @@ async function main() {
                 // The tape's, or — for a held coin the tape no longer labels,
                 // whose every review went out unnamed — the one its buy used.
                 displayName: await displayNameFor(agentId, focus.symbol, displayNameOf(focus.symbol)),
+                // THE COIN'S SIZE, from the same tape this review just read, so
+                // a trade can say "at $3.1M MC". It is GeckoTerminal's fdv_usd
+                // — price times TOTAL supply — which is the figure a memecoin
+                // trader quotes as its cap; the tape carries no circulating
+                // count to do better with. Absent tape, absent figure — never
+                // a zero.
+                mcapUsd: tape?.fdvUsd ?? null,
                 triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
               }); },
               m => console.log(`[trencher] ${m}`));

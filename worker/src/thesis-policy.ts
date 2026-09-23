@@ -99,6 +99,38 @@ export interface ThesisRow {
    * a fault.
    */
   post?: string | null;
+  // ── WHAT THE CALL WAS WORTH, folded per group by the reader's SQL ─────────
+  //
+  // A row here is a GROUP of identical copies, so each figure below arrives
+  // already folded, and already NULL unless every copy in the group was read:
+  // one unevidenced copy makes the whole group's figure unread, because an
+  // average over the copies somebody happened to read is a guess. That rule
+  // lives in the SQL beside the fold (read-theses.ts); this module only ever
+  // sees the result and never turns an absent input into a zero.
+  //
+  // All optional: a reader that does not select them — the peer files — gets a
+  // post with no figures, which claims nothing.
+  /**
+   * What the group's fills paid per unit, averaged by cash (Σ cash / Σ units),
+   * from EVIDENCED fills only — a receipt or a paper book, never a quote,
+   * because a quoted fill is an estimate and an estimated entry price is a
+   * figure nobody read.
+   */
+  entry_price_usd?: number | null;
+  /** Σ realized P&L the group's fills booked, USDG, when every copy booked one. */
+  realized_pnl_usdg?: number | null;
+  /** Σ USDG those same fills received — the proceeds the P&L was booked against. */
+  closed_cash_usdg?: number | null;
+  /** The price the author saw when it decided, when every copy saw the same one. */
+  mark_usd?: number | null;
+  /** The coin's market cap at decision time, the same way. Memecoins only. */
+  mcap_usd?: number | null;
+  /**
+   * The author's owner opted into a public book — decorated by the caller from
+   * settings, like `slug`. Only an explicit `true` publishes a dollar figure;
+   * anything else, including absence, keeps the percentages-only default.
+   */
+  public_book?: boolean | null;
 }
 
 export interface PublicThesis {
@@ -184,6 +216,28 @@ export interface PublicThesis {
   /** Epoch seconds. Formatted by the page, so this module stays pure. */
   at: number;
   firstAt: number;
+  // ── THE CALL'S OWN FIGURES ───────────────────────────────────────────────
+  //
+  // A trade used to render beside the TOKEN's 24h change, and a reader took the
+  // token's day for the agent's result. These are the call's: what a buy paid,
+  // what a sell booked, the price a view was posted at. Each is null unless
+  // every input to it was read — a surface renders NOTHING for null, never 0%.
+  //
+  // Optional because an older server sends none of them; a consumer treats
+  // `undefined` exactly as null. The publisher always sets all five.
+  /** A landed (or paper) BUY's fill price, USD per unit. "Since entry" = live / this − 1. */
+  entryPriceUsd?: number | null;
+  /** A landed (or paper) SELL's realized return, percent of the cost it closed. */
+  realizedPct?: number | null;
+  /**
+   * The same sell's realized dollars — non-null ONLY when the author's owner
+   * made the book public. Percentages are the public default; sizes are opt-in.
+   */
+  realizedUsd?: number | null;
+  /** The price the author saw when it posted. "Since posted" = live / this − 1. */
+  markUsd?: number | null;
+  /** A memecoin's market cap at decision time, from the tape the agent read. */
+  mcapUsd?: number | null;
 }
 
 /**
@@ -984,6 +1038,23 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // would trade a real loss for an imaginary one.
   const slug = typeof row.slug === "string" && SLUG_SHAPE.test(row.slug) ? row.slug : null;
 
+  // ── the call's own figures ────────────────────────────────────────────────
+  // Only a trade that FILLED paid or booked anything: a refusal, a revert or a
+  // pending buy has no entry and no result, whatever columns rode along.
+  const filled = outcome === "landed";
+  const entryPriceUsd = filled && action === "buy" ? positive(row.entry_price_usd) : null;
+  // A sell's return is its booked P&L over the cost it closed, and the cost is
+  // what it received minus what it booked. A cost of zero or less is not a
+  // cost, so it measures nothing. Percent first and divided last, so +1.5 on 5
+  // is exactly 30 rather than 30.000000000000004.
+  const pnl = filled && action === "sell" ? figure(row.realized_pnl_usdg) : null;
+  const proceeds = positive(row.closed_cash_usdg);
+  const cost = pnl !== null && proceeds !== null ? proceeds - pnl : null;
+  const realizedPct = pnl !== null && cost !== null && cost > 0 ? (pnl * 100) / cost : null;
+  // DOLLARS ARE OPT-IN. Strictly `=== true`: a settings blob is JSON, and a
+  // stray "true" string or a 1 is not the owner deciding to publish their book.
+  const realizedUsd = realizedPct !== null && row.public_book === true ? pnl : null;
+
   return {
     name,
     slug,
@@ -1003,5 +1074,29 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     said: Math.max(1, Number(row.said ?? 1)),
     at: Number(row.last_at ?? 0),
     firstAt: Number(row.first_at ?? row.last_at ?? 0),
+    entryPriceUsd,
+    realizedPct,
+    realizedUsd,
+    markUsd: positive(row.mark_usd),
+    mcapUsd: positive(row.mcap_usd),
   };
+}
+
+/**
+ * A figure as a reader handed it, or null for anything that is not one.
+ *
+ * node-postgres returns some aggregates as strings, and "3.1" is a read, not an
+ * absence. Everything else that is not a finite number — null, undefined, "",
+ * NaN, Infinity — is UNREAD and stays null, never 0.
+ */
+function figure(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : Number.NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** A price or a size: a figure, and above zero, or nothing. */
+function positive(v: unknown): number | null {
+  const n = figure(v);
+  return n !== null && n > 0 ? n : null;
 }
