@@ -114,7 +114,7 @@ import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from 
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
+import { isExpired, runTickCommand, unlessLate, type FileCommand, type LateOrder } from "./command-files";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -4648,9 +4648,14 @@ async function main() {
    * gas. claimCommand takes the row before anything runs, so a crash mid-probe
    * leaves it claimed rather than replayed. At-most-once, never at-least-once.
    *
-   * ONE COMMAND PER TICK, and only when armed. There is no batch drain and no
-   * catch-up: an operator who queued three probes wants three ticks' worth of
-   * evidence, not three UserOps racing the same nonce.
+   * ONE LIVE COMMAND PER TICK, and only when armed. There is no batch run and
+   * no catch-up: an operator who queued three probes wants three ticks' worth
+   * of evidence, not three UserOps racing the same nonce.
+   *
+   * BUT AN EXPIRED ONE NO LONGER COSTS A TICK. It is answered and the drain
+   * moves on in the same tick, so a fresh order behind a pile of stale ones is
+   * reached while it can still fill. Nothing expired is ever run, and nothing
+   * is drained anywhere but here, on the tick. See runTickCommand.
    */
   let commandInFlight = false;
   async function runQueuedCommand(agentId: string, marketUnreadable = false): Promise<void> {
@@ -4664,22 +4669,20 @@ async function main() {
       // different databases, and nothing would ever have been claimed. The
       // orchestrator ferries commands in as files, exactly as it already does
       // for grants and settings. See command-files.ts.
-      const cmd = claimCommandFile(merrymenHome());
-      if (!cmd) return;
-      // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
-      // gone from here until the receipt lands. Without this marker an owner
-      // who asked again mid-trade got a second fill.
-      markRunning(merrymenHome(), cmd.id);
-      // The unlink above WAS the claim, so from here the command is ours and
-      // will not be replayed — a lost probe is a button pressed again, a
-      // replayed one is gas nobody asked to spend twice.
-      const outcome = await runCommand(cmd, marketUnreadable);
-      writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
-      // LABELLED BY WHAT IT WAS. Every result used to be written into the
-      // owner's event feed as `selftest: …` regardless of kind, which for an
-      // order is a wrong claim about what the agent did, in the one log an
-      // operator reads to work out what a fleet is doing.
-      await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+      await runTickCommand(merrymenHome(), {
+        now: Date.now,
+        // The unlink WAS the claim, so a command reaching here is ours and
+        // will not be replayed — a lost probe is a button pressed again, a
+        // replayed one is gas nobody asked to spend twice.
+        run: (cmd) => runCommand(cmd, marketUnreadable),
+        // LABELLED BY WHAT IT WAS. Every result used to be written into the
+        // owner's event feed as `selftest: …` regardless of kind, which for an
+        // order is a wrong claim about what the agent did, in the one log an
+        // operator reads to work out what a fleet is doing.
+        told: async (cmd, outcome) => {
+          await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+        },
+      });
     } catch (e) {
       console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -4854,7 +4857,13 @@ async function main() {
     // successes. `ok` is the sole input to the event LEVEL, and "ok" is a level
     // no surface in this app renders, so an owner refused for being paused,
     // expired, over their ceiling or in an unwatched symbol saw nothing at all.
-    return submitChatTrade(side, symbol, size);
+    //
+    // THE ORDER'S DEADLINE GOES INTO THE INTENT QUEUE WITH IT. The claim judged
+    // it once, but the queue can hold the order behind the tick's own intents
+    // for minutes, so the queue judges it again when it reaches the order. A
+    // command with no deadline — a legacy row — has none to carry.
+    if (typeof cmd.expiresAt !== "number") return submitChatTrade(side, symbol, size);
+    return submitChatTrade(side, symbol, size, { ...chatAsked(side, symbol, size), notAfterMs: cmd.expiresAt });
   }
 
   /**
@@ -6475,16 +6484,37 @@ async function main() {
    * absorbed and recorded, which is the house rule about somebody's money
    * broken in the most direct way there is: the owner believes they hold $25
    * of TSLA and they do not.
+   *
+   * AND AN OWNER'S ORDER BRINGS ITS DEADLINE IN WITH IT. `notAfterMs` is read
+   * when the chain reaches this step, not when the order joined it: the
+   * intents ahead of it can each wait minutes on a receipt, and an order that
+   * starts after its own window has closed fills into a market the owner never
+   * saw. Past it, nothing is built or sent and the answer is `late`, which is
+   * not a ledger status — no row exists. See unlessLate in command-files.ts.
    */
   function processIntentReporting(
     intent: TradeIntent,
     equityUsdg: bigint,
+    equityKnown?: boolean,
+  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | null>;
+  function processIntentReporting(
+    intent: TradeIntent,
+    equityUsdg: bigint,
+    equityKnown: boolean,
+    notAfterMs: number | undefined,
+  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | LateOrder | null>;
+  function processIntentReporting(
+    intent: TradeIntent,
+    equityUsdg: bigint,
     equityKnown = true,
-  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | null> {
+    notAfterMs?: number,
+  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | LateOrder | null> {
     const step = async () => {
-      lastTradeOutcome = null;
-      await processIntentLocked(intent, equityUsdg, equityKnown);
-      return lastTradeOutcome;
+      return unlessLate(notAfterMs, Date.now, async () => {
+        lastTradeOutcome = null;
+        await processIntentLocked(intent, equityUsdg, equityKnown);
+        return lastTradeOutcome;
+      });
     };
     const run = intentChain.then(step, step);
     intentChain = run.then(
@@ -11139,7 +11169,7 @@ async function main() {
     // does — memecoins are exactly where a reasoner other than the owner is
     // most likely to be the one asking, and where a pre-trade thesis most
     // needs its id to survive into the fill.
-    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance; notAfterMs?: number } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     },
@@ -11300,7 +11330,9 @@ async function main() {
     // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
     // nothing, could not be read, or belongs to another agent. Nothing is sent.
     if (!stamped.ok) return no(stamped.why);
-    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
+    // Reached after its deadline: nothing was built or sent, and the line says so.
+    if (outcome?.status === "late") return no(outcome.line);
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
     // discarded above — `amountInRaw` is the whole on-chain balance — so the
@@ -11400,8 +11432,14 @@ async function main() {
    * reads for attribution.
    *
    * Default `chat`, because the owner typing an order is what this path was
-   * built for and is still the overwhelming majority of its traffic.
+   * built for and is still the overwhelming majority of its traffic. Named so
+   * that an app order carrying a deadline files the very same ask as one typed
+   * without one.
    */
+  function chatAsked(side: "buy" | "sell", symbol: string, usdgAmount: number): { source: string; reason: string } {
+    return { source: "chat", reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat` };
+  }
+
   async function submitChatTrade(
     side: "buy" | "sell",
     symbol: string,
@@ -11415,11 +11453,16 @@ async function main() {
      * `ensureDecision` verifies and REUSES it instead of minting a second
      * decision that the trade then attaches to. Absent for an owner's typed
      * order, which genuinely is a new decision at this moment.
+     *
+     * `notAfterMs` is the deadline of an order that arrived as a command. The
+     * intent queue checks it again when it reaches the order — see
+     * processIntentReporting — so the order cannot start after it.
      */
-    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance } = {
-      source: "chat",
-      reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`,
-    },
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance; notAfterMs?: number } = chatAsked(
+      side,
+      symbol,
+      usdgAmount,
+    ),
   ): Promise<OrderReply> {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
@@ -11471,7 +11514,9 @@ async function main() {
       // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
       // nothing, could not be read, or belongs to another agent. Nothing is sent.
       if (!stamped.ok) return no(stamped.why);
-      const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+      const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown, asked.notAfterMs);
+      // Reached after its deadline: nothing was built or sent, and the line says so.
+      if (outcome?.status === "late") return no(outcome.line);
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
       return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status };

@@ -40,10 +40,12 @@ export const ORDER_STALE_GRACE_MS = 2 * 60_000;
  * How long past deadline AND grace a CLAIMED row goes on holding the slot.
  *
  * A claimed order may be waiting on its receipt well after its deadline — the
- * deadline only bounds the claim. So the slot is released only once the
- * worker's own pipeline cannot still be filling it; freeing it earlier is
- * "ask again" with the first order on chain. The orchestrator's sweep closes
- * such a row at the same moment, with a sentence that does not claim to know.
+ * deadline bounds when the order STARTS (the worker refuses a late claim, and
+ * refuses an order its intent queue reaches late), not when it finishes. So
+ * the slot is released only once the order's own run cannot still be filling
+ * it; freeing it earlier is "ask again" with the first order on chain. The
+ * orchestrator's sweep closes such a row at the same moment, with a sentence
+ * that does not claim to know.
  * Stated again in worker/src/command-files.ts for that sweep; a test holds the
  * two equal.
  */
@@ -120,11 +122,20 @@ export interface SlotHolder {
  * that in bulk on this fleet — never answers, and a row nothing can finish
  * used to refuse every future order from that owner, for good.
  *
- * NO DEADLINE (nothing the route writes today): the floor window from when it
- * was placed, which is the orchestrator's old seven-minute close for the same
- * rows.
+ * NO DEADLINE (legacy rows only; nothing the route writes today) AND NOT YET
+ * CLAIMED: never, until it is claimed. The worker's `isExpired` runs such an
+ * order whenever it gets to it, and GET calls it queued for as long as it
+ * waits, so there is no moment at which it stops being able to fill. It used
+ * to let go at the floor window and its grace — the orchestrator's old seven
+ * minutes — and admit a second order beside one the worker would still run.
+ * Hosted, the ferry ends the wait: it delivers the row, or closes it as never
+ * delivered. Self-hosted, the worker's next armed tick does.
+ *
+ * NO DEADLINE, CLAIMED: the floor window from when it was placed (or, for a
+ * marker, claimed), and the in-flight bound after it, as for any claimed order.
  */
 export function slotFreesAt(o: SlotHolder): number {
+  if (o.expiresAt === null && !o.claimed) return Number.POSITIVE_INFINITY;
   const deadline = o.expiresAt ?? o.at + ORDER_TTL_FLOOR_MS;
   return deadline + ORDER_STALE_GRACE_MS + (o.claimed ? ORDER_IN_FLIGHT_MS : 0);
 }

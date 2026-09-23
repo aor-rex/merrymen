@@ -23,6 +23,7 @@ import {
   orderExpiresAt,
   orderStateOf,
   orderTtlMs,
+  placeSelfHostedOrder,
   slotFreesAt,
 } from "./order-state";
 
@@ -149,8 +150,38 @@ describe("the window itself", () => {
     assert.equal(orderTtlMs(3600), (2 * 3600 + 15) * 1000);
   });
 
-  it("a row with no deadline is held for the floor window and its grace — the sweep's old seven minutes", () => {
-    const legacy = { claimed: false, expiresAt: null, at: T };
-    assert.equal(slotFreesAt(legacy), T + 7 * MIN);
+});
+
+describe("AN UNCLAIMED ORDER WITH NO DEADLINE HOLDS THE SLOT UNTIL IT IS CLAIMED", () => {
+  // Legacy rows only — nothing the route writes today lacks a deadline. The
+  // worker's isExpired runs such an order whenever it is claimed, and GET
+  // calls it queued for as long as it sits there. Freeing the slot at the old
+  // seven minutes admitted a second order beside one that could still run.
+  const legacy = { claimed: false, expiresAt: null, at: T };
+
+  it("still held at seven minutes, and a day later — GET still calls it queued", () => {
+    for (const at of [T + 7 * MIN, T + 7 * MIN + 1, T + 24 * 60 * MIN]) {
+      assert.equal(orderStateOf({ done: false, claimed: false, expiresAt: null }, at), "queued");
+      assert.equal(holdsSlot(legacy, at), true, `at +${(at - T) / MIN} min`);
+    }
+  });
+
+  it("once claimed it is bounded like any claimed order — the floor window, the grace, the in-flight bound", () => {
+    const claimed = { claimed: true, expiresAt: null, at: T };
+    const bound = T + ORDER_TTL_FLOOR_MS + ORDER_STALE_GRACE_MS + ORDER_IN_FLIGHT_MS;
+    assert.equal(slotFreesAt(claimed), bound);
+    assert.equal(holdsSlot(claimed, bound), true);
+    assert.equal(holdsSlot(claimed, bound + 1), false, "a child SIGKILLed mid-trade still lets go");
+  });
+
+  it("the self-hosted placement refuses a second order behind a legacy file, however old", () => {
+    const files = [{ state: "queued" as const, expiresAt: null, at: T }];
+    let written = 0;
+    const r = placeSelfHostedOrder(
+      { open: () => files, write: () => void (written += 1) },
+      { id: "second", args: { side: "buy", symbol: "TSLA", usdgAmount: 25 }, expiresAt: T + 60 * MIN + WINDOW_MS, now: T + 60 * MIN },
+    );
+    assert.deepEqual(r, { ok: false, why: "in-flight" });
+    assert.equal(written, 0, "nothing was queued beside it");
   });
 });

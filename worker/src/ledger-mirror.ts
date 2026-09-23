@@ -35,6 +35,7 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { getAddress, isAddress } from "viem";
 import type { Db } from "./db";
 import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
@@ -245,6 +246,15 @@ export interface MirrorReport {
 
 /** The `copied` keys that count rows read and deliberately NOT inserted. */
 const NOT_COPIED = "_already_mirrored";
+
+/**
+ * An account id as EIP-55 spells it, or the lowercase id back when it is not
+ * an address at all — the duplicate-op probe asks for it beside the other two
+ * spellings, and a repeated value in an IN list is harmless.
+ */
+function checksummed(lower: string): string {
+  return isAddress(lower, { strict: false }) ? getAddress(lower) : lower;
+}
 
 /**
  * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
@@ -514,32 +524,43 @@ export async function mirrorTenant(args: {
         // that is the row its daily cap is seeded from. Nothing is summed
         // against a cap from the shared ledger.
         //
-        // ASKED OF THE INDEX FIRST. `(agent_id, user_op_hash)` is exactly
-        // trades_agent_userop, so the ordinary question costs one seek per
-        // hashed row. It has to: every new live fill asks it, inside this
-        // transaction, on a fifteen-second clock, and the first version of this
-        // check read `lower(agent_id)`, which no index serves, and so scanned
-        // the whole fleet's tape on every one of those passes. The raw spelling
-        // is the key the resolution pass below already updates by. It also
-        // catches a re-record left for a pass AFTER the rewind (a catch-up
-        // longer than one batch): the reconciler lowercases the hash, a bundler
-        // returns it as lowercase hex, and the same code spells the account in
-        // both incarnations.
+        // ASKED OF THE INDEX, IN EVERY SPELLING A WRITER HERE USES.
+        // `(agent_id, user_op_hash)` is exactly trades_agent_userop, and every
+        // new live fill asks this, inside this transaction, on a fifteen-second
+        // clock. The first version read `lower(agent_id)`, which no index
+        // serves, and so scanned the whole fleet's tape on every one of those
+        // passes.
         //
-        // THE lower() SCAN ONLY ON A REWIND, and only when the seek missed. A
-        // rewind is the one pass on which a copy may be spelt differently from
-        // its original — the in-flight reconciler lowercases every hash it
-        // writes, and an account can arrive checksummed from one incarnation
-        // and lowercased from the next. So on that pass alone the account's
-        // held hashes are read once per batch, lowercased on both sides, as a
-        // set rather than asked row by row. And never INSERT … WHERE NOT
-        // EXISTS: the insert stays the statement Postgres already runs.
+        // A COPY IS SPELT ITS OWN WAY, AND IT CAN ARRIVE ON ANY PASS. The
+        // in-flight reconciler lowercases every hash it writes, and an account
+        // arrives EIP-55 from one incarnation and lowercase from the next. It
+        // used to be only the rewind pass that looked past the exact spelling,
+        // on the theory that copies arrive there — but a rebuilt child whose
+        // first row is a tick's refusal is rewound onto BEFORE the arm's
+        // reconciler has written anything, and its copies then come up on
+        // ordinary passes, where the exact seek missed them and the shared
+        // tape took both rows. So every pass asks for the account as written,
+        // lowercase and checksummed, and the hash as written and lowercase.
+        // Each pair is a key of the same index, so the question is still a
+        // handful of seeks. No index is added for it and none may be: a CREATE
+        // INDEX on the shared trades table takes a write lock on every tenant's
+        // mirror at once.
+        //
+        // THE lower() SCAN STAYS ON THE REWIND PASS, and only when the seek
+        // missed. It is the one net for a spelling no writer here produces —
+        // mixed case that is not EIP-55 — and it costs one read per account per
+        // rebuild rather than one per fill. On that pass the account's held
+        // hashes are read once per batch, lowercased on both sides, as a set.
+        // And never INSERT … WHERE NOT EXISTS: the insert stays the statement
+        // Postgres already runs.
         //
         // Hashes inserted in this batch are remembered, lowercased, so a child
         // holding one op twice does not put it here twice either. A row with
         // no hash — a refusal, a paper fill — is always inserted.
         const rewound = restarted[table] !== undefined;
-        const seek = db.prepare(`SELECT 1 AS ok FROM trades WHERE agent_id = ? AND user_op_hash = ? LIMIT 1`);
+        const seek = db.prepare(
+          `SELECT 1 AS ok FROM trades WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) LIMIT 1`,
+        );
         const heldBy = new Map<string, Set<string>>();
         const heldAnyCase = async (account: string): Promise<Set<string>> => {
           let set = heldBy.get(account);
@@ -564,7 +585,7 @@ export async function mirrorTenant(args: {
             const key = `${account} ${hash}`;
             const held =
               thisBatch.has(key) ||
-              (await seek.get(r.agent_id ?? null, raw)) !== undefined ||
+              (await seek.get(r.agent_id ?? null, account, checksummed(account), raw, hash)) !== undefined ||
               (rewound && (await heldAnyCase(account)).has(hash));
             if (held) {
               alreadyHeld++;

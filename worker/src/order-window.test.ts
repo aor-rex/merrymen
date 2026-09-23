@@ -238,6 +238,30 @@ describe("the sweep and the one-at-a-time slot agree, row by row", () => {
       name: "running, past the in-flight bound",
       place: (raw, home) => takenAndRunning(raw, home, "o", WINDOW_MS + GRACE_MS + ORDER_IN_FLIGHT_MS + MIN),
     },
+    {
+      // A legacy row the ferry delivered: the child would still run it.
+      name: "no deadline, delivered and still queued, past the old seven minutes",
+      place: (raw, home) => {
+        const created = delivered(raw, "o", 8 * MIN, { ...ORDER });
+        writeCommand(home, { id: "o", kind: "trade", at: created, args: { ...ORDER } });
+      },
+    },
+    {
+      // Stuck behind five older commands, so this pass cannot deliver it and
+      // closes it instead.
+      name: "no deadline, never delivered, past the old seven minutes",
+      place: (raw) => {
+        const created = Date.now() - 8 * MIN;
+        raw
+          .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
+          .run("o", ACCOUNT, JSON.stringify(ORDER), created);
+        for (let i = 0; i < 5; i += 1) {
+          raw
+            .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'selftest', NULL, ?)")
+            .run(`probe-${i}`, ACCOUNT, created - 1_000 - i);
+        }
+      },
+    },
   ];
   for (const c of cases) {
     it(`${c.name}: open ⇔ a second order is refused`, async () => {
@@ -256,4 +280,24 @@ describe("the sweep and the one-at-a-time slot agree, row by row", () => {
       assert.equal(second.ok, !open, open ? "the first may still trade, so the second must wait" : "closed, so the owner may ask again");
     });
   }
+
+  it("A ROW WITH NO DEADLINE THAT NOTHING HAS DELIVERED STILL HOLDS THE SLOT — until the ferry delivers or closes it", async () => {
+    // The slot used to let go of it at seven minutes, and the down-leg — which
+    // runs before the sweep, and does not look at age — then handed it to a
+    // child that runs a deadline-less order whenever it claims one. Two orders
+    // in flight for what the route promises is one.
+    const { raw, db, home } = setup();
+    raw
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
+      .run("legacy", ACCOUNT, JSON.stringify(ORDER), Date.now() - 8 * MIN);
+    const ask = (id: string) => {
+      const now = Date.now();
+      return placeHostedOrder(db, { agent: ACCOUNT, id, args: { ...ORDER }, expiresAt: now + WINDOW_MS, now });
+    };
+    assert.deepEqual(await ask("second"), { ok: false, why: "in-flight" }, "before any pass");
+    await pass(db, home);
+    assert.ok(state(raw, "legacy").claimed_at, "the down-leg delivered it");
+    assert.equal(state(raw, "legacy").done_at, null, "and the child would still run it");
+    assert.deepEqual(await ask("third"), { ok: false, why: "in-flight" }, "delivered, it is held like any claimed order");
+  });
 });
