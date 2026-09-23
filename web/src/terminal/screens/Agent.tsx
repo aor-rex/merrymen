@@ -111,7 +111,8 @@ export function Agent({
    */
   const pending: { id: string; args: Record<string, CommandArg> } | null = chat.proposal;
   const setPending = chat.setProposal;
-  const [running,setRunning]=useState(false);
+  /** The card is being carried out — the controller's, so every screen drawing it agrees. */
+  const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -260,10 +261,9 @@ export function Agent({
    * authenticated route the buttons already call. Nothing here is a new way
    * into the app — it is the existing way, reached by asking.
    */
-  const confirm = async () => {
-    const cmd = pending && commandFor(pending.id);
-    if (!cmd || running) return;
-    setRunning(true);
+  const confirm = () => chat.confirm(async (proposal) => {
+    const cmd = commandFor(proposal.id);
+    if (!cmd) return;
     try {
       if (cmd.via === "navigate") {
         window.location.href = cmd.to!;
@@ -280,7 +280,7 @@ export function Agent({
         const res = await fetch("/api/snipe", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
+          body: JSON.stringify(commandPayload(cmd, proposal.args)),
         });
         const out = (await res.json().catch(() => null)) as {
           outcome?: string;
@@ -345,7 +345,7 @@ export function Agent({
         const placed = await fetch("/api/orders", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
+          body: JSON.stringify(commandPayload(cmd, proposal.args)),
         });
         const body = (await placed.json().catch(() => null)) as
           | { error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }
@@ -366,7 +366,7 @@ export function Agent({
           role: "agent",
           text: body?.duplicate
             ? `That exact order is already queued — I have not placed a second one.`
-            : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+            : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
           ...(body?.id ? { order: { id: body.id } } : {}),
         });
         setPending(null);
@@ -380,7 +380,7 @@ export function Agent({
       const put = await fetch("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(commandPayload(cmd, pending!.args)),
+        body: JSON.stringify(commandPayload(cmd, proposal.args)),
       });
       if (!put.ok) {
         const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
@@ -389,7 +389,7 @@ export function Agent({
       // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
       // agent did on your instruction belongs in the record of what you asked.
       chat.say({ role: "owner", text: "✓ Confirmed" });
-      chat.say({ role: "agent", text: `Done — ${cmd.say(pending!.args)}` });
+      chat.say({ role: "agent", text: `Done — ${cmd.say(proposal.args)}` });
       setPending(null);
       // What the model is told about the settings has just changed.
       chat.refreshSettings();
@@ -398,10 +398,8 @@ export function Agent({
       // looking, with the route's own reason. The card stays, so asking again
       // is one tap — and never automatic, because this may be an order.
       chat.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
-    } finally {
-      setRunning(false);
     }
-  };
+  });
 
   const blocked = blockerAdvice(liveBlocker);
   /**

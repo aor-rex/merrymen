@@ -64,6 +64,16 @@ export interface ChatController {
   streaming: string | null;
   proposal: Proposal | null;
   setProposal: (p: Proposal | null) => void;
+  /**
+   * The card is being carried out. HELD HERE, beside the proposal it guards,
+   * so every screen that draws the card sees it — see `confirm`.
+   */
+  confirming: boolean;
+  /**
+   * Carry out the card ONCE: `run` is handed the proposal, and a second call
+   * while one is in flight does nothing, from whichever screen it came.
+   */
+  confirm(run: (p: Proposal) => Promise<void>): Promise<void>;
   /** Something arrived while the chat was not on screen. */
   unread: boolean;
   /** /api/settings as last read, or null when it has not been. */
@@ -206,6 +216,10 @@ export function useChatController(o: {
   const sendingRef = useRef(false);
   const [streaming, setStreaming] = useState<string | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
+  const proposalRef = useRef(proposal);
+  proposalRef.current = proposal;
+  const [confirming, setConfirming] = useState(false);
+  const confirmingRef = useRef(false);
   const [unread, setUnread] = useState(false);
   const [settings, setSettings] = useState<ChatSettings | null>(null);
 
@@ -380,6 +394,30 @@ export function useChatController(o: {
     [clock, update],
   );
 
+  // ── the card, carried out once ──────────────────────────────────────────
+  //
+  // THE GUARD LIVES WITH THE PROPOSAL, NOT WITH A SCREEN. It was the Agent
+  // screen's own `running` state while the proposal became the App's: a phone
+  // tab switch, or the dock closed with Escape and reopened, while the POST was
+  // in flight brought the same card back READY, and one more tap placed the
+  // same order again — and desktop can draw two Agent screens at once, each
+  // with its own guard over the one proposal. The minute-bucket id and the
+  // one-at-a-time slot catch most repeats, but not a tap after the minute
+  // rolled once the first order had already been answered. A ref, so two taps
+  // in the same instant — before either screen has redrawn — are still one.
+  const confirm = useCallback(async (run: (p: Proposal) => Promise<void>) => {
+    const p = proposalRef.current;
+    if (!p || confirmingRef.current) return;
+    confirmingRef.current = true;
+    setConfirming(true);
+    try {
+      await run(p);
+    } finally {
+      confirmingRef.current = false;
+      if (mounted.current) setConfirming(false);
+    }
+  }, []);
+
   // ── orders, followed at App level ──────────────────────────────────────
   const followOrder = useCallback(
     (id: string, expiresInMs: number | null) => {
@@ -479,6 +517,8 @@ export function useChatController(o: {
     streaming,
     proposal,
     setProposal,
+    confirming,
+    confirm,
     unread,
     settings,
     send: (question, ctx) => send(question, ctx),

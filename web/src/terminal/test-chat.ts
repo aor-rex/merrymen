@@ -21,6 +21,8 @@ export const idleChat: ChatController = {
   streaming: null,
   proposal: null,
   setProposal: noop,
+  confirming: false,
+  confirm: async () => {},
   unread: false,
   settings: null,
   send: async () => false,

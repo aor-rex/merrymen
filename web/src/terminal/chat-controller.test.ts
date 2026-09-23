@@ -22,7 +22,7 @@ import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
 import { useChatController, type ChatController } from "./chat-controller";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
-import { json, testDom } from "./test-dom";
+import { deferred, json, testDom } from "./test-dom";
 
 const KEY = "merrymen.chat.self";
 const ORDER_ID = "0123456789abcdef0123456789abcdef";
@@ -84,6 +84,8 @@ function Harness(p: {
   chatKey?: string | null;
   open?: boolean;
   show?: boolean;
+  /** Two Agent screens on one controller — desktop's /agent body and its dock, both open. */
+  twice?: boolean;
   moves?: Thesis[] | null;
   perTrade?: number | null;
   onOutcome?: () => void;
@@ -96,27 +98,29 @@ function Harness(p: {
     deps: { sleep: () => new Promise((r) => setTimeout(r, 1)) },
   });
   chat = c;
+  const screen = (key: string) =>
+    createElement(Agent, {
+      key,
+      mine: MINE,
+      tokens: [],
+      perTrade: p.perTrade === undefined ? 10 : p.perTrade,
+      perDay: 50,
+      stopped: false,
+      chat: c,
+      onToken: noop,
+      onDeposit: noop,
+      onWithdraw: noop,
+      onLimits: noop,
+      onResign: noop,
+      onSettings: noop,
+      liveBlocker: null,
+    });
   return createElement(
     "div",
     null,
     createElement("i", { "data-unread": String(c.unread) }),
-    p.show === false
-      ? null
-      : createElement(Agent, {
-          mine: MINE,
-          tokens: [],
-          perTrade: p.perTrade === undefined ? 10 : p.perTrade,
-          perDay: 50,
-          stopped: false,
-          chat: c,
-          onToken: noop,
-          onDeposit: noop,
-          onWithdraw: noop,
-          onLimits: noop,
-          onResign: noop,
-          onSettings: noop,
-          liveBlocker: null,
-        }),
+    p.show === false ? null : screen("body"),
+    p.twice ? screen("dock") : null,
   );
 }
 const h = (p: Parameters<typeof Harness>[0] = {}) => createElement(Harness, p);
@@ -516,6 +520,45 @@ describe("an order's answer reaches the owner wherever they are", () => {
     assert.doesNotMatch(text(), /Done —/);
   });
 
+  it("A CONFIRMED SETTING SENDS ONLY THE DECLARED KEYS, through the route that already exists", async () => {
+    // Not a new write path: the same authenticated PUT the Settings screen
+    // uses, carrying nothing but what the command declares. The args come off
+    // the wire from a model whose context another agent can write into, so an
+    // extra key riding along must be dropped here — /api/settings strips the
+    // house-owned fields again on the server, the second of two gates.
+    routes["POST /api/chat"] = () =>
+      json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25, liveTradingEnabled: true, sponsorGasEnabled: true } } });
+    routes["PUT /api/settings"] = () => json({ ok: true });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("trade bigger");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Done —/.test(text()), "done");
+    const puts = calls.filter((c) => c.method === "PUT");
+    assert.equal(puts.length, 1);
+    assert.equal(puts[0]!.url, "/api/settings");
+    assert.deepEqual(puts[0]!.body, { buyPerTickUsdg: 25 });
+  });
+
+  it("A NAVIGATE COMMAND WRITES NOTHING on its way", async () => {
+    // A command that both moved you and wrote something would be two acts
+    // behind one sentence.
+    routes["POST /api/chat"] = () => json({ reply: "This way.", command: { id: "open-settings", args: {} } });
+    await ui.render(h());
+    await settle();
+    await typeAndSend("where are my settings?");
+    await until(() => buttons("Take me there").length === 1, "the card");
+    const before = calls.length;
+    await ui.click("Take me there");
+    await settle();
+    assert.deepEqual(
+      calls.slice(before).filter((c) => c.method !== "GET"),
+      [],
+      "nothing written, nothing placed",
+    );
+  });
+
   it("a confirmed setting is said, and the settings are read again", async () => {
     routes["POST /api/chat"] = () => json({ reply: "Bigger it is.", command: { id: "set-size", args: { buyPerTickUsdg: 25 } } });
     routes["PUT /api/settings"] = () => json({ ok: true });
@@ -647,5 +690,108 @@ describe("the agent's own fills", () => {
     await settle();
     assert.equal(localStorage.getItem(KEY), null);
     assert.equal(chat.messages.length, 0);
+  });
+});
+
+describe("one proposal is one order", () => {
+  const card = () => {
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    const held = deferred<Response>();
+    routes["POST /api/orders"] = () => held.promise;
+    return held;
+  };
+
+  it("THE CARD STAYS BUSY WHEN THE SCREEN COMES BACK — a second tap places nothing", async () => {
+    // The guard was the screen's own state and the proposal the App's, so a
+    // phone tab switch (or the dock closed with Escape and reopened) mid-POST
+    // brought the same card back ready, and a tap placed it again.
+    const held = card();
+    await ui.render(h());
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    assert.equal(buttons("Doing it…").length, 1);
+    await ui.render(h({ show: false }));
+    await ui.render(h());
+    await settle();
+    assert.equal(buttons("Yes, do it").length, 0, "the new mount knows the card is being carried out");
+    assert.equal(buttons("Doing it…").length, 1);
+    for (const b of Array.from(ui.container.querySelectorAll(".desk-confirm button")) as HTMLButtonElement[]) {
+      await act(async () => b.click());
+    }
+    held.resolve(json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 }));
+    await until(() => /Placed it —/.test(text()), "placed");
+    await settle();
+    assert.equal(count("POST", "/api/orders"), 1);
+    assert.equal((text().match(/Placed it —/g) ?? []).length, 1);
+  });
+
+  it("TWO SCREENS ON AT ONCE SHARE ONE GUARD", async () => {
+    // Desktop can draw the /agent body and the dock together, one proposal on
+    // both. Tapped on each, it is still one order.
+    const held = card();
+    await ui.render(h({ twice: true }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 2, "the card, on both screens");
+    await act(async () => {
+      for (const b of buttons("Yes, do it")) b.click();
+    });
+    held.resolve(json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 }));
+    await until(() => /Placed it —/.test(text()), "placed");
+    await settle();
+    assert.equal(count("POST", "/api/orders"), 1);
+  });
+});
+
+describe("nothing is done twice by accident", () => {
+  it("TWO SENDS BEFORE THE REPLY ARE ONE MESSAGE", async () => {
+    // A double tap on Send, both landing before the screen has redrawn with
+    // the typing bubble (and so before the button knows to disable itself):
+    // the second must not become a second question.
+    const s = stream();
+    routes["POST /api/chat"] = () => s.response;
+    await ui.render(h());
+    await settle();
+    await act(async () => chat.setDraft("hello there"));
+    await act(async () => {
+      const send = ui.container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+      send.click();
+      send.click();
+    });
+    s.done({ reply: "Hello." });
+    await until(() => /Hello\./.test(text()), "reply");
+    await settle();
+    assert.equal(count("POST", "/api/chat"), 1);
+    const asked = Array.from(ui.container.querySelectorAll(".desk-question")).filter((q) => q.textContent === "hello there");
+    assert.equal(asked.length, 1);
+  });
+
+  it("AN ORDER IS FOLLOWED ONCE, however often the kept orders change", async () => {
+    // Two orders can be kept at once — the slot is released at a deadline even
+    // when nothing answered. When one answers, the list changes and the follow
+    // effect runs again; the other must not gain a second follower, or its
+    // answer is said twice.
+    const A = "a".repeat(32);
+    const B = "b".repeat(32);
+    const until_ = Date.now() + 300_000;
+    localStorage.setItem(KEY, JSON.stringify({ v: 2, messages: [], orders: [{ id: A, until: until_ }, { id: B, until: until_ }], since: null }));
+    let bAnswered = false;
+    routes["GET /api/orders"] = (url) => {
+      const id = new URL(url, "https://app.example.test").searchParams.get("id");
+      if (id === A) return json({ id: A, state: "done", result: "sold 2.00 USDG of WIF" });
+      return json(bAnswered ? { id: B, state: "done", result: "bought 5.00 USDG of TSLA" } : { id: B, state: "running" });
+    };
+    let outcomes = 0;
+    await ui.render(h({ onOutcome: () => outcomes++ }));
+    await until(() => /sold 2\.00 USDG of WIF/.test(text()), "the first answer");
+    await settle(5);
+    bAnswered = true;
+    await until(() => /bought 5\.00 USDG of TSLA/.test(text()), "the second answer");
+    await settle(10);
+    assert.equal((text().match(/bought 5\.00 USDG of TSLA/g) ?? []).length, 1, "said once");
+    assert.equal(outcomes, 2, "and the book re-read once per order");
   });
 });
