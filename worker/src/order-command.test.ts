@@ -178,10 +178,11 @@ describe("an unreadable market answers the order instead of starving it", () => 
     const at = CODE.indexOf("the market could not be read this tick");
     assert.ok(at > 0);
     const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
-    assert.match(branch, /runQueuedCommand\(active\.agentId, true\)/);
-    // The refusal that flag produces — by name, before the pause and before
+    assert.match(branch, /runQueuedCommand\(active\.agentId, tickReads\.marketUnread\(\)\)/);
+    // The refusal those reads produce — by name, before the pause and before
     // anything is sized, with nothing reaching a submitter — is run in
-    // order-gate.test.ts.
+    // order-gate.test.ts. The reads are a required argument now, so a drain
+    // that states none does not compile.
   });
 
   it("but the PROBE still runs, because it needs no market data at all", () => {
@@ -189,8 +190,8 @@ describe("an unreadable market answers the order instead of starving it", () => 
     // that depends on a price, so an unreadable tick is no reason to refuse it.
     // The probe arm takes no flag; only the trade arm does.
     assert.match(RUN, /if \(cmd\.kind === "selftest"\) return runSelftestProbe\("dashboard"\);/);
-    // The trade arm takes both read flags, and its reply is only wrapped —
-    // the sentence and the verdict pass through orderOutcome untouched.
-    assert.match(RUN, /if \(cmd\.kind === "trade"\) return orderOutcome\(cmd, await runOrderCommand\(cmd, marketUnreadable, bookUnreadable\)\);/);
+    // The trade arm takes the tick's reads whole, and its reply is only
+    // wrapped — the sentence and the verdict pass through orderOutcome untouched.
+    assert.match(RUN, /if \(cmd\.kind === "trade"\) return orderOutcome\(cmd, await runOrderCommand\(cmd, reads\)\);/);
   });
 });

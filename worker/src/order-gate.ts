@@ -22,8 +22,17 @@
  * worth more than a late yes, and the owner can ask again in a minute.
  */
 
-/** What this tick read, as the order is judged against it. */
-export interface OrderReads {
+/**
+ * What the tick that drains an order could read — handed to the drain whole.
+ *
+ * NONE OF IT IS DEFAULTED. The drain took these as positional booleans that
+ * defaulted to false, so a drain site that dropped them still typechecked and
+ * the order was judged against whatever the PREVIOUS tick left behind; and
+ * `equityKnown` was read off a global beside them. Every drain site now builds
+ * one of these with `tickReads` and passes it through, so stating nothing does
+ * not compile and a hand-written literal is not the natural edit.
+ */
+export interface TickReads {
   /** The market could not be read this tick. */
   marketUnreadable: boolean;
   /** A balance could not be read, or a holding could not be priced, this tick. */
@@ -34,13 +43,70 @@ export interface OrderReads {
    * skips the drawdown breaker for every intent it judges.
    */
   equityKnown: boolean;
+}
+
+/** The three places a tick drains from, and what each of them has read. */
+export const tickReads = {
+  /** The market could not be read, so nothing downstream of it was either. */
+  marketUnread: (): TickReads => ({ marketUnreadable: true, bookUnreadable: true, equityKnown: false }),
+  /** The market was read and the book was not: a balance or a price failed. */
+  bookUnread: (): TickReads => ({ marketUnreadable: false, bookUnreadable: true, equityKnown: false }),
+  /** Both were read and equity composed; `equityKnown` is whether it could be totalled. */
+  composed: (equityKnown: boolean): TickReads => ({ marketUnreadable: false, bookUnreadable: false, equityKnown }),
+} as const;
+
+/** What an order is judged against: the tick's reads, and the owner's own settings as they stand. */
+export interface OrderReads extends TickReads {
   /** The owner has the agent paused. */
   paused: boolean;
   /** The owner's own ceiling on a typed order, in USDG. Zero means none is set. */
   ceilingUsdg: number;
 }
 
+export function orderReadsOf(tick: TickReads, owner: { paused: boolean; ceilingUsdg: number }): OrderReads {
+  return {
+    marketUnreadable: tick.marketUnreadable,
+    bookUnreadable: tick.bookUnreadable,
+    equityKnown: tick.equityKnown,
+    paused: owner.paused,
+    ceilingUsdg: owner.ceilingUsdg,
+  };
+}
+
 type Side = "buy" | "sell";
+
+/**
+ * A BOOK THAT CANNOT BE TOTALLED CANNOT JUDGE A BUY. Equity is unknown, so
+ * policy.ts runs the breaker only `if (state.equityKnown !== false)` — a buy
+ * would go out with the loss limit switched off. A sell is an exit, which the
+ * breaker exempts anyway, and refusing it would lock the owner into the very
+ * holding that makes the book untotallable. Null when the order may go on.
+ */
+function untotalledBuy(side: Side, equityKnown: boolean): string | null {
+  if (side !== "buy" || equityKnown) return null;
+  return (
+    "I did not place it: something you hold has no price and no cost on record, so I cannot total your " +
+    "book, and without that the drawdown limit can't judge a buy. Selling still works."
+  );
+}
+
+/**
+ * THE GATE EVERY ORDER MEETS AT submitChatTrade — typed in Telegram, placed
+ * from the app, or handed over by the Brain. Null when it may go on to the
+ * wall; otherwise the sentence the owner reads, and nothing is built or sent.
+ *
+ * The untotalled-buy refusal lived only in placeOrder, which only an app order
+ * reaches, so a buy typed in Telegram went out with equity unknown and the
+ * breaker skipped. It is one rule, so it is one function, and both paths say
+ * the same sentence.
+ *
+ * `equityUsdg` is the last tick's; 0n is its initialiser, before any tick has
+ * read the book, when the drawdown check would judge garbage.
+ */
+export function chatOrderGate(side: Side, book: { equityUsdg: bigint; equityKnown: boolean }): string | null {
+  if (book.equityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
+  return untotalledBuy(side, book.equityKnown);
+}
 
 /**
  * Judge an order, and hand it to `submit` only if every gate passes.
@@ -82,17 +148,10 @@ export async function placeOrder<R>(
   const a = args ?? {};
   const side: Side | null = a.side === "buy" || a.side === "sell" ? a.side : null;
   if (!side) return no(`'${String(a.side)}' is not a buy or a sell`);
-  // A BOOK THAT CANNOT BE TOTALLED CANNOT JUDGE A BUY. Equity is unknown, so
-  // policy.ts runs the breaker only `if (state.equityKnown !== false)` — a buy
-  // would go out with the loss limit switched off. A sell is an exit, which the
-  // breaker exempts anyway, and refusing it would lock the owner into the very
-  // holding that makes the book untotallable.
-  if (side === "buy" && !reads.equityKnown) {
-    return no(
-      "I did not place it: something you hold has no price and no cost on record, so I cannot total your " +
-        "book, and without that the drawdown limit can't judge a buy. Selling still works.",
-    );
-  }
+  // A BOOK THAT CANNOT BE TOTALLED CANNOT JUDGE A BUY — the same rule, and the
+  // same sentence, submitChatTrade's gate gives a Telegram order.
+  const untotalled = untotalledBuy(side, reads.equityKnown);
+  if (untotalled) return no(untotalled);
   // A SYMBOL IS A SHORT PLAIN TICKER OR IT IS NOTHING. It is resolved against
   // the watch set by the submitter, so this only has to stop the shapes that
   // have no business reaching a lookup at all.

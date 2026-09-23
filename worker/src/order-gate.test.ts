@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { placeOrder, type OrderReads } from "./order-gate";
+import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type OrderReads } from "./order-gate";
 
 const READ: OrderReads = { marketUnreadable: false, bookUnreadable: false, equityKnown: true, paused: false, ceilingUsdg: 0 };
 const BUY = { side: "buy", symbol: "TSLA", usdgAmount: 5 };
@@ -121,5 +121,98 @@ describe("an order that passes every gate is handed on exactly as validated", ()
     });
     assert.equal(calls, 1);
     assert.equal(out, reply);
+  });
+});
+
+/**
+ * EVERY DRAIN SAYS WHAT ITS TICK READ.
+ *
+ * runQueuedCommand, runCommand and runOrderCommand took the two read flags as
+ * positional booleans defaulting to false, so a drain site that dropped them
+ * still typechecked — and an order drained on a tick that could not value the
+ * book was judged against the PREVIOUS tick's equity, which the doNotDo list
+ * forbids by name. And the order's equityKnown was a literal read off a global
+ * beside them. The tick now hands its reads over whole, built here, and none is
+ * defaulted: a drain that states nothing does not compile.
+ */
+describe("every drain states what its tick read", () => {
+  const OWNER = { paused: false, ceilingUsdg: 0 };
+  /** placeOrder, fed the reads a drain site builds. */
+  const drained = async (args: Record<string, unknown>, tick: ReturnType<typeof tickReads.composed>, owner = OWNER) => {
+    const sent: string[] = [];
+    const reply = await placeOrder(args, orderReadsOf(tick, owner), async (side) => {
+      sent.push(side);
+      return { ok: true, line: "submitted" };
+    });
+    return { reply, sent };
+  };
+
+  it("A TICK THAT COULD NOT READ THE MARKET REFUSES THE ORDER BY NAME — a buy and a sell alike", async () => {
+    for (const args of [BUY, SELL]) {
+      const { reply, sent } = await drained(args, tickReads.marketUnread());
+      assert.match(reply.line, /I could not read the market this tick/);
+      assert.deepEqual(sent, []);
+    }
+  });
+
+  it("A TICK THAT COULD NOT VALUE THE BOOK REFUSES IT BY NAME — never judged on the last tick's equity", async () => {
+    for (const args of [BUY, SELL]) {
+      const { reply, sent } = await drained(args, tickReads.bookUnread());
+      assert.match(reply.line, /I could not value your book this tick/);
+      assert.deepEqual(sent, []);
+    }
+  });
+
+  it("A TICK THAT READ THE BOOK BUT COULD NOT TOTAL IT REFUSES A BUY, AND PLACES A SELL", async () => {
+    const buy = await drained(BUY, tickReads.composed(false));
+    assert.match(buy.reply.line, /the drawdown limit can't judge a buy/);
+    assert.deepEqual(buy.sent, []);
+    const sell = await drained(SELL, tickReads.composed(false));
+    assert.deepEqual(sell.sent, ["sell"]);
+  });
+
+  it("a tick that totalled its book places the order", async () => {
+    assert.deepEqual((await drained(BUY, tickReads.composed(true))).sent, ["buy"]);
+  });
+
+  it("the owner's pause and ceiling ride along with the tick's reads, unchanged", async () => {
+    assert.match((await drained(BUY, tickReads.composed(true), { paused: true, ceilingUsdg: 0 })).reply.line, /you have me paused/);
+    assert.match(
+      (await drained({ ...BUY, usdgAmount: 26 }, tickReads.composed(true), { paused: false, ceilingUsdg: 25 })).reply.line,
+      /over your 25 USDG limit/,
+    );
+  });
+});
+
+/**
+ * ONE GATE FOR THE APP AND FOR TELEGRAM.
+ *
+ * The "buy with the book untotalled" refusal lived only in placeOrder, which
+ * only an app order reaches. A buy typed in Telegram went straight to
+ * submitChatTrade, which hands lastEquityKnown to checkPolicy — and when that
+ * is false the drawdown breaker is skipped. submitChatTrade now asks
+ * chatOrderGate first, so the app, Telegram and Brain orders all meet it.
+ */
+describe("one gate for an order, whoever placed it", () => {
+  it("A TELEGRAM BUY WITH THE BOOK UNTOTALLED IS REFUSED WITH THE APP ORDER'S OWN SENTENCE", async () => {
+    const app = await place(BUY, { equityKnown: false });
+    assert.equal(app.reply.ok, false);
+    assert.equal(chatOrderGate("buy", { equityUsdg: 100_000_000n, equityKnown: false }), app.reply.line);
+  });
+
+  it("BUT A SELL STILL GOES THROUGH — the owner can always get out of the holding that untotals the book", () => {
+    assert.equal(chatOrderGate("sell", { equityUsdg: 100_000_000n, equityKnown: false }), null);
+  });
+
+  it("with the book totalled nothing is refused here — the wall judges the rest", () => {
+    assert.equal(chatOrderGate("buy", { equityUsdg: 100_000_000n, equityKnown: true }), null);
+    assert.equal(chatOrderGate("sell", { equityUsdg: 100_000_000n, equityKnown: true }), null);
+  });
+
+  it("BEFORE THE FIRST TICK HAS READ THE BOOK, NOTHING IS PLACED — a buy or a sell", () => {
+    // Equity is still its 0n initialiser, and the breaker would judge garbage.
+    for (const side of ["buy", "sell"] as const) {
+      assert.match(chatOrderGate(side, { equityUsdg: 0n, equityKnown: true }) ?? "", /still saddling up \(first tick pending\)/);
+    }
   });
 });

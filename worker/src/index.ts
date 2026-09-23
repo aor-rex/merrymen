@@ -118,7 +118,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
-import { placeOrder } from "./order-gate";
+import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type TickReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -4676,7 +4676,7 @@ async function main() {
    * say when it frees as well as whether it is held.
    */
   const commandInFlight = createOrderInFlight();
-  async function runQueuedCommand(agentId: string, marketUnreadable = false, bookUnreadable = false): Promise<void> {
+  async function runQueuedCommand(agentId: string, reads: TickReads): Promise<void> {
     if (!active) return;
     await commandInFlight.run(async () => {
       try {
@@ -4692,7 +4692,7 @@ async function main() {
           // The unlink WAS the claim, so a command reaching here is ours and
           // will not be replayed — a lost probe is a button pressed again, a
           // replayed one is gas nobody asked to spend twice.
-          run: (cmd) => runCommand(cmd, marketUnreadable, bookUnreadable),
+          run: (cmd) => runCommand(cmd, reads),
           // LABELLED BY WHAT IT WAS. Every result used to be written into the
           // owner's event feed as `selftest: …` regardless of kind, which for an
           // order is a wrong claim about what the agent did, in the one log an
@@ -4723,7 +4723,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<CommandOutcome> {
+  async function runCommand(cmd: FileCommand, reads: TickReads): Promise<CommandOutcome> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -4741,7 +4741,7 @@ async function main() {
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
     if (cmd.kind === "paper-reset") return runPaperReset();
-    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, marketUnreadable, bookUnreadable));
+    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
   }
 
@@ -4825,25 +4825,19 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<OrderReply> {
+  async function runOrderCommand(cmd: FileCommand, reads: TickReads): Promise<OrderReply> {
     // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
     // runs it: the unreadable market and the unread book (both drained with
     // their flag by the tick that could not read them — answered, not
     // starved), a book that cannot be totalled for a BUY (checkPolicy would
     // skip the drawdown breaker for it), the owner's pause, the arguments, and
     // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
-    // other surface and meaning the same thing in both. `lastEquityKnown` is
-    // this tick's: every drain runs after the tick composed it, and the ticks
-    // that could not compose it drain with `bookUnreadable`.
+    // other surface and meaning the same thing in both. `reads` is what the
+    // draining tick read, stated at its drain site (order-gate.ts tickReads)
+    // and carried here whole: never a default, never a global beside it.
     return placeOrder(
       cmd.args,
-      {
-        marketUnreadable,
-        bookUnreadable,
-        equityKnown: lastEquityKnown,
-        paused: isPaused(),
-        ceilingUsdg: cfg.telegramMaxActionUsdg,
-      },
+      orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
       (side, symbol, size) => {
         // And from here the wall decides. submitChatTrade reports what the
         // LEDGER said, so this returns a verdict about a trade that really
@@ -8968,7 +8962,7 @@ async function main() {
       // no market data at all), and a trade is refused BY NAME rather than
       // filled — see runOrderCommand for why filling it would switch the
       // drawdown breaker off.
-      if (active) await runQueuedCommand(active.agentId, true).catch(() => {});
+      if (active) await runQueuedCommand(active.agentId, tickReads.marketUnread()).catch(() => {});
       return;
     }
 
@@ -9364,7 +9358,7 @@ async function main() {
       // drain, so a queued order was skipped until its window closed. With the
       // book unread there is no equity for the breaker to judge it against, so
       // it is refused by name — see runOrderCommand.
-      await runQueuedCommand(agentId, false, true).catch(() => {});
+      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
       return;
     }
 
@@ -9376,7 +9370,7 @@ async function main() {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
       // Answered for the same reason as the unread book just above.
-      await runQueuedCommand(agentId, false, true).catch(() => {});
+      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
       return;
     }
 
@@ -10836,7 +10830,9 @@ async function main() {
     // strategy's per-tick cadence, and waking early for an order must not run
     // either an extra time. A regular tick drains beside its strategy, as it
     // always has. See command-wake.ts drainOnTick.
-    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId) : Promise.resolve())))) return;
+    // With what this tick read: the book valued, and totalled or not.
+    const drainReads = tickReads.composed(!bookIncomplete);
+    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId, drainReads) : Promise.resolve())))) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -11544,9 +11540,16 @@ async function main() {
   ): Promise<OrderReply> {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
-      // Before the first tick completes, equity is unknown (0n) and the drawdown
-      // check would judge garbage — hold chat trades until the book is read.
-      if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
+      // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is resolved or
+      // sized (order-gate.ts chatOrderGate, where a test runs it). Before the
+      // first tick equity is its 0n initialiser and the drawdown check would
+      // judge garbage; and with a holding that has neither a price nor a cost
+      // the book cannot be totalled, checkPolicy skips the breaker, and a BUY
+      // would go out with the loss limit off. That refusal lived only in the
+      // app order's gate, so a buy typed in Telegram got through. It is here now,
+      // where the app, Telegram and the Brain all pass, in the app's own words.
+      const unjudged = chatOrderGate(side, { equityUsdg: lastEquityUsdg, equityKnown: lastEquityKnown });
+      if (unjudged) return no(unjudged);
       // Resolve against the watch set, not the shipped registry — otherwise a
       // memecoin the owner added, covered by their grant and priced from its pool
       // still came back "unknown symbol" when they asked for it by name.
