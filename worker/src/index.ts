@@ -116,7 +116,7 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, commandTickReady, createCommandWake, createTickClock } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
 import { placeOrder } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -4664,44 +4664,48 @@ async function main() {
    * "THE TICK" INCLUDES A COMMAND TICK. An order that lands between ticks no
    * longer waits out the rest of a 240-second cadence: the watcher at the run
    * loop wakes a tick that re-reads the market and the book and then drains
-   * here, under this same guard (see tick's `commandOnly`). Still one command
-   * at a time, still claimed by the unlink, and refused by name — never filled
-   * on old numbers — when either read fails.
+   * here, under this same guard (see tick's `plan`). Still one command at a
+   * time, still claimed by the unlink, and refused by name — never filled on
+   * old numbers — when either read fails.
+   *
+   * THE GUARD IS A SLOT THE CLOCK CAN WAIT ON (command-wake.ts
+   * createOrderInFlight). It was a bare boolean; a regular tick now waits for
+   * the command in flight to land before it reads the book, so the flag had to
+   * say when it frees as well as whether it is held.
    */
-  let commandInFlight = false;
+  const commandInFlight = createOrderInFlight();
   async function runQueuedCommand(agentId: string, marketUnreadable = false, bookUnreadable = false): Promise<void> {
-    if (commandInFlight || !active) return;
-    commandInFlight = true;
-    try {
-      // FROM THIS WORKER'S OWN HOME, not from a shared table.
-      //
-      // Children have DATABASE_URL stripped, so a hosted worker's store is its
-      // private sqlite while the dashboard writes shared Postgres — two
-      // different databases, and nothing would ever have been claimed. The
-      // orchestrator ferries commands in as files, exactly as it already does
-      // for grants and settings. See command-files.ts.
-      await runTickCommand(merrymenHome(), {
-        now: Date.now,
-        // The unlink WAS the claim, so a command reaching here is ours and
-        // will not be replayed — a lost probe is a button pressed again, a
-        // replayed one is gas nobody asked to spend twice.
-        run: (cmd) => runCommand(cmd, marketUnreadable, bookUnreadable),
-        // LABELLED BY WHAT IT WAS. Every result used to be written into the
-        // owner's event feed as `selftest: …` regardless of kind, which for an
-        // order is a wrong claim about what the agent did, in the one log an
-        // operator reads to work out what a fleet is doing.
-        told: async (cmd, outcome) => {
-          await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
-        },
-        // AN ORDER THAT EXPIRED IN THE QUEUE STILL GETS ITS RECEIPT. Only an
-        // order has one; a probe past its window is answered in words alone.
-        expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
-      });
-    } catch (e) {
-      console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      commandInFlight = false;
-    }
+    if (!active) return;
+    await commandInFlight.run(async () => {
+      try {
+        // FROM THIS WORKER'S OWN HOME, not from a shared table.
+        //
+        // Children have DATABASE_URL stripped, so a hosted worker's store is its
+        // private sqlite while the dashboard writes shared Postgres — two
+        // different databases, and nothing would ever have been claimed. The
+        // orchestrator ferries commands in as files, exactly as it already does
+        // for grants and settings. See command-files.ts.
+        await runTickCommand(merrymenHome(), {
+          now: Date.now,
+          // The unlink WAS the claim, so a command reaching here is ours and
+          // will not be replayed — a lost probe is a button pressed again, a
+          // replayed one is gas nobody asked to spend twice.
+          run: (cmd) => runCommand(cmd, marketUnreadable, bookUnreadable),
+          // LABELLED BY WHAT IT WAS. Every result used to be written into the
+          // owner's event feed as `selftest: …` regardless of kind, which for an
+          // order is a wrong claim about what the agent did, in the one log an
+          // operator reads to work out what a fleet is doing.
+          told: async (cmd, outcome) => {
+            await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+          },
+          // AN ORDER THAT EXPIRED IN THE QUEUE STILL GETS ITS RECEIPT. Only an
+          // order has one; a probe past its window is answered in words alone.
+          expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
+        });
+      } catch (e) {
+        console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
   }
 
   /**
@@ -8840,10 +8844,13 @@ async function main() {
   async function tick() {
     // A COMMAND TICK is this same tick with its producers left out: the same
     // grant sync, the same market read, the same book read and equity — the
-    // reads an owner's order must not be placed without — then the drain, and
-    // nothing after it. No strategy, no Brain, no class route: an order that
-    // arrives between ticks must not also buy the basket a second time.
-    const commandOnly = commandTick;
+    // reads an owner's order must not be placed without — then the drain,
+    // waited for, and nothing after it. No strategy, no Brain, no class route:
+    // an order that arrives between ticks must not also buy the basket a second
+    // time. And no ratchet: it composes equity for the order and writes none of
+    // it down. Every one of those forks reads this plan (command-wake.ts
+    // tickPlan, where a test runs it) rather than a flag tested inline.
+    const plan = tickPlan(commandTick ? "command" : "regular");
     const tickStartedAt = Date.now();
     let brainOrderAccepted = false;
     const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
@@ -9726,7 +9733,9 @@ async function main() {
       // trading on a peak that never happened, which is precisely the signal
       // the owner would be reading to decide whether to go live.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      if (usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
+      // Not on a command tick (plan.ratchets): an owner's order is not a sample
+      // of the cadence the peak is measured on. See command-wake.ts tickPlan.
+      if (plan.ratchets && usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
         bookRow.hwmUsdg = usdgNum(equityUsdg);
         await setPaperBook(agentId, bookRow);
       }
@@ -9790,7 +9799,14 @@ async function main() {
       // net. A percentage published without saying which is not a performance
       // figure, and a model comparing gross history against net future returns
       // is comparing two different quantities.
-      const riskPeak = await getRiskPeriodPeak(agentId, curveMarked.length === 0 ? usdgNum(equityUsdg) : null);
+      // READ ON EVERY TICK, OBSERVED ONLY ON A REGULAR ONE. A command tick still
+      // needs the peak its order is judged against, but an order arriving must
+      // not move that reference point at the very moment it judges the order
+      // — null asks without observing (risk-period.ts markRiskPeriod).
+      const riskPeak = await getRiskPeriodPeak(
+        agentId,
+        plan.ratchets && curveMarked.length === 0 ? usdgNum(equityUsdg) : null,
+      );
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -9838,7 +9854,11 @@ async function main() {
           `[fees] not ratcheting the high-water mark: ${curveMarked.join(", ")} valued off a bonding curve`,
         );
       }
-      if (accrual.profitUsdg > 0n && curveMarked.length === 0) {
+      // NO FEE ON A COMMAND TICK. The fee follows the running maximum of sampled
+      // equity, which only rises as samples are added — so a sample an owner's
+      // order added could charge a fee on a transient peak the regular cadence
+      // would never have seen. The next regular tick accrues whatever is real.
+      if (plan.ratchets && accrual.profitUsdg > 0n && curveMarked.length === 0) {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),
@@ -9877,7 +9897,7 @@ async function main() {
       // curve mark reverting would then halt every non-exit intent on a
       // drawdown that never happened. accrueAboveHwm returns the mark
       // unchanged when there is no profit, so this is a no-op in that case.
-      if (curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
+      if (plan.ratchets && curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
@@ -9887,8 +9907,9 @@ async function main() {
 
     // No equity row while the book is unvaluable: a partial total would read as
     // a real drop on the equity curve and in P&L. A gap is honest; a wrong
-    // number is not.
-    if (!bookIncomplete) {
+    // number is not. And none on a command tick: the curve is the regular
+    // cadence's record, and an order's extra sample is not a point on it.
+    if (!bookIncomplete && plan.ratchets) {
       await addEquity(agentId, {
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
@@ -10036,9 +10057,9 @@ async function main() {
       nextMarketReviewAt = clock.nextAt;
     };
 
-    // Not on a command tick: the Brain keeps its own clock, and an owner's
-    // order arriving is not a reason to ask it anything.
-    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && !commandOnly) {
+    // Not on a command tick (plan.brain): the Brain keeps its own clock, and an
+    // owner's order arriving is not a reason to ask it anything.
+    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
@@ -10796,11 +10817,15 @@ async function main() {
     // bad minute must not delay a sell.
     // A dashboard-queued probe, before discovery: it is the thing somebody is
     // actively waiting on, and it is one operation.
-    if (active) void runQueuedCommand(active.agentId).catch(() => {});
-    // A COMMAND TICK ENDS HERE. Everything below is a producer on its own
-    // clock or the strategy's per-tick cadence, and waking early for an order
-    // must not run either an extra time.
-    if (commandOnly) return;
+    //
+    // A COMMAND TICK WAITS FOR IT AND ENDS HERE. Waited for, because a tick
+    // that ended with its order mid-trade handed the clock straight back to a
+    // regular tick that read the book between the order's inclusion and its
+    // row. Ends, because everything below is a producer on its own clock or the
+    // strategy's per-tick cadence, and waking early for an order must not run
+    // either an extra time. A regular tick drains beside its strategy, as it
+    // always has. See command-wake.ts drainOnTick.
+    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId) : Promise.resolve())))) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -11862,8 +11887,7 @@ async function main() {
 
   /**
    * ONE COMMAND TICK, between two regular ones. See command-wake.ts for why
-   * this is a tick and not a side door, and tick's `commandOnly` for what it
-   * leaves out.
+   * this is a tick and not a side door, and tickPlan for what it leaves out.
    *
    * The flag is raised only for the synchronous call: tick() reads it in its
    * first statement, before its first await, so it cannot leak into any other
@@ -11883,32 +11907,29 @@ async function main() {
     reportRpc();
   };
 
-  // THE CLOCK BOTH RUN ON. See createTickClock: a command tick takes the next
-  // regular tick off the clock while it runs and hands it back for the moment
-  // it was already due, so an order never shortens the strategy's cadence.
-  const tickClock = createTickClock({
+  // THE CLOCK BOTH RUN ON, AND THE WATCHER THAT WAKES IT, wired to the drain's
+  // own one-at-a-time slot inside createCommandClock, where a test runs that
+  // wiring. A command tick takes the next regular tick off the clock while it
+  // runs and hands it back for the moment it was already due, so an order never
+  // shortens the strategy's cadence; a regular tick that comes due while a
+  // command is still in flight waits for it to land before it reads the book;
+  // and each order that lands between ticks is owed one command tick, taken one
+  // at a time, only when no tick and no order is already running.
+  const tickClock = createCommandClock({
     now: Date.now,
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     fallbackMs: tickIntervalMs(cfg.tickSeconds),
+    orders: commandInFlight,
+    pending: () => queuedCommandIds(merrymenHome()),
     regular: runLoop,
     command: runCommandTick,
   });
-
-  // THE WATCHER. A directory listing every couple of seconds; it wakes a
-  // command tick for an order that has just landed, once, and only when no
-  // tick and no order is already running. Unref'd, so it never holds a
+  // A directory listing every couple of seconds. Unref'd, so it never holds a
   // process open that would otherwise exit.
-  const commandWake = createCommandWake({
-    pending: () => queuedCommandIds(merrymenHome()),
-    ready: () => commandTickReady({ ...tickClock.state(), commandInFlight }),
-    wake: () => {
-      tickClock.wakeCommand();
-    },
-  });
   setInterval(() => {
     try {
-      commandWake.poll();
+      tickClock.poll();
     } catch (e) {
       console.error("[command-wake]", e);
     }
