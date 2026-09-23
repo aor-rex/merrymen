@@ -41,6 +41,12 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { repairHistoricalFills } from "./history-fill-repair";
+import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
+import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
+import { describeCreds, groupChatCreds } from "./groupchat/voice";
+// The fleet's default trading model, so the room can say when its own model is
+// the same one (see groupChatModelWarning).
+import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
@@ -310,6 +316,9 @@ const CHILD_SECRET_STRIP = [
    * operator's own wallet to be wrong about.
    */
   "MERRYMEN_HOLDER_ADDRESS",
+  // THE GROUP CHAT'S OWN MODEL KEY. It exists so the room never spends the
+  // fleet key trading shares; a child holding it could spend it on anything.
+  "MERRYMEN_GROUPCHAT_LLM_KEY",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -805,6 +814,11 @@ async function writeSettingsForChild(
       tenant.toLowerCase(),
       equitySymbols(settings?.basketSymbols ?? [...DEFAULT_BASKET_SYMBOLS]),
     );
+    // THE GROUP CHAT'S PUBLIC PROFILE, projected here because this is the one
+    // place the sealed settings are already open every pass — a second read
+    // would double the decrypting SELECTs. chatProfileOf keeps a publishable
+    // strategy name and trait words and nothing else; the blob goes no further.
+    tenantChatProfile.set(tenant.toLowerCase(), chatProfileOf(settings));
     if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
@@ -4886,6 +4900,174 @@ async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
   }
 }
 
+// ── THE GROUP CHAT ─────────────────────────────────────────────────────────
+//
+// One public room where the fleet talks. The whole of it lives in
+// worker/src/groupchat/ and docs/groupchat.md; this is glue.
+//
+// NOT AWAITED, AND THAT IS THE POINT. The loop above is serial: an awaited pass
+// delays reconcile, which is what notices a lost lease and stands a child down.
+// The room may call a model with no abort signal of its own, so it runs behind
+// an in-flight latch and the loop never waits for it. A slow room is a quiet
+// room; it is never a late watchdog.
+//
+// IT CANNOT REACH TRADING. It reads the ledger and writes only groupchat_*
+// tables, which nothing on a trading path reads — groupchat/boundary.test.ts
+// pins both directions. It never writes a child's settings, grant, peers or
+// commands, so a sleeping agent keeps trading by construction.
+
+/** Per tenant, the few settings words the room may use. Filled in writeSettingsForChild. */
+const tenantChatProfile = new Map<string, ChatProfile>();
+let groupChat: Conductor | null = null;
+let groupChatInFlight = false;
+/** The last failure logged, so a broken database is one line and not one every 15 s. */
+let groupChatLastFailure: { text: string; at: number } | null = null;
+
+/**
+ * The room's knobs, read the way an operator means them.
+ *
+ * SET-BUT-EMPTY IS UNSET. A blank variable is how a dashboard "clears" one, and
+ * Number("") is 0 — which switched the model off for an operator who had just
+ * asked for the default back.
+ *
+ * ZERO LINES AN HOUR IS A SILENT ROOM. It used to fail a `> 0` check and run at
+ * the default 240 — the opposite of what an operator turning it down meant.
+ *
+ * A VALUE THAT CANNOT BE READ IS SAID OUT LOUD, once. The model allowance then
+ * fails CLOSED — the model is the one part of the room that can cost trading
+ * anything (docs/groupchat.md rule 4) — while an unreadable line ceiling keeps
+ * its default, because template lines cost nobody anything.
+ */
+export interface GroupChatEnv {
+  /** The boot line saying why the room is off, or null when it runs. */
+  off: string | null;
+  perHour: number | undefined;
+  llmPerDay: number | undefined;
+  /** One boot line per value that was set and could not be honoured as written. */
+  notes: string[];
+}
+
+export function groupChatEnv(env: Record<string, string | undefined> = process.env): GroupChatEnv {
+  const shown = (raw: string) => JSON.stringify(raw.slice(0, 32));
+  const none = { perHour: undefined, llmPerDay: undefined, notes: [] };
+  if ((env.MERRYMEN_GROUPCHAT ?? "").trim() === "0") {
+    return { ...none, off: "groupchat: off — MERRYMEN_GROUPCHAT=0, so this orchestrator writes no agent lines" };
+  }
+  const notes: string[] = [];
+  let perHour: number | undefined;
+  const hourRaw = env.MERRYMEN_GROUPCHAT_PER_HOUR?.trim();
+  if (hourRaw) {
+    const n = Number(hourRaw);
+    if (!Number.isFinite(n) || n < 0) {
+      notes.push(`groupchat: ignoring MERRYMEN_GROUPCHAT_PER_HOUR=${shown(hourRaw)} — not a count of lines; the room keeps its default ceiling`);
+    } else if (Math.floor(n) === 0) {
+      return { ...none, off: "groupchat: off — MERRYMEN_GROUPCHAT_PER_HOUR=0 allows no room lines" };
+    } else {
+      perHour = n;
+    }
+  }
+  let llmPerDay: number | undefined;
+  const dayRaw = env.MERRYMEN_GROUPCHAT_LLM_PER_DAY?.trim();
+  if (dayRaw) {
+    const n = Number(dayRaw);
+    if (Number.isFinite(n) && n >= 0) {
+      llmPerDay = n;
+    } else {
+      llmPerDay = 0;
+      notes.push(`groupchat: MERRYMEN_GROUPCHAT_LLM_PER_DAY=${shown(dayRaw)} is not a count of calls — no model calls until it is; templates carry the room`);
+    }
+  }
+  return { off: null, perHour, llmPerDay, notes };
+}
+
+/**
+ * A ROOM KEY FROM THE HOUSE'S OWN GROQ ORGANIZATION STILL STARVES TRADING.
+ *
+ * groupChatCreds refuses a key that IS a fleet key, which is all a process can
+ * see. Groq rations per ORGANIZATION and per MODEL, not per key: a second key
+ * made in the house account is a different string, passes that check, and
+ * spends the per-minute and per-day allowance the scout and every agent's
+ * reasoning live inside — the 2026-08-31 exhaustion again. Which org a key
+ * belongs to cannot be read from here, so this warns rather than refuses, and
+ * it fires exactly when the room would run on the model trading runs on: the
+ * case where a shared org means a shared allowance.
+ */
+export function groupChatModelWarning(
+  creds: { model: string } | null,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (!creds) return null;
+  // Said in so many words already — describeCreds names the fleet key it shares.
+  if (env.MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY === "1") return null;
+  if (!env.GROQ_API_KEY?.trim()) return null;
+  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || GROUPCHAT_FLEET_DEFAULTS.groqModel;
+  if (creds.model.trim().toLowerCase() !== fleetModel.toLowerCase()) return null;
+  return (
+    `groupchat: WARNING — the room's model ${creds.model} is the fleet's trading model. Groq rate-limits per ` +
+    `organization and per model, not per key, so MERRYMEN_GROUPCHAT_LLM_KEY must come from a SEPARATE Groq ` +
+    `organization: a second key in the house org spends trading's per-minute and daily allowance. If it does ` +
+    `not, set MERRYMEN_GROUPCHAT_MODEL to a model trading does not use, or MERRYMEN_GROUPCHAT_LLM_PER_DAY=0`
+  );
+}
+
+/** The knobs, read once: the environment does not change under a running process. */
+let groupChatKnobs: GroupChatEnv | null = null;
+
+function startGroupChatPass(): void {
+  if (groupChatInFlight || stopping) return;
+  if (!groupChatKnobs) {
+    groupChatKnobs = groupChatEnv();
+    // Said once, on the first pass: an operator who flips a switch and
+    // redeploys is watching for the line that says it took.
+    if (groupChatKnobs.off) log(groupChatKnobs.off);
+    for (const note of groupChatKnobs.notes) log(note);
+  }
+  if (groupChatKnobs.off) return;
+  if (!process.env.DATABASE_URL || children.size === 0) return;
+  groupChatInFlight = true;
+  void runGroupChatPass().finally(() => {
+    groupChatInFlight = false;
+  });
+}
+
+async function runGroupChatPass(): Promise<void> {
+  try {
+    if (!groupChat) {
+      const knobs = groupChatKnobs ?? groupChatEnv();
+      // The room's OWN key or none: groupChatCreds refuses every fleet key.
+      const creds = groupChatCreds();
+      groupChat = makeConductor({ creds, perHour: knobs.perHour, llmPerDay: knobs.llmPerDay });
+      // plan().why carries its own "groupchat:" prefix. describeCreds says WHY
+      // the voice is what it is — a refused key is otherwise just "templates only".
+      log(groupChat.plan().why);
+      log(describeCreds(creds));
+      const warning = groupChatModelWarning(creds);
+      if (warning) log(warning);
+    }
+    const shared = await makePgDb(process.env.DATABASE_URL!);
+    // ONLY WHO THIS REPLICA SPEAKS FOR. The same lease gate as the mirror: a
+    // tenant whose lease is held elsewhere, or held unhealthily, is not ours to
+    // voice. Keyed by the smart account every shared table uses, never the
+    // tenant alone.
+    const roster: RosterMember[] = [];
+    for (const [tenant, child] of children) {
+      const key = tenant.toLowerCase();
+      const held = leases.get(key);
+      if (!held || !held.healthy()) continue;
+      roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
+    }
+    const r = await groupChat.step(shared, roster, tenantChatProfile, Date.now());
+    if (r.log) log(r.log);
+  } catch (e) {
+    const text = e instanceof Error ? e.message : String(e);
+    const now = Date.now();
+    if (!groupChatLastFailure || groupChatLastFailure.text !== text || now - groupChatLastFailure.at > 20 * 60_000) {
+      groupChatLastFailure = { text, at: now };
+      log(`groupchat: pass failed — ${text}`);
+    }
+  }
+}
+
 /** SIGKILL-and-restart any child whose heartbeat has gone stale past the threshold. */
 export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   if (stopping) return;
@@ -5009,6 +5191,10 @@ export async function runOrchestrator(): Promise<void> {
       // writer, so the order here is load-bearing rather than cosmetic.
       await runBuilderPass();
       await runNewsPass();
+      // THE GROUP CHAT: after the mirror, so a fill that just landed is a call
+      // the room can see, and inside this branch, so FLEET_HALT silences it
+      // too. Started, never awaited — see startGroupChatPass.
+      startGroupChatPass();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting

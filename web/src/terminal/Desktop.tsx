@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { AgentStrip } from "./AgentStrip";
 import Link from "next/link";
 import { useWatchlist } from "./watchlist";
+import { useGroupChatSupported } from "./groupchat";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -52,6 +53,8 @@ export function DesktopHeader({
 }: Actions & { hasAgent?: boolean; mine: LiveMine }) {
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
+  // The desktop's way into the group chat; hidden where the install has no room.
+  const room = useGroupChatSupported();
   return (
     <header className="desktop-header">
       <button
@@ -76,6 +79,7 @@ export function DesktopHeader({
         <span>Search tokens or agents</span>
       </button>
       <div className="desktop-header-account">
+        {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
         <Link className="desktop-settings-link" href="/settings">Settings</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a

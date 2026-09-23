@@ -42,6 +42,7 @@ import { Alpha } from "./screens/Alpha";
 import { pathForScreen, screenForPath, TABS } from "./nav";
 
 import { Feed } from "./screens/Feed";
+import { GroupChat } from "./screens/GroupChat";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -501,6 +502,7 @@ export function App() {
             onDeposit={() => openScreen({ kind: "deposit" })}
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
+            onGroupChat={() => openScreen({ kind: "groupchat" })}
             hasAgent={account?.status.exists === true}
           />
         )}
@@ -688,6 +690,7 @@ export function App() {
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
+        {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
       {desktop && money ? (
         <aside

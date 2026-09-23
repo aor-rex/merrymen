@@ -7,6 +7,7 @@ import "@/terminal/terminal.css";
 import "@/terminal/forms.css";
 import "@/terminal/polish.css";
 import "@/terminal/root.css";
+import "@/terminal/groupchat.css";
 import { RegisterSW } from "@/components/RegisterSW";
 import { localeBootScript } from "@/lib/locale";
 

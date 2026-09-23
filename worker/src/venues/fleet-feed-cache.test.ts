@@ -59,7 +59,13 @@ test("different pages share a request pace across independent worker connections
 
 test("a queued page stops when another request encounters a provider rate limit", async () => {
   const home = mkdtempSync(path.join(tmpdir(), "gecko-cache-"));
-  const a = new FleetFeedCache(home, 100), b = new FleetFeedCache(home, 100);
+  // THE DRIVEN CLOCK, for the reason fakeClock gives. On the real clock this
+  // reddened CI: a process descheduled for over 100ms between `a` taking the
+  // slot and `b` reading it let `b` find its turn already due, skip the sleep,
+  // and read the cooldown before `a` had written it — the cache was right, the
+  // test was racing the scheduler.
+  const clock = fakeClock();
+  const a = new FleetFeedCache(home, 100, clock), b = new FleetFeedCache(home, 100, clock);
   try {
     let laterCalls = 0;
     const unavailable = (failure: string) => ({ failed: true, failure });
