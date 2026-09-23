@@ -80,9 +80,11 @@ describe("the shell announcing landed trades", () => {
     }
   });
 
-  it("TWO FILLS OF ONE POST WHILE AWAY ARE TWO IN THE TITLE — and one tone for the read", async () => {
-    // The feed groups every landed copy of a post into one row, so two fills
-    // of a steady leg between two reads are one row whose `said` grew by two.
+  it("A NEW FILL WHILE AWAY IS COUNTED IN THE TITLE — one tone for the read, and nothing it did not see land", async () => {
+    // The count is by newest time only (arrivals.ts): two fills of one row
+    // between two reads are one, and an older order landing late under the
+    // same newest time is not counted. Undercounting is the price of a title
+    // that never counts a fill nobody made.
     const t = testDom();
     Object.defineProperty(t.dom.window.document, "hidden", { configurable: true, get: () => true });
     t.dom.window.document.title = "merrymen";
@@ -93,10 +95,12 @@ describe("the shell announcing landed trades", () => {
       const leg = { ...fill(), at: NOW_MS / 1000 - 3000, said: 1 };
       await t.render(probe([leg]));
       await t.render(probe([{ ...leg, at: NOW_MS / 1000 - 5, said: 3 }]));
-      assert.equal(t.dom.window.document.title, "(2) merrymen");
+      assert.equal(t.dom.window.document.title, "(1) merrymen");
       assert.deepEqual(played, ["buy"]);
       await t.render(probe([{ ...leg, at: NOW_MS / 1000 - 5, said: 4 }]));
-      assert.equal(t.dom.window.document.title, "(3) merrymen", "an older order landing late joins the count");
+      assert.equal(t.dom.window.document.title, "(1) merrymen", "a count that grew under the same time is not evidence of a fill");
+      await t.render(probe([{ ...leg, at: NOW_MS / 1000 - 2, said: 5 }]));
+      assert.equal(t.dom.window.document.title, "(2) merrymen", "a newer time is");
     } finally {
       await t.close();
     }
