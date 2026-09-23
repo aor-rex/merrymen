@@ -6154,7 +6154,7 @@ async function main() {
         // spends its completion budget thinking BEFORE it writes: gpt-oss-120b
         // measured 198 reasoning tokens on this prompt and had nothing left, so
         // a 200 budget returned HTTP 200 with an empty completion on every
-        // call. The post itself is capped at POST_MAX either way.
+        // call. The post itself is capped at TAKE_MAX (social-post.ts) either way.
         maxTokens: 800,
       });
 
