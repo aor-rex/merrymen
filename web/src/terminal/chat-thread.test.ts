@@ -115,8 +115,16 @@ describe("the agent's own fills, merged into the thread", () => {
     assert.deepEqual(mergeFills([], tape, since), []);
   });
 
-  it("A PAPER FILL SAYS SO", () => {
-    assert.equal(mergeFills([], [move({ paper: true })], since)[0]!.text, "$5.00 CASHCAT · Filled on paper");
+  it("A PAPER FILL IS NOT ANNOUNCED AS A FILL", () => {
+    // The tape books a paper trade as "landed", and the thread read that as a
+    // fill: "$5.00 CASHCAT · Filled on paper" on a surface that reads as money,
+    // an unread dot for every practice trade, and a paper agent that trades
+    // every tick turning the eighty-line thread into a trade log. The worker's
+    // receipt refuses to call a paper trade "filled" for the same reason.
+    assert.deepEqual(mergeFills([], [move({ paper: true })], since), []);
+    assert.deepEqual(mergeFills([], [move({ paper: true, action: "sell" }), move({ paper: true, at: since + 5 })], since), []);
+    // And a real fill beside it still is one.
+    assert.equal(mergeFills([], [move({ paper: true, at: since + 5 }), move()], since).length, 1);
   });
 
   it("A CHAT ORDER'S RECEIPT IS THE SAME TRADE, not a second one", () => {
@@ -207,6 +215,99 @@ describe("the agent's own fills, merged into the thread", () => {
     const tx = "0x" + "cd".repeat(32);
     assert.equal(tradeKeyOf({ ...move(), txHash: tx } as Thesis), `tx:${tx}`);
     assert.equal(tradeKeyOf(move({ action: "hold" })), null);
+  });
+});
+
+describe("a chat SELL joins its fill too", () => {
+  // A sell's receipt and its tape row do not carry the same figure: the tape's
+  // size is the order's (amount_usdg), the receipt's is the cash the fill
+  // returned, or nothing when the cost was booked from the quote. The join
+  // demanded the two agree to the cent, so every sell was two "Filled" lines,
+  // sometimes with two different dollar figures.
+  const T = 1_800_000_000;
+  const since = T - 3_600;
+  const sold = (over: Partial<Thesis> = {}) => move({ action: "sell", symbol: "TSLA", sizeUsdg: 5.01, at: T, ...over });
+  const placed = msg({ id: "p", at: T * 1000 - 60_000, text: "Placed it — sell TSLA.", order: { id: "abc" } });
+  const answer = (over: Partial<OrderReceipt> = {}, at = T * 1000 + 20_000) =>
+    msg({ id: "o", at, text: "sold TSLA", order: { id: "abc", receipt: receipt({ side: "sell", symbol: "TSLA", usdgActual: null, ...over }) } });
+  const events = (m: ChatMessage[]) => m.filter((x) => x.role === "event");
+
+  it("A QUOTE-BOOKED SELL IS ONE LINE — its receipt names no figure", () => {
+    const merged = mergeFills([placed, answer()], [sold()], since);
+    assert.equal(events(merged).length, 0, "no second line");
+    assert.equal(merged[1]!.trade?.symbol, "TSLA", "the receipt holds the fill's card");
+  });
+
+  it("A RECEIPT-BOOKED SELL IS ONE LINE, whatever its figure says", () => {
+    const merged = mergeFills([placed, answer({ usdgActual: 4.97 })], [sold()], since);
+    assert.equal(events(merged).length, 0);
+    assert.ok(merged[1]!.tradeKey);
+  });
+
+  it("AND WHEN THE TAPE SHOWS IT FIRST, the receipt absorbs it", () => {
+    const tapeFirst = mergeFills([placed], [sold()], since);
+    assert.equal(events(tapeFirst).length, 1);
+    const after = absorbFill([...tapeFirst, answer()], "o");
+    assert.equal(events(after).length, 0);
+    assert.equal(after.at(-1)!.tradeKey, tapeFirst.at(-1)!.tradeKey);
+  });
+
+  it("A SELL OF THE SAME COIN FROM BEFORE THE ORDER WAS PLACED IS NOT ITS FILL", () => {
+    // With no size to go on, the order's own life is the window: after it was
+    // placed, and before it was answered. The agent's own earlier sell of the
+    // same coin is its own line, in either order of arrival.
+    const earlier = sold({ at: T - 600, sizeUsdg: 2 });
+    const merged = mergeFills([placed, answer()], [sold(), earlier], since);
+    assert.equal(merged[1]!.trade?.at, T, "the receipt took the order's fill");
+    assert.deepEqual(events(merged).map((e) => e.trade?.at), [T - 600], "and the earlier sell kept its own line");
+    const tapeFirst = mergeFills([placed], [earlier], since);
+    assert.equal(absorbFill([...tapeFirst, answer()], "o").filter((m) => m.role === "event").length, 1, "an earlier sell is never absorbed");
+  });
+
+  it("NOR IS ONE THAT FILLED AFTER THE ORDER WAS ANSWERED", () => {
+    // A receipt is written after its fill, so a sell minutes after the answer
+    // is the agent's own next trade.
+    const later = sold({ at: T + 600 });
+    assert.equal(events(mergeFills([placed, answer()], [later], since)).length, 1);
+  });
+
+  it("TWO FILLS IN THE WINDOW: the receipt takes the one nearest its answer", () => {
+    const soon = sold({ at: T - 50, sizeUsdg: 1 });
+    const merged = mergeFills([placed, answer()], [sold(), soon], since);
+    assert.equal(merged[1]!.trade?.at, T);
+    const tapeFirst = mergeFills([placed], [soon, sold()], since);
+    const after = absorbFill([...tapeFirst, answer()], "o");
+    assert.equal(after.find((m) => m.id === "o")!.trade?.at, T);
+    assert.deepEqual(events(after).map((e) => e.trade?.at), [T - 50]);
+  });
+
+  it("THE CHAIN HASH DECIDES when both sides carry one", () => {
+    const tx = "0x" + "ab".repeat(32);
+    const other = "0x" + "cd".repeat(32);
+    const withHash = (h: string) => ({ ...sold(), txHash: h }) as Thesis;
+    assert.equal(events(mergeFills([placed, answer({ txHash: tx })], [withHash(tx)], since)).length, 0, "the same hash is one trade");
+    assert.equal(events(mergeFills([placed, answer({ txHash: tx })], [withHash(other)], since)).length, 1, "a different hash is not, whatever else agrees");
+  });
+
+  it("a buy's size must still agree — two buys of one coin are two trades", () => {
+    const bought = answer({ side: "buy", symbol: "CASHCAT", usdgActual: 20 });
+    assert.equal(events(mergeFills([placed, bought], [move({ at: T })], since)).length, 1);
+  });
+});
+
+describe("the tape learning a trade's hash", () => {
+  it("A LINE KEYED BEFORE THE TAPE CARRIED THE HASH IS NOT REPEATED ONCE IT DOES", () => {
+    // Owner moves now carry t.tx_hash, and the hash is the better key. A fill
+    // already in the thread under its old key must not come back as news
+    // under the new one.
+    const since = 1_800_000_000 - 1;
+    const first = mergeFills([], [move()], since);
+    assert.equal(first.length, 1);
+    const hashed = { ...move(), txHash: "0x" + "ef".repeat(32) } as Thesis;
+    const kept = first.map(({ trade: _t, ...m }) => m);
+    const again = mergeFills(kept, [hashed], since);
+    assert.equal(again.length, 1, "one trade, one line");
+    assert.equal(again[0]!.trade?.symbol, "CASHCAT", "and it gets its card back");
   });
 });
 

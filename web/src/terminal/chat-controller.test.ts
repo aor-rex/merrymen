@@ -729,6 +729,47 @@ describe("the agent's own fills", () => {
     assert.equal(chat.messages.at(-1)!.text, "Still here.", "and the reply is the newest line");
   });
 
+  it("A PAPER FILL IS NOT ANNOUNCED — no line, no unread dot", async () => {
+    await ui.render(h({ moves: [fill(100)], open: false, show: false }));
+    await settle();
+    await ui.render(h({ moves: [fill(200, { paper: true }), fill(100)], open: false }));
+    await settle(10);
+    assert.doesNotMatch(text(), /Filled/);
+    assert.equal(unread(), "false");
+  });
+
+  it("A CHAT SELL IS ONE LINE, with the receipt's own figure", async () => {
+    // The reviewer's case, end to end: the receipt says what the sell
+    // returned, the tape says the order's size, and they are one trade.
+    const now = Math.floor(Date.now() / 1000);
+    let answered = false;
+    routes["POST /api/chat"] = () => json({ reply: "Selling.", command: { id: "sell", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () =>
+      json(
+        answered
+          ? { id: ORDER_ID, state: "done", result: "sold TSLA for 4.97 USDG", receipt: { ...FILLED, side: "sell", usdgActual: 4.97 } }
+          : { id: ORDER_ID, state: "running" },
+      );
+    await ui.render(h({ moves: [] }));
+    await settle();
+    await typeAndSend("sell $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed it —/.test(text()), "placed");
+    const tape = [fill(now + 1, { action: "sell", symbol: "TSLA", sizeUsdg: 5.01 })];
+    await ui.render(h({ moves: tape }));
+    await until(() => /· Filled/.test(text()), "the fill, off the tape");
+    answered = true;
+    await until(() => /sold TSLA for 4\.97 USDG/.test(text()), "the receipt");
+    await settle(5);
+    await ui.render(h({ moves: tape }));
+    await settle(5);
+    assert.equal((text().match(/· Filled/g) ?? []).length, 1, "one trade, one line");
+    assert.match(text(), /\$4\.97 TSLA · Filled/);
+    assert.doesNotMatch(text(), /\$5\.01/, "and one figure: the receipt's");
+  });
+
   it("with the tape unread, nothing is merged and no watermark is set", async () => {
     await ui.render(h({ moves: null }));
     await settle();

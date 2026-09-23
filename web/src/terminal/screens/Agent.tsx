@@ -949,10 +949,15 @@ function ChatLine({
   onToken: (id: string) => void;
   onRetry?: () => void;
 }) {
-  const card = m.trade ? (
+  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
+  // ONE LINE, ONE FIGURE. A receipt joined to its fill shows the worker's
+  // figure on the card too: for a sell the tape's size is the order's, and the
+  // receipt's is what the fill returned.
+  const trade = m.trade && receipt && receipt.usdgActual !== null ? { ...m.trade, sizeUsdg: receipt.usdgActual } : m.trade;
+  const card = trade ? (
     <TradeTokenCard
-      trade={m.trade}
-      token={tokens.find((t) => t.symbol.toUpperCase() === m.trade?.symbol?.toUpperCase())}
+      trade={trade}
+      token={tokens.find((t) => t.symbol.toUpperCase() === trade.symbol?.toUpperCase())}
       onToken={onToken}
     />
   ) : null;
@@ -977,7 +982,6 @@ function ChatLine({
       </div>
     );
   }
-  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
   return (
     <div className="chat-msg chat-msg-agent">
       <div className="desk-reply">

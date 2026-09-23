@@ -70,6 +70,23 @@ export function fillParts(m: Thesis): { side: "buy" | "sell" | null; line: strin
 }
 
 /**
+ * The chain hash an owner's tape row carries (live.ts mineOf maps
+ * t.tx_hash onto it), lower-cased, or null when it carries none. Read off the
+ * row rather than off the type, so this reads the field before and after the
+ * tape learns it.
+ */
+function txOf(m: Thesis): string | null {
+  const tx = (m as { txHash?: unknown }).txHash;
+  return typeof tx === "string" && /^0x[0-9a-fA-F]{64}$/.test(tx) ? tx.toLowerCase() : null;
+}
+
+/** The ledger fields that make a row one row — the key before a row had a hash. */
+function fieldKeyOf(m: Thesis): string | null {
+  if (m.at == null || (m.action !== "buy" && m.action !== "sell")) return null;
+  return `t:${m.at}:${m.action}:${(m.symbol ?? "").toUpperCase()}:${m.sizeUsdg ?? ""}:${m.paper ? "p" : "l"}`;
+}
+
+/**
  * WHICH TRADE THIS IS, so the thread can hold it exactly once.
  *
  * The chain hash when the tape carries one. Otherwise the fields that make a
@@ -78,10 +95,8 @@ export function fillParts(m: Thesis): { side: "buy" | "sell" | null; line: strin
  * buy or a sell with a time: a hold is not a fill.
  */
 export function tradeKeyOf(m: Thesis): string | null {
-  const tx = (m as { txHash?: unknown }).txHash;
-  if (typeof tx === "string" && /^0x[0-9a-fA-F]{64}$/.test(tx)) return `tx:${tx.toLowerCase()}`;
-  if (m.at == null || (m.action !== "buy" && m.action !== "sell")) return null;
-  return `t:${m.at}:${m.action}:${(m.symbol ?? "").toUpperCase()}:${m.sizeUsdg ?? ""}:${m.paper ? "p" : "l"}`;
+  const tx = txOf(m);
+  return tx ? `tx:${tx}` : fieldKeyOf(m);
 }
 
 /**
@@ -102,24 +117,74 @@ export function newestAt(moves: Thesis[]): number {
   return moves.reduce((max, m) => (typeof m.at === "number" && m.at > max ? m.at : max), 0);
 }
 
-const isFill = (m: Thesis) => m.outcome === "landed" && (m.action === "buy" || m.action === "sell") && typeof m.at === "number";
+/**
+ * A LANDED BUY OR SELL, FOR REAL MONEY.
+ *
+ * NOT A PAPER ONE. The tape books a paper trade as "landed" (live.ts
+ * tradeOutcome), and the thread took that as a fill: "Filled on paper" on a
+ * surface that reads as money, an unread dot for every practice trade, and a
+ * paper agent trading every tick turned the conversation into a trade log.
+ * The worker's receipt refuses to call a paper trade "filled" for the same
+ * reason, and a paper fill is not announced anywhere else either.
+ */
+const isFill = (m: Thesis) =>
+  m.outcome === "landed" && !m.paper && (m.action === "buy" || m.action === "sell") && typeof m.at === "number";
 
-/** How far apart a receipt and its fill may be and still be one trade. */
+/** How far back a receipt's fill may be when the order's placing was not kept. */
 const SAME_TRADE_MS = 30 * 60_000;
 
-/** Is this fill the trade that chat order's receipt describes? Every known fact must agree. */
-function sameTrade(message: ChatMessage, fill: Thesis): boolean {
+/**
+ * How far the browser's clock (a line's `at`) and the ledger's (a fill's)
+ * may disagree, for a join by time.
+ */
+const CLOCK_SKEW_MS = 2 * 60_000;
+
+/** When the order a receipt answers was placed — the line that said so — or null when it was not kept. */
+function placedAtOf(messages: ChatMessage[], line: ChatMessage): number | null {
+  const id = line.order?.id;
+  if (!id) return null;
+  return messages.find((m) => m !== line && m.order?.id === id && !m.order.receipt && m.at !== null)?.at ?? null;
+}
+
+/** How far a fill is from the answer that describes it. */
+const gap = (line: ChatMessage, fill: Thesis) => (line.at === null ? 0 : Math.abs(fill.at! * 1000 - line.at));
+
+/**
+ * IS THIS FILL THE TRADE THAT CHAT ORDER'S RECEIPT DESCRIBES?
+ *
+ * THE CHAIN HASH DECIDES when both sides carry one, and nothing else does.
+ *
+ * Otherwise side and coin must agree, and so must a BUY's size: what was
+ * spent is one figure on both sides, so two buys of one coin at different
+ * sizes are two trades. A SELL'S SIZE IS NOT: the tape carries the order's
+ * size (amount_usdg), the receipt the cash the fill returned — or nothing,
+ * when its cost was booked from the quote — and a stock sell clamps to the
+ * position while a curve sell exits it whole. Two measurements of different
+ * things; demanding they agree to the cent made every chat sell two "Filled"
+ * lines. So a sell is matched on side, coin and TIME, and the time is the
+ * order's own life: after it was placed and before it was answered, give or
+ * take the two clocks. The agent's own earlier sell of the same coin is
+ * therefore never taken for it. When the placing line was not kept, the
+ * window falls back to half an hour before the answer.
+ */
+function sameTrade(message: ChatMessage, fill: Thesis, placedAt: number | null): boolean {
   const r = message.order?.receipt;
   if (!r || r.status !== "filled" || message.tradeKey) return false;
   if (r.side !== fill.action) return false;
   if (!r.symbol || !fill.symbol || r.symbol.toUpperCase() !== fill.symbol.toUpperCase()) return false;
-  const tx = (fill as { txHash?: unknown }).txHash;
-  if (r.txHash && typeof tx === "string") return r.txHash.toLowerCase() === tx.toLowerCase();
-  // No hash on both sides: the size has to match to the cent, or it is a
-  // different trade of the same coin and gets its own line.
-  if (r.usdgActual === null || fill.sizeUsdg === null || Math.abs(r.usdgActual - fill.sizeUsdg) >= 0.005) return false;
-  return message.at === null || Math.abs(fill.at! * 1000 - message.at) <= SAME_TRADE_MS;
+  const tx = txOf(fill);
+  if (r.txHash && tx) return r.txHash.toLowerCase() === tx;
+  if (r.side === "buy" && r.usdgActual !== null && fill.sizeUsdg !== null && Math.abs(r.usdgActual - fill.sizeUsdg) >= 0.005) {
+    return false;
+  }
+  if (message.at === null) return true;
+  const at = fill.at! * 1000;
+  const from = placedAt ?? message.at - SAME_TRADE_MS;
+  return at >= from - CLOCK_SKEW_MS && at <= message.at + CLOCK_SKEW_MS;
 }
+
+/** A receipt that said "filled" and has not been joined to its fill yet. */
+const awaitsFill = (m: ChatMessage) => m.order?.receipt?.status === "filled" && !m.tradeKey;
 
 /**
  * THE AGENT'S OWN FILLS, JOINED INTO THE THREAD BY TRADE.
@@ -133,7 +198,12 @@ function sameTrade(message: ChatMessage, fill: Thesis): boolean {
  * first saw.
  *
  * A chat order's fill is not a second line. Its receipt already said "Filled";
- * the tape's row is joined to it instead, which gives the receipt its card.
+ * the tape's row is joined to it instead, which gives the receipt its card —
+ * each receipt to the matching fill nearest its answer (sameTrade).
+ *
+ * A line keyed before the tape carried its trade's hash keeps its place: the
+ * row's old key is read as its new one, so the hash arriving does not bring
+ * the trade back as news.
  *
  * `trade` is never stored — only the key — so a reloaded thread gets its cards
  * back here from whatever the tape still holds, however old.
@@ -150,25 +220,44 @@ export function mergeFills(messages: ChatMessage[], moves: Thesis[], since: numb
     out[i] = next;
   };
   const byKey = new Map<string, Thesis>();
+  /** A row's key from before its tape carried the hash → its key now. */
+  const renamed = new Map<string, string>();
   for (const m of moves) {
     const key = isFill(m) ? tradeKeyOf(m) : null;
-    if (key) byKey.set(key, m);
+    if (!key) continue;
+    byKey.set(key, m);
+    const older = fieldKeyOf(m);
+    if (older && older !== key) renamed.set(older, key);
   }
+  const current = (key: string | undefined) => (key ? (renamed.get(key) ?? key) : undefined);
   // Cards back onto lines the thread already has.
   out.forEach((line, i) => {
-    const t = line.tradeKey ? byKey.get(line.tradeKey) : undefined;
+    const key = current(line.tradeKey);
+    const t = key ? byKey.get(key) : undefined;
     // Only where the card is MISSING: every refresh brings new objects for the
     // same rows, and rebuilding the thread for each would redraw it for nothing.
     if (t && !line.trade) replace(i, { ...line, trade: t });
   });
-  const known = new Set(out.map((l) => l.tradeKey).filter(Boolean));
+  const known = new Set(out.map((l) => current(l.tradeKey)).filter(Boolean));
   const fresh = [...byKey.entries()].filter(([key, m]) => !known.has(key) && m.at! > since).sort((a, b) => a[1].at! - b[1].at!);
-  for (const [key, fill] of fresh) {
-    const receiptAt = out.findIndex((l) => sameTrade(l, fill));
-    if (receiptAt >= 0) {
-      replace(receiptAt, { ...out[receiptAt]!, tradeKey: key, trade: fill });
-      continue;
+  // Each receipt still waiting takes the matching fill NEAREST its answer.
+  const joined = new Set<string>();
+  for (let i = 0; i < out.length; i++) {
+    const line = out[i]!;
+    if (!awaitsFill(line)) continue;
+    const placedAt = placedAtOf(out, line);
+    let best: [string, Thesis] | null = null;
+    for (const entry of fresh) {
+      if (joined.has(entry[0]) || !sameTrade(line, entry[1], placedAt)) continue;
+      if (!best || gap(line, entry[1]) < gap(line, best[1])) best = entry;
     }
+    if (best) {
+      replace(i, { ...line, tradeKey: best[0], trade: best[1] });
+      joined.add(best[0]);
+    }
+  }
+  for (const [key, fill] of fresh) {
+    if (joined.has(key)) continue;
     const p = fillParts(fill);
     if (out === messages) out = [...messages];
     out.push({ id: `fill-${key}`, role: "event", at: fill.at! * 1000, text: p.line, side: p.side, tradeKey: key, trade: fill });
@@ -227,15 +316,19 @@ export function capThread<T extends { messages: ChatMessage[]; since: number | n
  * THE OTHER ORDER OF ARRIVAL: the tape showed the fill before the order's
  * poll heard back. The receipt line `id` then takes the fill's key and card,
  * and the fill's own event line goes — one trade, one line, whichever came
- * first. Every fact must agree, exactly as when the fill arrives second.
+ * first. Every fact must agree, exactly as when the fill arrives second, and
+ * of several that do it takes the one nearest the answer.
  */
 export function absorbFill(messages: ChatMessage[], id: string): ChatMessage[] {
   const at = messages.findIndex((m) => m.id === id);
   const receiptLine = messages[at];
   if (!receiptLine) return messages;
-  const fillAt = messages.findIndex(
-    (m) => m.role === "event" && !m.order && m.tradeKey && m.trade && sameTrade(receiptLine, m.trade),
-  );
+  const placedAt = placedAtOf(messages, receiptLine);
+  let fillAt = -1;
+  messages.forEach((m, i) => {
+    if (m.role !== "event" || m.order || !m.tradeKey || !m.trade || !sameTrade(receiptLine, m.trade, placedAt)) return;
+    if (fillAt < 0 || gap(receiptLine, m.trade) < gap(receiptLine, messages[fillAt]!.trade!)) fillAt = i;
+  });
   if (fillAt < 0) return messages;
   const fill = messages[fillAt]!;
   return messages
