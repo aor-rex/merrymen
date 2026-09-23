@@ -253,13 +253,16 @@ function providerName(id: string): string | undefined {
  * all. Read for what it is — its status and the provider's own type and
  * message — or a rejected key classifies as "a reason I don't recognise" and
  * the JSON is what the owner reads.
+ *
+ * NOT REDACTED HERE: failedReply redacts the whole line, whichever way it
+ * was made, before anything is cut from it or sent.
  */
 function providerLineOf(e: unknown, creds: LlmCreds): string {
   if (e instanceof Anthropic.APIError && typeof e.status === "number") {
     const inner = (e.error as { error?: { type?: unknown; message?: unknown } } | undefined)?.error;
     const said = [inner?.type, inner?.message].filter((x): x is string => typeof x === "string" && x.length > 0).join(": ");
-    const safe = redactSecrets(said, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
-    return `${creds.provider} ${e.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+    const one = said.replace(/\s+/g, " ").trim();
+    return `${creds.provider} ${e.status}${one ? ` — ${one}` : ""}`;
   }
   return e instanceof Error ? e.message : "";
 }
@@ -279,10 +282,16 @@ function providerLineOf(e: unknown, creds: LlmCreds): string {
  * A PROVIDER STREAM THAT STOPPED SHORT IS A CUT-OFF, the same failure the
  * browser reports for its own stream: half an answer, which asking again can
  * fix. The partner surface keeps its bare answer, and never a detail.
+ *
+ * THE DETAIL REACHES THE BROWSER, so it is redacted — the brain's own key and
+ * anything shaped like a secret — for EVERY error, not only the SDK's: a
+ * transport error's own message can carry the key too (a key in a URL, say).
+ * Redacted whole, and only then cut to length, so a key that straddled the cut
+ * cannot leave its first half behind.
  */
 function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds): AgentReply {
   if (options.surface === "partner") return { reply: null, why: "llm-error" };
-  const line = providerLineOf(e, creds);
+  const line = redactSecrets(providerLineOf(e, creds), [creds.apiKey].filter(Boolean));
   if (/stream ended before the reply was finished/.test(line)) return { reply: null, why: "cut-off" };
   // No status at all: the SDK never got an answer. describeLlmFailure knows
   // undici's "fetch failed"; the SDK says "Connection error." instead.

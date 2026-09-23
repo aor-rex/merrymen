@@ -143,6 +143,46 @@ describe("a model call that failed is classified where the error is", () => {
     assert.equal((await streamed("hi", failWith(gone), { credentials: as("anthropic", "anthropic") })).out.kind, "unreachable");
   });
 
+  it("THE DETAIL THAT RIDES ALONG IS REDACTED — the brain's own key and anything shaped like a secret", async () => {
+    // `detail` goes to the browser in the SSE error event and the JSON
+    // failure. Every other test's key is "k", and redaction ignores a known
+    // secret shorter than eight characters, so nothing could see it happen.
+    const KEY = "brain-key-0f3a9c7e51d2";
+    const BLOB = "gsk_" + "Q".repeat(24);
+    const withKey = () => ({ ...credentials(), provider: "anthropic", transport: "anthropic" as const, apiKey: KEY });
+    const e = new Anthropic.AuthenticationError(
+      401,
+      { type: "error", error: { type: "authentication_error", message: `invalid x-api-key ${KEY} (also tried ${BLOB})` } },
+      undefined,
+      new Headers(),
+    );
+    const { out } = await streamed("hi", failWith(e), { credentials: withKey });
+    assert.equal(out.kind, "key-rejected", "still classified");
+    assert.match(out.detail ?? "", /\[redacted\]/, "the detail is still there, with the secrets marked");
+    assert.ok(!(out.detail ?? "").includes(KEY), "not the key");
+    assert.ok(!(out.detail ?? "").includes(BLOB), "not a secret-shaped blob");
+    // An error thrown with the key in its own message — not through the SDK,
+    // not through providerError — is redacted the same way.
+    const plain = await streamed("hi", failWith(new Error(`request to https://api.example.com?key=${KEY} failed, reason: ECONNRESET`)), { credentials: withKey });
+    assert.ok(!(plain.out.detail ?? "").includes(KEY), "nor a key an error message carried on its own");
+    // Redacted before it is cut to length: a key straddling the cut would
+    // otherwise leave its first half behind, and no whole key to match.
+    const head = "anthropic 401 — authentication_error: ";
+    const straddle = new Anthropic.AuthenticationError(
+      401,
+      { type: "error", error: { type: "authentication_error", message: `${"x".repeat(300 - head.length - 6)} ${KEY}` } },
+      undefined,
+      new Headers(),
+    );
+    const cut = (await streamed("hi", failWith(straddle), { credentials: withKey })).out.detail ?? "";
+    assert.equal(cut.length, 300);
+    assert.ok(!cut.includes(KEY.slice(0, 5)), "no half of a key at the cut");
+    // And the unstreamed answer carries the same redacted detail.
+    const res = await agentReplyResponse({ message: "hi" }, { stream: false }, { credentials: withKey, complete: failWith(e) as unknown as AgentChatOptions["complete"] });
+    const body = (await res.json()) as { detail?: string };
+    assert.ok(body.detail && !body.detail.includes(KEY) && !body.detail.includes(BLOB), "unstreamed too");
+  });
+
   it("each situation an owner can act on has its kind", async () => {
     const cases: [string, string][] = [
       ["groq 429 — rate_limit_exceeded: slow down", "rate-limited"],
