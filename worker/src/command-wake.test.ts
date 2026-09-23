@@ -18,18 +18,29 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 
-import { queuedCommandIds, runTickCommand, writeCommand, type CommandOutcome, type FileCommand } from "./command-files";
 import {
+  ORDER_IN_FLIGHT_MS,
+  queuedCommandIds,
+  runTickCommand,
+  writeCommand,
+  type CommandOutcome,
+  type FileCommand,
+} from "./command-files";
+import {
+  ALIVE_BEAT_EVERY_MS,
+  COMMAND_WAKE_EVERY_MS,
   COMMAND_WAKE_MIN_LEAD_MS,
   commandTickReady,
   createCommandClock,
   createCommandWake,
+  createLiveTrades,
   createOrderInFlight,
   createTickClock,
   drainOnTick,
   tickPlan,
   type TickKind,
 } from "./command-wake";
+import { staleThresholdSec } from "./orchestrator";
 
 /** A watcher over a queue the test controls, recording every wake. */
 function harness(ready = true) {
@@ -286,7 +297,7 @@ describe("the tick clock", () => {
   function clock(over: { regularDelay?: number } = {}) {
     const f = fake();
     const log: string[] = [];
-    const orders = createOrderInFlight();
+    const orders = createOrderInFlight(f.now);
     let finishRegular: (() => void) | null = null;
     let failRegular: (() => void) | null = null;
     let finishCommand: (() => void) | null = null;
@@ -297,6 +308,7 @@ describe("the tick clock", () => {
       clearTimer: f.clearTimer,
       fallbackMs: 240_000,
       inFlight: () => orders.settled(),
+      onHold: () => void log.push("hold"),
       regular: () =>
         new Promise<number>((resolve, reject) => {
           log.push("regular");
@@ -412,21 +424,48 @@ describe("the tick clock", () => {
     const land = k.startOrder(); // drained by that tick, still waiting on its receipt
     k.f.fire(); // the next regular tick comes due
     await settle();
-    assert.deepEqual(k.log, ["regular"], "not started while the order is mid-trade");
+    assert.deepEqual(k.log, ["regular", "hold"], "not started while the order is mid-trade");
     assert.equal(k.c.state().tickRunning, true, "and it holds the clock, so no command tick starts either");
     assert.equal(k.c.wakeCommand(), false);
     await land();
-    assert.deepEqual(k.log, ["regular", "regular"], "it runs the moment the order lands");
+    assert.deepEqual(k.log, ["regular", "hold", "regular"], "it runs the moment the order lands");
     await k.finishRegular();
     assert.equal(k.c.state().tickRunning, false);
     assert.equal(k.f.pending().length, 1, "and the cadence carries on");
   });
 
-  it("with nothing in flight a regular tick starts on its timer, at once", () => {
+  it("with nothing in flight a regular tick starts on its timer, at once — and says nothing about holding", () => {
     const k = clock();
     k.c.start(0);
     k.f.fire();
     assert.deepEqual(k.log, ["regular"]);
+  });
+
+  it("A HELD REGULAR TICK SAYS SO ONCE PER DEFERRAL — the process is alive and waiting on purpose", async () => {
+    // tick() writes the heartbeat as its first statement, so a regular tick
+    // held behind an order has not beaten; the hook is where it says it is
+    // alive. Once per deferral, not once per poll: a second order in flight
+    // when the first lands is a second deferral.
+    const k = clock();
+    k.c.start(0);
+    k.f.fire();
+    await k.finishRegular();
+    const landFirst = k.startOrder();
+    // A second order takes the slot the moment the first frees it, before the
+    // held tick can start: that is a second deferral, and it says so again.
+    let landSecond: (() => Promise<void>) | null = null;
+    void k.orders.settled()!.then(() => {
+      landSecond = k.startOrder();
+    });
+    k.f.fire();
+    await settle();
+    assert.deepEqual(k.log, ["regular", "hold"]);
+    for (let i = 0; i < 10; i += 1) await settle();
+    assert.equal(k.log.filter((l) => l === "hold").length, 1, "one deferral, one hold — not one per turn of the loop");
+    await landFirst();
+    assert.deepEqual(k.log, ["regular", "hold", "hold"]);
+    await landSecond!();
+    assert.deepEqual(k.log, ["regular", "hold", "hold", "regular"]);
   });
 });
 
@@ -520,67 +559,151 @@ describe("one owner order in flight", () => {
  * readiness rule, plan, drain and command files, with the order's trade held
  * open by the test. The reviewer's probe, made a test.
  */
-describe("a command tick's order and the regular tick never overlap", () => {
-  function worker() {
-    let now = 1_000_000;
-    let seq = 0;
-    const timers = new Map<number, { fn: () => void; at: number }>();
-    const home = newHome();
-    const orders = createOrderInFlight();
-    const log: string[] = [];
-    const landing: (() => void)[] = [];
-    const drain = () =>
-      orders.run(() =>
-        runTickCommand(home, {
-          now: () => now,
-          run: (cmd: FileCommand) =>
-            new Promise<CommandOutcome>((resolve) => {
-              log.push(`order ${cmd.id} sent`);
-              landing.push(() => {
-                log.push(`order ${cmd.id} recorded`);
-                resolve({ ok: true, line: "filled" });
-              });
-            }),
-          told: async () => {},
+/**
+ * A worker as main() wires it: the real clock, watcher, slot, live-trade count,
+ * plan, drain and command files. The order's trade joins the intent chain the
+ * way processIntentReporting does (`trades.run`), and every beat — the one
+ * tick() writes first, and the ones the clock writes for it — is recorded with
+ * its time.
+ */
+function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
+  const tickMs = opts.tickMs ?? 240_000;
+  /** How many regular ticks still send a strategy intent of their own and wait for it. */
+  let strategyHolds = opts.strategyHolds ?? 0;
+  let now = 1_000_000;
+  let seq = 0;
+  const timers = new Map<number, { fn: () => void; at: number }>();
+  const home = newHome();
+  const orders = createOrderInFlight(() => now);
+  const trades = createLiveTrades(() => now);
+  const log: string[] = [];
+  const beats: number[] = [];
+  /** Trades still out, each landed by the test: `label` is how land() finds one. */
+  const landing: { label: string; fn: () => void }[] = [];
+  /** A trade on the intent chain that stays out until the test lands it. */
+  const held = (label: string) =>
+    trades.run(
+      () =>
+        new Promise<void>((resolve) => {
+          log.push(`${label} sent`);
+          landing.push({
+            label,
+            fn: () => {
+              log.push(`${label} recorded`);
+              resolve();
+            },
+          });
         }),
-      );
-    const tick = async (kind: TickKind) => {
-      const plan = tickPlan(kind);
-      log.push(`${kind} reads the book${orders.busy() ? " WITH AN ORDER IN FLIGHT" : ""}`);
-      if (!(await drainOnTick(plan, drain))) return;
-      log.push(`${kind} runs its producers`);
-    };
-    // THE SAME FACTORY main() BUILDS ITS CLOCK WITH, so this runs its wiring.
-    const clock = createCommandClock({
-      now: () => now,
-      setTimer: (fn, ms) => (timers.set(++seq, { fn, at: now + ms }), seq),
-      clearTimer: (h) => void timers.delete(h as number),
-      fallbackMs: 240_000,
-      orders,
-      pending: () => queuedCommandIds(home),
-      regular: async () => (await tick("regular"), 240_000),
-      command: () => tick("command"),
-    });
-    return {
-      home,
-      log,
-      clock,
-      watcher: clock,
-      advance: (ms: number) => void (now += ms),
-      now: () => now,
-      pending: () => [...timers.values()].map((t) => t.at),
-      fire: async () => {
-        const [id, t] = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0]!;
-        timers.delete(id);
-        if (now < t.at) now = t.at;
-        t.fn();
+    );
+  const drain = () =>
+    orders.run(() =>
+      runTickCommand(home, {
+        now: () => now,
+        run: (cmd: FileCommand) =>
+          trades.run(
+            () =>
+              new Promise<CommandOutcome>((resolve) => {
+                log.push(`order ${cmd.id} sent`);
+                landing.push({
+                  label: `order ${cmd.id}`,
+                  fn: () => {
+                    log.push(`order ${cmd.id} recorded`);
+                    resolve({ ok: true, line: "filled" });
+                  },
+                });
+              }),
+          ),
+        told: async () => {},
+      }),
+    );
+  const live = () => orders.busy() || trades.busy();
+  const tick = async (kind: TickKind) => {
+    // BEAT FIRST — tick()'s first statement.
+    beats.push(now);
+    const plan = tickPlan(kind);
+    log.push(`${kind} reads the book${live() ? " WITH A TRADE IN FLIGHT" : ""}`);
+    if (!(await drainOnTick(plan, drain))) return;
+    log.push(`${kind} runs its producers`);
+    // Its own strategy intent, awaited as tick() awaits every intent it sends.
+    if (kind === "regular" && strategyHolds > 0) {
+      strategyHolds -= 1;
+      await held("strategy intent");
+    }
+  };
+  // THE SAME FACTORY main() BUILDS ITS CLOCK WITH, so this runs its wiring.
+  const clock = createCommandClock({
+    now: () => now,
+    setTimer: (fn, ms) => (timers.set(++seq, { fn, at: now + ms }), seq),
+    clearTimer: (h) => void timers.delete(h as number),
+    fallbackMs: tickMs,
+    orders,
+    trades,
+    pending: () => queuedCommandIds(home),
+    regular: async () => (await tick("regular"), tickMs),
+    command: () => tick("command"),
+    beat: () => void beats.push(now),
+  });
+  const fireDue = async () => {
+    const [id, t] = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0]!;
+    timers.delete(id);
+    if (now < t.at) now = t.at;
+    t.fn();
+    await settle();
+  };
+  return {
+    home,
+    log,
+    beats,
+    clock,
+    watcher: clock,
+    orders,
+    trades,
+    advance: (ms: number) => void (now += ms),
+    now: () => now,
+    pending: () => [...timers.values()].map((t) => t.at),
+    fire: fireDue,
+    /**
+     * `ms` of the process's life as main() runs it: the watcher's poll every
+     * COMMAND_WAKE_EVERY_MS, and any timer that comes due in between.
+     */
+    run: async (ms: number) => {
+      const until = now + ms;
+      while (now < until) {
+        now = Math.min(until, now + COMMAND_WAKE_EVERY_MS);
+        while ([...timers.values()].some((t) => t.at <= now)) await fireDue();
+        clock.poll();
         await settle();
-      },
-      land: async () => (landing.shift()!(), await settle()),
-      order: (id: string) =>
-        writeCommand(home, { id, kind: "trade", at: now, args: { side: "buy", symbol: "TSLA", usdgAmount: 5 }, expiresAt: now + 495_000 }),
-    };
-  }
+      }
+    },
+    /** Land the oldest trade still out, or the oldest whose label starts with `label`. */
+    land: async (label?: string) => {
+      const i = label === undefined ? 0 : landing.findIndex((l) => l.label.startsWith(label));
+      assert.ok(i >= 0 && landing[i], `nothing out labelled ${label}`);
+      landing.splice(i, 1)[0]!.fn();
+      await settle();
+    },
+    order: (id: string) =>
+      writeCommand(home, { id, kind: "trade", at: now, args: { side: "buy", symbol: "TSLA", usdgAmount: 5 }, expiresAt: now + 495_000 }),
+    /** A trade typed in Telegram: straight onto the intent chain, no command, no slot. */
+    chat: (id: string) => void held(`chat ${id}`),
+  };
+}
+
+/**
+ * The longest the watchdog would have seen the file unchanged, over [from, to]:
+ * measured from the last beat at or before `from`, so a silence that began
+ * earlier is counted whole.
+ */
+function longestSilence(beats: readonly number[], from: number, to: number): number {
+  const before = beats.filter((b) => b <= from);
+  const start = before.length ? before[before.length - 1]! : from;
+  const at = [start, ...beats.filter((b) => b > from && b <= to), to];
+  let worst = 0;
+  for (let i = 1; i < at.length; i += 1) worst = Math.max(worst, at[i]! - at[i - 1]!);
+  return worst;
+}
+
+describe("a command tick's order and the regular tick never overlap", () => {
 
   it("A COMMAND TICK DOES NOT END WHILE ITS ORDER IS MID-TRADE, and the regular tick waits behind it", async () => {
     const w = worker();
@@ -634,7 +757,7 @@ describe("a command tick's order and the regular tick never overlap", () => {
     await w.land();
     assert.deepEqual(queuedCommandIds(w.home), []);
     assert.equal(w.log.filter((l) => l === "command reads the book").length, 2);
-    assert.ok(!w.log.some((l) => l.includes("WITH AN ORDER IN FLIGHT")), w.log.join("\n"));
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
   });
 
   it("NO COMMAND TICK WHILE AN ORDER A REGULAR TICK DRAINED IS STILL IN FLIGHT — it would read the book mid-trade too", async () => {
@@ -655,7 +778,7 @@ describe("a command tick's order and the regular tick never overlap", () => {
     w.clock.poll();
     await settle();
     assert.ok(w.log.includes("order order2 sent"), "and the waiting order gets its tick the moment the first lands");
-    assert.ok(!w.log.some((l) => l.includes("WITH AN ORDER IN FLIGHT")), w.log.join("\n"));
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
   });
 
   it("AN ORDER THAT LANDS WITHIN FIVE SECONDS OF THE REGULAR TICK IS LEFT TO IT — one read of the chain, not two", async () => {
@@ -678,9 +801,223 @@ describe("a command tick's order and the regular tick never overlap", () => {
     await w.fire(); // reads, drains order1 beside the strategy, and ends
     assert.ok(w.log.includes("order order1 sent"));
     await w.fire(); // the next regular tick, 240 s on, with the receipt still outstanding
-    assert.ok(!w.log.some((l) => l.includes("WITH AN ORDER IN FLIGHT")), w.log.join("\n"));
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
     await w.land();
     assert.deepEqual(w.log.slice(-3), ["order order1 recorded", "regular reads the book", "regular runs its producers"]);
-    assert.ok(!w.log.some((l) => l.includes("WITH AN ORDER IN FLIGHT")), w.log.join("\n"));
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
+  });
+});
+
+/**
+ * THE WATCHDOG MUST NEVER KILL A CHILD MID-TRADE.
+ *
+ * tick() writes the heartbeat as its first statement and nothing else writes
+ * it, while the orchestrator SIGKILLs a child whose beat is older than
+ * staleThresholdSec(tick) — 180 s on the 15-second Trencher preset. A command
+ * tick now holds the clock until its order lands, and a regular tick due while
+ * one is out waits for it, so an order whose receipt takes its three reads of
+ * two minutes each left the file untouched for longer than that: the child was
+ * killed between the send and the row, and the owner was told "I never heard
+ * back… it may have filled". The process is alive and waiting on purpose, so
+ * the clock says so — for a bounded time, so a wedged one is still reaped.
+ */
+describe("a child is alive while a trade it sent is out", () => {
+  it("A COMMAND TICK'S ORDER HELD LONGER THAN THE 15-SECOND PRESET'S WATCHDOG KEEPS BEATING", async () => {
+    const w = worker({ tickMs: 15_000 });
+    const watchdogMs = staleThresholdSec(15) * 1000;
+    w.clock.start(0);
+    await w.fire(); // the first regular tick; the next is due in 15 s
+    w.order("order1");
+    await w.run(COMMAND_WAKE_EVERY_MS);
+    assert.ok(w.log.includes("command reads the book"), w.log.join("\n"));
+    assert.ok(w.log.includes("order order1 sent"), w.log.join("\n"));
+    const sentAt = w.now();
+    // Three receipt reads of two minutes each, and then some.
+    await w.run(400_000);
+    assert.ok(!w.log.includes("order order1 recorded"), "still out");
+    const silence = longestSilence(w.beats, sentAt, w.now());
+    assert.ok(silence < watchdogMs, `the file went ${silence / 1000}s unwritten against a ${watchdogMs / 1000}s watchdog`);
+    assert.ok(silence <= ALIVE_BEAT_EVERY_MS + COMMAND_WAKE_EVERY_MS, `a beat every ${ALIVE_BEAT_EVERY_MS / 1000}s, not ${silence / 1000}s`);
+    // And not a write every two-second poll: a dozen small writes, not two hundred.
+    const written = w.beats.filter((b) => b > sentAt).length;
+    assert.ok(written <= Math.ceil(400_000 / ALIVE_BEAT_EVERY_MS) + 1, `${written} beats in 400 s`);
+    await w.land("order");
+    await w.run(60_000);
+    assert.ok(w.log.includes("order order1 recorded"), w.log.join("\n"));
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
+  });
+
+  it("A REGULAR TICK HELD BEHIND AN ORDER BEATS AS IT DEFERS, and keeps beating while it waits — the reviewer's 730 s gap", async () => {
+    // The reviewer's case: a regular tick whose own strategy intent sits ahead
+    // of the order it drained, both receipts taking their 3 × 120 s. The tick
+    // waits for its intent (370 s) and ends; the next is due 240 s later, while
+    // the order is still out, and waits for it until it lands at 730 s.
+    // staleThresholdSec(240) is 570 s: silent from 0 to 730 is a kill.
+    const w = worker({ tickMs: 240_000, strategyHolds: 1 });
+    const watchdogMs = staleThresholdSec(240) * 1000;
+    w.order("order1");
+    w.clock.start(0);
+    await w.fire();
+    const t0 = w.now();
+    assert.ok(w.log.includes("order order1 sent") && w.log.includes("strategy intent sent"), w.log.join("\n"));
+    await w.run(370_000);
+    await w.land("strategy intent"); // the tick's own intent lands and the tick ends
+    const dueAt = w.pending()[0]!;
+    assert.equal(dueAt, t0 + 370_000 + 240_000, "the next regular tick is on the clock");
+    await w.run(dueAt - w.now()); // it comes due, with the order still out
+    assert.equal(w.log.filter((l) => l === "regular reads the book").length, 1, "held, not run");
+    assert.ok(w.beats.includes(dueAt), `the held tick said it was alive the moment it deferred: ${w.beats.map((b) => b - t0)}`);
+    await w.run(t0 + 730_000 - w.now());
+    const silence = longestSilence(w.beats, t0, w.now());
+    assert.ok(silence < watchdogMs, `the file went ${silence / 1000}s unwritten against a ${watchdogMs / 1000}s watchdog`);
+    assert.ok(silence <= ALIVE_BEAT_EVERY_MS + COMMAND_WAKE_EVERY_MS, `a beat every ${ALIVE_BEAT_EVERY_MS / 1000}s, not ${silence / 1000}s`);
+    await w.land("order");
+    assert.equal(w.log.filter((l) => l === "regular reads the book").length, 2, "and it runs the moment the order lands");
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
+  });
+
+  it("BUT A TRADE THAT NEVER COMES BACK STOPS THE BEAT once it has outlived any real order — a wedged child is still reaped", async () => {
+    // ORDER_IN_FLIGHT_MS is the bound on an order's own run once the queue has
+    // reached it (command-files.ts). Past it nothing legitimate is still going.
+    const w = worker({ tickMs: 15_000 });
+    w.clock.start(0);
+    await w.fire();
+    w.order("stuck");
+    await w.run(COMMAND_WAKE_EVERY_MS);
+    const sentAt = w.now();
+    await w.run(ORDER_IN_FLIGHT_MS + 10 * 60_000);
+    const last = w.beats[w.beats.length - 1]!;
+    assert.ok(last < sentAt + ORDER_IN_FLIGHT_MS, "no beat once the trade has sat past the bound");
+    assert.ok(last >= sentAt + ORDER_IN_FLIGHT_MS - ALIVE_BEAT_EVERY_MS - COMMAND_WAKE_EVERY_MS, "and beats right up to it");
+    assert.ok(w.now() - last > staleThresholdSec(15) * 1000, "so the watchdog gets to judge it");
+  });
+
+  it("an idle worker between ticks does not beat off the clock — that is tick()'s job, and a stall must still show", async () => {
+    const w = worker({ tickMs: 240_000 });
+    w.clock.start(0);
+    await w.fire();
+    const before = w.beats.length;
+    await w.run(200_000);
+    assert.equal(w.beats.length, before, `${w.beats.length - before} beat(s) off the clock with nothing in flight`);
+  });
+});
+
+/**
+ * NOT ONLY THE COMMAND SLOT: EVERY TRADE ON THE INTENT CHAIN.
+ *
+ * A trade typed in Telegram goes straight to submitChatTrade and onto the
+ * intent chain; it never touches the command slot. So a regular tick due while
+ * one was between inclusion and its row read the book under it, and a command
+ * tick could start beside it and read it again.
+ */
+describe("a trade typed in Telegram holds the clock the same way", () => {
+  it("A REGULAR TICK DUE WHILE A CHAT TRADE IS OUT WAITS FOR IT", async () => {
+    const w = worker();
+    w.clock.start(0);
+    await w.fire();
+    w.chat("tg1");
+    await w.run(240_000);
+    assert.equal(w.log.filter((l) => l === "regular reads the book").length, 1, "held while the chat trade is out");
+    await w.land("chat");
+    assert.equal(w.log.filter((l) => l === "regular reads the book").length, 2, "and run the moment it lands");
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
+  });
+
+  it("NO COMMAND TICK STARTS BESIDE A CHAT TRADE — the order waits for it, and is not spent while it waits", async () => {
+    const w = worker();
+    w.clock.start(0);
+    await w.fire();
+    w.chat("tg1");
+    w.order("order1");
+    await w.run(20_000);
+    assert.ok(!w.log.includes("command reads the book"), w.log.join("\n"));
+    await w.land("chat"); // the chat trade lands
+    await w.run(COMMAND_WAKE_EVERY_MS);
+    assert.ok(w.log.includes("order order1 sent"), "picked up the moment the chat trade is recorded");
+    assert.ok(!w.log.some((l) => l.includes("IN FLIGHT")), w.log.join("\n"));
+  });
+
+  it("and a chat trade held past the preset's watchdog keeps the child beating too", async () => {
+    const w = worker({ tickMs: 15_000 });
+    w.clock.start(0);
+    await w.fire();
+    w.chat("tg1");
+    const sentAt = w.now();
+    await w.run(400_000);
+    const silence = longestSilence(w.beats, sentAt, w.now());
+    assert.ok(silence < staleThresholdSec(15) * 1000, `the file went ${silence / 1000}s unwritten`);
+  });
+});
+
+describe("the live-trade count", () => {
+  it("BUSY FROM THE MOMENT A TRADE JOINS THE CHAIN UNTIL IT SETTLES, however it settles", async () => {
+    const t = createLiveTrades(() => 0);
+    assert.equal(t.busy(), false);
+    assert.equal(t.settled(), null);
+    let land!: () => void;
+    let fail!: (e: Error) => void;
+    const a = t.run(() => new Promise<string>((r) => (land = () => r("a"))));
+    const b = t.run(() => new Promise<string>((_, rej) => (fail = rej)));
+    assert.equal(t.busy(), true);
+    const waiting = t.settled();
+    assert.ok(waiting, "a settle to wait on");
+    let freed = false;
+    void waiting.then(() => (freed = true));
+    land();
+    assert.equal(await a, "a", "the step's own value comes back untouched");
+    await settle();
+    assert.equal(freed, false, "one still out");
+    assert.equal(t.busy(), true);
+    fail(new Error("reverted"));
+    await assert.rejects(b, /reverted/, "and so does its failure");
+    await settle();
+    assert.equal(freed, true);
+    assert.equal(t.busy(), false);
+    assert.equal(t.settled(), null);
+  });
+
+  it("a step that throws before it returns a promise still frees the count", async () => {
+    const t = createLiveTrades(() => 0);
+    await assert.rejects(
+      t.run(() => {
+        throw new Error("sync");
+      }),
+      /sync/,
+    );
+    assert.equal(t.busy(), false);
+  });
+
+  it("IT MOVED WHEN WORK STARTED FROM IDLE OR SETTLED — a trade queued behind a stuck one does not reset the bound", async () => {
+    let now = 100;
+    const t = createLiveTrades(() => now);
+    assert.equal(t.movedAt(), null);
+    let landA!: () => void;
+    const a = t.run(() => new Promise<void>((r) => (landA = r)));
+    assert.equal(t.movedAt(), 100);
+    now = 200;
+    let landB!: () => void;
+    const b = t.run(() => new Promise<void>((r) => (landB = r)));
+    assert.equal(t.movedAt(), 100, "joining the queue is not progress");
+    now = 300;
+    landA();
+    await a;
+    assert.equal(t.movedAt(), 300, "a trade settling is");
+    now = 400;
+    landB();
+    await b;
+    assert.equal(t.movedAt(), null, "and idle has nothing to time");
+  });
+
+  it("the command slot knows when its order started, and forgets when it frees", async () => {
+    let now = 5;
+    const o = createOrderInFlight(() => now);
+    assert.equal(o.since(), null);
+    let land!: () => void;
+    const run = o.run(() => new Promise<void>((r) => (land = r)));
+    now = 9;
+    assert.equal(o.since(), 5);
+    land();
+    await run;
+    assert.equal(o.since(), null);
   });
 });

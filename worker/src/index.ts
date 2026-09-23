@@ -117,7 +117,7 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
 import { placeOrder } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -6466,16 +6466,26 @@ async function main() {
    * exactly the concurrency this exists to prevent. The chain is kept alive
    * across a rejection (the .catch below), or one throwing intent would
    * poison every later one — which is how a lock like this usually fails.
+   *
+   * AND THE CLOCK CAN SEE WHAT IS ON IT (`liveTrades`, command-wake.ts). Every
+   * trade is counted from the moment it joins the chain until it settles, so a
+   * regular tick due while one is between inclusion and its row waits for it,
+   * no command tick starts beside it, and the heartbeat keeps beating while the
+   * process waits on it. A trade typed in Telegram never touches the command
+   * slot, so the slot alone could not say any of that.
    */
+  const liveTrades = createLiveTrades();
   let intentChain: Promise<unknown> = Promise.resolve();
   function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true): Promise<void> {
-    const run = intentChain.then(
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-    );
-    // The chain must never hold a rejection, or the next waiter inherits it.
-    intentChain = run.catch(() => {});
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+      );
+      // The chain must never hold a rejection, or the next waiter inherits it.
+      intentChain = run.catch(() => {});
+      return run;
+    });
   }
 
   /**
@@ -6533,12 +6543,14 @@ async function main() {
         return lastTradeOutcome;
       });
     };
-    const run = intentChain.then(step, step);
-    intentChain = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(step, step);
+      intentChain = run.then(
+        () => {},
+        () => {},
+      );
+      return run;
+    });
   }
 
   async function processIntentLocked(
@@ -11865,22 +11877,34 @@ async function main() {
   };
 
   // THE CLOCK BOTH RUN ON, AND THE WATCHER THAT WAKES IT, wired to the drain's
-  // own one-at-a-time slot inside createCommandClock, where a test runs that
-  // wiring. A command tick takes the next regular tick off the clock while it
-  // runs and hands it back for the moment it was already due, so an order never
-  // shortens the strategy's cadence; a regular tick that comes due while a
-  // command is still in flight waits for it to land before it reads the book;
-  // and each order that lands between ticks is owed one command tick, taken one
-  // at a time, only when no tick and no order is already running.
+  // own one-at-a-time slot and to every trade on the intent chain inside
+  // createCommandClock, where a test runs that wiring. A command tick takes the
+  // next regular tick off the clock while it runs and hands it back for the
+  // moment it was already due, so an order never shortens the strategy's
+  // cadence; a regular tick that comes due while a command or any trade is
+  // still in flight waits for it to land before it reads the book; and each
+  // order that lands between ticks is owed one command tick, taken one at a
+  // time, only when no tick and no trade is already running.
+  //
+  // THE CLOCK BEATS WHILE IT WAITS ON A TRADE. tick() beats as its first
+  // statement and nothing else does, while a command tick holds the clock until
+  // its order lands — three receipt reads of up to two minutes — and a regular
+  // tick due meanwhile waits too. On the 15-second preset the watchdog's limit
+  // is 180 s, so the child was SIGKILLed between the send and the row. The file
+  // alone, with the mode heartbeat() would publish and no block: this is a claim
+  // about the process being alive, not about the chain, and the shared `agents`
+  // row stays the tick's to write.
   const tickClock = createCommandClock({
     now: Date.now,
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     fallbackMs: tickIntervalMs(cfg.tickSeconds),
     orders: commandInFlight,
+    trades: liveTrades,
     pending: () => queuedCommandIds(merrymenHome()),
     regular: runLoop,
     command: runCommandTick,
+    beat: () => beatFile(publishedMode(execMode()), gasSponsored()),
   });
   // A directory listing every couple of seconds. Unref'd, so it never holds a
   // process open that would otherwise exit.
