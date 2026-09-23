@@ -149,14 +149,19 @@ describe("the idle channel on the real store", () => {
     assert.equal((await store.ownerNotice(a))?.message, withEarlier(breakerResetLine(null), blocker));
   });
 
-  it("A TRIP THAT CLEARS ACROSS A RESTART is taken down by the new process, on the real store", async () => {
+  it("A TRIP THAT STANDS ACROSS A RESTART is told by the new process on a tick that gives no reason, and its reset follows, on the real store", async () => {
     const a = agent();
-    await channel().tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await channel().tell({ agentId: a, strategyName: "even-keel", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
     const restarted = channel();
-    await restarted.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    for (let i = 0; i < 3; i++) await restarted.tell({ agentId: a, strategyName: "even-keel", idle: undefined, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal((await store.ownerNotice(a))?.message, renderWhy(breaker), "said again, not nested in the old line");
+    assert.equal(warnCount(a), 2, "once");
+    await restarted.tell({ agentId: a, strategyName: "even-keel", idle: null, modeEmptied: null, drawdown: CLEAR });
     assert.equal((await store.ownerNotice(a))?.message, breakerResetLine(null));
-    await restarted.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
-    assert.equal(warnCount(a), 2);
+    await restarted.tell({ agentId: a, strategyName: "even-keel", idle: undefined, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal((await store.ownerNotice(a))?.message, renderWhy(breaker), "a silent re-trip takes the reset line down");
+    assert.equal(warnCount(a), 4);
+    assert.deepEqual(decisions(a), []);
   });
 
   it("A REASON THAT POSTS writes one row, in the public register, and is not said again", async () => {
