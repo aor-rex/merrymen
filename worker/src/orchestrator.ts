@@ -57,6 +57,8 @@ function startHistoryRepair(): void {
     await applyLedgerSchema(db);
     const result = await repairHistoricalFills(db, process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com");
     log(`historical fills: ${result.repaired} receipt-backed rows recovered; ${result.pnlRecovered} sale P&Ls recovered; ${result.unavailable} unavailable or ambiguous; reasons ${JSON.stringify(result.reasons)}`);
+    // The chat's history files were read at spawn, before this ran. See refreshHistoryForLiveChildren.
+    if (result.repaired + result.pnlRecovered > 0) await refreshHistoryForLiveChildren();
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn, type ChildProcess } from "node:child_process";
@@ -1008,6 +1010,24 @@ async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string)
     log(`history: ${tenant} — ${file.trades.length} trades, ${file.decisions.length} decisions carried for the chat`);
   } catch (e) {
     log(`history: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * READ THE HISTORY AGAIN AFTER THE STARTUP REPAIR. Spawn reads each child's
+ * history before startHistoryRepair begins, so what the repair recovers — a
+ * coin's name, a fill side, a sale's P&L — would otherwise reach the chat only
+ * at the next redeploy. Once per orchestrator start, one child at a time,
+ * behind the lease, with each child's CURRENT account (a re-sign updates it in
+ * place). A child replaced meanwhile read the repaired rows at its own spawn.
+ */
+async function refreshHistoryForLiveChildren(): Promise<void> {
+  for (const [tenant, child] of [...children]) {
+    if (stopping) return;
+    const held = leases.get(tenant);
+    if (!held || !held.healthy()) continue;
+    if (children.get(tenant) !== child) continue;
+    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount);
   }
 }
 
