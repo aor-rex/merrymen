@@ -117,8 +117,9 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
-import { placeOrder } from "./order-gate";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
+import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type TickReads } from "./order-gate";
+import { createFlowWitness, opsStillOut } from "./flow-witness";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -3124,6 +3125,8 @@ async function main() {
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
+    /** flowWitness.mark(), taken just before `cashUsdg` was read. See flow-witness.ts. */
+    flowMark: number,
     /** Present when flows can be READ instead of inferred. See scanChainFlows. */
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
@@ -3318,6 +3321,12 @@ async function main() {
       return true;
     };
 
+    // AN OP OUT WITH NO OUTCOME, read before anything is booked so a failed
+    // read aborts the whole pass (reconcileFlowsOrRetry retries it). Its landing
+    // time is unknown, so while one is out — and for the look after — no cash
+    // change can be called the owner's. See flow-witness.ts.
+    const opsOutstanding = opsStillOut(await listSubmittedOps(agentId), Date.now());
+
     // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
     // truth about money crossing the boundary, and inference must not book the
     // same movement a second time from the balance change it already explains.
@@ -3397,12 +3406,12 @@ async function main() {
       }
       // `resume-clean` is the remaining arm and it does nothing on purpose: a
       // funded account came back with the cash the anchor said it had.
-    } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
+    } else if (!covered && lastCashUsdg !== null && flowWitness.unexplained({ opsOutstanding })) {
       await record(cashUsdg - lastCashUsdg, "no trade explains this");
     }
 
     lastCashUsdg = cashUsdg;
-    ledgerWritesAtSnapshot = ledgerWrites;
+    flowWitness.settle({ mark: flowMark, opsOutstanding });
   };
 
   /**
@@ -3422,13 +3431,14 @@ async function main() {
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
+    flowMark: number,
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
   ): Promise<void> => {
     try {
-      await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+      await reconcileFlows(agentId, cashUsdg, equityUsdg, flowMark, scan);
     } catch (e) {
       console.log(
         `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
@@ -3706,8 +3716,13 @@ async function main() {
     cfg.browserUrl && cfg.browserToken
       ? { baseUrl: cfg.browserUrl, token: cfg.browserToken }
       : null;
-  let ledgerWrites = 0;
-  let ledgerWritesAtSnapshot = 0;
+  /**
+   * WHAT THIS PROCESS DID THAT CAN MOVE CASH, as flow inference reads it: every
+   * op sent and every landed or simulated row, counted, and whether an op is out
+   * with no outcome. See flow-witness.ts for the two ways the old count let an
+   * order's own debit be booked as the owner's withdrawal.
+   */
+  const flowWitness = createFlowWitness();
   /** The last row recordTrade wrote — see the comment there for why this exists. */
   let lastTradeOutcome = null as LedgerFacts | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
@@ -4676,7 +4691,7 @@ async function main() {
    * say when it frees as well as whether it is held.
    */
   const commandInFlight = createOrderInFlight();
-  async function runQueuedCommand(agentId: string, marketUnreadable = false, bookUnreadable = false): Promise<void> {
+  async function runQueuedCommand(agentId: string, reads: TickReads): Promise<void> {
     if (!active) return;
     await commandInFlight.run(async () => {
       try {
@@ -4692,7 +4707,7 @@ async function main() {
           // The unlink WAS the claim, so a command reaching here is ours and
           // will not be replayed — a lost probe is a button pressed again, a
           // replayed one is gas nobody asked to spend twice.
-          run: (cmd) => runCommand(cmd, marketUnreadable, bookUnreadable),
+          run: (cmd) => runCommand(cmd, reads),
           // LABELLED BY WHAT IT WAS. Every result used to be written into the
           // owner's event feed as `selftest: …` regardless of kind, which for an
           // order is a wrong claim about what the agent did, in the one log an
@@ -4723,7 +4738,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<CommandOutcome> {
+  async function runCommand(cmd: FileCommand, reads: TickReads): Promise<CommandOutcome> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -4741,7 +4756,7 @@ async function main() {
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
     if (cmd.kind === "paper-reset") return runPaperReset();
-    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, marketUnreadable, bookUnreadable));
+    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
   }
 
@@ -4825,25 +4840,19 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false, bookUnreadable = false): Promise<OrderReply> {
+  async function runOrderCommand(cmd: FileCommand, reads: TickReads): Promise<OrderReply> {
     // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
     // runs it: the unreadable market and the unread book (both drained with
     // their flag by the tick that could not read them — answered, not
     // starved), a book that cannot be totalled for a BUY (checkPolicy would
     // skip the drawdown breaker for it), the owner's pause, the arguments, and
     // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
-    // other surface and meaning the same thing in both. `lastEquityKnown` is
-    // this tick's: every drain runs after the tick composed it, and the ticks
-    // that could not compose it drain with `bookUnreadable`.
+    // other surface and meaning the same thing in both. `reads` is what the
+    // draining tick read, stated at its drain site (order-gate.ts tickReads)
+    // and carried here whole: never a default, never a global beside it.
     return placeOrder(
       cmd.args,
-      {
-        marketUnreadable,
-        bookUnreadable,
-        equityKnown: lastEquityKnown,
-        paused: isPaused(),
-        ceilingUsdg: cfg.telegramMaxActionUsdg,
-      },
+      orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
       (side, symbol, size) => {
         // And from here the wall decides. submitChatTrade reports what the
         // LEDGER said, so this returns a verdict about a trade that really
@@ -6466,16 +6475,26 @@ async function main() {
    * exactly the concurrency this exists to prevent. The chain is kept alive
    * across a rejection (the .catch below), or one throwing intent would
    * poison every later one — which is how a lock like this usually fails.
+   *
+   * AND THE CLOCK CAN SEE WHAT IS ON IT (`liveTrades`, command-wake.ts). Every
+   * trade is counted from the moment it joins the chain until it settles, so a
+   * regular tick due while one is between inclusion and its row waits for it,
+   * no command tick starts beside it, and the heartbeat keeps beating while the
+   * process waits on it. A trade typed in Telegram never touches the command
+   * slot, so the slot alone could not say any of that.
    */
+  const liveTrades = createLiveTrades();
   let intentChain: Promise<unknown> = Promise.resolve();
   function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true): Promise<void> {
-    const run = intentChain.then(
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-    );
-    // The chain must never hold a rejection, or the next waiter inherits it.
-    intentChain = run.catch(() => {});
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+      );
+      // The chain must never hold a rejection, or the next waiter inherits it.
+      intentChain = run.catch(() => {});
+      return run;
+    });
   }
 
   /**
@@ -6533,12 +6552,14 @@ async function main() {
         return lastTradeOutcome;
       });
     };
-    const run = intentChain.then(step, step);
-    intentChain = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(step, step);
+      intentChain = run.then(
+        () => {},
+        () => {},
+      );
+      return run;
+    });
   }
 
   async function processIntentLocked(
@@ -6618,7 +6639,7 @@ async function main() {
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
       const moneyMoving = row.status === "landed" || row.status === "paper" || row.status === "submitted";
-      if (moneyMoving) ledgerWrites += 1;
+      if (moneyMoving) flowWitness.wrote();
       if (!wrote && moneyMoving) {
         // FAIL-CLOSED. The fill happened (on-chain, or a simulated paper fill)
         // but its ledger row did NOT land — a network-backed write can fail
@@ -7073,6 +7094,10 @@ async function main() {
           // unreconcilable spend costs the notional and the ability to find out.
           submittedRow = wrote;
           if (!wrote) throw new NotRecorded(userOpHash);
+          // AND FROM HERE THE OP CAN MOVE CASH, before any outcome row does —
+          // counted now, because a receipt that cannot be read leaves no other
+          // write behind and the op may still land (flow-witness.ts).
+          flowWitness.wrote();
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -8956,7 +8981,7 @@ async function main() {
       // no market data at all), and a trade is refused BY NAME rather than
       // filled — see runOrderCommand for why filling it would switch the
       // drawdown breaker off.
-      if (active) await runQueuedCommand(active.agentId, true).catch(() => {});
+      if (active) await runQueuedCommand(active.agentId, tickReads.marketUnread()).catch(() => {});
       return;
     }
 
@@ -9026,6 +9051,10 @@ async function main() {
       symbols: [],
       tokens: [],
     };
+    // THE WRITE COUNT AS OF THIS CASH READ, taken before it. A trade whose row
+    // lands between the read and the reconcile is then seen by the next look,
+    // the first one whose cash includes it (flow-witness.ts).
+    const flowMark = flowWitness.mark();
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -9352,7 +9381,7 @@ async function main() {
       // drain, so a queued order was skipped until its window closed. With the
       // book unread there is no equity for the breaker to judge it against, so
       // it is refused by name — see runOrderCommand.
-      await runQueuedCommand(agentId, false, true).catch(() => {});
+      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
       return;
     }
 
@@ -9364,7 +9393,7 @@ async function main() {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
       // Answered for the same reason as the unread book just above.
-      await runQueuedCommand(agentId, false, true).catch(() => {});
+      await runQueuedCommand(agentId, tickReads.bookUnread()).catch(() => {});
       return;
     }
 
@@ -9724,6 +9753,12 @@ async function main() {
     // charged, and a drawdown measured from the last honest peak. The breaker
     // still works -- a curve token falling is still measured against that peak.
     const curveMarked = curveMarkedSymbols(positions);
+    // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
+    // observation, the fee and the mark, and the equity row — decided in
+    // command-wake.ts tickRatchets, where a test runs every guard. A command
+    // tick writes none of them; a curve mark moves no peak; an untotalled book
+    // writes no row. Each write below is handed to the call that decides it.
+    const ratchet = tickRatchets(plan, { incomplete: bookIncomplete, curveMarked: curveMarked.length });
 
     // With an unvaluable holding on the books, equity is UNKNOWN — not lower.
     // Ratcheting the HWM, accruing a performance fee or judging drawdown off a
@@ -9744,13 +9779,10 @@ async function main() {
       // trading on a peak that never happened, which is precisely the signal
       // the owner would be reading to decide whether to go live.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      // Not on a command tick (plan.ratchets): an owner's order is not a sample
-      // of the cadence the peak is measured on. See command-wake.ts tickPlan.
-      if (plan.ratchets && usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
-        bookRow.hwmUsdg = usdgNum(equityUsdg);
-        await setPaperBook(agentId, bookRow);
-      }
-      highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
+      // Raised past the recorded peak and written only on a regular tick with no
+      // curve mark: an owner's order is not a sample of the cadence the peak is
+      // measured on. See command-wake.ts tickRatchets.
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
     } else {
       // Capital first, performance second. Any deposit or withdrawal since the
       // last look moves the high-water mark with it, so what follows can only
@@ -9768,6 +9800,7 @@ async function main() {
         agentId,
         balances.cashUsdg,
         equityUsdg,
+        flowMark,
         cfg.depositScanEnabled
           ? {
               chain: makeReconcileChain(client),
@@ -9813,11 +9846,9 @@ async function main() {
       // READ ON EVERY TICK, OBSERVED ONLY ON A REGULAR ONE. A command tick still
       // needs the peak its order is judged against, but an order arriving must
       // not move that reference point at the very moment it judges the order
-      // — null asks without observing (risk-period.ts markRiskPeriod).
-      const riskPeak = await getRiskPeriodPeak(
-        agentId,
-        plan.ratchets && curveMarked.length === 0 ? usdgNum(equityUsdg) : null,
-      );
+      // — null asks without observing (risk-period.ts markRiskPeriod), and
+      // tickRatchets passes null on a command tick or under a curve mark.
+      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -9869,7 +9900,19 @@ async function main() {
       // equity, which only rises as samples are added — so a sample an owner's
       // order added could charge a fee on a transient peak the regular cadence
       // would never have seen. The next regular tick accrues whatever is real.
-      if (plan.ratchets && accrual.profitUsdg > 0n && curveMarked.length === 0) {
+      //
+      // AND THE IN-MEMORY MARK MOVES WITH IT, inside the same guard and not
+      // after it. That is the variable the drawdown BREAKER actually judges
+      // against (it is copied into AgentState and divided by in checkPolicy),
+      // and it is re-read from the database only at arm time and on a capital
+      // flow -- so an inflated value survives for the whole process. Leaving it
+      // outside meant the fee and the DB write were skipped while the peak that
+      // gates trading ratcheted anyway, and a curve mark reverting would then
+      // halt every non-exit intent on a drawdown that never happened.
+      // accrueAboveHwm returns the mark unchanged when there is no profit.
+      // tickRatchets.accrue returns the mark this tick may carry, and runs the
+      // write below only when it may and there is a profit to charge.
+      highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),
@@ -9898,17 +9941,7 @@ async function main() {
             `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${effFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)${circle}`,
           );
         }
-      }
-      // Inside the guard, not after it. This is the variable the drawdown
-      // BREAKER actually judges against (it is copied into AgentState and
-      // divided by in checkPolicy), and it is re-read from the database only
-      // at arm time and on a capital flow -- so an inflated value survives for
-      // the whole process. Leaving it outside meant the fee and the DB write
-      // were skipped while the peak that gates trading ratcheted anyway, and a
-      // curve mark reverting would then halt every non-exit intent on a
-      // drawdown that never happened. accrueAboveHwm returns the mark
-      // unchanged when there is no profit, so this is a no-op in that case.
-      if (plan.ratchets && curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
+      });
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
@@ -9920,8 +9953,9 @@ async function main() {
     // a real drop on the equity curve and in P&L. A gap is honest; a wrong
     // number is not. And none on a command tick: the curve is the regular
     // cadence's record, and an order's extra sample is not a point on it.
-    if (!bookIncomplete && plan.ratchets) {
-      await addEquity(agentId, {
+    // Both decided in tickRatchets.equityRow.
+    await ratchet.equityRow(() =>
+      addEquity(agentId, {
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one
@@ -9952,8 +9986,8 @@ async function main() {
         // The block the balances were read at — where an auditor re-reads from.
         // Non-null by construction: an unreadable market returned above.
         blockNumber: market.blockNumber ?? undefined,
-      });
-    }
+      }),
+    );
     await setPositions(
       agentId,
       positions.map((p) => ({
@@ -10824,7 +10858,9 @@ async function main() {
     // strategy's per-tick cadence, and waking early for an order must not run
     // either an extra time. A regular tick drains beside its strategy, as it
     // always has. See command-wake.ts drainOnTick.
-    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId) : Promise.resolve())))) return;
+    // With what this tick read: the book valued, and totalled or not.
+    const drainReads = tickReads.composed(!bookIncomplete);
+    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId, drainReads) : Promise.resolve())))) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -11532,9 +11568,16 @@ async function main() {
   ): Promise<OrderReply> {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
-      // Before the first tick completes, equity is unknown (0n) and the drawdown
-      // check would judge garbage — hold chat trades until the book is read.
-      if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
+      // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is resolved or
+      // sized (order-gate.ts chatOrderGate, where a test runs it). Before the
+      // first tick equity is its 0n initialiser and the drawdown check would
+      // judge garbage; and with a holding that has neither a price nor a cost
+      // the book cannot be totalled, checkPolicy skips the breaker, and a BUY
+      // would go out with the loss limit off. That refusal lived only in the
+      // app order's gate, so a buy typed in Telegram got through. It is here now,
+      // where the app, Telegram and the Brain all pass, in the app's own words.
+      const unjudged = chatOrderGate(side, { equityUsdg: lastEquityUsdg, equityKnown: lastEquityKnown });
+      if (unjudged) return no(unjudged);
       // Resolve against the watch set, not the shipped registry — otherwise a
       // memecoin the owner added, covered by their grant and priced from its pool
       // still came back "unknown symbol" when they asked for it by name.
@@ -11865,22 +11908,34 @@ async function main() {
   };
 
   // THE CLOCK BOTH RUN ON, AND THE WATCHER THAT WAKES IT, wired to the drain's
-  // own one-at-a-time slot inside createCommandClock, where a test runs that
-  // wiring. A command tick takes the next regular tick off the clock while it
-  // runs and hands it back for the moment it was already due, so an order never
-  // shortens the strategy's cadence; a regular tick that comes due while a
-  // command is still in flight waits for it to land before it reads the book;
-  // and each order that lands between ticks is owed one command tick, taken one
-  // at a time, only when no tick and no order is already running.
+  // own one-at-a-time slot and to every trade on the intent chain inside
+  // createCommandClock, where a test runs that wiring. A command tick takes the
+  // next regular tick off the clock while it runs and hands it back for the
+  // moment it was already due, so an order never shortens the strategy's
+  // cadence; a regular tick that comes due while a command or any trade is
+  // still in flight waits for it to land before it reads the book; and each
+  // order that lands between ticks is owed one command tick, taken one at a
+  // time, only when no tick and no trade is already running.
+  //
+  // THE CLOCK BEATS WHILE IT WAITS ON A TRADE. tick() beats as its first
+  // statement and nothing else does, while a command tick holds the clock until
+  // its order lands — three receipt reads of up to two minutes — and a regular
+  // tick due meanwhile waits too. On the 15-second preset the watchdog's limit
+  // is 180 s, so the child was SIGKILLed between the send and the row. The file
+  // alone, with the mode heartbeat() would publish and no block: this is a claim
+  // about the process being alive, not about the chain, and the shared `agents`
+  // row stays the tick's to write.
   const tickClock = createCommandClock({
     now: Date.now,
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     fallbackMs: tickIntervalMs(cfg.tickSeconds),
     orders: commandInFlight,
+    trades: liveTrades,
     pending: () => queuedCommandIds(merrymenHome()),
     regular: runLoop,
     command: runCommandTick,
+    beat: () => beatFile(publishedMode(execMode()), gasSponsored()),
   });
   // A directory listing every couple of seconds. Unref'd, so it never holds a
   // process open that would otherwise exit.

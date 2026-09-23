@@ -28,11 +28,21 @@
  * leave that order to the four-minute wait this exists to remove.
  */
 
+import { ORDER_IN_FLIGHT_MS } from "./command-files";
+
 /** How close the regular tick may be before the watcher leaves the order to it. */
 export const COMMAND_WAKE_MIN_LEAD_MS = 5_000;
 
 /** How often the child looks at its own queue. A directory listing, nothing more. */
 export const COMMAND_WAKE_EVERY_MS = 2_000;
+
+/**
+ * How often the clock writes the heartbeat for a process that is waiting on a
+ * trade it sent. Far inside the watchdog's floor (orchestrator.ts
+ * staleThresholdSec, 180 s at the fastest tick) and far above the poll, so a
+ * trade out for six minutes is a dozen writes of one small file.
+ */
+export const ALIVE_BEAT_EVERY_MS = 30_000;
 
 /**
  * May a command tick start now?
@@ -42,9 +52,13 @@ export const COMMAND_WAKE_EVERY_MS = 2_000;
  *                       across the fleet on purpose; a wake must not undo that.
  *   tickRunning       — never beside a running tick: two ticks at once are two
  *                       drains, and the tick's own reads race each other.
- *   commandInFlight   — never beside an order still in flight. The guard in
- *                       runQueuedCommand would refuse it anyway; asking here
- *                       keeps the order's one wake for a moment it can use.
+ *   commandInFlight   — never beside an order still in flight, nor beside any
+ *                       trade still on the intent chain (a Telegram order has
+ *                       no command slot, and a command tick's reads under it
+ *                       are the same reads under a live trade). The guard in
+ *                       runQueuedCommand would refuse a second command anyway;
+ *                       asking here keeps the order's one wake for a moment it
+ *                       can use.
  *   regularDueInMs    — null when no regular tick is on the clock (one is
  *                       running, or none is armed): there is nothing to hand
  *                       the cadence back to. Within the lead, the regular tick
@@ -157,6 +171,62 @@ export function tickPlan(kind: TickKind): TickPlan {
 }
 
 /**
+ * WHAT A TICK MAY WRITE DOWN, with each write handed in by the tick.
+ *
+ * `plan.ratchets` was read by five guards inside tick() — the paper peak, the
+ * risk-period observation, the fee and the persisted mark, the in-memory mark
+ * the breaker divides by, and the equity row — and removing all five passed
+ * every test, because the only test read the constant. So the guards live here,
+ * and tick() passes the writer to the one call that decides whether it runs.
+ *
+ * Two more rules than the plan ride along, because they gate the same writes:
+ *
+ *   curveMarked — a holding valued off a bonding curve has no oracle behind it
+ *                 and arrives discontinuously, so no peak may move while one is
+ *                 held (index.ts, at curveMarkedSymbols). The equity row is not
+ *                 a peak, and is still written.
+ *   incomplete  — a book that could not be totalled has no equity to write: a
+ *                 gap is honest, a partial total is not. tick() skips the peaks
+ *                 for it before it gets here; this holds that too.
+ *
+ * The reads stay unconditional. A command tick still needs the peak its order
+ * is judged against — it is asked with `null`, which reads without observing
+ * (risk-period.ts) — and the paper and live marks it already has.
+ */
+export interface TickRatchets {
+  /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
+  paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
+  /** The risk-period peak, read with this tick's equity as an observation only when this tick may. */
+  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
+  /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
+  accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
+  /** The equity row: written on a regular tick whose book could be totalled. */
+  equityRow(write: () => Promise<unknown>): Promise<void>;
+}
+
+export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveMarked: number }): TickRatchets {
+  const peaks = plan.ratchets && !book.incomplete && book.curveMarked === 0;
+  return {
+    async paperPeak(b, equityUsdg, write) {
+      if (peaks && equityUsdg > b.hwmUsdg) {
+        b.hwmUsdg = equityUsdg;
+        await write(b);
+      }
+      return b.hwmUsdg;
+    },
+    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : null),
+    async accrue(accrual, peakUsdg, persist) {
+      if (!peaks) return peakUsdg;
+      if (accrual.profitUsdg > 0n) await persist();
+      return accrual.newHwmUsdg;
+    },
+    async equityRow(write) {
+      if (plan.ratchets && !book.incomplete) await write();
+    },
+  };
+}
+
+/**
  * The tick's drain, run the way its plan says. Resolves to whether the tick
  * goes on to its producers.
  *
@@ -198,30 +268,114 @@ export async function drainOnTick(plan: TickPlan, drain: () => Promise<unknown>)
  *   settled()  — resolves when the one in flight has finished, however it
  *                finished; null when none is. Null again the moment it frees,
  *                so a waiter that re-asks never spins on a resolved promise.
+ *   since()    — when the one in flight started; null when none is. What the
+ *                clock times a wait against (createCommandClock's beat).
  */
 export interface OrderInFlight {
   run(body: () => Promise<void>): Promise<boolean>;
   busy(): boolean;
   settled(): Promise<void> | null;
+  since(): number | null;
 }
 
-export function createOrderInFlight(): OrderInFlight {
+export function createOrderInFlight(now: () => number = Date.now): OrderInFlight {
   let current: Promise<void> | null = null;
+  let startedAt: number | null = null;
   return {
     async run(body) {
       if (current) return false;
       let free!: () => void;
       current = new Promise<void>((r) => (free = r));
+      startedAt = now();
       try {
         await body();
       } finally {
         current = null;
+        startedAt = null;
         free();
       }
       return true;
     },
     busy: () => current !== null,
     settled: () => current,
+    since: () => startedAt,
+  };
+}
+
+/**
+ * EVERY TRADE ON THE INTENT CHAIN, counted from the moment it joins the chain
+ * until it settles — however it settles.
+ *
+ * The command slot above only knows about commands. A trade typed in Telegram
+ * goes straight to submitChatTrade and onto the chain, a regular tick's drain
+ * runs beside its strategy, and a strategy's own intent waits on the same
+ * receipts: each of them is a trade between its send and its row, and the
+ * clock has to see all of them — to hold a regular tick off a book they are
+ * still changing, and to say the process is alive while it waits on them.
+ *
+ * Counted from JOINING the chain, not from starting on it: a trade queued
+ * behind another is already owed, and a regular tick that started in the gap
+ * between the two would read the book as the second one went out.
+ *
+ *   run(step)  — `step` is the call that puts the trade on the chain; it is
+ *                called at once, and its promise comes back untouched, value
+ *                and failure alike. Busy until it settles.
+ *   busy()     — whether any trade is on the chain.
+ *   settled()  — resolves when the last one settles; null when none is.
+ *   movedAt()  — when the chain last made progress: work starting from idle,
+ *                or a trade settling. Null when idle. Joining the queue is not
+ *                progress, so a trade typed behind a stuck one cannot keep a
+ *                wedged process looking alive (createCommandClock).
+ */
+export interface LiveTrades {
+  run<T>(step: () => Promise<T>): Promise<T>;
+  busy(): boolean;
+  settled(): Promise<void> | null;
+  movedAt(): number | null;
+}
+
+export function createLiveTrades(now: () => number = Date.now): LiveTrades {
+  let live = 0;
+  let moved: number | null = null;
+  let current: Promise<void> | null = null;
+  let free: (() => void) | null = null;
+  const done = () => {
+    live -= 1;
+    if (live > 0) {
+      moved = now();
+      return;
+    }
+    const f = free;
+    live = 0;
+    moved = null;
+    current = null;
+    free = null;
+    f?.();
+  };
+  return {
+    run<T>(step: () => Promise<T>): Promise<T> {
+      if (live === 0) {
+        current = new Promise<void>((r) => (free = r));
+        moved = now();
+      }
+      live += 1;
+      let p: Promise<T>;
+      try {
+        p = step();
+      } catch (e) {
+        p = Promise.reject(e);
+      }
+      return p.then(
+        (v) => (done(), v),
+        (e: unknown) => {
+          done();
+          throw e;
+        },
+      );
+    },
+    busy: () => live > 0,
+    settled: () => current,
+    movedAt: () => moved,
   };
 }
 
@@ -253,6 +407,14 @@ export function createOrderInFlight(): OrderInFlight {
  * not only the command tick's order: a regular tick drains beside its
  * strategy, and that order can still be waiting on a receipt when the next
  * regular tick comes due.
+ *
+ * AND A HELD TICK SAYS IT IS ALIVE (`onHold`). tick() writes the heartbeat as
+ * its first statement, so a regular tick waiting here has not beaten, and the
+ * orchestrator's watchdog kills a child whose beat has gone stale — 180 s at
+ * the fastest tick, while one order can wait three receipt reads of two
+ * minutes each. The process is waiting on purpose, so the hook runs once each
+ * time the tick defers. createCommandClock wires it to the heartbeat and keeps
+ * beating for as long as the wait is a real one.
  */
 export interface TickClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -269,8 +431,10 @@ export function createTickClock(deps: {
   clearTimer: (handle: unknown) => void;
   /** The wait after a regular tick that rejected instead of saying how long. */
   fallbackMs: number;
-  /** The settle of a command still in flight, or null when none is (OrderInFlight.settled). */
+  /** The settle of a command or trade still in flight, or null when none is (OrderInFlight.settled). */
   inFlight: () => Promise<unknown> | null;
+  /** A regular tick came due and is waiting on something in flight. Once per deferral. */
+  onHold: () => void;
   /** One regular tick, and everything after it; resolves to the wait before the next one. */
   regular: () => Promise<number>;
   /** One command tick. */
@@ -296,7 +460,14 @@ export function createTickClock(deps: {
     } catch {
       waiting = null;
     }
-    if (waiting) return waiting.then(startRegular, startRegular);
+    if (waiting) {
+      try {
+        deps.onHold();
+      } catch {
+        // Saying it is alive must never be the reason the clock stops.
+      }
+      return waiting.then(startRegular, startRegular);
+    }
     try {
       return deps.regular();
     } catch {
@@ -359,8 +530,26 @@ export function createTickClock(deps: {
  * an order was between inclusion and its row. It lives here now, where the
  * tests that hold those promises run exactly this.
  *
- * `orders` is the slot runQueuedCommand drains under, passed in rather than
- * made here because main() declares the drain long before it builds the clock.
+ * `orders` is the slot runQueuedCommand drains under, and `trades` counts
+ * every trade on the intent chain; both are passed in rather than made here
+ * because main() declares the drain and the chain long before it builds the
+ * clock. Both hold the clock: a trade typed in Telegram is as live as an order.
+ *
+ * WHILE SOMETHING IS IN FLIGHT, THE CLOCK KEEPS THE HEARTBEAT. The watcher's
+ * poll runs every two seconds whatever the ticks are doing, so it is where the
+ * process says it is alive while it waits on a trade it sent: at most every
+ * ALIVE_BEAT_EVERY_MS, and once each time a regular tick defers. Nothing else
+ * writes the file between ticks, and a command tick that holds the clock for
+ * its order's three receipt reads — or a regular tick waiting behind it — used
+ * to leave it stale past the watchdog, which SIGKILLed the child between the
+ * send and the row.
+ *
+ * BOUNDED, so a wedged process is still reaped. It beats only while the work in
+ * flight has moved within ORDER_IN_FLIGHT_MS — an order started, or a trade
+ * settled. That figure bounds an order's own run once the queue reaches it, so
+ * past it nothing legitimate is still going, the beat stops, and the watchdog
+ * judges the child as it always did. An idle worker gets no beat from here:
+ * between ticks that is tick()'s job, and a stall there must still show.
  */
 export interface CommandClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -378,28 +567,54 @@ export function createCommandClock(deps: {
   fallbackMs: number;
   /** The one-at-a-time slot every drain runs under. */
   orders: OrderInFlight;
+  /** Every trade on the intent chain (processIntent, processIntentReporting). */
+  trades: LiveTrades;
   /** What is queued right now — a listing (command-files.ts `queuedCommandIds`). */
   pending: () => readonly string[];
   regular: () => Promise<number>;
   command: () => Promise<void>;
+  /** Write the heartbeat file — what the orchestrator's watchdog reads. */
+  beat: () => void;
 }): CommandClock {
+  const live = () => deps.orders.busy() || deps.trades.busy();
+  let beatAt = -Infinity;
+  const beat = () => {
+    beatAt = deps.now();
+    try {
+      deps.beat();
+    } catch {
+      // A beat that failed to write is the watchdog's to judge, not a reason to stop the clock.
+    }
+  };
   const clock = createTickClock({
     now: deps.now,
     setTimer: deps.setTimer,
     clearTimer: deps.clearTimer,
     fallbackMs: deps.fallbackMs,
-    inFlight: () => deps.orders.settled(),
+    inFlight: () => deps.orders.settled() ?? deps.trades.settled(),
+    onHold: beat,
     regular: deps.regular,
     command: deps.command,
   });
   const watcher = createCommandWake({
     pending: deps.pending,
-    ready: () => commandTickReady({ ...clock.state(), commandInFlight: deps.orders.busy() }),
+    ready: () => commandTickReady({ ...clock.state(), commandInFlight: live() }),
     wake: () => clock.wakeCommand(),
   });
+  const alive = () => {
+    const now = deps.now();
+    // Null on both when nothing is in flight, so an idle worker never gets here.
+    const moved = Math.max(deps.orders.since() ?? -Infinity, deps.trades.movedAt() ?? -Infinity);
+    if (now - moved >= ORDER_IN_FLIGHT_MS) return;
+    if (now - beatAt < ALIVE_BEAT_EVERY_MS) return;
+    beat();
+  };
   return {
     start: (delayMs) => clock.start(delayMs),
-    poll: () => watcher.poll(),
+    poll: () => {
+      alive();
+      return watcher.poll();
+    },
     state: () => clock.state(),
   };
 }
