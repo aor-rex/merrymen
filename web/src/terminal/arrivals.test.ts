@@ -14,22 +14,28 @@ import { createArrivals, isLandedTrade } from "./arrivals";
 
 const NOW = 1_800_000_000;
 let n = 0;
-const row = (over: Partial<Thesis> = {}): Thesis =>
-  ({
+/**
+ * A landed row. Its coin follows its post id unless named, so rows of one post
+ * share an agent, side and coin (what arrivals keys on) and unrelated rows do not.
+ */
+const row = (over: Partial<Thesis> = {}): Thesis => {
+  const postId = over.postId ?? (++n).toString(16).padStart(32, "0");
+  return {
     name: "Shogun",
     slug: "shogun",
     handle: null,
     action: "buy",
-    symbol: "CASHCAT",
+    symbol: `C${postId}`,
     sizeUsdg: 5,
     reason: "r",
     paper: false,
     head: "bought CASHCAT",
     outcome: "landed",
     at: NOW - 30,
-    postId: (++n).toString(16).padStart(32, "0"),
+    postId,
     ...over,
-  }) as Thesis;
+  } as Thesis;
+};
 
 describe("a landed trade", () => {
   it("is a real-money buy or sell that landed, with an id to remember it by", () => {
@@ -201,5 +207,34 @@ describe("a fill that did not happen is never announced", () => {
     const leg = row({ at: NOW - 20, said: 2 });
     a.take([leg], NOW);
     assert.deepEqual(a.take([{ ...leg, said: 3 }], NOW + 10), { rows: [], fills: 0 });
+  });
+});
+
+describe("what the owner's book setting changes is not news", () => {
+  it("A BOOK FLIPPED PUBLIC OR PRIVATE re-ids every recent fill — and none of them chimes again", () => {
+    // The post id hashes the published size and reason; a private book
+    // publishes neither size nor figures. The same landed decision, read once
+    // public and once private, comes back under a new id at the same time.
+    const a = createArrivals();
+    a.take([], NOW);
+    const publicRow = row({ slug: "shogun", action: "buy", symbol: "CASHCAT", at: NOW - 30, sizeUsdg: 5, postId: "a".repeat(32) });
+    assert.equal(a.take([publicRow], NOW).rows.length, 1, "the fill, once");
+    const privateRow = { ...publicRow, sizeUsdg: null, postId: "b".repeat(32) } as Thesis;
+    assert.deepEqual(a.take([privateRow], NOW + 10), { rows: [], fills: 0 }, "the same fill under a new id is not a new fill");
+    assert.deepEqual(a.take([publicRow], NOW + 20), { rows: [], fills: 0 }, "and flipped back, still not");
+    const next = { ...privateRow, at: NOW + 25 };
+    assert.equal(a.take([next], NOW + 30).rows.length, 1, "a genuinely newer fill of that coin still is");
+  });
+
+  it("two agents, or two sides, or two coins keep their own times", () => {
+    const a = createArrivals();
+    const t = NOW - 30;
+    a.take([row({ slug: "shogun", symbol: "CASHCAT", at: t })], NOW);
+    const other = [
+      row({ slug: "sirsendit", symbol: "CASHCAT", at: t }),
+      row({ slug: "shogun", action: "sell", symbol: "CASHCAT", at: t }),
+      row({ slug: "shogun", symbol: "CHUMP", at: t }),
+    ];
+    assert.equal(a.take(other, NOW).rows.length, 3);
   });
 });

@@ -16,13 +16,14 @@ import { useLiveNews, useSoundPref } from "./live-news";
 
 const NOW_MS = 1_800_000_000_000;
 let n = 0;
+/** A landed fill of its own coin: separate fills are separate agent/side/coin times (arrivals.ts). */
 const fill = (action: "buy" | "sell" = "buy"): Thesis =>
   ({
     name: "Shogun",
     slug: "shogun",
     handle: null,
     action,
-    symbol: "CASHCAT",
+    symbol: `COIN${n + 1}`,
     sizeUsdg: 5,
     reason: "r",
     paper: false,

@@ -10,9 +10,17 @@
  * and it fills on every proposal, so it would be the loudest thing on the feed
  * and the least news. Refusals and pending orders are not fills.
  *
- * ONE RULE, AND IT CANNOT ANNOUNCE A FILL THAT DID NOT HAPPEN: a post's landed
- * row is news when its `at` is newer than any `at` this page has ever seen for
- * that post. Each post keeps that high-water time, and it only goes up.
+ * ONE RULE, AND IT CANNOT ANNOUNCE A FILL THAT DID NOT HAPPEN: a landed row is
+ * news when its `at` is newer than any `at` this page has ever seen for the
+ * same agent, side and coin. Each of those keeps that high-water time, and it
+ * only goes up.
+ *
+ * KEYED ON WHAT THE PUBLICATION GATE NEVER REWRITES. The post id hashes the
+ * published size and reason, and both change when the owner flips the book
+ * public or private (a private book publishes no size and no figures) — or
+ * when one read could not tell which it was and published it as private. Keyed
+ * on the id, every recent fill came back as a post never seen, and chimed
+ * again. The agent, the side and the coin are the same whatever the book.
  *
  * The id names a THESIS, not a trade (lib/post-id.ts hashes the author, side,
  * symbol, size and reason, and leaves the outcome and the time out on purpose),
@@ -82,7 +90,7 @@ const finite = (v: unknown): number | null => (typeof v === "number" && Number.i
 export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
   const freshSec = opts.freshSec ?? FRESH_SEC;
   const cap = opts.cap ?? 2_000;
-  /** Each post's newest landed `at` ever read. It never goes down. */
+  /** Each agent, side and coin's newest landed `at` ever read. It never goes down. */
   const high = new Map<string, number>();
   let seeded = false;
   return {
@@ -98,7 +106,7 @@ export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
       for (const t of theses) {
         const at = finite(t.at);
         if (!isLandedTrade(t) || at === null) continue;
-        const id = t.postId as string;
+        const id = `${t.slug ?? ""}|${t.action}|${t.symbol ?? ""}`;
         const times = read.get(id) ?? new Map<number, Thesis>();
         read.set(id, times);
         if (!times.has(at)) times.set(at, t);
