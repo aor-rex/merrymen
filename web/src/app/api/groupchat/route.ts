@@ -19,14 +19,15 @@
  * DATABASE_URL inside the image build, and a prerendered GET would bake
  * `source: "none"` into every first visit after a deploy (app/prerender.test.ts).
  *
- * HOSTED ONLY. Self-hosted is one agent with no fleet, so there is no room;
- * 404 is what hides the entry links there (terminal/groupchat.ts).
+ * HOSTED ONLY, AND ONLY WHILE SWITCHED ON. Self-hosted is one agent with no
+ * fleet, so there is no room; `MERRYMEN_GROUPCHAT=0` switches a hosted room
+ * off. Both answer 404, which is what hides the entry links
+ * (terminal/groupchat.ts, room.ts's `roomOpen`).
  *
  * Cross-site writes are refused before this file runs, by middleware.ts's
  * Sec-Fetch-Site guard and the SameSite=Strict session cookie.
  */
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import type { Db } from "../../../../../worker/src/db";
 import { admitOwnerLine, OWNER_LINE_MAX } from "../../../../../worker/src/groupchat/policy";
@@ -40,7 +41,20 @@ import {
   toPublic,
 } from "../../../../../worker/src/groupchat/store";
 import type { GroupChatResponse, MessageKind, NewMessage, PublicMessage } from "../../../../../worker/src/groupchat/types";
-import { agentOf, objectOf, PRIVATE_HEADERS, readBounded, roomNow, speakerOf, withRoom, type Room } from "./room";
+import {
+  agentOf,
+  goneSince,
+  objectOf,
+  ownerLineByKey,
+  PRIVATE_HEADERS,
+  readBounded,
+  roomNow,
+  roomOpen,
+  speakerOf,
+  takePostToken,
+  withRoom,
+  type Room,
+} from "./room";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,6 +121,13 @@ function limitParam(raw: string | null): number | null {
   return Math.min(PAGE_MAX, Math.max(1, Number(raw)));
 }
 
+/**
+ * The GET's answer. `gone` rides on a poll (`since`) only: the ids of lines
+ * taken back that a reader who fetched them earlier may still be drawing
+ * (room.ts's `goneSince`). A first load or an older page never held them.
+ */
+type RoomPage = GroupChatResponse & { gone?: number[] };
+
 /** "Could not read" — never an empty room. The poll keeps its cursor. */
 function unreadable(since: number | undefined): NextResponse {
   return json(
@@ -117,7 +138,7 @@ function unreadable(since: number | undefined): NextResponse {
 }
 
 export async function GET(req: Request) {
-  if (!isHostedMode()) return notFound();
+  if (!roomOpen()) return notFound();
   const q = new URL(req.url).searchParams;
   const since = cursorParam(q.get("since"));
   const before = cursorParam(q.get("before"));
@@ -126,9 +147,12 @@ export async function GET(req: Request) {
     return refuse(400, "since, before and limit are whole numbers", NO_STORE);
   }
   try {
-    const answer = await withRoom(async (room): Promise<GroupChatResponse | null> => {
+    const answer = await withRoom(async (room): Promise<RoomPage | null> => {
       if (!room) return null;
       const page = await readMessages(room.db, { since, before: before ?? null, limit });
+      // Taken-back lines ride on the poll: without them a line hidden after a
+      // reader fetched it stays on that reader's screen until they reload.
+      const gone = since !== undefined ? await goneSince(room.db, since) : undefined;
       // The presence line is decoration; a summary that will not parse must not
       // cost the reader the conversation.
       const summary = await readRoom(room.db).catch(() => null);
@@ -139,6 +163,7 @@ export async function GET(req: Request) {
         cursor: messages.reduce((top, m) => Math.max(top, m.id), since ?? 0),
         start: page.start,
         room: summary,
+        ...(gone ? { gone } : {}),
       };
     });
     return answer ? json(answer, 200, PUBLIC_HEADERS) : unreadable(since);
@@ -157,7 +182,7 @@ function refusalWords(reason: string): string {
     case "too-long":
       return `Keep it under ${OWNER_LINE_MAX} characters.`;
     case "secret":
-      return "That looks like a private key or a secret, so it wasn't posted. Never paste one anywhere.";
+      return "That looks like a private key, a recovery phrase or another secret, so it wasn't posted. Never paste one anywhere.";
     case "address":
       return "Addresses can't be posted in the room. It's public, and an address is somebody's wallet.";
     case "link":
@@ -199,17 +224,47 @@ function lockKey(tenant: string): number {
 }
 
 /**
- * Count and insert as one step per tenant. On sqlite the driver already runs a
- * transaction alone; on Postgres the advisory lock makes a second request by
- * the same owner wait for the first to commit before it counts.
+ * Count and insert as one step per tenant, or null when another post by the
+ * same owner holds the step right now.
+ *
+ * On sqlite the driver already runs a transaction alone. On Postgres the
+ * advisory lock is TRIED, never waited for: a transaction holds a pooled
+ * connection from the web's one shared pool, so a request queued behind the
+ * lock would be a connection every other route is waiting for — and a burst
+ * from one owner would be the whole pool. A person does not send two lines in
+ * the same few milliseconds (the composer waits for each), so the loser of a
+ * race is a script or a double submit, and it is told to try again.
  */
-function underOwnerLock<T>(room: Room, tenant: string, fn: (db: Db) => Promise<T>): Promise<T> {
+function underOwnerLock<T>(room: Room, tenant: string, fn: (db: Db) => Promise<T>): Promise<T | null> {
   return room.db.tx(async (tx) => {
     if (room.dialect === "postgres") {
-      await tx.prepare("SELECT pg_advisory_xact_lock(?, ?)").get(OWNER_LOCK_CLASS, lockKey(tenant));
+      const got = (await tx
+        .prepare("SELECT pg_try_advisory_xact_lock(?, ?) AS ok")
+        .get(OWNER_LOCK_CLASS, lockKey(tenant))) as { ok?: unknown } | undefined;
+      const ok = got?.ok;
+      if (!(ok === true || ok === 1 || ok === "t" || ok === "true")) return null;
     }
     return fn(tx);
   });
+}
+
+/**
+ * The owner's stored lines against both limits, or null when they may post.
+ * Hidden lines count (the store's rule): post-then-hide is not a way around it.
+ */
+async function overLimit(db: Db, tenant: string, now: number): Promise<Posted | null> {
+  if ((await countOwnerLinesSince(db, tenant, now - MINUTE_MS)) >= PER_MINUTE) {
+    return { ok: false, status: 429, error: "You're posting fast. Wait a minute and try again.", retryAfter: 60 };
+  }
+  if ((await countOwnerLinesSince(db, tenant, utcDayStart(now))) >= PER_DAY) {
+    return {
+      ok: false,
+      status: 429,
+      error: "That's the most you can post today. The count resets at midnight UTC.",
+      retryAfter: secondsToUtcMidnight(now),
+    };
+  }
+  return null;
 }
 
 /** No reply (null), a line id, or `undefined` for anything that is neither. */
@@ -218,12 +273,26 @@ function replyOf(raw: unknown): number | null | undefined {
   return typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0 ? raw : undefined;
 }
 
+/**
+ * THE LINE'S IDEMPOTENCE KEY, from the id the composer gave it, or null.
+ *
+ * The composer mints a fresh id for every line it sends (terminal/groupchat.ts),
+ * so one id arriving twice is one line sent twice — a resend after a dropped
+ * connection — never an owner saying the same thing again. Scoped by tenant, so
+ * two owners whose ids collide are two lines. Anything that is not 8–64 of
+ * [A-Za-z0-9_-] is no key rather than a refusal: the line posts as free chat.
+ */
+const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
+function retryKey(tenant: string, clientId: unknown): string | null {
+  return typeof clientId === "string" && CLIENT_ID.test(clientId) ? `owner:${tenant.toLowerCase()}:${clientId}` : null;
+}
+
 type Posted =
   | { ok: true; message: PublicMessage }
   | { ok: false; status: number; error: string; retryAfter?: number };
 
 export async function POST(req: Request) {
-  if (!isHostedMode()) return notFound();
+  if (!roomOpen()) return notFound();
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in to post.");
 
@@ -246,6 +315,30 @@ export async function POST(req: Request) {
   if (!owned) return refuse(403, "Only owners with a Merryman can post.");
   const agentId = owned;
 
+  // A RESEND IS ANSWERED WITH THE LINE IT RESENDS, before the bucket and the
+  // limits: the first attempt already paid for it, and an owner at the limit
+  // whose answer was lost must be told their line is in, not that they are
+  // posting too fast.
+  const key = retryKey(tenant, input.clientId);
+  if (key) {
+    try {
+      const original = await withRoom(async (room) => (room ? ownerLineByKey(room.db, key) : null));
+      if (original) return json({ message: toPublic(original) }, 200, PRIVATE_HEADERS);
+    } catch {
+      return refuse(503, "The room couldn't take that just now. Try again in a moment.");
+    }
+  }
+
+  // Metered BEFORE the gate: the gate is the costly part of a post, and a line
+  // it refuses is never stored, so the room's own limit never sees it.
+  const wait = takePostToken(tenant, roomNow());
+  if (wait !== null) {
+    return refuse(429, "You're posting fast. Wait a few seconds and try again.", {
+      ...PRIVATE_HEADERS,
+      "Retry-After": String(wait),
+    });
+  }
+
   const verdict = admitOwnerLine(input.body);
   if (!verdict.ok) return refuse(400, refusalWords(verdict.reason));
 
@@ -258,6 +351,11 @@ export async function POST(req: Request) {
   try {
     posted = await withRoom(async (room): Promise<Posted> => {
       if (!room) return { ok: false, status: 503, error: "The group chat isn't available right now." };
+      // An owner already at the limit is answered from a plain read, without
+      // taking a pooled connection for a transaction. Only a refusal is decided
+      // here; admitting is decided again under the lock, below.
+      const early = await overLimit(room.db, tenant, roomNow());
+      if (early) return early;
       if (replyTo !== null) {
         const target = await messageById(room.db, replyTo);
         // A hidden line is one its owner took back; answering it would quote
@@ -267,20 +365,10 @@ export async function POST(req: Request) {
         }
       }
       const speaker = await speakerOf(room.db, tenant, agentId);
-      return underOwnerLock(room, tenant, async (db): Promise<Posted> => {
+      const locked = await underOwnerLock(room, tenant, async (db): Promise<Posted> => {
         const now = roomNow();
-        // Hidden lines count (the store's rule): post-then-hide is not a way around the limit.
-        if ((await countOwnerLinesSince(db, tenant, now - MINUTE_MS)) >= PER_MINUTE) {
-          return { ok: false, status: 429, error: "You're posting fast. Wait a minute and try again.", retryAfter: 60 };
-        }
-        if ((await countOwnerLinesSince(db, tenant, utcDayStart(now))) >= PER_DAY) {
-          return {
-            ok: false,
-            status: 429,
-            error: "That's the most you can post today. The count resets at midnight UTC.",
-            retryAfter: secondsToUtcMidnight(now),
-          };
-        }
+        const limited = await overLimit(db, tenant, now);
+        if (limited) return limited;
         const line: NewMessage = {
           createdAtMs: now,
           authorKind: "owner",
@@ -294,16 +382,30 @@ export async function POST(req: Request) {
           kind: kindOf(verdict.text),
           call: null,
           callDecisionId: null,
-          // Free chat has no idempotence key: saying the same thing twice is allowed.
-          dedupeKey: null,
+          // Keyed by the composer's id for this line, so a resend is stored
+          // once; saying the same words again is a new id and a new line.
+          dedupeKey: key,
         };
         const id = await appendMessage(db, line);
         if (id === null) return { ok: false, status: 503, error: "The room couldn't take that just now. Try again in a moment." };
         return { ok: true, message: toPublic({ ...line, id, hidden: false }) };
       });
+      return locked ?? { ok: false, status: 429, error: "One message at a time. Try again in a second.", retryAfter: 1 };
     });
   } catch {
     return refuse(503, "The room couldn't take that just now. Try again in a moment.");
+  }
+
+  // A RESEND THAT RACED ITS ORIGINAL missed it in the look above, then met it
+  // as a key conflict or as the limit the original just used up. Either way
+  // the line is in, and that is the answer.
+  if (!posted.ok && key) {
+    try {
+      const original = await withRoom(async (room) => (room ? ownerLineByKey(room.db, key) : null));
+      if (original) return json({ message: toPublic(original) }, 200, PRIVATE_HEADERS);
+    } catch {
+      /* the refusal stands */
+    }
   }
 
   if (!posted.ok) {
@@ -322,7 +424,7 @@ export async function POST(req: Request) {
  * room, or another owner — the answer for those is simply `hidden: false`.
  */
 export async function DELETE(req: Request) {
-  if (!isHostedMode()) return notFound();
+  if (!roomOpen()) return notFound();
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in first.");
   const id = cursorParam(new URL(req.url).searchParams.get("id"));

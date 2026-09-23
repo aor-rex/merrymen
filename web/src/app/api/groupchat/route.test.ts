@@ -5,12 +5,13 @@
  * with a real session cookie, the real file-backed grant and identity stores
  * under a temporary home, and the store's real SQL on an in-memory sqlite
  * through the ledger's own driver (room.ts's seam). What is NOT covered here is
- * the Postgres dialect of that SQL; the one statement this route adds on top
- * of the store (the per-owner advisory lock) is Postgres-only and is skipped
- * on sqlite.
+ * the Postgres dialect of that SQL. The one statement this route adds on top
+ * of the store (the per-owner advisory lock) is Postgres-only: it is skipped on
+ * sqlite, and driven here by a seam that claims Postgres and answers that one
+ * statement itself.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -23,6 +24,7 @@ import { getGrantStore, resetGrantStoreForTest } from "../../../../../worker/src
 import { getIdentityStore, resetIdentityStoreForTest } from "../../../../../worker/src/identity-store";
 import { appendMessage, ensureGroupchatSchema } from "../../../../../worker/src/groupchat/store";
 import type { NewMessage, PublicMessage } from "../../../../../worker/src/groupchat/types";
+import { GET as getMe } from "./me/route";
 import { DELETE, GET, POST } from "./route";
 import { setRoomForTest } from "./room";
 
@@ -38,7 +40,10 @@ const SA_B = "0x00000000000000000000000000000000000000b2" as const;
 const NOON = Date.UTC(2026, 8, 23, 12, 0, 0);
 
 const saved = Object.fromEntries(
-  ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK"].map((k) => [k, process.env[k]]),
+  ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK", "MERRYMEN_GROUPCHAT"].map((k) => [
+    k,
+    process.env[k],
+  ]),
 );
 let home: string;
 let slugA: string;
@@ -93,6 +98,7 @@ let clock = NOON;
 /** A fresh room per test, with the ledger's `agents` rows the name is read from. */
 beforeEach(async () => {
   process.env.MERRYMEN_HOSTED = "1";
+  delete process.env.MERRYMEN_GROUPCHAT;
   clock = NOON;
   raw = new DatabaseSync(":memory:");
   raw.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT)");
@@ -174,6 +180,43 @@ function slow(inner: Db): Db {
   };
 }
 
+/** The same database, counting the transactions opened on it. */
+function counted(inner: Db, seen: { tx: number }): Db {
+  return {
+    prepare: (sql) => inner.prepare(sql),
+    exec: (sql) => inner.exec(sql),
+    tx: (fn) => {
+      seen.tx += 1;
+      return inner.tx(fn);
+    },
+  };
+}
+
+/**
+ * The same sqlite, answering the route's Postgres-only lock statement itself:
+ * `free()` says whether the lock was there to take. Every other statement is
+ * the store's real SQL on the real engine.
+ */
+function pgLock(inner: Db, free: () => boolean, seen: string[]): Db {
+  const wrap = (d: Db): Db => ({
+    prepare(sql) {
+      if (!/\bpg_\w*advisory/.test(sql)) return d.prepare(sql);
+      seen.push(sql);
+      const answer = async () => ({ ok: free() });
+      return {
+        run: async () => ({ changes: 0, lastInsertRowid: 0 }),
+        get: answer,
+        all: async () => [await answer()],
+      };
+    },
+    exec: (sql) => d.exec(sql),
+    tx: (fn) => d.tx((scoped) => fn(wrap(scoped))),
+  });
+  return wrap(inner);
+}
+
+type Page = { source: string; messages: PublicMessage[]; cursor: number; start?: boolean; gone?: number[] };
+
 async function posted(res: Response): Promise<PublicMessage> {
   const body = (await res.json()) as { message?: PublicMessage; error?: string };
   assert.equal(res.status, 200, JSON.stringify(body));
@@ -193,6 +236,30 @@ describe("hosted only", () => {
     assert.equal((await post(A, { body: "hello" })).status, 404);
     assert.equal((await del(A, 1)).status, 404);
   });
+
+  it("MERRYMEN_GROUPCHAT=0 on the web answers every verb exactly like self-hosted, and writes nothing", async () => {
+    const line = await posted(await post(A, { body: "said before the switch" }));
+    const verbs = [() => get(), () => get("?since=0", A), () => post(A, { body: "anyone here?" }), () => del(A, line.id)];
+    const answer = async (res: Response) => [res.status, res.headers.get("cache-control"), await res.text()];
+    delete process.env.MERRYMEN_HOSTED;
+    const selfHosted: unknown[][] = [];
+    for (const verb of verbs) selfHosted.push(await answer(await verb()));
+    assert.deepEqual(selfHosted.map((a) => a[0]), [404, 404, 404, 404]);
+    process.env.MERRYMEN_HOSTED = "1";
+    for (const off of ["0", " 0 ", "0\n"]) {
+      process.env.MERRYMEN_GROUPCHAT = off;
+      for (const [i, verb] of verbs.entries()) {
+        assert.deepEqual(await answer(await verb()), selfHosted[i], `${JSON.stringify(off)}, verb #${i}`);
+      }
+    }
+    assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM groupchat_messages").get() as { n: number }).n, 1, "no line was stored");
+    assert.equal((raw.prepare("SELECT hidden FROM groupchat_messages").get() as { hidden: number }).hidden, 0, "none was taken back");
+    // Anything but a 0 leaves the room open: the orchestrator reads it the same way.
+    for (const on of ["", "1", "off", "false"]) {
+      process.env.MERRYMEN_GROUPCHAT = on;
+      assert.equal((await get()).status, 200, JSON.stringify(on));
+    }
+  });
 });
 
 describe("GET is the same bytes for everybody", () => {
@@ -205,7 +272,7 @@ describe("GET is the same bytes for everybody", () => {
   });
 
   it("answers a signed-in and a signed-out reader identically, sets no cookie, and carries nothing internal", async () => {
-    await posted(await post(A, { body: "morning all, my agent is up early" }));
+    await posted(await post(A, { body: "morning all, my agent is up early", clientId: "leak-check-0001" }));
     await appendMessage(db, agentLine());
     const anon = await get("?limit=60");
     const signed = await get("?limit=60", A);
@@ -214,7 +281,7 @@ describe("GET is the same bytes for everybody", () => {
     assert.equal(anon.headers.get("set-cookie"), null);
     assert.equal(signed.headers.get("set-cookie"), null);
     assert.equal(anon.headers.get("cache-control"), "public, max-age=2, s-maxage=2");
-    for (const secret of [A, B, SA_A, SA_B, "decision-secret-id", "call:", "tenant", "agentId", "agent_id", "dedupe", "hidden"]) {
+    for (const secret of [A, B, SA_A, SA_B, "decision-secret-id", "call:", "leak-check-0001", "tenant", "agentId", "agent_id", "dedupe", "hidden"]) {
       assert.ok(!anonText.toLowerCase().includes(secret.toLowerCase()), `the public GET leaked ${secret}`);
     }
     const page = JSON.parse(anonText) as { source: string; messages: PublicMessage[] };
@@ -281,6 +348,42 @@ describe("GET pages by cursor", () => {
   });
 });
 
+describe("GET: a line taken back leaves the screens that already hold it", () => {
+  it("a poll lists the ids of lines hidden behind its cursor, the same for every reader, naming nobody", async () => {
+    const mine = await posted(await post(A, { body: "my city is lisbon, come say hi" }));
+    const kept = await posted(await post(B, { body: "hello all" }));
+    // A reader loads the room and now holds the line.
+    const first = (await (await get("?since=0&limit=100")).json()) as Page;
+    assert.ok(first.messages.some((m) => m.id === mine.id));
+    assert.deepEqual(first.gone, [], "nothing taken back yet");
+    // The room moves on, then the owner takes their line back.
+    for (let i = 0; i < 30; i++) await appendMessage(db, agentLine({ body: `line ${i}`, dedupeKey: null }));
+    assert.equal(((await (await del(A, mine.id)).json()) as { hidden: boolean }).hidden, true);
+    const top = ((await (await get("?limit=1")).json()) as Page).cursor;
+    // The reader's next poll asks from a little behind its cursor, as the client does.
+    const query = `?since=${top - 16}&limit=100`;
+    const anon = await get(query);
+    const anonText = await anon.text();
+    const next = JSON.parse(anonText) as Page;
+    assert.deepEqual(next.gone, [mine.id], "the taken-back line is named, and only it");
+    assert.ok(!next.gone?.includes(kept.id));
+    assert.equal(anonText, await (await get(query, B)).text(), "the same bytes signed in or out");
+    assert.equal(anon.headers.get("cache-control"), "public, max-age=2, s-maxage=2");
+    for (const secret of [A, B, SA_A, SA_B, "tenant", "hidden", "lisbon"]) {
+      assert.ok(!anonText.toLowerCase().includes(secret.toLowerCase()), `the public GET leaked ${secret}`);
+    }
+  });
+
+  it("only a poll carries the list, and only for a bounded stretch behind it", async () => {
+    const mine = await posted(await post(A, { body: "take this back" }));
+    await del(A, mine.id);
+    assert.equal(((await (await get()).json()) as Page).gone, undefined, "a first load never held the line");
+    assert.equal(((await (await get(`?before=${mine.id + 1}`)).json()) as Page).gone, undefined, "nor an older page");
+    assert.deepEqual(((await (await get(`?since=${mine.id}`)).json()) as Page).gone, [mine.id]);
+    assert.deepEqual(((await (await get(`?since=${mine.id + 5_000}`)).json()) as Page).gone, [], "far behind the poll is not scanned");
+  });
+});
+
 describe("GET says when it could not read", () => {
   it("source none, the client's cursor back, no-store — never an empty room", async () => {
     raw.close();
@@ -344,7 +447,7 @@ describe("POST: who may post", () => {
       ["x".repeat(501), /under 500 characters/],
       ["send it to 0x1234567890abcdef1234567890abcdef12345678", /Addresses can't be posted/],
       ["check https://evil.example/x", /Links can't be posted/],
-      [`my key is 0x${"ab".repeat(32)}`, /private key or a secret/],
+      [`my key is 0x${"ab".repeat(32)}`, /private key, a recovery phrase or another secret/],
     ];
     for (const [body, words] of cases) {
       const res = await post(A, { body });
@@ -380,6 +483,29 @@ describe("POST: the line as the room shows it", () => {
     assert.equal((await posted(await post(B, { body: "two" }))).name, `${agentNameForSlug(slugB)}'s owner`);
   });
 
+  it("two agents named 'Pine Stoat' and 'Pine Stoatㅤ': the first minted keeps the label, the other owner posts under their slug's name", async () => {
+    raw.prepare("UPDATE agents SET name = ? WHERE LOWER(smart_account) = ?").run("Pine Stoat", SA_A);
+    raw.prepare("UPDATE agents SET name = ? WHERE LOWER(smart_account) = ?").run("Pine Stoatㅤ", SA_B);
+    // Mint order decides, not who asks first: set it, then flip it.
+    const files = [A, B].map((t) => path.join(home, "agent-identity", `${t}.json`));
+    const originals = files.map((f) => readFileSync(f, "utf8"));
+    const mint = (aAt: number, bAt: number) =>
+      files.forEach((f, i) => writeFileSync(f, JSON.stringify({ ...JSON.parse(originals[i]!), createdAt: i === 0 ? aAt : bAt })));
+    try {
+      mint(1_700_000_000, 1_700_000_500);
+      assert.equal((await posted(await post(B, { body: "hi" }))).name, `${agentNameForSlug(slugB)}'s owner`);
+      assert.equal((await posted(await post(A, { body: "hi" }))).name, "Pine Stoat's owner");
+      // The chat screen's own view of the name agrees with the label.
+      const meB = (await (await getMe(new Request(`${ORIGIN}/api/groupchat/me`, { headers: { cookie: cookie(B) } }))).json()) as { name: string };
+      assert.equal(meB.name, agentNameForSlug(slugB));
+      mint(1_700_000_900, 1_700_000_500);
+      assert.equal((await posted(await post(A, { body: "again" }))).name, `${agentNameForSlug(slugA)}'s owner`);
+      assert.equal((await posted(await post(B, { body: "again" }))).name, "Pine Stoatㅤ's owner");
+    } finally {
+      files.forEach((f, i) => writeFileSync(f, originals[i]!));
+    }
+  });
+
   it("a line that is only a greeting is a gm; a greeting with a question is chat", async () => {
     for (const body of ["gm", "GM all!", "good morning everyone ☀️", "gm gm frens"]) {
       assert.equal((await posted(await post(A, { body }))).kind, "gm", body);
@@ -406,6 +532,68 @@ describe("POST: replies", () => {
     const ok = await posted(await post(A, { body: "agreed", replyTo: target }));
     assert.equal(ok.replyTo, target);
     assert.equal((await posted(await post(A, { body: "no reply", replyTo: null }))).replyTo, null);
+  });
+});
+
+describe("POST: a resend is stored once", () => {
+  const keyed = () =>
+    (raw.prepare("SELECT id, dedupe_key FROM groupchat_messages WHERE dedupe_key IS NOT NULL ORDER BY id").all() as Record<string, unknown>[]).map(
+      (r) => ({ ...r }),
+    );
+
+  it("the same client id again is answered with the original line; another owner's same id, or a new id, is a new line", async () => {
+    const id = "3f2b9c1e-8a7d-4e6f-9b0a-1c2d3e4f5a6b";
+    const first = await posted(await post(A, { body: "is this thing on", clientId: id }));
+    clock += 2_000;
+    const again = await post(A, { body: "is this thing on", clientId: id });
+    assert.equal(again.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(await posted(again), first);
+    assert.deepEqual(keyed(), [{ id: first.id, dedupe_key: `owner:${A}:${id}` }]);
+    const theirs = await posted(await post(B, { body: "is this thing on", clientId: id }));
+    assert.notEqual(theirs.id, first.id);
+    const saidAgain = await posted(await post(A, { body: "is this thing on", clientId: "a-new-line-0001" }));
+    assert.notEqual(saidAgain.id, first.id);
+    assert.equal(keyed().length, 3);
+  });
+
+  it("a resend costs nothing against the limits: not a post token, and not refused at the minute's limit", async () => {
+    const line = await posted(await post(A, { body: "only once", clientId: "only-once-0001" }));
+    // Far more resends than the bucket holds, at one instant.
+    for (let i = 0; i < 20; i++) assert.deepEqual(await posted(await post(A, { body: "only once", clientId: "only-once-0001" })), line, `resend ${i}`);
+    assert.equal((await post(A, { body: "a new line, same instant" })).status, 200, "the bucket was not drained");
+    // An owner whose sixth line of the minute landed but whose answer was lost.
+    for (let i = 0; i < 5; i++) await posted(await post(B, { body: `line ${i}` }));
+    const sixth = await posted(await post(B, { body: "the sixth", clientId: "the-sixth-0001" }));
+    assert.equal((await post(B, { body: "a seventh" })).status, 429);
+    assert.deepEqual(await posted(await post(B, { body: "the sixth", clientId: "the-sixth-0001" })), sixth);
+  });
+
+  it("a resend racing its original is still one line, and both are answered with it", async () => {
+    // Every statement answers late, so both copies look for the key before either has stored it.
+    setRoomForTest({ db: slow(db), now: () => clock });
+    for (let i = 0; i < 5; i++) await posted(await post(A, { body: `line ${i}` }));
+    // B has room to spare, so the loser meets the key; A is one short of the
+    // limit, so the loser meets the limit its own original just used up.
+    for (const [tenant, clientId] of [
+      [B, "raced-line-0001"],
+      [A, "raced-line-0002"],
+    ] as const) {
+      const [one, two] = await Promise.all([post(tenant, { body: "twice?", clientId }), post(tenant, { body: "twice?", clientId })]);
+      assert.deepEqual(await posted(two), await posted(one), tenant);
+    }
+    assert.equal(keyed().length, 2);
+  });
+
+  it("an id that is not 8-64 of [A-Za-z0-9_-] is ignored, never refused: the line posts as free chat each time", async () => {
+    for (const clientId of ["short12", "x".repeat(65), "has space1", "semi;colon", "ünïcödé-id", "", 12345678, true, null, { id: "abcdefgh" }]) {
+      const one = await posted(await post(A, { body: "free chat", clientId }));
+      const two = await posted(await post(A, { body: "free chat", clientId }));
+      assert.notEqual(one.id, two.id, JSON.stringify(clientId));
+      clock += 61_000;
+    }
+    assert.deepEqual(keyed(), []);
+    for (const clientId of ["abcdefgh", "A_-9".repeat(16)]) await posted(await post(A, { body: "at the edges", clientId }));
+    assert.equal(keyed().length, 2, "eight and sixty-four characters are keys");
   });
 });
 
@@ -457,6 +645,64 @@ describe("POST: the rate limit", () => {
     const results = await Promise.all(Array.from({ length: 10 }, (_, i) => post(A, { body: `burst ${i}` })));
     const statuses = results.map((r) => r.status).sort();
     assert.deepEqual(statuses, [200, 200, 200, 200, 200, 200, 429, 429, 429, 429]);
+  });
+
+  it("an owner already at the limit is refused without a transaction being opened", async () => {
+    for (let i = 0; i < 6; i++) await posted(await post(A, { body: `line ${i}` }));
+    const seen = { tx: 0 };
+    setRoomForTest({ db: counted(db, seen), now: () => clock });
+    const over = await post(A, { body: "one more" });
+    assert.equal(over.status, 429);
+    assert.equal(over.headers.get("retry-after"), "60");
+    assert.equal(seen.tx, 0, "the refusal came from a plain read, not a pooled transaction");
+    assert.equal((await post(B, { body: "under the limit" })).status, 200);
+    assert.equal(seen.tx, 1, "a post that may go ahead still counts and writes under the lock");
+  });
+});
+
+describe("POST: the per-owner lock on Postgres is tried, never waited for", () => {
+  it("takes the lock with pg_try_advisory_xact_lock and posts when it is free", async () => {
+    const seen: string[] = [];
+    setRoomForTest({ db: pgLock(db, () => true, seen), now: () => clock, dialect: "postgres" });
+    assert.equal((await posted(await post(A, { body: "hello" }))).body, "hello");
+    assert.equal(seen.length, 1);
+    assert.match(seen[0]!, /pg_try_advisory_xact_lock\(\?, \?\)/);
+  });
+
+  it("a post that finds the lock held is told to try again at once, and writes nothing", async () => {
+    const seen: string[] = [];
+    setRoomForTest({ db: pgLock(db, () => false, seen), now: () => clock, dialect: "postgres" });
+    const busy = await post(A, { body: "hello" });
+    assert.equal(busy.status, 429);
+    assert.equal(busy.headers.get("retry-after"), "1");
+    assert.match(((await busy.json()) as { error: string }).error, /One message at a time/);
+    assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM groupchat_messages").get() as { n: number }).n, 0);
+    assert.ok(!seen.some((sql) => /pg_advisory_xact_lock/.test(sql)), "never the waiting form");
+  });
+});
+
+describe("POST: every post is metered before the gate runs", () => {
+  it("a burst of lines the gate refuses meets 429 instead of the gate, and a token comes back every five seconds", async () => {
+    const address = `CA 0x${"ab".repeat(20)}`;
+    for (let i = 0; i < 12; i++) assert.equal((await post(A, { body: address })).status, 400, `refusal ${i}`);
+    // The gate would answer 400 again; a 429 means it never ran.
+    const over = await post(A, { body: address });
+    assert.equal(over.status, 429);
+    assert.equal(over.headers.get("retry-after"), "5");
+    assert.match(((await over.json()) as { error: string }).error, /Wait a few seconds/);
+    assert.equal((await post(A, { body: "a fine line" })).status, 429, "a good line waits its turn too");
+    assert.equal((await post(B, { body: "another owner is unaffected" })).status, 200);
+    clock += 5_000;
+    assert.equal((await post(A, { body: "a fine line" })).status, 200);
+    assert.equal((await post(A, { body: "and another" })).status, 429);
+  });
+
+  it("a person posting at the room's own limit never meets it", async () => {
+    for (let minute = 0; minute < 3; minute++) {
+      for (let i = 0; i < 6; i++) await posted(await post(A, { body: `minute ${minute} line ${i}` }));
+      assert.equal((await post(A, { body: "x".repeat(501) })).status, 400, "a refused line is still answered by the gate");
+      clock += 61_000;
+    }
   });
 });
 

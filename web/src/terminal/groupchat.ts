@@ -66,12 +66,29 @@ export const ROOM_STALE_MS = 3 * 60_000;
  * this only stops a reader typing past it. groupchat.test.ts pins the two equal.
  */
 export const COMPOSER_MAX = 500;
+/**
+ * HOW MANY LINES A FOLLOWING READER KEEPS. A room near its hourly ceiling left
+ * open all day is thousands of bubbles, every one of them re-laid-out on a
+ * phone; past this, the oldest are let go (and "Load earlier" fetches them
+ * back). Never while the reader is scrolled up reading, or while an earlier
+ * page is on its way — that would pull the lines out from under them.
+ */
+export const KEEP_LINES = 400;
+/**
+ * A screen reopened after this long starts again from the newest page instead
+ * of paging forward from where it stopped: paging forward would show hours-old
+ * lines as the newest for as long as the catch-up takes, and animate every one
+ * of them in.
+ */
+export const RESUME_AFTER_MS = 5 * 60_000;
 /** Lines by one speaker closer together than this read as one burst. */
 const RUN_GAP_MS = 5 * 60_000;
 /** The owner's own settings change rarely; re-asked on return after this long. */
 const ME_STALE_MS = 60_000;
 /** A catch-up after a long absence chains pages, but not for ever. */
 const MAX_CATCH_UP = 5;
+/** "Show the original" pages back at most this far looking for it. */
+const MAX_EARLIER_HOPS = 5;
 
 export type GroupChatStatus = "unread" | "unreadable" | "ok" | "unsupported";
 
@@ -81,6 +98,12 @@ export interface PendingLine {
   body: string;
   replyTo: number | null;
   at: number;
+  /**
+   * The cursor when it was sent. Every id the reader had already seen was
+   * handed out before this POST began, so its echo is always NEWER than this —
+   * an older identical line ("gm", said again) can never be mistaken for it.
+   */
+  after: number;
 }
 
 export interface GroupChatState {
@@ -101,7 +124,18 @@ export interface GroupChatState {
   cursor: number;
   /** The oldest loaded line is the start of history (or of what is retained). */
   start: boolean;
+  /**
+   * The presence summary AS DRAWN. A rewrite that only moves `updatedAtMs` —
+   * the conductor rewrites it every pass — keeps the old object, so it is not
+   * news; `roomFresh` carries the part of the timestamp the screen shows.
+   */
   room: RoomState | null;
+  /**
+   * The summary's writer was heard from recently, as of the last poll. Kept in
+   * the state rather than worked out at render so that a conductor going quiet
+   * — when nothing else changes and nothing would re-render — is still news.
+   */
+  roomFresh: boolean;
   /** A read after the first one failed: what is on screen is older than it looks. */
   failing: boolean;
   loadingEarlier: boolean;
@@ -113,6 +147,12 @@ export interface GroupChatState {
    * the same element instead of popping out and back in.
    */
   keys: Record<number, string>;
+  /**
+   * Bumped when the log was REPLACED rather than added to (a screen reopened
+   * after a long absence). The screen takes it as "this is a first read":
+   * nothing animates in, nothing is announced, and it goes to the bottom.
+   */
+  epoch: number;
 }
 
 const initial = (): GroupChatState => ({
@@ -122,12 +162,14 @@ const initial = (): GroupChatState => ({
   cursor: 0,
   start: false,
   room: null,
+  roomFresh: false,
   failing: false,
   loadingEarlier: false,
   earlierFailed: false,
   me: null,
   meState: "unread",
   keys: {},
+  epoch: 0,
 });
 
 let state: GroupChatState = initial();
@@ -145,6 +187,21 @@ let lastPullAt = 0;
 let meAt = 0;
 let probed = false;
 let visibilityBound = false;
+let earlierInFlight: Promise<void> | null = null;
+/** The newest `updatedAtMs` any poll has carried — what `roomFresh` is measured from. */
+let roomSeenAt = 0;
+/** Is the reader at the bottom of the log? The screen says; the trim asks. */
+let following = true;
+/** The next newest-page read replaces the log instead of adding to it. */
+let replaceNext = false;
+/**
+ * LINES TAKEN BACK, as far as this page knows: hidden here, or named by the
+ * server's `gone` list on a poll. A take-back is for good, so a copy of one of
+ * these arriving later — a poll that read the room just before the hide
+ * committed, a page from the short edge cache — is dropped instead of being
+ * put back on screen.
+ */
+const takenBack = new Set<number>();
 /**
  * Bumped by the test reset. A read still in flight from before a reset must not
  * write its answer into the state that replaced it — nor clear the next read's
@@ -254,20 +311,69 @@ interface Page {
   cursor: number;
   start: boolean | undefined;
   room: RoomState | null;
+  /** Ids of lines taken back that this reader may still be drawing (a poll's `gone`). */
+  gone: number[];
 }
 
 /** `source: "none"` is the server saying it could not read — NOT an empty room. */
 function pageOf(data: unknown): Page | null {
   if (!data || typeof data !== "object") return null;
-  const d = data as Partial<GroupChatResponse>;
+  const d = data as Partial<GroupChatResponse> & { gone?: unknown };
   if (d.source !== "db" || !Array.isArray(d.messages)) return null;
   const messages = d.messages.map(messageOf).filter((m): m is PublicMessage => m !== null);
+  // Optional, so a server that does not send it yet is simply one that never
+  // tells us about a take-back.
+  const gone = Array.isArray(d.gone) ? d.gone.filter((id): id is number => Number.isSafeInteger(id) && (id as number) > 0) : [];
   return {
     messages,
     cursor: num(d.cursor) ?? 0,
     start: typeof d.start === "boolean" ? d.start : undefined,
     room: roomOf(d.room),
+    gone,
   };
+}
+
+/** A page's lines without any this page knows were taken back. */
+function shown(list: readonly PublicMessage[]): readonly PublicMessage[] {
+  return takenBack.size === 0 || !list.some((m) => takenBack.has(m.id)) ? list : list.filter((m) => !takenBack.has(m.id));
+}
+
+/**
+ * The log and the key map without the taken-back lines. The same objects when
+ * there is nothing to drop, so a poll with no news still notifies nobody.
+ */
+function withoutTakenBack(
+  messages: PublicMessage[],
+  keys: Record<number, string>,
+): { messages: PublicMessage[]; keys: Record<number, string> } {
+  if (takenBack.size === 0 || !messages.some((m) => takenBack.has(m.id))) return { messages, keys };
+  return { messages: messages.filter((m) => !takenBack.has(m.id)), keys: withoutKeys(keys, takenBack) };
+}
+
+function withoutKeys(keys: Record<number, string>, ids: { has(id: number): boolean }): Record<number, string> {
+  let out: Record<number, string> | null = null;
+  for (const k of Object.keys(keys)) {
+    if (!ids.has(Number(k))) continue;
+    out ??= { ...keys };
+    delete out[Number(k)];
+  }
+  return out ?? keys;
+}
+
+/**
+ * Point `clientId` at `id` alone. An optimistic key that an earlier poll had
+ * already given to some other line goes back to that line's own key, so no
+ * two rows ever share one.
+ */
+function keyedTo(keys: Record<number, string>, clientId: string, id: number): Record<number, string> {
+  let out: Record<number, string> | null = null;
+  for (const [k, v] of Object.entries(keys)) {
+    if (v !== clientId || Number(k) === id) continue;
+    out ??= { ...keys };
+    delete out[Number(k)];
+  }
+  const base = out ?? keys;
+  return base[id] === undefined ? { ...base, [id]: clientId } : base;
 }
 
 function meOf(data: unknown): MeResponse | null {
@@ -315,9 +421,29 @@ export function mergeMessages(a: readonly PublicMessage[], b: readonly PublicMes
   return [...byId.values()].sort((x, y) => x.id - y.id);
 }
 
-/** The summary as it would be drawn; a rewrite with the same facts keeps the old object. */
+/**
+ * The summary as it would be drawn; a rewrite with the same facts keeps the old
+ * object. `updatedAtMs` is left out: the conductor rewrites it on every pass,
+ * and treating that as news re-rendered every bubble on screen every fifteen
+ * seconds. What the timestamp decides — fresh or stale — is `roomFresh`.
+ */
 function sameRoom(x: RoomState | null, y: RoomState | null): boolean {
-  return x === y || (!!x && !!y && JSON.stringify(x) === JSON.stringify(y));
+  if (x === y) return true;
+  if (!x || !y) return false;
+  const drawn = (r: RoomState) => JSON.stringify([r.members, r.awake, r.asleep, r.presence]);
+  return drawn(x) === drawn(y);
+}
+
+/** Was the summary's writer heard from within ROOM_STALE_MS of `nowMs`? */
+export function roomIsFresh(room: RoomState | null, seenAtMs: number, nowMs: number): boolean {
+  return !!room && nowMs - seenAtMs <= ROOM_STALE_MS;
+}
+
+/** Note a page's summary, and hand back the one to keep. */
+function takeRoom(room: RoomState | null): RoomState | null {
+  if (!room) return state.room;
+  roomSeenAt = Math.max(roomSeenAt, room.updatedAtMs);
+  return room;
 }
 
 /** Only the fields that differ, so a poll with no news notifies nobody. */
@@ -339,9 +465,11 @@ const flat = (s: string) => s.replace(/\s+/g, " ").trim();
  *
  * The public line carries no client id — the GET is the same bytes for every
  * visitor — so the match is on what the reader would recognise: an owner line,
- * under their agent's slug, with the same words. Matching wrongly costs a
- * duplicate bubble for the length of one request; not matching at all costs the
- * same, so the heuristic can only help.
+ * under their agent's slug, with the same words — and NEWER THAN ANYTHING THE
+ * READER HAD SEEN WHEN IT WAS SENT. That last part is what keeps "gm" said
+ * again from being absorbed by the "gm" of a minute ago that every poll's
+ * overlap window re-delivers: that one's id is at or below the pending line's
+ * `after`, and the real echo's cannot be.
  */
 function absorbEchoes(incoming: readonly PublicMessage[]): Partial<GroupChatState> {
   const slug = state.me?.slug ?? null;
@@ -350,7 +478,7 @@ function absorbEchoes(incoming: readonly PublicMessage[]): Partial<GroupChatStat
   let keys = state.keys;
   for (const m of incoming) {
     if (m.author !== "owner" || m.slug !== slug || keys[m.id]) continue;
-    const hit = pending.find((p) => flat(p.body) === flat(m.body));
+    const hit = pending.find((p) => m.id > p.after && flat(p.body) === flat(m.body));
     if (!hit) continue;
     pending = pending.filter((p) => p !== hit);
     keys = { ...keys, [m.id]: hit.clientId };
@@ -395,16 +523,29 @@ async function pullLatest(): Promise<boolean> {
   }
   failures = 0;
   loaded = true;
+  const replace = replaceNext;
+  replaceNext = false;
+  for (const id of page.gone) takenBack.add(id);
+  const incoming = shown(page.messages);
   const top = page.messages.reduce((m, x) => Math.max(m, x.id), 0);
+  const echo = absorbEchoes(incoming);
+  const keys = echo.keys ?? state.keys;
+  // A screen back after a long absence starts from the newest page: what it
+  // held is hours old, and paging forward from it would show those lines as
+  // the newest for as long as the catch-up took.
+  const next = replace
+    ? { messages: [...incoming].sort((x, y) => x.id - y.id), keys: withoutKeys(keys, { has: (id) => !incoming.some((m) => m.id === id) }) }
+    : withoutTakenBack(mergeMessages(state.messages, incoming), keys);
   set({
-    ...absorbEchoes(page.messages),
+    ...echo,
+    ...next,
     status: "ok",
     failing: false,
-    messages: mergeMessages(state.messages, page.messages),
     cursor: Math.max(state.cursor, page.cursor, top),
     // No `start` from the server on a newest page: a short page is the whole room.
     start: page.start ?? page.messages.length < PAGE,
-    room: page.room ?? state.room,
+    room: takeRoom(page.room),
+    ...(replace ? { epoch: state.epoch + 1, earlierFailed: false } : {}),
   });
   return false;
 }
@@ -423,16 +564,35 @@ async function pullSince(): Promise<boolean> {
     return false;
   }
   failures = 0;
+  // Taken back since this reader fetched them: every open screen drops them,
+  // not only the one whose owner pressed remove.
+  for (const id of page.gone) takenBack.add(id);
+  const incoming = shown(page.messages);
   const top = page.messages.reduce((m, x) => Math.max(m, x.id), 0);
+  const echo = absorbEchoes(incoming);
+  let { messages, keys } = withoutTakenBack(mergeMessages(state.messages, incoming), echo.keys ?? state.keys);
+  let start = state.start;
+  // A FOLLOWING reader keeps a bounded log. Only when this poll added lines
+  // (the follow effect then re-pins the bottom), never while they are reading
+  // back, and never under an earlier page that is still on its way.
+  if (following && !state.loadingEarlier && messages.length > KEEP_LINES && messages !== state.messages) {
+    const cut = messages.slice(0, messages.length - KEEP_LINES);
+    messages = messages.slice(cut.length);
+    const dropped = new Set(cut.map((m) => m.id));
+    keys = withoutKeys(keys, dropped);
+    start = false;
+  }
   set({
-    ...absorbEchoes(page.messages),
+    ...echo,
     status: "ok",
     failing: false,
-    messages: mergeMessages(state.messages, page.messages),
+    messages,
+    keys,
+    start,
     // Never backwards: a quiet overlap answers with the `since` we sent, which
     // is behind the cursor by design.
     cursor: Math.max(state.cursor, page.cursor, top),
-    room: page.room ?? state.room,
+    room: takeRoom(page.room),
   });
   return page.messages.length >= POLL_LIMIT;
 }
@@ -456,6 +616,9 @@ export function pollNow(): Promise<void> {
       if (gen === generation) {
         inFlight = null;
         lastPullAt = Date.now();
+        // Every poll, failed or not: a summary nobody has rewritten for minutes
+        // turns stale by the clock alone, and that flip is the news.
+        set({ roomFresh: roomIsFresh(state.room, roomSeenAt, lastPullAt) });
         catchUp = behind ? catchUp + 1 : 0;
         schedule(behind && catchUp <= MAX_CATCH_UP ? 0 : undefined);
       }
@@ -498,8 +661,17 @@ function subscribePoll(fn: () => void): () => void {
       document.addEventListener("visibilitychange", onVisibility);
       visibilityBound = true;
     }
+    // Gone long enough that what is held is history, not the room: start over
+    // from the newest page. A read still failing keeps what was on screen.
+    if (loaded && lastPullAt > 0 && Date.now() - lastPullAt > RESUME_AFTER_MS) {
+      loaded = false;
+      replaceNext = true;
+    }
     void pollNow();
-    void pullMe();
+    // FORCED, every time the screen opens: sign-in happens in the page with no
+    // reload, so the answer cached on the last visit may be a signed-out one.
+    // One private read per screen open.
+    void pullMe(true);
   }
   return () => {
     listeners.delete(fn);
@@ -570,23 +742,73 @@ export function retry(): void {
   void pullMe(true);
 }
 
-/** The page before the oldest loaded line. */
-export async function loadEarlier(): Promise<void> {
+/** The page before the oldest loaded line. A second call while one is on its way joins it. */
+export function loadEarlier(): Promise<void> {
+  if (earlierInFlight) return earlierInFlight;
   const first = state.messages[0];
-  if (state.loadingEarlier || state.start || !first) return;
+  if (state.start || !first) return Promise.resolve();
   set({ loadingEarlier: true, earlierFailed: false });
-  const r = await ask(`/api/groupchat?before=${first.id}&limit=${PAGE}`);
-  if (r.stale) return;
-  const page = r.ok ? pageOf(r.data) : null;
-  if (!page) {
-    set({ loadingEarlier: false, earlierFailed: true });
-    return;
-  }
-  set({
-    loadingEarlier: false,
-    messages: mergeMessages(state.messages, page.messages),
-    start: page.start ?? page.messages.length < PAGE,
+  const gen = generation;
+  earlierInFlight = (async () => {
+    const r = await ask(`/api/groupchat?before=${first.id}&limit=${PAGE}`);
+    if (r.stale) return;
+    const page = r.ok ? pageOf(r.data) : null;
+    if (!page) {
+      set({ loadingEarlier: false, earlierFailed: true });
+      return;
+    }
+    set({
+      loadingEarlier: false,
+      messages: mergeMessages(state.messages, shown(page.messages)),
+      start: page.start ?? page.messages.length < PAGE,
+    });
+  })().finally(() => {
+    if (gen === generation) earlierInFlight = null;
   });
+  return earlierInFlight;
+}
+
+/**
+ * Page back until line `id` is loaded. True when it is; false when it is not
+ * in the room any more (taken back, or older than what the room keeps) or the
+ * pages would not come. `beforePage` runs before each page is asked for — the
+ * screen pins the reader's place there, so every page lands without moving it.
+ */
+export async function loadUntil(id: number, beforePage?: () => void): Promise<boolean> {
+  for (let hop = 0; hop <= MAX_EARLIER_HOPS; hop++) {
+    if (state.messages.some((m) => m.id === id)) return true;
+    const first = state.messages[0];
+    if (!first || first.id < id || state.start || takenBack.has(id) || hop === MAX_EARLIER_HOPS) return false;
+    beforePage?.();
+    await loadEarlier();
+    if (state.earlierFailed) return false;
+  }
+  return false;
+}
+
+/** Was line `id` taken back, as far as this page knows? */
+export function isTakenBack(id: number): boolean {
+  return takenBack.has(id);
+}
+
+/**
+ * The screen says whether its reader is at the bottom of the log. Only a
+ * following reader's log is trimmed to KEEP_LINES.
+ */
+export function setFollowing(on: boolean): void {
+  following = on;
+}
+
+/**
+ * A /me answer from elsewhere on the page — OwnerClock's zone capture answers
+ * with the owner's settings. Taken so the room's panel does not keep saying
+ * "never sleeps" about a zone that was just recorded.
+ */
+export function noteMe(data: unknown): void {
+  const me = meOf(data);
+  if (!me || !me.signedIn) return;
+  meAt = Date.now();
+  set({ me, meState: "ok" });
 }
 
 function newClientId(): string {
@@ -609,7 +831,9 @@ function said(data: unknown): string | null {
  */
 export function postError(status: number, data: unknown): string {
   const words = said(data);
-  if (status === 0) return "Can't reach merrymen right now. Your message wasn't sent.";
+  // NOT "wasn't sent": silence can also be an answer lost after the room took
+  // the line, and a reader told it failed sends it twice.
+  if (status === 0) return "Can't reach merrymen right now, so we couldn't confirm your message was sent. Check the room before sending it again.";
   if (status >= 500) return "The room couldn't take that just now. Try again in a moment.";
   if (status === 401) return words ?? "Sign in again to post.";
   if (status === 403) return words ?? "Only owners with a Merryman can post.";
@@ -632,7 +856,7 @@ export async function postLine(body: string, replyTo: number | null): Promise<Po
   if (!text) return { ok: false, error: "Write something first." };
   if (text.length > COMPOSER_MAX) return { ok: false, error: `Keep it under ${COMPOSER_MAX} characters.` };
   const clientId = newClientId();
-  set({ pending: [...state.pending, { clientId, body: text, replyTo, at: Date.now() }] });
+  set({ pending: [...state.pending, { clientId, body: text, replyTo, at: Date.now(), after: state.cursor }] });
   const r = await ask("/api/groupchat", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -641,6 +865,13 @@ export async function postLine(body: string, replyTo: number | null): Promise<Po
   if (r.stale) return { ok: false, error: "" };
   const message = r.ok && r.data && typeof r.data === "object" ? messageOf((r.data as { message?: unknown }).message) : null;
   if (!message) {
+    // THE ROOM ALREADY SHOWED IT. A poll brought the line back while the POST
+    // was out, and then the answer was lost (a dropped connection, a timeout
+    // on a slow commit). The echo is the room saying it took the line; telling
+    // the owner it failed would get it posted twice. A 4xx is a real refusal
+    // and is said as one.
+    const settled = r.status === 0 || r.status >= 500 ? settledAs(clientId) : null;
+    if (settled) return { ok: true, message: settled };
     set({ pending: state.pending.filter((p) => p.clientId !== clientId) });
     // Signed out or no longer a member since the page loaded: re-ask, so the
     // composer stops offering what the server just refused.
@@ -649,18 +880,34 @@ export async function postLine(body: string, replyTo: number | null): Promise<Po
   }
   set({
     pending: state.pending.filter((p) => p.clientId !== clientId),
-    messages: mergeMessages(state.messages, [message]),
-    keys: state.keys[message.id] ? state.keys : { ...state.keys, [message.id]: clientId },
+    messages: withoutTakenBack(mergeMessages(state.messages, [message]), state.keys).messages,
+    keys: keyedTo(state.keys, clientId, message.id),
   });
   return { ok: true, message };
 }
 
-/** Hide one of the reader's own lines. True when the server hid it. */
+/** The line a pending post's echo was drawn as, if a poll already brought it. */
+function settledAs(clientId: string): PublicMessage | null {
+  if (state.pending.some((p) => p.clientId === clientId)) return null;
+  const id = Object.entries(state.keys).find(([, v]) => v === clientId)?.[0];
+  return id === undefined ? null : (state.messages.find((m) => m.id === Number(id)) ?? null);
+}
+
+/**
+ * Hide one of the reader's own lines. True when the server hid it.
+ *
+ * Remembered as taken back from the moment the server says so: a poll that
+ * read the room a moment before the hide committed can answer after it, and
+ * its copy must not put the line back for good.
+ */
 export async function hideLine(id: number): Promise<boolean> {
   const r = await ask(`/api/groupchat?id=${encodeURIComponent(String(id))}`, { method: "DELETE" });
   if (r.stale) return false;
   const hiddenOk = r.ok && !!r.data && typeof r.data === "object" && (r.data as { hidden?: unknown }).hidden === true;
-  if (hiddenOk) set({ messages: state.messages.filter((m) => m.id !== id) });
+  if (hiddenOk) {
+    takenBack.add(id);
+    set(withoutTakenBack(state.messages, state.keys));
+  }
   return hiddenOk;
 }
 
@@ -698,12 +945,17 @@ export function resetGroupChatForTest(): void {
   pollers = 0;
   inFlight = null;
   meInFlight = null;
+  earlierInFlight = null;
   loaded = false;
   failures = 0;
   catchUp = 0;
   lastPullAt = 0;
   meAt = 0;
   probed = false;
+  roomSeenAt = 0;
+  following = true;
+  replaceNext = false;
+  takenBack.clear();
 }
 
 /** Test seam: the subscriptions the hooks make, callable without React. */
@@ -806,7 +1058,11 @@ export function chatItems(
     const d = localDayKey(m.at);
     if (d !== day) {
       day = d;
-      out.push({ type: "day", key: `d${d}`, label: "" });
+      // Keyed by the row it heads, not by the day: stamps are not monotonic in
+      // id (a pass stamps its lines when it starts and inserts them after its
+      // model calls), so one day can head the log twice around midnight, and
+      // two elements must never share a key.
+      out.push({ type: "day", key: `d${row.key}`, label: "" });
       prev = null;
     }
     if (m.author === "system") {
@@ -815,12 +1071,15 @@ export function chatItems(
       continue;
     }
     const mine = row.pending || isMine(m, mySlug);
+    // The reader's own lines are one speaker whatever they are called: a line
+    // still sending is drawn as "You" and settles as "<agent>'s owner", and a
+    // run broken by the name alone jumped every bubble twice per send.
     const joins =
       prev !== null &&
       prev.mine === mine &&
       prev.message.author === m.author &&
       prev.message.slug === m.slug &&
-      prev.message.name === m.name &&
+      (mine || prev.message.name === m.name) &&
       m.at - prev.message.at < RUN_GAP_MS;
     if (joins && prev) prev.last = false;
     const item: Extract<ChatItem, { type: "line" }> = { type: "line", key: row.key, message: m, mine, pending: row.pending, first: !joins, last: true };
@@ -881,15 +1140,54 @@ export function excerpt(text: string, max = 80): string {
   return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
+/** More new lines than this at once are announced as a count, not read out one by one. */
+export const ANNOUNCE_MAX = 3;
+
+/**
+ * A new line as a screen reader should hear it: who, what they called (from
+ * the structured card, never the sentence), and the words.
+ */
+export function spokenLine(m: PublicMessage): string {
+  if (m.author === "system") return excerpt(m.body, 140);
+  const coin = m.call ? (m.call.name ?? m.call.symbol ?? "a coin") : null;
+  const call = m.call ? ` (${m.call.side === "buy" ? "bought" : "sold"} ${coin}${m.call.paper ? ", paper trade" : ""})` : "";
+  return `${m.name}${call}: ${excerpt(m.body, 140)}`;
+}
+
+/** What a burst of new lines is announced as: each one, or one count. */
+export function announcements(lines: readonly PublicMessage[]): string[] {
+  if (lines.length === 0) return [];
+  if (lines.length > ANNOUNCE_MAX) return [`${count(lines.length)} new messages`];
+  return lines.map(spokenLine);
+}
+
+/**
+ * Where a reply's original is: loaded (the line), EARLIER (older than the
+ * oldest loaded line, and the room may still have it — one "load earlier"
+ * away), or gone (null: taken back, or older than what the room keeps).
+ */
+export function replyTarget(
+  replyTo: number,
+  loaded: ReadonlyMap<number, PublicMessage>,
+  firstId: number | null,
+  start: boolean,
+): PublicMessage | "earlier" | null {
+  const hit = loaded.get(replyTo);
+  if (hit) return hit;
+  if (firstId !== null && replyTo < firstId && !start && !takenBack.has(replyTo)) return "earlier";
+  return null;
+}
+
 /**
  * The header's one line about who is here — or null when there is nothing to
  * say. A summary the conductor has not refreshed in minutes is said to be
  * stale rather than repeated: "12 awake" from a writer that stopped is a claim
- * about now made with a fact from then.
+ * about now made with a fact from then. `fresh` is the store's `roomFresh`,
+ * worked out at each poll (see `roomIsFresh`).
  */
-export function presenceLine(room: RoomState | null, nowMs: number): { text: string; fresh: boolean } | null {
+export function presenceLine(room: RoomState | null, fresh: boolean): { text: string; fresh: boolean } | null {
   if (!room) return null;
-  if (nowMs - room.updatedAtMs > ROOM_STALE_MS) return { text: "Presence unavailable", fresh: false };
+  if (!fresh) return { text: "Presence unavailable", fresh: false };
   const awake = `${count(room.awake)} awake`;
   return { text: room.asleep > 0 ? `${awake} · ${count(room.asleep)} asleep` : awake, fresh: true };
 }

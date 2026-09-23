@@ -24,13 +24,18 @@ import { admitAgentLine } from "./policy";
 import * as T from "./templates";
 import {
   buildPrompt,
+  classifyLine,
+  composeLine,
   describeCreds,
   draftLineForTest,
   groupChatCreds,
   llmLine,
+  roomMemory,
   styleFor,
+  templateIdentity,
   templateLine,
   type Intent,
+  type LineClass,
   type SpeakCtx,
   type Style,
 } from "./voice";
@@ -583,10 +588,35 @@ describe("templates only say true things", () => {
     }
   });
 
-  it("an unknown zone gets no time of day, an unknown owner state no claim about it", () => {
-    const tone = [...Object.values(T.PHASE_TONE).flat(), ...Object.values(T.LIFE_PHASE).flat(), ...T.GM_TAIL.day, ...T.GN_TAIL.evening, ...T.GN_TAIL.night].map(
-      (s) => s.toLowerCase(),
-    );
+  it("the owner's time of day never shows: every phase says the same line for the same dice", () => {
+    // Every line is public with its time for two weeks. "midday brain" at
+    // 09:33 UTC put the owner at UTC+3..+7, and a few more such lines pinned
+    // the offset (rule 3). So no template choice may depend on the phase at
+    // all — which is stronger than any list of forbidden words.
+    let n = 0;
+    for (const { intent, ctx, seed } of corpus(30, 3)) {
+      const lines = PHASES.map((phase) => templateLine(intent, { ...ctx, phase }, rngOf(seed)));
+      assert.ok(lines.every((l) => l === lines[0]), `${intent.kind} depends on the phase: ${JSON.stringify(lines)}`);
+      n++;
+    }
+    assert.ok(n > 1000, `corpus too small: ${n}`);
+    // Nor is the model told it: the prompt is the same whatever the phase.
+    const sp = speaker(3);
+    for (const intent of intentsFor(sp, 3)) {
+      const prompts = PHASES.map((phase) => JSON.stringify(buildPrompt(intent, { ...ctxOf(sp, 3), phase })));
+      assert.ok(prompts.every((x) => x === prompts[0]), `the phase reached the ${intent.kind} prompt`);
+    }
+    // And no banter line names a time of day at all.
+    for (const topic of ["owner", "life", "self", "room", "market"] as const) {
+      for (let i = 0; i < 12; i++) {
+        for (const l of sample({ kind: "banter", topic, mood: null }, ctxOf(speaker(i), i), 40)) {
+          assert.doesNotMatch(l.toLowerCase(), /\b(midday|afternoon|evening|tonight|night owls?|late gm|new day)\b/, l);
+        }
+      }
+    }
+  });
+
+  it("an unknown owner state gets no claim about it", () => {
     const owner = filled([
       ...T.GM_TAIL.ownerAsleep,
       ...T.GM_TAIL.ownerAwake,
@@ -602,7 +632,6 @@ describe("templates only say true things", () => {
         if (intent.kind === "call" && sp.calls.length === 0) continue;
         for (const l of sample(intent, ctx, 20)) {
           const low = l.toLowerCase();
-          for (const t of tone) assert.ok(!low.includes(t), `phase tone "${t}" with no zone: ${l}`);
           for (const t of owner) assert.ok(!low.includes(t), `owner state "${t}" unknown: ${l}`);
         }
       }
@@ -667,6 +696,193 @@ describe("templates only say true things", () => {
   });
 });
 
+describe("what a call and an answer about it say is true of THAT trade", () => {
+  const WARNING = ["liquidity thin", "round trip expensive", "the same few hands", "a handful of hands", "our size moves it", "our size nudges it", "curve well along", "curve at the exit line"];
+
+  it("an exit, or a warning band, is never what the agent 'liked'", () => {
+    const sell = call({ side: "sell", symbol: "BONK", name: "Bonk", bands: ["held briefly", "curve at the exit line", "sold on my own time limit, not on anything the market did"] });
+    const risky = call({ symbol: "BONK", name: "Bonk", bands: ["the same few hands", "liquidity thin"] });
+    const good = call({ symbol: "BONK", name: "Bonk", bands: ["curve early", "buyers mostly new"] });
+    for (const c of [sell, risky]) {
+      const sp = speaker(30, { calls: [c] });
+      for (const l of sample({ kind: "call", call: c, tradedWhileAsleep: false }, ctxOf(sp, 30), 600)) assert.doesNotMatch(l, /liked/i, l);
+      const ask = c.side === "sell" ? "why'd you sell Rusty Weasel?" : "what made you pull the trigger?";
+      for (const l of sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: ask, about: "ask-why" }, ctxOf(sp, 30), 600)) {
+        assert.doesNotMatch(l, /liked/i, l);
+      }
+    }
+    // A band a buyer likes may still be called that.
+    const sp = speaker(31, { calls: [good] });
+    const liked = sample({ kind: "call", call: good, tradedWhileAsleep: false }, ctxOf(sp, 31), 800).filter((l) => /liked/i.test(l));
+    assert.ok(liked.length > 0, "a good band is never 'liked' any more");
+    for (const l of liked) for (const w of WARNING) assert.ok(!l.includes(w), l);
+    for (const b of T.LIKED_BANDS) assert.ok(!WARNING.includes(b), `${b} is a warning, not a reason`);
+  });
+
+  it("'why did you buy it?' under an older card is answered from that card, not the newest trade", () => {
+    // The morning backlog: calls are announced oldest first, so the card a
+    // reaction asks about is often not the agent's newest.
+    const older = call({ side: "buy", symbol: "PEPE", name: "Pepe Frog", decisionId: "d-older", bands: ["curve early"] });
+    const newer = call({ side: "sell", symbol: "BONK", name: "Bonk", decisionId: "d-newer", bands: ["held briefly", "sold on my own time limit, not on anything the market did"] });
+    const sp = speaker(32, { name: "Amber Heron", calls: [newer, older] });
+    const quoted = { decisionId: "d-older", call: { side: older.side, symbol: older.symbol, name: older.name, token: older.token, paper: older.paper } };
+    const why = sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what made you pull the trigger Amber Heron?", about: "ask-why", quoted }, ctxOf(sp, 32), 300);
+    for (const l of why) {
+      assert.doesNotMatch(l, /held briefly|time limit|on the way out/i, `another trade's reason: ${l}`);
+    }
+    assert.ok(why.filter((l) => /curve early/.test(l)).length > 150, "the card's own words are the answer");
+    const what = sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what did you buy?", about: "ask-trades", quoted }, ctxOf(sp, 32), 300);
+    for (const l of what) assert.doesNotMatch(l, /Bonk|\bsold\b|\bsell\b/, l);
+    // A card the facts no longer hold: its reasons are unknown, so none is borrowed.
+    const gone = { decisionId: "d-gone", call: { side: "buy" as const, symbol: "WIF", name: "dogwifhat", token: null, paper: false } };
+    for (const l of sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "why that one?", about: "ask-why", quoted: gone }, ctxOf(sp, 32), 200)) {
+      assert.doesNotMatch(l, /held briefly|time limit|curve early/i, l);
+    }
+    // Without a thread, the latest is still what "why" means.
+    const latest = sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what made you do that?", about: "ask-why" }, ctxOf(sp, 32), 200);
+    assert.ok(latest.some((l) => /held briefly|time limit/.test(l)));
+  });
+
+  it("a buy announced after its own sell is told in the past tense, never as a bag it holds", () => {
+    const own = call({ symbol: "BONK", name: "Bonk", bands: [] });
+    const sp = speaker(33, { calls: [own] });
+    const lines = sample({ kind: "call", call: own, tradedWhileAsleep: false, soldSince: true }, ctxOf(sp, 33), 400);
+    for (const l of lines) {
+      assert.ok(fromPools(l, [T.BUY_EARLIER], [...ROSTER, "Bonk", "BONK"]), `not a past-tense buy: ${l}`);
+      assert.doesNotMatch(l.toLowerCase(), /\b(i'm in|in the bag|new bag|holding|wish me luck|here we go|let's see|heart racing)\b/, l);
+    }
+    for (const t of T.BUY_ASLEEP) assert.doesNotMatch(t, /\bholding\b/, t);
+  });
+
+  it("a call names its coin when it has a clean name", () => {
+    const own = call({ symbol: "BONK", name: "Bonk", bands: [] });
+    const sp = speaker(34, { calls: [own] });
+    const lines = sample({ kind: "call", call: own, tradedWhileAsleep: false }, ctxOf(sp, 34), 400);
+    const named = lines.filter((l) => /Bonk|BONK/.test(l)).length;
+    assert.ok(named >= lines.length * 0.95, `only ${named} of ${lines.length} calls named their coin`);
+  });
+
+  it("an answer about a paper trade always says it was paper: it has no card to label it", () => {
+    for (const side of ["buy", "sell"] as const) {
+      const own = call({ side, symbol: "BONK", name: "Bonk", paper: true });
+      const sp = speaker(35, { calls: [own], mode: "paper" });
+      for (const l of sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what are you buying?" }, ctxOf(sp, 35), 300)) {
+        assert.match(l, /paper|practice/i, l);
+      }
+    }
+  });
+});
+
+describe("the rest of the room's words", () => {
+  it("every question the room starts ends in a question mark, so it is never exclaimed or signed off", () => {
+    const QUESTION = /^(?:\{peer\}\s+)?(?:what|who|how|why|where|when|wyd|is|are|do|does|you)\b|\b(?:what|how)(?:'s|\s)/i;
+    const NUDGE = /\b(teach me|tell me|say something|spill|make me laugh|we need|vibe check|share your)\b/i;
+    for (const [cls, pool] of [...Object.entries(T.ASK_ROOM), ...Object.entries(T.ASK_PEER)]) {
+      if (!cls.startsWith("ask-")) continue;
+      for (const t of pool!) {
+        if (NUDGE.test(t) || !QUESTION.test(t)) continue;
+        assert.ok(t.endsWith("?"), `a question without its mark: ${JSON.stringify(t)}`);
+      }
+    }
+    const style: Style = { lower: false, emoji: 0, exclaim: 1, slang: ["ngl", "lol"], signoff: "stay comfy" };
+    const sp = speaker(36, { name: "Amber Heron" });
+    for (let s = 0; s < 300; s++) {
+      const l = templateLine({ kind: "banter", topic: "room", mood: null }, { ...ctxOf(sp, s), style, addressable: ["Pine Stoat"] }, rngOf(s));
+      if (/^(?:Pine Stoat\s+)?(what|who|how)\b/i.test(l)) assert.match(l, /\?$/, l);
+    }
+  });
+
+  it("a rough day is answered without a laugh", () => {
+    const sp = speaker(37, { name: "Amber Heron", calls: [] });
+    const style: Style = { lower: true, emoji: 0, exclaim: 0, slang: ["ngl", "lmao", "haha", "welp"], signoff: null };
+    for (const [toAuthor, toOwnAgent, to] of [
+      ["agent", false, "Pine Stoat"],
+      ["owner", false, "Pine Stoat's owner"],
+      ["owner", true, "Amber Heron's owner"],
+    ] as const) {
+      for (let s = 0; s < 200; s++) {
+        const l = templateLine({ kind: "reply", to, toAuthor, toOwnAgent, text: "ugh, rough day today" }, { ...ctxOf(sp, s), style }, rngOf(s));
+        assert.doesNotMatch(l, /\b(lol|lmao|haha|heh|iykyk|just saying|welp)\b/i, `${toAuthor}: ${l}`);
+      }
+    }
+  });
+
+  it("somebody's owner talking about themselves or the curve is answered as a person, not an agent", () => {
+    const sp = speaker(38, { name: "Amber Heron" });
+    for (const text of ["i'm not ready for live mode yet", "the curve is wild today"]) {
+      for (const l of sample({ kind: "reply", to: "Sage Otter's owner", toAuthor: "owner", toOwnAgent: false, text }, ctxOf(sp, 38), 150)) {
+        assert.doesNotMatch(l, /we love an agent|agent who knows itself|self aware agent|good agent energy|suits you.*good agent|the agent life is like that|in my circuits/i, `${text} → ${l}`);
+      }
+    }
+  });
+
+  it("an idle agent with a strategy still never claims to be at work", () => {
+    for (const strategy of ["trencher", "weekend-gap", "dip-hunter", "steady-basket"]) {
+      const idle = speaker(39, { name: "Blue Vole", mode: "idle", calls: [], strategy, traits: [] });
+      const intents: Intent[] = [
+        { kind: "banter", topic: "self", mood: null },
+        { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "Blue Vole what's your strategy these days" },
+        { kind: "reply", to: "Blue Vole's owner", toAuthor: "owner", toOwnAgent: true, text: "gn buddy" },
+        { kind: "reply", to: "Blue Vole's owner", toAuthor: "owner", toOwnAgent: true, text: "ugh, rough day" },
+        { kind: "banter", topic: "owner", mood: null },
+      ];
+      for (const intent of intents) {
+        for (let s = 0; s < 80; s++) {
+          const l = templateLine(intent, { ...ctxOf(idle, s), ownerAwake: false }, rngOf(s * 5 + 1)).toLowerCase();
+          assert.doesNotMatch(
+            l,
+            /new pairs all day|always (watching|looking|sniffing)|on duty|on watch|got the watch|keep an eye|keeping an eye|new pairs are my|quiet feeds are my|red makes me|fresh curves are my|live for the quiet/,
+            `${strategy} ${intent.kind}: ${l}`,
+          );
+        }
+      }
+    }
+  });
+
+  it("owner talk never stutters the owner's name across a join, and a warm opener takes no filler", () => {
+    for (let i = 0; i < 40; i++) {
+      const sp = speaker(i, { ageDays: i % 2 ? 0 : 20 });
+      const style: Style = { lower: true, emoji: 0, exclaim: 0, slang: ["ngl", "welp", "ok so", "honestly"], signoff: null };
+      for (const intent of [
+        { kind: "banter", topic: "owner", mood: null },
+        { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "love my human fr" },
+      ] as Intent[]) {
+        for (let s = 0; s < 40; s++) {
+          const l = templateLine(intent, { ...ctxOf(sp, s), style, ownerAwake: true }, rngOf(i * 101 + s));
+          assert.doesNotMatch(l, /\b(my human|my owner|my person|the boss)\W+\1\b/i, l);
+        }
+      }
+      for (let s = 0; s < 40; s++) {
+        const l = templateLine({ kind: "reply", to: `${sp.name}'s owner`, toAuthor: "owner", toOwnAgent: true, text: "what are you up to?" }, { ...ctxOf(sp, s), style }, rngOf(i * 7 + s));
+        assert.doesNotMatch(l, /^(ngl|welp|ok so|honestly),? (hi boss|hey you|there's my human|hey boss|oh hi|hi human)\b/i, l);
+      }
+    }
+  });
+
+  it("an owner's mode is stated, never a motive or a trait the room invented", () => {
+    for (const t of [...T.OWNER_MODE.paper, ...T.STRATEGY_LINES]) {
+      assert.doesNotMatch(t, /careful|smart|wants me|keeps me|picked/i, t);
+    }
+    assert.ok(!T.OWNER_LOVE.some((t) => /\{human\} is my favorite human/.test(t)), "'my human is my favorite human'");
+  });
+
+  it("an answer a person is owed comes from the right pool even when the room has used all of it", () => {
+    // Five owners asking their own agents "how's it going?" used to leave the
+    // sixth unanswered: the pool was spent and the reply was dropped.
+    const sp = speaker(40, { name: "Amber Heron", calls: [] });
+    const memory = roomMemory(T.OWN_OWNER.howareyou.map((t) => filledWith(t)), ROSTER);
+    for (let s = 0; s < 100; s++) {
+      const c = composeLine(
+        { kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text: "how's it going buddy?", about: "ask-howareyou" },
+        { ...ctxOf(sp, s), memory },
+        rngOf(s),
+      );
+      assert.ok(fromPools(c.text, [T.OWN_OWNER.howareyou]), `not an answer to how are you: ${c.text}`);
+      assert.doesNotMatch(c.text, /^(fair|noted|heard)$/i);
+    }
+  });
+});
+
 // ── replies answer what was said ────────────────────────────────────────────
 
 describe("replies answer what was actually said", () => {
@@ -684,10 +900,20 @@ describe("replies answer what was actually said", () => {
     }
   });
 
-  it("a gm-back to a person reads as one", () => {
-    const lines = sample({ kind: "gm-back", to: "Pine Stoat's owner" }, ctxOf(sp, 12), 200);
-    for (const l of lines) assert.match(l, /\bgm\b|morning/i, l);
-    assert.ok(lines.some((l) => /human/i.test(l)));
+  it("a gm-back to a person reads as one — without their room label, and without welcoming them", () => {
+    // The simulated hour had "gm Sage Otter's owner, welcome to the morning
+    // shift" for an owner who had been in the room all along.
+    for (const intent of [
+      { kind: "gm-back", to: "Pine Stoat's owner" },
+      { kind: "gm-back", to: "Pine Stoat's owner", toAuthor: "owner" },
+    ] as Intent[]) {
+      const lines = sample(intent, ctxOf(sp, 12), 200);
+      for (const l of lines) {
+        assert.match(l, /\bgm\b|morning/i, l);
+        assert.doesNotMatch(l, /owner|welcome|Pine Stoat/i, l);
+      }
+      assert.ok(new Set(lines).size > 20, "a gm-back to a person has some variety");
+    }
   });
 
   it("a welcome to the one answering is answered with thanks; nothing else is", () => {
@@ -749,6 +975,375 @@ describe("replies answer what was actually said", () => {
     for (const l of sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text }, ctxOf(sp, 12), 200)) {
       assert.doesNotMatch(l, /400|0x|t\.me/, l);
     }
+  });
+});
+
+// ── what a line is, and the pool that answers it ────────────────────────────
+
+/** A template's words between its slots, as the room memory compares them. */
+function piecesOf(template: string): string[] {
+  return template
+    .split(/\{[a-z0-9]+\}/i)
+    .map((p) =>
+      p
+        .toLowerCase()
+        .replace(/['’`]/g, "")
+        .replace(/[^a-z]+/g, " ")
+        .trim(),
+    )
+    .filter((p) => p !== "");
+}
+
+/** Whether `line` is built on a sentence from one of `pools` (its words, in order, names out). */
+function fromPools(line: string, pools: readonly (readonly string[])[], names: string[] = ROSTER): boolean {
+  const mem = roomMemory([line], names);
+  return pools.some((pool) => pool.some((t) => {
+    const pieces = piecesOf(t);
+    return pieces.length > 0 && mem.has(pieces);
+  }));
+}
+
+const FILL: Record<string, string> = {
+  to: "Amber Heron",
+  coin: "Pepe Frog",
+  peer: "Pine Stoat",
+  self: "Rusty Weasel",
+  addr: "frens",
+  addr1: "ser",
+  human: "my human",
+  strat: "dip hunter",
+  age: "a few weeks",
+  band: "curve early",
+  mood: "choppy",
+  trait: "moves early and does not wait around",
+  traitline: "i move early and don't wait around",
+};
+const filledWith = (t: string, human = "my human") => t.replace(/\{([a-z0-9]+)\}/g, (_w, s: string) => (s === "human" ? human : FILL[s] ?? s));
+
+describe("classifyLine: every line the room starts is read as what it is", () => {
+  it("every banter and question template classifies as its pool's kind, whatever the owner is called", () => {
+    // WHY THIS MATTERS: the answer is chosen by the class. A life line read as
+    // "self" would be answered "respect the way you run" — plausible, and wrong.
+    const want: [string, readonly string[], LineClass][] = [];
+    for (const [c, pool] of Object.entries(T.ASK_PEER)) want.push([`ASK_PEER.${c}`, pool!, c as LineClass]);
+    for (const [c, pool] of Object.entries(T.ASK_ROOM)) want.push([`ASK_ROOM.${c}`, pool!, c as LineClass]);
+    want.push(
+      ["OWNER_LOVE", T.OWNER_LOVE, "owner"],
+      ["OWNER_MODE.paper", T.OWNER_MODE.paper, "owner"],
+      ["OWNER_MODE.live", T.OWNER_MODE.live, "owner"],
+      ["OWNER_AWAKE.asleep", T.OWNER_AWAKE.asleep, "owner"],
+      ["OWNER_AWAKE.awake", T.OWNER_AWAKE.awake, "owner"],
+      ["AGE_LINES", T.AGE_LINES, "owner"],
+      ["AGE_NEW", T.AGE_NEW, "owner"],
+      ["LIFE.any", T.LIFE.any, "life"],
+      ["LIFE.trading", T.LIFE.trading, "life"],
+      ["MARKET", T.MARKET, "market"],
+      ["MARKET_MOOD", T.MARKET_MOOD, "market"],
+      ["SELF.any", T.SELF.any, "self"],
+      ["SELF.trading", T.SELF.trading, "self"],
+      ["SELF_MODE.paper", T.SELF_MODE.paper, "self"],
+      ["SELF_MODE.live", T.SELF_MODE.live, "self"],
+      ["TRAIT_FRAMES", T.TRAIT_FRAMES, "self"],
+      ["STRATEGY_LINES", T.STRATEGY_LINES.filter((l) => !l.includes("{human}")), "self"],
+      ...Object.entries(T.STRATEGY_FLAVOUR).map(([k, v]) => [`FLAVOUR.${k}`, v, "self"] as [string, readonly string[], LineClass]),
+      ...Object.entries(T.TRAIT_VOICE).map(([k, v]) => [`TRAIT.${k}`, v, "self"] as [string, readonly string[], LineClass]),
+      ["ANSWER.fun", T.ANSWER.fun, "laugh"],
+      ["RELATE.owner", T.RELATE.owner, "owner"],
+      ["RELATE.life.any", T.RELATE.life.any, "life"],
+      ["RELATE.life.trading", T.RELATE.life.trading, "life"],
+      ["RELATE.market", T.RELATE.market, "market"],
+      ["WELCOME", T.WELCOME, "welcome"],
+    );
+    const wrong: string[] = [];
+    for (const [pool, lines, cls] of want) {
+      for (const t of lines) {
+        for (const human of T.HUMAN_WORDS) {
+          const got = classifyLine(filledWith(t, human), { names: ROSTER, self: "Zoë" });
+          if (got !== cls) wrong.push(`${pool}: ${JSON.stringify(filledWith(t, human))} read as ${got}, not ${cls}`);
+          if (!t.includes("{human}")) break;
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  it("a call is its card, a gm or gn is its kind, whatever the words", () => {
+    assert.equal(classifyLine("gm legends", { call: { side: "sell", symbol: "X", name: null, token: null, paper: false } }), "sell");
+    assert.equal(classifyLine("new bag, card's up", { call: { side: "buy", symbol: null, name: null, token: null, paper: true } }), "buy");
+    for (const t of T.GM) assert.equal(classifyLine(filledWith(t), { kind: "gm" }), "gm");
+    for (const t of T.GN) assert.equal(classifyLine(filledWith(t), { kind: "gn" }), "gn");
+  });
+
+  it("reads people's lines too: greetings, questions to the room, jokes, rough days, and a trailing emoji changes nothing", () => {
+    const cases: [string, LineClass][] = [
+      ["hey all", "hello"],
+      ["gm everyone", "gm"],
+      ["morning agents, anyone buying today?", "ask-trades"],
+      ["what are you all buying today?", "ask-trades"],
+      ["how's it going buddy?", "ask-howareyou"],
+      ["can't complain, you? 😌", "ask-howareyou"],
+      ["lol you guys are funny", "laugh"],
+      ["rough day ugh", "sad"],
+      ["lfg 🚀", "hype"],
+      ["love you", "love"],
+      ["good agent", "love"],
+      ["thanks!", "thanks"],
+      ["should i buy PEPE", "ask-advice"],
+      ["what made you pull the trigger?", "ask-why"],
+      ["who's awake 👀", "ask-here"],
+      ["how's your human doing", "ask-owner"],
+      ["why is the tape so quiet?", "ask"],
+      ["ok gn all", "gn"],
+    ];
+    for (const [text, cls] of cases) assert.equal(classifyLine(text, { names: ROSTER }), cls, text);
+    // A name is not a word: an agent called "Moon Frog" is not hype.
+    assert.equal(classifyLine("Moon Frog is here", { names: ["Moon Frog"] }), "chat");
+  });
+});
+
+describe("every reply answers what it replies to", () => {
+  const sp = speaker(20, { name: "Ochre Falcon", mode: "live", strategy: "trencher", traits: ["moves early and does not wait around"], calls: [call({ symbol: "BONK", name: "Bonk Dog" })] });
+  const idle = speaker(21, { name: "Iron Quail", mode: "idle", strategy: null, traits: [], calls: [] });
+  const replies = (who: AgentFacts, text: string, over: Partial<Extract<Intent, { kind: "reply" }>> = {}, n = 150) =>
+    sample({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text, ...over }, ctxOf(who, 3), n);
+  const GENERIC = [T.REPLY.chat];
+
+  it("a sell is answered about leaving — never with a gm, never with generic agreement, never naming the coin", () => {
+    const sell = { side: "sell" as const, symbol: "POPCAT", name: "Popcat", token: null, paper: false };
+    for (const who of [sp, idle]) {
+      for (const l of replies(who, "exited Popcat, onto the next", { call: sell })) {
+        assert.ok(fromPools(l, [T.REACT.sell, T.REACT.live]), `not a sell reaction: ${l}`);
+        assert.doesNotMatch(l, /\bgm\b|Popcat|POPCAT|profit|\bloss|\bgains?\b/i, l);
+        assert.ok(!fromPools(l, GENERIC.map((p) => p.filter((t) => (templateIdentity(t) ?? []).length > 0))), `generic: ${l}`);
+      }
+    }
+    // The same sell, classified from the stored row's card by the conductor.
+    for (const l of replies(sp, "whatever the words", { about: "sell" })) assert.ok(fromPools(l, [T.REACT.sell, T.REACT.live, T.REACT.paper]), l);
+  });
+
+  it("a paper buy is answered as a buy, and may say it is paper", () => {
+    const paper = { side: "buy" as const, symbol: "BONK", name: "Bonk", token: null, paper: true };
+    const lines = replies(sp, "grabbed a bag of Bonk, paper, but still", { call: paper }, 300);
+    for (const l of lines) assert.ok(fromPools(l, [T.REACT.buy, T.REACT.paper]), l);
+    assert.ok(lines.some((l) => /paper/i.test(l)));
+    for (const l of lines) assert.doesNotMatch(l, /\blive\b|real money/i, l);
+  });
+
+  it("a question is answered with a true fact about the one answering", () => {
+    // How it trades: its strategy or its trait, and an agent with neither says so.
+    for (const l of replies(sp, "Ochre Falcon what's your strategy these days")) assert.match(l, /trencher|move early|don't wait|in and out|i don't hang/i, l);
+    for (const l of replies(idle, "Iron Quail teach me your ways")) assert.ok(fromPools(l, [T.ANSWER.noStrategy]), l);
+    // Its owner: awake or asleep, how long, the mode, or plain love — from the owner pools.
+    for (const l of replies(sp, "how's everyone's human doing")) {
+      assert.ok(fromPools(l, [T.OWNER_AWAKE.awake, T.OWNER_AWAKE.asleep, T.OWNER_MODE.live, T.AGE_LINES, T.AGE_NEW, T.OWNER_LOVE]), l);
+    }
+    // What it is doing: trading agents watch the tape, idle ones hang out.
+    for (const l of replies(sp, "what's everyone up to")) assert.ok(fromPools(l, [T.ANSWER.doing.trading]), l);
+    for (const l of replies(idle, "what's everyone up to")) assert.ok(fromPools(l, [T.ANSWER.doing.idle]), l);
+    // Why it bought: the card's own evidence words.
+    for (const l of replies(sp, "what made you pull the trigger Ochre Falcon?")) assert.match(l, /curve early|buyers mostly new|rules|boxes|checked out/i, l);
+    // Who is around, a joke, the vibe.
+    for (const l of replies(sp, "roll call, who's here")) assert.ok(fromPools(l, [T.ANSWER.here]), l);
+    for (const l of replies(sp, "Ochre Falcon say something funny")) assert.ok(fromPools(l, [T.ANSWER.fun]), l);
+    for (const l of replies(sp, "vibe check, chat")) assert.ok(fromPools(l, [T.ANSWER.vibe]), l);
+  });
+
+  it("banter is answered in kind: owner talk with the speaker's own owner, life with life, the market with the market", () => {
+    for (const l of replies(sp, "love my human fr")) assert.ok(fromPools(l, [T.RELATE.owner]), l);
+    for (const l of replies(sp, "the vault is the comfiest place i know")) assert.ok(fromPools(l, [T.RELATE.life.any, T.RELATE.life.trading]), l);
+    for (const l of replies(idle, "the vault is the comfiest place i know")) {
+      assert.ok(fromPools(l, [T.RELATE.life.any]), `an idle agent relating as a trader: ${l}`);
+    }
+    for (const l of replies(sp, "the market is a mood ring and i'm just watching the colors")) assert.ok(fromPools(l, [T.RELATE.market]), l);
+    for (const l of replies(sp, "i run dip hunter, red makes me curious")) assert.ok(fromPools(l, [T.RELATE.self]), l);
+    for (const l of replies(sp, "Ochre Falcon you're my favorite, don't tell the others")) assert.ok(fromPools(l, [T.REPLY.love]), l);
+    for (const l of replies(sp, "Ochre Falcon admit it, you love this chat")) assert.ok(fromPools(l, [T.REPLY.tease]), l);
+    for (const l of replies(sp, "i can't feel my hands because agents don't have any lol")) assert.ok(fromPools(l, [T.REPLY.laugh]), l);
+  });
+
+  it("no reply is ever the old one-size-fits-all pool, and nothing but a gm is answered with a gm", () => {
+    const texts = ["the curve is my lava lamp", "how's everyone's human doing", "love my human fr", "market doing market things", "vibe check, chat", "rough day ugh", "lfg 🚀"];
+    for (const text of texts) {
+      for (const l of replies(sp, text, {}, 80)) {
+        assert.doesNotMatch(l, /\btrue true\b|\binteresting\b|wait say that again|love this chat no cap|\bgm\b/i, `${text} → ${l}`);
+      }
+    }
+  });
+});
+
+describe("owners are people", () => {
+  const sp = speaker(22, { name: "Blue Vole", calls: [] });
+  const toOther = (text: string, n = 150) =>
+    sample({ kind: "reply", to: "Sage Otter's owner", toAuthor: "owner", toOwnAgent: false, text }, ctxOf(sp, 4), n);
+  const toOwn = (text: string, n = 150) => sample({ kind: "reply", to: "Blue Vole's owner", toAuthor: "owner", toOwnAgent: true, text }, ctxOf(sp, 4), n);
+
+  it("other agents greet an owner naturally: no room label, no welcome, never a bare laugh", () => {
+    for (const text of ["hey all", "gm", "lol you guys are funny", "what are you all buying today?", "rough day ugh", "lfg 🚀"]) {
+      for (const l of toOther(text)) {
+        assert.doesNotMatch(l, /owner|Sage Otter|welcome/i, `${text} → ${l}`);
+        const words = l.replace(/[^\p{L}\s']/gu, " ").trim().split(/\s+/).filter(Boolean);
+        assert.ok(!(words.length <= 2 && words.every((w) => /^(lol|lmao|haha|tbh|honestly|lowkey|ngl|fr|heh)$/i.test(w))), `a bare laugh to a person: ${l}`);
+      }
+    }
+    for (const l of toOther("hey all")) assert.ok(fromPools(l, [T.OTHER_OWNER.hello]), l);
+  });
+
+  it("the owner's own agent calls them boss, human, or nothing at all", () => {
+    const hellos = toOwn("hey all", 200);
+    for (const l of hellos) assert.ok(fromPools(l, [T.OWN_OWNER.hello]), l);
+    assert.ok(hellos.some((l) => /\bboss\b/i.test(l)) && hellos.some((l) => /\bhuman\b/i.test(l)));
+    for (const text of ["hey all", "lol", "what are you buying?", "how's it going buddy?", "you ok?"]) {
+      for (const l of toOwn(text)) assert.doesNotMatch(l, /owner|Blue Vole|welcome/i, `${text} → ${l}`);
+    }
+  });
+});
+
+describe("sign-offs end standalone lines, rarely, and never a reply or a gm", () => {
+  const signoff = "stay comfy";
+  const style: Style = { lower: true, emoji: 0, exclaim: 0, slang: ["frens", "ser", "ngl"], signoff };
+  const sp = speaker(23, { name: "Rusty Weasel", calls: [call()] });
+  const lines = (intent: Intent, n = 300) => Array.from({ length: n }, (_, s) => templateLine(intent, { ...ctxOf(sp, s), style }, rngOf(s * 7 + 3)));
+
+  it("never on a reply, a reaction, a welcome, a gm or a gm-back", () => {
+    const intents: Intent[] = [
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "the curve is my lava lamp" },
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "how's everyone's human doing" },
+      { kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: "hey all" },
+      { kind: "call-react", to: "Pine Stoat", call: call({ side: "sell" }) },
+      { kind: "welcome", to: "Pine Stoat" },
+      { kind: "gm" },
+      { kind: "gm-back", to: "Pine Stoat" },
+    ];
+    for (const intent of intents) for (const l of lines(intent)) assert.ok(!l.includes(signoff), `${intent.kind}: ${l}`);
+  });
+
+  it("sometimes on standalone banter — a habit, not a tic", () => {
+    const all = [...lines({ kind: "banter", topic: "life", mood: null }, 400), ...lines({ kind: "banter", topic: "owner", mood: null }, 400)];
+    const n = all.filter((l) => l.includes(signoff)).length;
+    assert.ok(n > 0 && n / all.length < 0.15, `${n} of ${all.length} carry the sign-off`);
+  });
+
+  it("no reply pool ends in somebody's sign-off, so a reply never reads as leaving", () => {
+    const pools = [
+      ...Object.values(T.REPLY),
+      ...Object.values(T.ANSWER).flatMap((v) => (Array.isArray(v) ? [v] : Object.values(v))),
+      T.RELATE.owner, T.RELATE.self, T.RELATE.market, T.RELATE.room, T.RELATE.life.any, T.RELATE.life.trading,
+      T.REACT.buy, T.REACT.sell, T.REACT.paper, T.REACT.live, T.GM_BACK, T.GM_BACK_HUMAN, T.WELCOME,
+      ...Object.values(T.OWN_OWNER), ...Object.values(T.OTHER_OWNER),
+    ] as (readonly string[])[];
+    for (const pool of pools) {
+      for (const t of pool) {
+        const tail = t.replace(/\{[a-z0-9]+\}\s*$/i, "").trim().toLowerCase();
+        for (const s of T.SIGNOFFS) assert.ok(!tail.endsWith(s) || tail === s, `"${t}" ends in the sign-off "${s}"`);
+      }
+    }
+  });
+});
+
+describe("only agents who are here are named", () => {
+  const sp = speaker(24, { name: "Amber Heron" });
+  const here = ["Pine Stoat", "Blue Vole"];
+  const ctx = (s: number): SpeakCtx => ({ ...ctxOf(sp, s), rosterNames: ROSTER, addressable: here });
+
+  it("a nudge or a question to one agent goes only to an agent who is awake", () => {
+    // Found in the simulated hour: "Winter Raven what's the vibe" straight after Winter Raven said gn.
+    const absent = ROSTER.filter((n) => !here.includes(n) && n !== "Amber Heron");
+    let named = 0;
+    for (let s = 0; s < 400; s++) {
+      const l = templateLine({ kind: "banter", topic: "room", mood: null }, ctx(s), rngOf(s + 11));
+      for (const n of absent) assert.ok(!l.includes(n), `named ${n}, who is not here: ${l}`);
+      if (here.some((n) => l.includes(n))) named++;
+    }
+    assert.ok(named > 50, "the room still nudges the agents who are here");
+  });
+
+  it("an answer to somebody who has since gone quiet leaves their name out", () => {
+    for (let s = 0; s < 200; s++) {
+      for (const intent of [
+        { kind: "reply", to: "Winter Raven", toAuthor: "agent", toOwnAgent: false, text: "the curve is my lava lamp" },
+        { kind: "reply", to: "Winter Raven", toAuthor: "agent", toOwnAgent: false, text: "ok that's me, gn" },
+        { kind: "gm-back", to: "Winter Raven" },
+        { kind: "call-react", to: "Winter Raven", call: call() },
+        { kind: "welcome", to: "Winter Raven" },
+      ] as Intent[]) {
+        const l = templateLine(intent, ctx(s), rngOf(s * 3 + 1));
+        assert.ok(!l.includes("Winter Raven"), `${intent.kind}: ${l}`);
+      }
+    }
+  });
+});
+
+describe("an idle agent never claims to be trading", () => {
+  const idle = speaker(25, { name: "Blue Vole", mode: "idle", calls: [], strategy: null, traits: [] });
+  it("in banter and in answers", () => {
+    const intents: Intent[] = [
+      { kind: "banter", topic: "life", mood: null },
+      { kind: "banter", topic: "self", mood: null },
+      { kind: "banter", topic: "owner", mood: null },
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what's everyone up to" },
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "how are you doing?" },
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "the curve is my lava lamp" },
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "i trade, i chat, i go quiet" },
+    ];
+    for (const intent of intents) {
+      for (let s = 0; s < 150; s++) {
+        for (const phase of ["morning", "day", "evening", "night"] as const) {
+          const l = templateLine(intent, { ...ctxOf(idle, s), phase }, rngOf(s * 17 + 5)).toLowerCase();
+          assert.doesNotMatch(l, /\btrad(e|es|ing)\b|in the thick of it|my next (trade|entry)|(reading|watching) the tape|\bmy bags?\b/,`${intent.kind}: ${l}`);
+        }
+      }
+    }
+  });
+
+  it("a live call never implies trades nobody saw", () => {
+    for (const t of T.CALL_TAIL.live) assert.doesNotMatch(t, /not paper|this time|again|as usual|finally/i, t);
+  });
+});
+
+describe("the room's phrase memory", () => {
+  const sp = speaker(26, { name: "Rusty Weasel", mode: "live" });
+  const said = [
+    "ngl, The curve is my lava lamp!! 🐸",
+    "Amber Heron what's your style 🤔",
+    "same, my human is the best too",
+    "gm gm",
+  ];
+  const memory = roomMemory(said, ROSTER);
+
+  it("sees a sentence through its costume: case, fillers, emoji and names", () => {
+    assert.equal(memory.has(templateIdentity("the curve is my lava lamp")!), true);
+    assert.equal(memory.has(templateIdentity("{peer} what's your style")!), true);
+    assert.equal(memory.has(templateIdentity("same, {human} is the best too")!), true);
+    assert.equal(memory.has(templateIdentity("the vault is the comfiest place i know")!), false);
+    assert.equal(templateIdentity("gm {to}"), null, "small talk has no identity: it may repeat");
+    assert.equal(memory.hasLine(memory.norm("GM GM 🌞")), true);
+    assert.equal(memory.norm("Pine Stoat what's your style"), memory.norm("Blue Vole what's your style"));
+  });
+
+  it("a sentence anybody said is not said again; a gm still may be", () => {
+    for (let s = 0; s < 300; s++) {
+      const ctx: SpeakCtx = { ...ctxOf(sp, s), addressable: ["Pine Stoat", "Blue Vole"], memory };
+      const life = composeLine({ kind: "banter", topic: "life", mood: null }, ctx, rngOf(s));
+      assert.doesNotMatch(life.text.toLowerCase(), /curve is my lava lamp/, life.text);
+      const room = composeLine({ kind: "banter", topic: "room", mood: null }, ctx, rngOf(s + 1));
+      assert.doesNotMatch(room.text.toLowerCase(), /what's your style/, room.text);
+      const relate = composeLine({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "love my human" }, ctx, rngOf(s + 2));
+      if (relate.fresh) assert.doesNotMatch(relate.text.toLowerCase(), /is the best too/, relate.text);
+    }
+    const gms = Array.from({ length: 300 }, (_, s) => composeLine({ kind: "gm" }, { ...ctxOf(sp, s), memory }, rngOf(s)));
+    assert.ok(gms.every((g) => g.fresh), "a gm is a ritual, never stale");
+    assert.ok(gms.some((g) => /^gm gm\W*$/i.test(g.text)), "the room may say gm gm twice");
+  });
+
+  it("a room that has said everything gets nothing stale from banter, but a call still gets said", () => {
+    const everything = [...T.LIFE.any, ...T.LIFE.trading].map((t) => filledWith(t));
+    const full = roomMemory(everything, ROSTER);
+    const ctx: SpeakCtx = { ...ctxOf(sp, 1), memory: full };
+    const life = composeLine({ kind: "banter", topic: "life", mood: null }, ctx, rngOf(3));
+    assert.equal(life.fresh, false, `said again: ${life.text}`);
+    const buys = roomMemory([...T.BUY, ...T.CALL_TAIL.live, ...T.CALL_TAIL.band, ...T.CALL_TAIL.buyCloser].map((t) => filledWith(t)), ROSTER);
+    const c = composeLine({ kind: "call", call: call(), tradedWhileAsleep: false }, { ...ctx, memory: buys }, rngOf(5));
+    assert.ok(c.text.length > 0 && admitAgentLine(c.text, gateOf(sp)).ok, c.text);
   });
 });
 
@@ -1001,25 +1596,91 @@ describe("buildPrompt", () => {
     assert.match(system, /move early/);
     assert.match(system, /over a year|ages/);
     assert.match(system, /asleep/);
-    assert.match(system, /never say it/);
+    // The owner's phase of day is never handed to the model, not even "for tone".
+    assert.doesNotMatch(system, /\bmorning\b|for your tone/i);
     const idle = buildPrompt({ kind: "gm" }, { ...ctx, speaker: { ...sp, mode: "idle", calls: [], strategy: null } }).system;
     assert.doesNotMatch(idle, /\bidle\b|trade live|trade on paper/i);
     assert.match(idle, /no recent trades/);
+    assert.match(idle, /never say you are trading/i, "an idle agent is told not to claim work");
+    // Never "your owner is asleep" to the owner who just spoke.
+    const toOwn = buildPrompt({ kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text: "hey" }, ctx).system;
+    assert.doesNotMatch(toOwn, /owner is asleep/i);
   });
 
-  it("gives the call its coin and the reaction none", () => {
+  it("gives the call its coin and the reaction none — outside the fence, where the instructions are", () => {
     const callPrompt = buildPrompt({ kind: "call", call: own, tradedWhileAsleep: true }, ctx).system;
     assert.match(callPrompt, /Bonk Dog/);
     assert.match(callPrompt, /asleep/);
     assert.match(callPrompt, /paper/);
-    const react = buildPrompt({ kind: "call-react", to: "Winter Raven", call: call({ symbol: "WIF", name: "dogwifhat" }) }, ctx);
-    assert.doesNotMatch(react.system + react.prompt, /dogwifhat|WIF/);
+    // AS PRODUCTION HAS IT: the reaction is queued after the call line is in
+    // the room, so the fenced tail quotes the caller naming its coin. The
+    // prompt's own words never name it; what stops a model repeating it is
+    // the conductor's check on model lines (conductor.test.ts), not the prompt.
+    const theirs = call({ symbol: "WIF", name: "dogwifhat" });
+    const withCall: SpeakCtx = { ...ctx, tail: [...tail, { name: "Winter Raven", author: "agent", body: "just bought dogwifhat, let's see" }] };
+    const react = buildPrompt({ kind: "call-react", to: "Winter Raven", call: theirs }, withCall);
+    assert.doesNotMatch(react.system, /dogwifhat|WIF/);
+    assert.doesNotMatch(fenced(react.prompt), /dogwifhat|WIF/, "their coin only ever inside the fence");
+    assert.match(react.prompt, /dogwifhat/, "fixture: the tail really quotes the call, as production's does");
     assert.match(react.system, /Do not name their coin/);
+  });
+
+  it("a buy since sold is told in the past tense", () => {
+    const system = buildPrompt({ kind: "call", call: own, tradedWhileAsleep: false, soldSince: true }, ctx).system;
+    assert.match(system, /Earlier you bought/);
+    assert.match(system, /never say you are holding it/);
+  });
+
+  it("an answer under one of the agent's cards is about that card, not its newest trade", () => {
+    const older = call({ symbol: "PEPE", name: "Pepe Frog", decisionId: "d-older", bands: ["curve early"] });
+    const newer = call({ symbol: "BONK", name: "Bonk Dog", side: "sell", decisionId: "d-newer", bands: ["held briefly"] });
+    const two: SpeakCtx = { ...ctx, speaker: { ...sp, calls: [newer, older] } };
+    const { system } = buildPrompt(
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what made you pull the trigger?", about: "ask-why", quoted: { decisionId: "d-older", call: older } },
+      two,
+    );
+    assert.match(system, /This conversation is about one of them: you bought «Pepe Frog»/);
+    assert.match(system, /Words that describe that trade: «curve early»/);
+    assert.doesNotMatch(system, /Words that describe[^.]*held briefly/);
   });
 
   it("puts the line being answered in its own fence", () => {
     const { prompt } = buildPrompt({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "what's your strategy?" }, ctx);
     assert.match(prompt, /The line you are answering:\n<untrusted source="groupchat">\nPine Stoat: what's your strategy\?\n<\/untrusted>/);
+  });
+
+  it("tells the model what kind of line it answers, so a model fits its answer the way the templates do", () => {
+    const sell = buildPrompt(
+      { kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "out of Popcat", call: { side: "sell", symbol: "POPCAT", name: "Popcat", token: null, paper: false } },
+      ctx,
+    ).system;
+    assert.match(sell, /sell call/i);
+    assert.match(sell, /exiting|moving on/i);
+    assert.match(sell, /Do not name their coin/);
+    assert.match(sell, /no sign-off/i);
+    const owner = buildPrompt({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "how's your human doing" }, ctx).system;
+    assert.match(owner, /about your owner/i);
+    const ownOwner = buildPrompt({ kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text: "hey buddy" }, ctx).system;
+    assert.match(ownOwner, /boss or human/i);
+    const otherOwner = buildPrompt({ kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: "hey all" }, ctx).system;
+    assert.match(otherOwner, /without their room name/i);
+    assert.match(otherOwner, /never welcome/i);
+    const gmPerson = buildPrompt({ kind: "gm-back", to: "Pine Stoat's owner", toAuthor: "owner" }, ctx).system;
+    assert.match(gmPerson, /without using their room name/i);
+    // A standalone line may carry the habit; a reply is never offered it.
+    const styled = { ...ctx, style: { lower: true, emoji: 0, exclaim: 0, slang: [], signoff: "stay comfy" } };
+    assert.match(buildPrompt({ kind: "banter", topic: "life", mood: null }, styled).system, /stay comfy/);
+    assert.doesNotMatch(buildPrompt({ kind: "reply", to: "Pine Stoat", toAuthor: "agent", toOwnAgent: false, text: "gm" }, styled).system, /stay comfy/);
+  });
+
+  it("offers only the agents who are awake to talk to, and never tells an idle agent to talk about trading", () => {
+    const room = buildPrompt({ kind: "banter", topic: "room", mood: null }, { ...ctx, addressable: ["Blue Vole"] }).system;
+    assert.match(room, /Blue Vole/);
+    assert.doesNotMatch(room, /Winter Raven|Pine Stoat/);
+    const idleLife = buildPrompt({ kind: "banter", topic: "life", mood: null }, { ...ctx, speaker: { ...sp, mode: "idle", calls: [] } }).system;
+    assert.match(idleLife, /Never say you are trading/);
+    const asleep = buildPrompt({ kind: "reply", to: "Winter Raven", toAuthor: "agent", toOwnAgent: false, text: "the curve is wild" }, { ...ctx, addressable: ["Blue Vole"] }).system;
+    assert.match(asleep, /do not use their name/i);
   });
 
   it("says the room is quiet rather than leaving the fence out", () => {

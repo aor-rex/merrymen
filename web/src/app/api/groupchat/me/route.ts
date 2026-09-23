@@ -20,16 +20,26 @@
  * source: "owner"}` forgets the zone as the owner's decision, so the agent
  * never sleeps until they pick one, instead of until the next page load.
  *
- * Hosted only (404 otherwise), like the room it describes.
+ * A BROWSER THAT SAYS "UTC" — OR "REYKJAVIK" — IS NOT SAYING WHERE ITS OWNER
+ * IS. Privacy browsers report one zone to everybody: Tor Browser since 13.5
+ * (Bug 42397), Mullvad Browser (built on it) and Firefox with
+ * resistFingerprinting say Atlantic/Reykjavik, older ones UTC. Storing either
+ * would put that owner's agent to sleep through the UTC night, which is
+ * somebody's afternoon. A browser capture of UTC, of any Etc/* zone, or of
+ * Atlantic/Reykjavik (alias Iceland) is dropped: nothing is written and the
+ * current state is the answer. An owner who PICKS any of them on the chat
+ * screen gets it.
+ *
+ * Hosted only and only while the room is on (404 otherwise), like the room it
+ * describes.
  */
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import type { Db } from "../../../../../../worker/src/db";
 import { canonicalTz, fmtHm, sleepWindow } from "../../../../../../worker/src/groupchat/clock";
 import { getMember, setMemberPrefs } from "../../../../../../worker/src/groupchat/store";
 import type { MeResponse, TzSource } from "../../../../../../worker/src/groupchat/types";
-import { agentOf, objectOf, PRIVATE_HEADERS, readBounded, roomNow, speakerOf, withRoom } from "../room";
+import { agentOf, objectOf, PRIVATE_HEADERS, readBounded, roomNow, roomOpen, speakerOf, withRoom } from "../room";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -79,7 +89,7 @@ async function meFor(db: Db, tenant: `0x${string}`): Promise<MeResponse> {
 }
 
 export async function GET(req: Request) {
-  if (!isHostedMode()) return refuse(404, "not found");
+  if (!roomOpen()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   // Signed out is a complete answer, not an error: the screen shows the room
   // and says why there is no composer.
@@ -97,8 +107,39 @@ type Change =
   | { ok: true; zone?: { tz: string | null; tzSource: TzSource }; muted?: boolean }
   | { ok: false; error: string };
 
+/**
+ * What a browser reports when it will not say where it is: UTC under each of
+ * its names, the Etc/* zones, and Iceland's zone under both of its names —
+ * the one Tor Browser (since 13.5), Mullvad Browser and Firefox's
+ * resistFingerprinting spoof now. Matched on the spelling sent AND the one
+ * Intl resolves it to, because engines differ on which alias they hand back.
+ * Browser captures only: an owner in Iceland picks the zone on the chat screen.
+ */
+const PLACELESS = new Set([
+  "utc",
+  "etc/utc",
+  "etc/gmt",
+  "gmt",
+  "universal",
+  "zulu",
+  "uct",
+  "greenwich",
+  "gmt0",
+  "gmt+0",
+  "gmt-0",
+  "atlantic/reykjavik",
+  "iceland",
+]);
+function placeless(zone: string): boolean {
+  const z = zone.trim().toLowerCase();
+  return PLACELESS.has(z) || z.startsWith("etc/");
+}
+
 function changeOf(input: Record<string, unknown>): Change {
   const out: { ok: true; zone?: { tz: string | null; tzSource: TzSource }; muted?: boolean } = { ok: true };
+  // A browser's UTC, read and deliberately not recorded: a complete request
+  // whose answer is the current state, not "nothing to change".
+  let dropped = false;
   if ("muted" in input) {
     if (typeof input.muted !== "boolean") return { ok: false, error: "muted is true or false." };
     out.muted = input.muted;
@@ -113,15 +154,16 @@ function changeOf(input: Record<string, unknown>): Change {
     } else {
       const tz = canonicalTz(input.tz);
       if (!tz) return { ok: false, error: "That isn't a time zone we know." };
-      out.zone = { tz, tzSource: source };
+      if (source === "browser" && (placeless(tz) || placeless(String(input.tz)))) dropped = true;
+      else out.zone = { tz, tzSource: source };
     }
   }
-  if (!out.zone && out.muted === undefined) return { ok: false, error: "Nothing to change." };
+  if (!out.zone && out.muted === undefined && !dropped) return { ok: false, error: "Nothing to change." };
   return out;
 }
 
 export async function POST(req: Request) {
-  if (!isHostedMode()) return refuse(404, "not found");
+  if (!roomOpen()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in to change this.");
 

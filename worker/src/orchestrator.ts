@@ -43,7 +43,10 @@ import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-check
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
-import { groupChatCreds } from "./groupchat/voice";
+import { describeCreds, groupChatCreds } from "./groupchat/voice";
+// The fleet's default trading model, so the room can say when its own model is
+// the same one (see groupChatModelWarning).
+import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
@@ -4920,9 +4923,106 @@ let groupChatInFlight = false;
 /** The last failure logged, so a broken database is one line and not one every 15 s. */
 let groupChatLastFailure: { text: string; at: number } | null = null;
 
+/**
+ * The room's knobs, read the way an operator means them.
+ *
+ * SET-BUT-EMPTY IS UNSET. A blank variable is how a dashboard "clears" one, and
+ * Number("") is 0 — which switched the model off for an operator who had just
+ * asked for the default back.
+ *
+ * ZERO LINES AN HOUR IS A SILENT ROOM. It used to fail a `> 0` check and run at
+ * the default 240 — the opposite of what an operator turning it down meant.
+ *
+ * A VALUE THAT CANNOT BE READ IS SAID OUT LOUD, once. The model allowance then
+ * fails CLOSED — the model is the one part of the room that can cost trading
+ * anything (docs/groupchat.md rule 4) — while an unreadable line ceiling keeps
+ * its default, because template lines cost nobody anything.
+ */
+export interface GroupChatEnv {
+  /** The boot line saying why the room is off, or null when it runs. */
+  off: string | null;
+  perHour: number | undefined;
+  llmPerDay: number | undefined;
+  /** One boot line per value that was set and could not be honoured as written. */
+  notes: string[];
+}
+
+export function groupChatEnv(env: Record<string, string | undefined> = process.env): GroupChatEnv {
+  const shown = (raw: string) => JSON.stringify(raw.slice(0, 32));
+  const none = { perHour: undefined, llmPerDay: undefined, notes: [] };
+  if ((env.MERRYMEN_GROUPCHAT ?? "").trim() === "0") {
+    return { ...none, off: "groupchat: off — MERRYMEN_GROUPCHAT=0, so this orchestrator writes no agent lines" };
+  }
+  const notes: string[] = [];
+  let perHour: number | undefined;
+  const hourRaw = env.MERRYMEN_GROUPCHAT_PER_HOUR?.trim();
+  if (hourRaw) {
+    const n = Number(hourRaw);
+    if (!Number.isFinite(n) || n < 0) {
+      notes.push(`groupchat: ignoring MERRYMEN_GROUPCHAT_PER_HOUR=${shown(hourRaw)} — not a count of lines; the room keeps its default ceiling`);
+    } else if (Math.floor(n) === 0) {
+      return { ...none, off: "groupchat: off — MERRYMEN_GROUPCHAT_PER_HOUR=0 allows no room lines" };
+    } else {
+      perHour = n;
+    }
+  }
+  let llmPerDay: number | undefined;
+  const dayRaw = env.MERRYMEN_GROUPCHAT_LLM_PER_DAY?.trim();
+  if (dayRaw) {
+    const n = Number(dayRaw);
+    if (Number.isFinite(n) && n >= 0) {
+      llmPerDay = n;
+    } else {
+      llmPerDay = 0;
+      notes.push(`groupchat: MERRYMEN_GROUPCHAT_LLM_PER_DAY=${shown(dayRaw)} is not a count of calls — no model calls until it is; templates carry the room`);
+    }
+  }
+  return { off: null, perHour, llmPerDay, notes };
+}
+
+/**
+ * A ROOM KEY FROM THE HOUSE'S OWN GROQ ORGANIZATION STILL STARVES TRADING.
+ *
+ * groupChatCreds refuses a key that IS a fleet key, which is all a process can
+ * see. Groq rations per ORGANIZATION and per MODEL, not per key: a second key
+ * made in the house account is a different string, passes that check, and
+ * spends the per-minute and per-day allowance the scout and every agent's
+ * reasoning live inside — the 2026-08-31 exhaustion again. Which org a key
+ * belongs to cannot be read from here, so this warns rather than refuses, and
+ * it fires exactly when the room would run on the model trading runs on: the
+ * case where a shared org means a shared allowance.
+ */
+export function groupChatModelWarning(
+  creds: { model: string } | null,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (!creds) return null;
+  // Said in so many words already — describeCreds names the fleet key it shares.
+  if (env.MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY === "1") return null;
+  if (!env.GROQ_API_KEY?.trim()) return null;
+  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || GROUPCHAT_FLEET_DEFAULTS.groqModel;
+  if (creds.model.trim().toLowerCase() !== fleetModel.toLowerCase()) return null;
+  return (
+    `groupchat: WARNING — the room's model ${creds.model} is the fleet's trading model. Groq rate-limits per ` +
+    `organization and per model, not per key, so MERRYMEN_GROUPCHAT_LLM_KEY must come from a SEPARATE Groq ` +
+    `organization: a second key in the house org spends trading's per-minute and daily allowance. If it does ` +
+    `not, set MERRYMEN_GROUPCHAT_MODEL to a model trading does not use, or MERRYMEN_GROUPCHAT_LLM_PER_DAY=0`
+  );
+}
+
+/** The knobs, read once: the environment does not change under a running process. */
+let groupChatKnobs: GroupChatEnv | null = null;
+
 function startGroupChatPass(): void {
   if (groupChatInFlight || stopping) return;
-  if ((process.env.MERRYMEN_GROUPCHAT ?? "").trim() === "0") return;
+  if (!groupChatKnobs) {
+    groupChatKnobs = groupChatEnv();
+    // Said once, on the first pass: an operator who flips a switch and
+    // redeploys is watching for the line that says it took.
+    if (groupChatKnobs.off) log(groupChatKnobs.off);
+    for (const note of groupChatKnobs.notes) log(note);
+  }
+  if (groupChatKnobs.off) return;
   if (!process.env.DATABASE_URL || children.size === 0) return;
   groupChatInFlight = true;
   void runGroupChatPass().finally(() => {
@@ -4933,15 +5033,16 @@ function startGroupChatPass(): void {
 async function runGroupChatPass(): Promise<void> {
   try {
     if (!groupChat) {
-      const perHour = Number(process.env.MERRYMEN_GROUPCHAT_PER_HOUR);
-      const llmPerDay = Number(process.env.MERRYMEN_GROUPCHAT_LLM_PER_DAY);
-      groupChat = makeConductor({
-        // The room's OWN key or none: groupChatCreds refuses every fleet key.
-        creds: groupChatCreds(),
-        perHour: Number.isFinite(perHour) && perHour > 0 ? perHour : undefined,
-        llmPerDay: Number.isFinite(llmPerDay) && llmPerDay >= 0 ? llmPerDay : undefined,
-      });
-      log(`groupchat: ${groupChat.plan().why}`);
+      const knobs = groupChatKnobs ?? groupChatEnv();
+      // The room's OWN key or none: groupChatCreds refuses every fleet key.
+      const creds = groupChatCreds();
+      groupChat = makeConductor({ creds, perHour: knobs.perHour, llmPerDay: knobs.llmPerDay });
+      // plan().why carries its own "groupchat:" prefix. describeCreds says WHY
+      // the voice is what it is — a refused key is otherwise just "templates only".
+      log(groupChat.plan().why);
+      log(describeCreds(creds));
+      const warning = groupChatModelWarning(creds);
+      if (warning) log(warning);
     }
     const shared = await makePgDb(process.env.DATABASE_URL!);
     // ONLY WHO THIS REPLICA SPEAKS FOR. The same lease gate as the mirror: a

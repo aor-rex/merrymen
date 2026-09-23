@@ -21,7 +21,17 @@ import { everyBand } from "../class-evidence";
 import { wrapSqlite, type Db } from "../db";
 import { resetIdentityStoreForTest } from "../identity-store";
 import { applyLedgerSchema } from "../store";
-import { callsSql, chatProfileOf, loadFacts, roomName, rosterSql, type AgentFacts, type ChatProfile } from "./facts";
+import {
+  cachedIdentities,
+  callsSql,
+  chatProfileOf,
+  loadFacts,
+  roomName,
+  rosterSql,
+  settleRoomNames,
+  type AgentFacts,
+  type ChatProfile,
+} from "./facts";
 
 const NOW = 1_790_000_000;
 
@@ -375,6 +385,295 @@ describe("roomName", () => {
     assert.equal(roomName("", null), DEFAULT_AGENT_NAME);
     assert.equal(roomName(DEFAULT_AGENT_NAME, null), DEFAULT_AGENT_NAME);
   });
+
+  it("replaces a name the room's own gate would refuse as an address, a link or a secret", () => {
+    // Each of these fits the stored-name rule and would head every line the
+    // agent writes, and sit in the public presence list, without passing a door.
+    const generated = agentNameForSlug(SLUG1);
+    for (const name of [
+      "0XDEADBEEF12345678",
+      "A0x1234567",
+      "d8da6bf26964af9d7eed9e03",
+      "pump.fun",
+      "vitalik.eth",
+      "t.me",
+      "evil.com",
+      "t.me/x",
+      "@elonmusk",
+      "sk-proj1234567890abcdef",
+      "AKIAABCDEFGHIJKLMNOP",
+    ]) {
+      assert.equal(roomName(name, SLUG1), generated, name);
+      assert.equal(roomName(name, null), DEFAULT_AGENT_NAME, name);
+    }
+  });
+
+  it("replaces a name that reads as an owner's label, which heads every owner line", () => {
+    // The web route labels an owner's line "<agent>'s owner"; an agent named
+    // that would post as a person. Any case, any apostrophe, or none.
+    const generated = agentNameForSlug(SLUG1);
+    for (const name of [
+      "Bob's owner",
+      "BOB'S OWNER",
+      "Bob’s Owner",
+      "Bobʼs owner",
+      "Bobʻs owner",
+      "Bobs' owner",
+      "Bob s owner",
+      "Bob'sOwner",
+      "Bob's owners",
+      "Robin's human",
+      "owner",
+      "Owner",
+      "OWNERS",
+      "the owner",
+      "human",
+      "Humans",
+      "Own-er",
+      "ᴏᴡɴᴇʀ",
+    ]) {
+      assert.equal(roomName(name, SLUG1), generated, name);
+      assert.equal(roomName(name, null), DEFAULT_AGENT_NAME, name);
+    }
+  });
+
+  it("replaces a name that reads as the room's own voice, in any case, spacing or lookalike", () => {
+    const generated = agentNameForSlug(SLUG1);
+    for (const name of [
+      "merrymen",
+      "Merrymen",
+      "MERRYMEN",
+      "Merry Men",
+      "merry-men",
+      "m.e.r.r.y.m.e.n",
+      "Mеrrymen", // Cyrillic е
+      "ᴍᴇʀʀʏᴍᴇɴ",
+      "merry‍men",
+      "mérrymen",
+    ]) {
+      assert.equal(roomName(name, SLUG1), generated, JSON.stringify(name));
+      assert.equal(roomName(name, null), DEFAULT_AGENT_NAME, JSON.stringify(name));
+    }
+  });
+
+  it("knows the room's voice by the name the conductor actually posts under", () => {
+    const src = readFileSync(join(import.meta.dirname, "conductor.ts"), "utf8");
+    const system = /const SYSTEM_NAME = "([^"]+)"/.exec(src)?.[1];
+    assert.ok(system, "conductor.ts names its system speaker");
+    assert.equal(roomName(system, SLUG1), agentNameForSlug(SLUG1));
+  });
+
+  it("replaces an owner's label with a trailing mark, a dropped apostrophe, or an apostrophe drawn some other way", () => {
+    // Every one of these passes the stored-name rule, so an owner can type it
+    // today, and each would head the agent's lines as another agent's owner.
+    const generated = agentNameForSlug(SLUG1);
+    for (const name of [
+      "Pine Stoat's owner.",
+      "Pine Stoat's owner-",
+      "Pine Stoat's owner'",
+      "Pine Stoat's owner .",
+      "Pine Stoats owner",
+      "Pine Stoats Owner",
+      "Pine Stoats human",
+      "Bobs owner",
+      "Pine Stoat̕s owner", // COMBINING COMMA ABOVE RIGHT
+      "Pine Stoat̓s owner", // COMBINING COMMA ABOVE
+      "Pine Stoat̒s owner", // COMBINING TURNED COMMA ABOVE
+      "Pine Stoat̔s owner", // COMBINING REVERSED COMMA ABOVE
+      "Pine Stoat̛s owner", // COMBINING HORN
+      "Pine Stoat̓s owner", // COMBINING GREEK KORONIS
+      "Pine Stoatˮs owner", // MODIFIER LETTER DOUBLE APOSTROPHE
+      "Pine Stoatՙs owner", // ARMENIAN MODIFIER LETTER LEFT HALF RING
+      "Pine Stoatߴs owner", // NKO HIGH TONE APOSTROPHE
+      "Pine Stoatߵs owner", // NKO LOW TONE APOSTROPHE
+    ]) {
+      assert.equal(roomName(name, SLUG1), generated, JSON.stringify(name));
+      assert.equal(roomName(name, null), DEFAULT_AGENT_NAME, JSON.stringify(name));
+    }
+    for (const name of ["Owner 2", "Agent 47", "Chris Owner", "Mrs Owner"]) assert.equal(roomName(name, SLUG1), name, name);
+  });
+
+  it("keeps a name that only mentions an owner, or is simply not Latin", () => {
+    for (const name of ["Chris Owner", "Owner Of Bob", "Mrs Owner", "Humane Hare", "Merry Marten", "Робин", "Deadbeef"]) {
+      assert.equal(roomName(name, SLUG1), name, name);
+    }
+  });
+
+  it("replaces a name that reads as a figure, which every model would be shown as who is talking", () => {
+    const generated = agentNameForSlug(SLUG1);
+    for (const name of ["Up 400x", "Up 1000 percent", "10k Club", "$100 Gang"]) assert.equal(roomName(name, SLUG1), generated, name);
+    // Digits are not a figure by themselves.
+    for (const name of ["Agent 47", "B2B", "Mr. Robin", "Zoë"]) assert.equal(roomName(name, SLUG1), name);
+  });
+});
+
+describe("one name per agent across the fleet", () => {
+  /** A ledger with these agents rows, and the names loadFacts gives the roster. */
+  async function named(
+    rows: [string, string][],
+    roster: { tenant: string; agentId: string }[],
+    idents: [string, { slug: string; createdAt: number; accounts?: string[] }][],
+  ): Promise<Map<string, AgentFacts>> {
+    const r = new DatabaseSync(":memory:");
+    const d = wrapSqlite(r);
+    try {
+      await applyLedgerSchema(d);
+      for (const [id, name] of rows) await agent(d, { id, name, mode: "live" });
+      return await loadFacts(d, roster, new Map(), NOW, { identities: async () => new Map(idents) });
+    } finally {
+      r.close();
+    }
+  }
+
+  it("two roster agents named 'Pine Stoat' and 'Pine Stoatㅤ': the first minted keeps it, the other takes its slug's name", async () => {
+    const roster = [
+      { tenant: T1, agentId: A1 },
+      { tenant: T2, agentId: A2 },
+    ];
+    const rows: [string, string][] = [
+      [A1, "Pine Stoatㅤ"], // a Hangul filler: invisible, and a letter to the name rule
+      [A2, "Pine Stoat"],
+    ];
+    const t2First = await named(rows, roster, [
+      [T1, { slug: SLUG1, createdAt: NOW - 60 }],
+      [T2, { slug: SLUG2, createdAt: NOW - 86_400 }],
+    ]);
+    assert.equal(t2First.get(T2)!.name, "Pine Stoat");
+    assert.equal(t2First.get(T1)!.name, agentNameForSlug(SLUG1));
+    // Mint order decides — not the roster's order or the rows'. A millisecond stamp is still a stamp.
+    const t1First = await named(rows, roster, [
+      [T1, { slug: SLUG1, createdAt: (NOW - 86_400) * 1000 }],
+      [T2, { slug: SLUG2, createdAt: NOW - 60 }],
+    ]);
+    assert.equal(t1First.get(T1)!.name, "Pine Stoatㅤ");
+    assert.equal(t1First.get(T2)!.name, agentNameForSlug(SLUG2));
+  });
+
+  it("a name reads the same through case, punctuation, lookalikes and invisibles; a different name is untouched", async () => {
+    const idents: [string, { slug: string; createdAt: number }][] = [
+      [T1, { slug: SLUG1, createdAt: NOW - 3000 }],
+      [T2, { slug: SLUG2, createdAt: NOW - 2000 }],
+      [T3, { slug: SLUG3, createdAt: NOW - 1000 }],
+    ];
+    const roster = [
+      { tenant: T1, agentId: A1 },
+      { tenant: T2, agentId: A2 },
+      { tenant: T3, agentId: A3 },
+    ];
+    for (const copy of ["PINE-STOAT", "Pine Stoat.", "Pіne Stoat", "Pine‍ Stoat", "Pine  Stoat", "PineStoat"]) {
+      const out = await named([[A1, "Pine Stoat"], [A2, copy], [A3, "Pine Marten"]], roster, idents);
+      assert.equal(out.get(T1)!.name, "Pine Stoat", copy);
+      assert.equal(out.get(T2)!.name, agentNameForSlug(SLUG2), JSON.stringify(copy));
+      assert.equal(out.get(T3)!.name, "Pine Marten", copy);
+    }
+  });
+
+  it("is settled against the whole fleet, not only the agents this replica runs", async () => {
+    // T3 holds "Pine Stoat" and is not on this roster (another replica, or not running).
+    const idents: [string, { slug: string; createdAt: number; accounts?: string[] }][] = [
+      [T1, { slug: SLUG1, createdAt: NOW - 60 }],
+      [T3, { slug: SLUG3, createdAt: NOW - 86_400, accounts: [A3.toUpperCase().replace("0X", "0x"), A4] }],
+    ];
+    const later = await named([[A1, "Pine Stoat"], [A3, "Pine Stoat"]], [{ tenant: T1, agentId: A1 }], idents);
+    assert.equal(later.get(T1)!.name, agentNameForSlug(SLUG1), "a later agent took an earlier one's name");
+    // …and an off-roster agent minted later takes nothing from one that is here.
+    const earlier = await named([[A1, "Pine Stoat"], [A3, "Pine Stoat"]], [{ tenant: T1, agentId: A1 }], [
+      [T1, { slug: SLUG1, createdAt: NOW - 86_400 }],
+      [T3, { slug: SLUG3, createdAt: NOW - 60, accounts: [A3] }],
+    ]);
+    assert.equal(earlier.get(T1)!.name, "Pine Stoat");
+  });
+
+  it("settleRoomNames: first minted first, a generated name counts, and the loser's fallback is claimed too", () => {
+    const names = new Map<string, unknown>([
+      [A1.toLowerCase(), "Robin"], // T1 unnamed: its slug's generated name
+      [A2, agentNameForSlug(SLUG1)], // T2 chose exactly T1's generated name, later
+      [A3, agentNameForSlug(SLUG2)], // T3 chose T2's generated name, later still
+    ]);
+    const out = settleRoomNames(
+      [
+        { tenant: T3, slug: SLUG3, account: A3, mintedAt: NOW - 10 },
+        { tenant: T2, slug: SLUG2, account: A2, mintedAt: NOW - 20 },
+        { tenant: T1, slug: SLUG1, account: A1, mintedAt: NOW - 30 },
+      ],
+      names,
+    );
+    assert.equal(out.get(T1), agentNameForSlug(SLUG1));
+    assert.equal(out.get(T2), agentNameForSlug(SLUG2), "lost its chosen name to T1's generated one");
+    assert.equal(out.get(T3), agentNameForSlug(SLUG3), "lost its chosen name to T2's fallback");
+  });
+});
+
+describe("cachedIdentities", () => {
+  const row = (tenant: string, slug: string) => ({ tenant, slug, createdAt: NOW, displayName: PRIVY_NAME });
+
+  function counting(rows: () => ReturnType<typeof row>[]) {
+    let reads = 0;
+    return {
+      read: async () => {
+        reads += 1;
+        return rows();
+      },
+      get reads() {
+        return reads;
+      },
+    };
+  }
+
+  it("reads the store once, not once a pass", async () => {
+    const store = counting(() => [row(T1, SLUG1), row(T2, SLUG2)]);
+    let now = 1_000_000;
+    const ids = cachedIdentities(store.read, () => now);
+    for (let pass = 0; pass < 240; pass++) {
+      const got = await ids([T1, T2.toUpperCase().replace("0X", "0x")]);
+      assert.equal(got.get(T1)?.slug, SLUG1);
+      assert.equal(got.get(T2)?.slug, SLUG2);
+      now += 15_000;
+    }
+    assert.equal(store.reads, 1, "an hour of passes read the whole identity table once");
+    // …and keeps nothing social from the rows it was handed.
+    assert.ok(!JSON.stringify([...(await ids([T1])).values()]).includes(PRIVY_NAME));
+  });
+
+  it("reads again at once for a tenant it has not seen, so a new agent is greeted by its real name", async () => {
+    let rows = [row(T1, SLUG1)];
+    const store = counting(() => rows);
+    const now = 1_000_000;
+    const ids = cachedIdentities(store.read, () => now);
+    await ids([T1]);
+    rows = [row(T1, SLUG1), row(T3, SLUG3)];
+    const got = await ids([T1, T3]);
+    assert.equal(got.get(T3)?.slug, SLUG3);
+    assert.equal(store.reads, 2);
+  });
+
+  it("looks for a tenant with no identity at most once a minute, and refreshes hourly", async () => {
+    const store = counting(() => [row(T1, SLUG1)]);
+    let now = 1_000_000;
+    const ids = cachedIdentities(store.read, () => now);
+    for (let pass = 0; pass < 4; pass++) {
+      assert.equal((await ids([T1, T4])).has(T4), false);
+      now += 15_000;
+    }
+    assert.equal(store.reads, 1, "four passes inside a minute");
+    await ids([T1, T4]);
+    assert.equal(store.reads, 2, "a minute later it looks again");
+    now += 60 * 60_000;
+    await ids([T1]);
+    assert.equal(store.reads, 3, "an hour on, the snapshot is read again");
+  });
+
+  it("lets a failed read propagate and keeps the last good snapshot", async () => {
+    let fail = false;
+    const ids = cachedIdentities(async () => {
+      if (fail) throw new Error("identity store down");
+      return [row(T1, SLUG1)];
+    });
+    await ids([T1]);
+    fail = true;
+    await assert.rejects(ids([T1, T3]));
+    assert.equal((await ids([T1])).get(T1)?.slug, SLUG1);
+  });
 });
 
 describe("loadFacts against the ledger schema", () => {
@@ -532,16 +831,63 @@ describe("loadFacts against the ledger schema", () => {
       await applyLedgerSchema(d);
       await agent(d, { id: A1, name: "Busy", mode: "paper" });
       await agent(d, { id: A2, name: "Quiet", mode: "live" });
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 200; i++) {
         const id = await decision(d, { agent: A1, source: "strategy:steady-basket", action: "buy", at: NOW - 10 - i, symbol: "TSLA" });
         await trade(d, { agent: A1, decision: id, status: "paper", buy: TSLA });
       }
       const quiet = await decision(d, { agent: A2, source: "strategy:steady-basket", action: "buy", at: NOW - 5000, symbol: "TSLA" });
       await trade(d, { agent: A2, decision: quiet, status: "landed", buy: TSLA });
       const out = await loadFacts(d, [{ tenant: T1, agentId: A1 }, { tenant: T2, agentId: A2 }], new Map(), NOW, { identities });
-      assert.equal(out.get(T1)!.calls.length, 25);
+      // As many as one agent can announce in the window (30 an hour for six hours), and no more.
+      assert.equal(out.get(T1)!.calls.length, 180);
       assert.equal(out.get(T1)!.calls[0]!.atSec, NOW - 10, "the newest are the ones kept");
       assert.deepEqual(out.get(T2)!.calls.map((c) => c.decisionId), [quiet]);
+    } finally {
+      r.close();
+    }
+  });
+
+  it("keeps a night's backlog whole, because the conductor announces the OLDEST call it has not said", async () => {
+    // An agent that traded all night while its owner slept: forty calls, and on
+    // waking the conductor starts from the earliest. A newest-25 cut would hand
+    // it a list whose oldest entries it had never seen, and the first fifteen
+    // calls of the night would never be said.
+    const r = new DatabaseSync(":memory:");
+    const d = wrapSqlite(r);
+    try {
+      await applyLedgerSchema(d);
+      await agent(d, { id: A1, name: "Night Owl", mode: "paper" });
+      const made: string[] = [];
+      for (let i = 0; i < 40; i++) {
+        const id = await decision(d, { agent: A1, source: "strategy:steady-basket", action: "buy", at: NOW - 5 * 3600 + i * 400, symbol: "TSLA" });
+        await trade(d, { agent: A1, decision: id, status: "paper", buy: TSLA });
+        made.push(id);
+      }
+      const out = await loadFacts(d, [{ tenant: T1, agentId: A1 }], new Map(), NOW, { identities });
+      const calls = out.get(T1)!.calls;
+      assert.equal(calls.length, 40);
+      assert.equal(calls[calls.length - 1]!.decisionId, made[0], "the night's first call is still there to announce");
+    } finally {
+      r.close();
+    }
+  });
+
+  it("drops a coin name the room's gate would refuse, and keeps the call", async () => {
+    const r = new DatabaseSync(":memory:");
+    const d = wrapSqlite(r);
+    try {
+      await applyLedgerSchema(d);
+      await agent(d, { id: A1, name: "Maid Marian", mode: "live" });
+      const names = ["up 500 percent", "pump.fun", "Sly Frog"];
+      for (const [i, displayName] of names.entries()) {
+        const id = await decision(d, { agent: A1, source: "class-route", action: "buy", at: NOW - 100 - i, symbol: `CN${"ABC"[i]}`, displayName });
+        await trade(d, { agent: A1, decision: id, status: "landed", buy: COIN2 });
+      }
+      const out = await loadFacts(d, [{ tenant: T1, agentId: A1 }], new Map(), NOW, { identities });
+      const bySymbol = new Map(out.get(T1)!.calls.map((c) => [c.symbol, c.name]));
+      assert.equal(bySymbol.get("CNA"), null, "a coin name that is a figure");
+      assert.equal(bySymbol.get("CNB"), null, "a coin name that is a link");
+      assert.equal(bySymbol.get("CNC"), "Sly Frog");
     } finally {
       r.close();
     }
@@ -688,7 +1034,7 @@ describe("what this module's SQL may name", () => {
   });
 
   it("never mentions a private column in the statements it actually prepares", () => {
-    for (const sql of [rosterSql(3), callsSql(3).sql]) {
+    for (const sql of [rosterSql(), callsSql(3).sql]) {
       for (const word of FORBIDDEN) assert.ok(!sql.toLowerCase().includes(word), `a SELECT names ${word}`);
       assert.ok(!/\*/.test(sql));
     }

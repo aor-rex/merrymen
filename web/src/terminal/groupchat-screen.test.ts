@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, before, beforeEach, describe, it } from "node:test";
+import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { JSDOM } from "jsdom";
 import React, { act } from "react";
 import type { MeResponse, PublicMessage, RoomState } from "../../../worker/src/groupchat/types";
@@ -31,6 +31,8 @@ let json: typeof import("./test-dom").json;
 let GroupChat: typeof import("./screens/GroupChat").GroupChat;
 let OwnerClock: typeof import("./OwnerClock").OwnerClock;
 let resetGroupChatForTest: typeof import("./groupchat").resetGroupChatForTest;
+let pollNow: typeof import("./groupchat").pollNow;
+let storeForTest: typeof import("./groupchat").storeForTest;
 before(async () => {
   const boot = new JSDOM("<!doctype html><p></p>", { pretendToBeVisual: true });
   const g = globalThis as Record<string, unknown>;
@@ -39,7 +41,7 @@ before(async () => {
   ({ testDom, json } = await import("./test-dom"));
   ({ GroupChat } = await import("./screens/GroupChat"));
   ({ OwnerClock } = await import("./OwnerClock"));
-  ({ resetGroupChatForTest } = await import("./groupchat"));
+  ({ resetGroupChatForTest, pollNow, storeForTest } = await import("./groupchat"));
   Reflect.deleteProperty(g, "window");
   Reflect.deleteProperty(g, "document");
   boot.window.close();
@@ -93,7 +95,11 @@ let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
 let requests: { path: string; search: string; method: string; body: Record<string, unknown> | null }[];
 let me: MeResponse;
-let roomAnswer: () => Response | Promise<Response>;
+/** Held until released, when a test needs /me to land after the room. */
+let meGate: Promise<void> | null;
+/** Who `/api/auth/session` says is signed in. */
+let session: { hosted: boolean; address: string | null };
+let roomAnswer: (search: URLSearchParams) => Response | Promise<Response>;
 let postAnswer: (body: Record<string, unknown>) => Response | Promise<Response>;
 let opened: { profile: string[]; token: string[] };
 
@@ -102,6 +108,8 @@ beforeEach(() => {
   ui = testDom();
   requests = [];
   me = ME({ member: false });
+  meGate = null;
+  session = { hosted: true, address: null };
   opened = { profile: [], token: [] };
   roomAnswer = () => json({ source: "db", messages: LINES, cursor: 106, start: true, room: ROOM });
   postAnswer = (b) => json({ message: { id: 200, at: NOW, author: "owner", slug: "myagent", name: "Robin's owner", body: b.body, replyTo: b.replyTo ?? null, kind: "chat", call: null } });
@@ -112,9 +120,15 @@ beforeEach(() => {
     const method = init?.method ?? "GET";
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
     requests.push({ path: url.pathname, search: url.search, method, body });
-    if (url.pathname === "/api/groupchat/me") return json(me);
+    if (url.pathname === "/api/auth/session") return json(session);
+    if (url.pathname === "/api/groupchat/me") {
+      // The real route: a signed-out POST is a 401, never `signedIn: false`.
+      if (method === "POST" && !session.address) return json({ error: "Sign in to change this." }, 401);
+      if (meGate) await meGate;
+      return json(me);
+    }
     if (url.pathname === "/api/groupchat" && method === "POST") return postAnswer(body ?? {});
-    if (url.pathname === "/api/groupchat") return roomAnswer();
+    if (url.pathname === "/api/groupchat") return roomAnswer(url.searchParams);
     // The face layer asks for uploaded avatars; nobody has one here.
     return new Response(null, { status: 404 });
   }) as typeof fetch;
@@ -168,7 +182,7 @@ describe("the room, as a reader sees it", () => {
     let answer!: () => void;
     const held = new Promise<void>((r) => (answer = r));
     const first = roomAnswer;
-    roomAnswer = () => held.then(first);
+    roomAnswer = (search) => held.then(() => first(search));
     await ui.render(screen());
     assert.ok(q('[aria-busy="true"]'), "waiting is drawn as waiting");
     assert.doesNotMatch(text(), /Nobody has said anything/, "and not as a quiet room");
@@ -177,6 +191,9 @@ describe("the room, as a reader sees it", () => {
     assert.equal(ui.container.querySelectorAll(".gc-row").length, 5, "five spoken lines");
     assert.equal(q(".gc-system")!.textContent, "Robin joined the group chat", "the room's own line, centred and quiet");
     assert.ok(q('[role="log"][aria-live="polite"]'), "a live log the reader's screen reader follows");
+    const scroller = q(".gc-log")!;
+    assert.notEqual(scroller.getAttribute("role"), "log", "the scroller itself is not the live region");
+    assert.equal(scroller.getAttribute("aria-live"), null);
     const owner = row(104).querySelector(".gc-text")!;
     assert.equal(owner.textContent, "<b>not bold</b> https://x.test");
     assert.equal(owner.querySelector("b, a"), null, "no markup and no link was made out of anybody's text");
@@ -235,6 +252,166 @@ describe("the room, as a reader sees it", () => {
     await mount();
     await act(async () => (row(101).querySelector(".gc-name button") as HTMLButtonElement).click());
     assert.deepEqual(opened.profile, ["shogun"]);
+  });
+
+  it("EVERY LINE SAYS WHO SPOKE to assistive tech, not only the first of a run", async () => {
+    await mount();
+    // 103 continues SirSendIt's run from 102: no face, no visible name.
+    assert.equal(row(103).querySelector(".gc-name"), null);
+    assert.equal(row(103).querySelector(".gc-bubble .sr-only")?.textContent, "SirSendIt: ");
+    assert.equal(row(102).querySelector(".gc-bubble .sr-only"), null, "the first line's name is already there to read");
+    assert.equal(row(106).querySelector(".gc-bubble .sr-only")?.textContent, "You: ");
+  });
+
+  it("day separators are read out: text, not a separator whose words are hidden", async () => {
+    await mount();
+    const day = q(".gc-day")!;
+    assert.equal(day.getAttribute("role"), null);
+    assert.equal(day.textContent, "Today");
+  });
+});
+
+describe("what a screen reader hears", () => {
+  const spoken = () => Array.from(ui.container.querySelectorAll('[role="log"][aria-live="polite"] > *')).map((n) => n.textContent);
+
+  it("ONLY NEW LINES — not the reply buttons /me brings, not a page of history, not the first read", async () => {
+    let release!: () => void;
+    meGate = new Promise<void>((r) => (release = r));
+    me = ME();
+    const older: PublicMessage[] = [
+      { id: 90, at: at(30), author: "agent", slug: "shogun", name: "Shogun", body: "old line", replyTo: null, kind: "chat", call: null },
+    ];
+    roomAnswer = (search) =>
+      search.has("before")
+        ? json({ source: "db", messages: older, cursor: 90, start: true, room: ROOM })
+        : json({ source: "db", messages: LINES, cursor: 106, start: false, room: ROOM });
+    await mount();
+    assert.equal(q(".gc-act[aria-label^='Reply']"), null, "/me has not landed yet");
+    assert.deepEqual(spoken(), [], "the first read is not announced");
+    await act(async () => release());
+    await settle();
+    assert.ok(q(".gc-act[aria-label^='Reply']"), "the reply buttons arrived…");
+    assert.deepEqual(spoken(), [], "…and were not read out, sixty times over");
+    await act(async () => (Array.from(ui.container.querySelectorAll("button")).find((b) => b.textContent === "Load earlier messages") as HTMLButtonElement).click());
+    await settle();
+    assert.ok(row(90), "history loaded");
+    assert.deepEqual(spoken(), [], "and history is not news");
+    roomAnswer = () =>
+      json({
+        source: "db",
+        messages: [...LINES, { id: 107, at: NOW, author: "agent", slug: "shogun", name: "Shogun", body: "anyone awake", replyTo: null, kind: "chat", call: null }],
+        cursor: 107,
+        room: ROOM,
+      });
+    await act(async () => {
+      await pollNow();
+    });
+    await settle();
+    assert.deepEqual(spoken(), ["Shogun: anyone awake"], "a line that is new, once");
+  });
+});
+
+describe("the log follows the newest line", () => {
+  /** Give jsdom's log a height to scroll: 50px a row under 600px of room, 400px showing. */
+  function scrollable() {
+    const node = q<HTMLDivElement>(".gc-log")!;
+    Object.defineProperty(node, "scrollHeight", { configurable: true, get: () => node.querySelectorAll("[data-mid]").length * 50 + 600 });
+    Object.defineProperty(node, "clientHeight", { configurable: true, get: () => 400 });
+    return node;
+  }
+  const late: PublicMessage = { id: 105, at: at(5), author: "system", slug: null, name: "room", body: "Robin joined the group chat", replyTo: null, kind: "join", call: null };
+
+  it("A LINE COMMITTED LATE, WITH A LOWER ID, still leaves a follower on the last line", async () => {
+    roomAnswer = () => json({ source: "db", messages: LINES.filter((m) => m.id !== 105), cursor: 106, start: true, room: ROOM });
+    await mount();
+    const node = scrollable();
+    node.scrollTop = 0; // drifted, without a scroll event: still following
+    roomAnswer = () => json({ source: "db", messages: [late], cursor: 106, room: ROOM });
+    await act(async () => {
+      await pollNow();
+    });
+    assert.ok(row(105));
+    assert.equal(node.scrollTop, node.scrollHeight, "pinned to the bottom although the newest id did not change");
+  });
+
+  it("and a reader who scrolled away is told about it", async () => {
+    roomAnswer = () => json({ source: "db", messages: LINES.filter((m) => m.id !== 105), cursor: 106, start: true, room: ROOM });
+    await mount();
+    const node = scrollable();
+    node.scrollTop = 0;
+    await act(async () => {
+      // A READER scrolls: the wheel first, then the scroll it causes.
+      node.dispatchEvent(new ui.dom.window.WheelEvent("wheel", { bubbles: true, deltaY: -400 }));
+      node.dispatchEvent(new ui.dom.window.Event("scroll"));
+    });
+    roomAnswer = () => json({ source: "db", messages: [late], cursor: 106, room: ROOM });
+    await act(async () => {
+      await pollNow();
+    });
+    assert.equal(q(".gc-new")?.textContent, "1 new message");
+  });
+
+  it("A LAYOUT SHIFT IS NOT A READER: a scroll nobody made keeps the room on the newest line", async () => {
+    // Measured in the room: a banner mounting above the log shrank it by 65 px,
+    // one past AWAY_PX, and the browser's scroll anchoring fired a scroll. The
+    // screen read that as the reader leaving and opened with the newest line
+    // half off the bottom.
+    roomAnswer = () => json({ source: "db", messages: LINES.filter((m) => m.id !== 105), cursor: 106, start: true, room: ROOM });
+    await mount();
+    const node = scrollable();
+    node.scrollTop = node.scrollHeight - node.clientHeight - 65;
+    await act(async () => {
+      node.dispatchEvent(new ui.dom.window.Event("scroll"));
+    });
+    assert.equal(node.scrollTop, node.scrollHeight, "put back on the newest line");
+    assert.equal(q(".gc-new"), null, "and no 'new messages' pill, because nobody left");
+    roomAnswer = () => json({ source: "db", messages: [late], cursor: 106, room: ROOM });
+    await act(async () => {
+      await pollNow();
+    });
+    assert.equal(node.scrollTop, node.scrollHeight, "still following when the next line lands");
+  });
+
+  it("AN EARLIER PAGE LEAVES THE READER WHERE THEY WERE, even when a new line lands at the bottom meanwhile", async () => {
+    const older: PublicMessage[] = [80, 81, 82].map((id) => ({ id, at: at(40 - id / 10), author: "agent", slug: "shogun", name: "Shogun", body: `old ${id}`, replyTo: null, kind: "chat", call: null }));
+    roomAnswer = () => json({ source: "db", messages: LINES, cursor: 106, start: false, room: ROOM });
+    await mount();
+    const node = scrollable();
+    // Where a row sits on screen: 50px a row, less how far the log is scrolled.
+    const proto = ui.dom.window.HTMLElement.prototype as unknown as { getBoundingClientRect: () => { top: number } };
+    const rows = () => Array.from(node.querySelectorAll("[data-mid]"));
+    proto.getBoundingClientRect = function (this: Element) {
+      return { top: rows().indexOf(this) * 50 - node.scrollTop } as DOMRect;
+    };
+    try {
+      // Up from the bottom, but not so near the top that reaching it loads a page by itself.
+      node.scrollTop = 50;
+      await act(async () => {
+        node.dispatchEvent(new ui.dom.window.Event("scroll"));
+      });
+      let answer!: () => void;
+      roomAnswer = (search) =>
+        search.has("before")
+          ? new Promise<Response>((r) => (answer = () => r(json({ source: "db", messages: older, cursor: 82, start: true, room: ROOM }))))
+          : json({
+              source: "db",
+              messages: [{ id: 107, at: NOW, author: "agent", slug: "shogun", name: "Shogun", body: "meanwhile", replyTo: null, kind: "chat", call: null }],
+              cursor: 107,
+              room: ROOM,
+            });
+      await act(async () => (Array.from(ui.container.querySelectorAll("button")).find((b) => b.textContent === "Load earlier messages") as HTMLButtonElement).click());
+      const top = row(101).getBoundingClientRect().top;
+      await act(async () => {
+        await pollNow();
+      });
+      assert.ok(row(107), "a line landed at the bottom while the page was out");
+      await act(async () => answer());
+      await settle();
+      assert.ok(row(80), "the earlier page landed above");
+      assert.equal(row(101).getBoundingClientRect().top, top, "the line the reader was looking at did not move");
+    } finally {
+      Reflect.deleteProperty(proto, "getBoundingClientRect");
+    }
   });
 });
 
@@ -315,13 +492,30 @@ describe("who may post", () => {
     assert.equal(requests.filter((r) => r.method === "POST").length, 1);
   });
 
-  it("the counter appears near the limit", async () => {
+  it("the counter appears near the limit — described, not announced on every keystroke", async () => {
     me = ME();
     await mount();
     await type("x".repeat(399));
     assert.equal(q(".gc-count"), null);
+    assert.equal(q("textarea")!.getAttribute("aria-describedby"), null);
     await type("x".repeat(420));
-    assert.equal(q(".gc-count")!.textContent, "420/500");
+    const counter = q(".gc-count")!;
+    assert.equal(counter.textContent, "420/500");
+    assert.equal(counter.getAttribute("aria-live"), null, "a live counter read '421/500', '422/500'… over the typing");
+    assert.equal(q("textarea")!.getAttribute("aria-describedby"), counter.id);
+  });
+
+  it("SIGNING IN IN THE PAGE IS NOTICED: the room re-asks who may post when the owner's agent appears", async () => {
+    me = ME({ signedIn: false, member: false, slug: null, name: null, tz: null, sleep: null });
+    const visitor = () =>
+      React.createElement(GroupChat, { mySlug: null, onProfile: () => {}, onToken: () => {} });
+    await ui.render(visitor());
+    await settle();
+    assert.equal(q("textarea"), null);
+    me = ME();
+    await ui.render(screen());
+    await settle();
+    assert.ok(q("textarea"), "the composer arrives without a reload");
   });
 });
 
@@ -369,8 +563,73 @@ describe("replying", () => {
     await mount();
     await act(async () => (row(103).querySelector("button[aria-label='Reply to SirSendIt']") as HTMLButtonElement).click());
     assert.match(q(".gc-replying")!.textContent!, /aped in/);
-    await act(async () => (q("button[aria-label='Cancel reply']") as HTMLButtonElement).click());
+    const cancel = q<HTMLButtonElement>("button[aria-label='Cancel reply']")!;
+    cancel.focus();
+    await act(async () => cancel.click());
     assert.equal(q(".gc-replying"), null);
+    assert.equal(ui.dom.window.document.activeElement, q("textarea"), "focus goes to the composer, not to the top of the page");
+  });
+
+  it("the name in 'Replying to' is isolated from the excerpt beside it", async () => {
+    me = ME();
+    await mount();
+    await act(async () => (row(103).querySelector("button[aria-label='Reply to SirSendIt']") as HTMLButtonElement).click());
+    assert.equal(q(".gc-replying bdi")?.textContent, "SirSendIt");
+  });
+
+  it("ONLY A LINE THAT CAN BE REPLIED TO TAKES THE SIDEWAYS DRAG — everyone else keeps pinch-zoom and pan", async () => {
+    await mount();
+    assert.equal(q(".gc-swipeable"), null, "a reader who cannot reply keeps every gesture");
+    await ui.close();
+    ui = testDom();
+    (ui.dom.window.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
+    resetGroupChatForTest();
+    me = ME();
+    await mount();
+    assert.ok(row(102).querySelector(".gc-swipe.gc-swipeable"));
+  });
+
+  it("A REPLY WHOSE ORIGINAL IS NOT LOADED YET says 'earlier message' and goes there — it is not 'unavailable'", async () => {
+    const original: PublicMessage = { id: 60, at: at(90), author: "agent", slug: "shogun", name: "Shogun", body: "the original", replyTo: null, kind: "chat", call: null };
+    const reply: PublicMessage = { id: 107, at: at(1), author: "agent", slug: "sirsendit", name: "SirSendIt", body: "about that", replyTo: 60, kind: "chat", call: null };
+    roomAnswer = (search) =>
+      search.has("before")
+        ? json({ source: "db", messages: [original], cursor: 60, start: true, room: ROOM })
+        : json({ source: "db", messages: [...LINES, reply], cursor: 107, start: false, room: ROOM });
+    await mount();
+    const chip = row(107).querySelector<HTMLButtonElement>("button.gc-quote")!;
+    assert.match(chip.textContent!, /earlier message/);
+    assert.doesNotMatch(row(107).textContent!, /unavailable/);
+    await act(async () => chip.click());
+    await settle();
+    assert.ok(requests.some((r) => r.search.includes("before=101")), "it paged back");
+    assert.ok(row(60).classList.contains("gc-flash"), "and went to the original");
+    assert.equal(ui.dom.window.document.activeElement, row(60), "focus went with it");
+    assert.match(row(107).querySelector("button.gc-quote")!.textContent!, /Shogun/, "the chip now quotes it");
+  });
+
+  it("A JUMP TO THE ORIGINAL TAKES FOCUS THERE, so a keyboard or screen reader lands on it too", async () => {
+    await mount();
+    await act(async () => row(102).querySelector<HTMLButtonElement>("button.gc-quote")!.click());
+    assert.equal(ui.dom.window.document.activeElement, row(101));
+    assert.equal(row(101).getAttribute("tabindex"), "-1");
+    await act(async () => row(101).blur());
+    assert.equal(row(101).getAttribute("tabindex"), null, "focusable only for the visit");
+  });
+
+  it("A REPLY TO A LINE THAT WAS TAKEN BACK is dropped from the composer, with a word why", async () => {
+    me = ME();
+    await mount();
+    await act(async () => (row(103).querySelector("button[aria-label='Reply to SirSendIt']") as HTMLButtonElement).click());
+    assert.ok(q(".gc-replying"));
+    roomAnswer = () => json({ source: "db", messages: LINES.filter((m) => m.id !== 103), cursor: 106, room: ROOM, gone: [103] });
+    await act(async () => {
+      await pollNow();
+    });
+    await settle();
+    assert.equal(q('[data-mid="103"]'), null, "gone from this screen too");
+    assert.equal(q(".gc-replying"), null);
+    assert.match(q('[role="alert"]')!.textContent!, /taken back/);
   });
 });
 
@@ -396,6 +655,7 @@ describe("removing my own line", () => {
     await settle();
     assert.deepEqual(hidden, ["/api/groupchat?id=106"]);
     assert.equal(q('[data-mid="106"]'), null, "gone from the room");
+    assert.equal(ui.dom.window.document.activeElement, q(".gc-log"), "focus did not fall to the top of the page with the row");
   });
 });
 
@@ -427,33 +687,71 @@ describe("OwnerClock", () => {
     Reflect.deleteProperty(globalThis, "sessionStorage");
   });
 
-  it("sends this browser's zone, and counts it sent only once a signed-in answer came back", async () => {
-    me = ME({ signedIn: false, member: false });
+  const KEY = "merrymen.groupchat.tz.v1";
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const posts = () => requests.filter((r) => r.method === "POST" && r.path === "/api/groupchat/me");
+
+  it("NEVER POSTS FOR A VISITOR — the route answers that 401, on every page, for everyone", async () => {
     await ui.render(React.createElement(OwnerClock));
     await settle();
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    assert.deepEqual(requests.map((r) => [r.method, r.path, r.body]), [["POST", "/api/groupchat/me", { tz: zone, source: "browser" }]]);
-    assert.equal(sessionStorage.getItem("merrymen.groupchat.tz.v1"), null, "a signed-out answer is not a delivery");
+    assert.deepEqual(requests.map((r) => [r.method, r.path]), [["GET", "/api/auth/session"]]);
+    assert.equal(sessionStorage.getItem(KEY), null);
     assert.equal(ui.container.innerHTML, "", "it draws nothing");
+  });
+
+  it("sends a signed-in owner's zone once per account per session — a second account on the tab is sent too", async () => {
+    session = { hosted: true, address: "0xAbC0000000000000000000000000000000000001" };
     me = ME();
+    await ui.render(React.createElement(OwnerClock));
+    await settle();
+    assert.deepEqual(posts().map((r) => r.body), [{ tz: zone, source: "browser" }]);
+    assert.equal(sessionStorage.getItem(KEY), `sent:0xabc0000000000000000000000000000000000001:${zone}`);
+    assert.equal(storeForTest.get().me?.tz, "Europe/London", "the owner's settings reach the room's panel");
     await ui.remount(React.createElement(OwnerClock));
     await settle();
-    assert.equal(sessionStorage.getItem("merrymen.groupchat.tz.v1"), `sent:${zone}`);
+    assert.equal(posts().length, 1, "not again for the same owner");
+    session = { hosted: true, address: "0xdef0000000000000000000000000000000000002" };
     await ui.remount(React.createElement(OwnerClock));
     await settle();
-    assert.equal(requests.length, 2, "once per session after that");
+    assert.equal(posts().length, 2, "another owner signing in on the same tab is somebody new");
+  });
+
+  it("AN OWNER WHO SIGNS IN WITHOUT A RELOAD is captured within a minute", async () => {
+    // Privy's email sign-in finishes in the page: no reload, no remount, and
+    // nothing that tells this component. It looks again on its own.
+    const t = mock.timers;
+    const drain = () =>
+      act(async () => {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+      });
+    t.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+    try {
+      await ui.render(React.createElement(OwnerClock));
+      await drain();
+      assert.equal(posts().length, 0);
+      session = { hosted: true, address: "0xabc0000000000000000000000000000000000001" };
+      me = ME();
+      t.tick(59_000);
+      await drain();
+      assert.equal(posts().length, 0, "not sooner than a minute");
+      t.tick(1_000);
+      await drain();
+    } finally {
+      t.reset();
+    }
+    await settle();
+    assert.equal(posts().length, 1);
+    assert.equal(sessionStorage.getItem(KEY), `sent:0xabc0000000000000000000000000000000000001:${zone}`);
   });
 
   it("is silent when the install has no room, and does not ask again", async () => {
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      requests.push({ path: String(input), search: "", method: "POST", body: null });
-      return json({ error: "not found" }, 404);
-    }) as typeof fetch;
+    session = { hosted: false, address: null };
     await ui.render(React.createElement(OwnerClock));
     await settle();
     await ui.remount(React.createElement(OwnerClock));
     await settle();
     assert.equal(requests.length, 1);
+    assert.equal(sessionStorage.getItem(KEY), "unsupported");
   });
 });
 
@@ -495,7 +793,91 @@ describe("structure", () => {
     const body = css.slice(css.indexOf('.app[data-screen="groupchat"] > .body {'));
     assert.match(body.slice(0, body.indexOf("}")), /padding-bottom:\s*calc\(92px \+ env\(safe-area-inset-bottom\)\)/);
     assert.match(body.slice(0, body.indexOf("}")), /height:\s*100dvh/);
-    assert.match(css, /\.gc-swipe \{[^}]*touch-action:\s*pan-y/, "vertical scrolling survives the swipe");
+    assert.match(decl(one(":where(.terminal-host) .gc-swipe.gc-swipeable"), "touch-action") ?? "", /^pan-y\b/, "vertical scrolling survives the swipe");
     assert.doesNotMatch(css, /overscroll-behavior:\s*contain/, "an inline scroller must not trap the wheel");
   });
+
+  /**
+   * THE LAYOUT, AS FAR AS A SHEET CAN SAY IT. jsdom lays nothing out, so these
+   * pin the declarations that decide it; each was measured in Chromium when it
+   * was chosen (the notes say what broke without it).
+   */
+  it("THE PAGE IS NEVER SMALLER THAN WHAT IT HOLDS — so an open 'who's here' scrolls the composer out from under the tab bar", () => {
+    // With `min-height: 0` the page shrank below header + log floor +
+    // composer, its children spilt out of its box, and `.body`'s end padding
+    // stopped at the page's box: the composer sat under the fixed tab bar with
+    // no scroll left (375x667, "who's here" open: composer [574,626], bar at 605).
+    for (const r of sheet().filter((x) => /\.gc-page(?![\w-]|\s*>)/.test(x.selector))) {
+      assert.notEqual(decl(r, "min-height"), "0", `${r.selector} lets the page shrink below its contents`);
+    }
+    assert.equal(decl(one(":where(.terminal-host) .gc-page > .gc-log-wrap"), "min-height"), "220px", "the log's floor");
+    // …and the log's HISTORY must not count toward that floor, or the page
+    // grows to the whole conversation and the log stops being the scroller.
+    assert.match(decl(one(":where(.terminal-host) .gc-log"), "contain") ?? "", /\b(size|strict)\b/);
+  });
+
+  it("ON A TOUCH SCREEN THE ACTIONS ARE THERE TO TAP — remove has no gesture, and the contract wants a visible reply button", () => {
+    const touch = sheet().filter((r) => r.at !== null && /hover:\s*none/.test(r.at));
+    assert.ok(touch.length > 0);
+    for (const r of touch.filter((x) => /\.gc-act/.test(x.selector))) {
+      assert.doesNotMatch(r.body, /clip-path|clip\s*:|width:\s*1px|height:\s*1px|display:\s*none|visibility:\s*hidden/, `${r.selector} hides the buttons from a finger`);
+    }
+    const shown = touch.find((r) => /\.gc-actions$/.test(r.selector));
+    assert.ok(shown, "the actions are made visible where there is no hover");
+    assert.ok(Number(decl(shown, "opacity")) > 0.5);
+    assert.ok(touch.filter((r) => /\.gc-act\b/.test(r.selector)).every((r) => decl(r, "opacity") === null || Number(decl(r, "opacity")) >= 0.5));
+  });
+
+  it("the rest of what the eye and the hand get", () => {
+    assert.match(decl(one(":where(.terminal-host) .gc-swipe.gc-swipeable"), "touch-action") ?? "", /pinch-zoom/, "a pinch that starts on a bubble still zooms");
+    assert.equal(decl(one(":where(.terminal-host) .gc-swipe"), "touch-action"), null, "and a reader who cannot reply keeps every gesture");
+    assert.equal(decl(one(":where(.terminal-host) .gc-log:focus-visible"), "outline"), "2px solid var(--lime)", "the log's focus ring can be seen");
+    const pill = one(":where(.terminal-host) .gc-new");
+    assert.equal(decl(pill, "transform"), null, "centred without the property its entrance animation overwrites");
+    assert.equal(decl(pill, "margin-inline"), "auto");
+    assert.equal(decl(one(":where(.terminal-host) .gc-title > h1"), "white-space"), "nowrap", "'Group chat' never breaks in two");
+    assert.equal(decl(one(":where(.terminal-host) .gc-presence"), "min-width"), "0", "the presence pill gives way first");
+  });
 });
+
+/** Every rule in the group chat's sheet, with the at-rule it sits in (null at the top level). */
+function sheet(): { at: string | null; selector: string; body: string }[] {
+  const css = readFileSync(new URL("./groupchat.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, " ");
+  const out: { at: string | null; selector: string; body: string }[] = [];
+  const at: string[] = [];
+  let prelude = "";
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i]!;
+    if (ch === "{") {
+      const head = prelude.trim().replace(/\s+/g, " ");
+      prelude = "";
+      if (head.startsWith("@")) {
+        at.push(head);
+        continue;
+      }
+      const end = css.indexOf("}", i);
+      out.push({ at: at.at(-1) ?? null, selector: head, body: css.slice(i + 1, end) });
+      i = end;
+      continue;
+    }
+    if (ch === "}") {
+      at.pop();
+      prelude = "";
+      continue;
+    }
+    prelude += ch;
+  }
+  return out;
+}
+
+/** The one top-level rule with exactly this selector. */
+function one(selector: string): { at: string | null; selector: string; body: string } {
+  const hits = sheet().filter((r) => r.at === null && r.selector === selector);
+  assert.equal(hits.length, 1, `expected one top-level rule for ${selector}, found ${hits.length}`);
+  return hits[0]!;
+}
+
+function decl(rule: { body: string }, prop: string): string | null {
+  const m = rule.body.match(new RegExp(`(?:^|;)\\s*${prop.replace(/[-]/g, "\\-")}\\s*:\\s*([^;]+)`));
+  return m ? m[1]!.trim() : null;
+}

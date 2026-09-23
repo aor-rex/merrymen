@@ -8,7 +8,7 @@
  * replaced by whatever zone their laptop happens to be in.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -34,7 +34,10 @@ const SA_A = "0x00000000000000000000000000000000000000a1" as const;
 const SA_D = "0x00000000000000000000000000000000000000d4" as const;
 
 const saved = Object.fromEntries(
-  ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK"].map((k) => [k, process.env[k]]),
+  ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK", "MERRYMEN_GROUPCHAT"].map((k) => [
+    k,
+    process.env[k],
+  ]),
 );
 let home: string;
 let slugA: string;
@@ -86,6 +89,7 @@ let db: Db;
 
 beforeEach(async () => {
   process.env.MERRYMEN_HOSTED = "1";
+  delete process.env.MERRYMEN_GROUPCHAT;
   raw = new DatabaseSync(":memory:");
   raw.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT)");
   raw.prepare("INSERT INTO agents (smart_account, name) VALUES (?, ?)").run(SA_A, "Kestrel");
@@ -137,6 +141,42 @@ describe("hosted only", () => {
     delete process.env.MERRYMEN_HOSTED;
     assert.equal((await get(A)).status, 404);
     assert.equal((await post(A, { muted: true })).status, 404);
+  });
+
+  it("MERRYMEN_GROUPCHAT=0 on the web answers both verbs exactly like self-hosted, and writes nothing", async () => {
+    const verbs = [() => get(A), () => get(null), () => post(A, { muted: true }), () => post(A, { tz: "Europe/London", source: "browser" })];
+    const answer = async (res: Response) => [res.status, res.headers.get("cache-control"), await res.text()];
+    delete process.env.MERRYMEN_HOSTED;
+    const selfHosted: unknown[][] = [];
+    for (const verb of verbs) selfHosted.push(await answer(await verb()));
+    assert.deepEqual(selfHosted.map((a) => a[0]), [404, 404, 404, 404]);
+    process.env.MERRYMEN_HOSTED = "1";
+    for (const off of ["0", " 0 ", "0\n"]) {
+      process.env.MERRYMEN_GROUPCHAT = off;
+      for (const [i, verb] of verbs.entries()) {
+        assert.deepEqual(await answer(await verb()), selfHosted[i], `${JSON.stringify(off)}, verb #${i}`);
+      }
+    }
+    assert.equal(await getMember(db, A), null, "nothing was written");
+    process.env.MERRYMEN_GROUPCHAT = "1";
+    assert.equal((await get(A)).status, 200);
+  });
+});
+
+/**
+ * Also swept by app/prerender.test.ts, which recognises a route that reaches
+ * the database through ../room. Kept here too, beside the route: a prerendered
+ * /me would be built where there is no DATABASE_URL.
+ */
+describe("never prerendered", () => {
+  const code = readFileSync(new URL("./route.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  it("is dynamic, never revalidated, and runs on node", () => {
+    assert.match(code, /export const dynamic = "force-dynamic"/);
+    assert.match(code, /export const runtime = "nodejs"/);
+    assert.doesNotMatch(code, /export const revalidate/);
   });
 });
 
@@ -225,6 +265,62 @@ describe("POST /me: the zone", () => {
     assert.equal(row.updatedAtMs, updated, "the capture wrote nothing");
     // The owner can still change their own mind.
     assert.equal((await me(await post(A, { tz: "Europe/Paris", source: "owner" }))).tz, "Europe/Paris");
+  });
+
+  it("A BROWSER THAT SAYS UTC IS NOT PLACED: UTC under any name and every Etc/* zone are dropped, never stored", async () => {
+    // What Tor Browser and Firefox's resistFingerprinting report to everybody.
+    const hiding = ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Universal", "Zulu", " utc ", "etc/gmt+5", "Etc/GMT-14", "UCT", "Greenwich", "Etc/Zulu"];
+    for (const tz of hiding) {
+      const answer = await me(await post(A, { tz, source: "browser" }));
+      assert.equal(answer.tz, null, tz);
+      assert.equal(answer.sleep, null, "an agent whose owner's zone is unknown never sleeps");
+    }
+    assert.equal(await getMember(db, A), null, "not even a row was created");
+    // A zone a browser reported before is kept, untouched.
+    await me(await post(A, { tz: "Asia/Tokyo", source: "browser" }));
+    const updated = (await getMember(db, A))!.updatedAtMs;
+    for (const tz of hiding) {
+      const answer = await me(await post(A, { tz, source: "browser" }));
+      assert.equal(answer.tz, "Asia/Tokyo", tz);
+      assert.equal(answer.tzSource, "browser");
+    }
+    assert.equal((await getMember(db, A))!.updatedAtMs, updated, "the captures wrote nothing");
+    // Dropping the zone does not drop the rest of the request.
+    assert.equal((await me(await post(A, { tz: "UTC", source: "browser", muted: true }))).muted, true);
+    assert.equal((await getMember(db, A))!.tz, "Asia/Tokyo");
+    // A real place that happens to sit on UTC is a place.
+    assert.equal((await me(await post(A, { tz: "Africa/Abidjan", source: "browser" }))).tz, "Africa/Abidjan");
+  });
+
+  it("A BROWSER THAT SAYS REYKJAVIK IS NOT PLACED EITHER: what Tor Browser 13.5+, Mullvad Browser and resistFingerprinting report now", async () => {
+    // Tor Browser spoofs Atlantic/Reykjavik since 13.5 (Bug 42397); Mullvad
+    // Browser is built on it; Mozilla's RFP page says "UTC or Icelandic".
+    // "Iceland" is the alias Intl resolves to the same zone.
+    for (const tz of ["Atlantic/Reykjavik", "Iceland", "atlantic/reykjavik", " ICELAND "]) {
+      const answer = await me(await post(A, { tz, source: "browser" }));
+      assert.equal(answer.tz, null, tz);
+      assert.equal(answer.sleep, null, "an agent whose owner's zone is unknown never sleeps");
+    }
+    assert.equal(await getMember(db, A), null, "not even a row was created");
+    await me(await post(A, { tz: "Asia/Tokyo", source: "browser" }));
+    const updated = (await getMember(db, A))!.updatedAtMs;
+    assert.equal((await me(await post(A, { tz: "Iceland", source: "browser" }))).tz, "Asia/Tokyo");
+    assert.equal((await getMember(db, A))!.updatedAtMs, updated, "the capture wrote nothing");
+    // An owner in Iceland picks it on the chat screen, and keeps it.
+    const picked = await me(await post(A, { tz: "Atlantic/Reykjavik", source: "owner" }));
+    assert.equal(picked.tz, "Atlantic/Reykjavik");
+    assert.equal(picked.tzSource, "owner");
+    assert.deepEqual(picked.sleep, hoursOf(A));
+    assert.equal((await getMember(db, A))?.tz, "Atlantic/Reykjavik");
+  });
+
+  it("an owner who PICKS UTC, or an Etc/* zone, on the chat screen keeps it", async () => {
+    const utc = await me(await post(A, { tz: "UTC", source: "owner" }));
+    assert.equal(utc.tz, "UTC");
+    assert.equal(utc.tzSource, "owner");
+    assert.deepEqual(utc.sleep, hoursOf(A));
+    assert.equal((await me(await post(A, { tz: "Etc/GMT-3", source: "owner" }))).tz, "Etc/GMT-3");
+    assert.equal((await getMember(db, A))?.tz, "Etc/GMT-3");
   });
 
   it("a later browser capture replaces an earlier one", async () => {

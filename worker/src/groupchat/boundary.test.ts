@@ -272,6 +272,45 @@ describe("the room reaches nothing that trades", () => {
     });
   }
 
+  /**
+   * THE ROOM'S IMPORTS, AS AN ALLOWLIST. The deny-list above knows the trading
+   * machinery by name, and a new module that moves money — a session key, a
+   * grant, a venue, a swap fill — is not on it until somebody remembers to add
+   * it. So the room's own code may import only these, and any new edge fails
+   * here until it is argued for in a diff. Tests may borrow more (a ledger
+   * fixture); the code that runs in production may not.
+   */
+  const ROOM_MAY_IMPORT: readonly RegExp[] = [
+    /^worker\/src\/groupchat\/[^/]+$/,
+    /^worker\/src\/(?:db|llm|llm-failure|coin-name|class-evidence|identity-store|social-post|thesis-policy)$/,
+    /^worker\/src\/memory\/tokens$/,
+    /^packages\/core\/src\/[^/]+$/,
+  ];
+  for (const f of ROOM_SOURCES) {
+    const name = path.basename(f);
+    it(`${name} imports only what the room may import`, () => {
+      for (const spec of specifiers(lexFile(f).code)) {
+        const target = resolved(f, spec);
+        if (target === null) {
+          // A package can move money as well as a module can: builtins only.
+          assert.match(spec, /^node:/, `${name} imports the package ${spec} — the room's code imports no packages`);
+          continue;
+        }
+        assert.ok(ROOM_MAY_IMPORT.some((re) => re.test(target)), `${name} imports ${spec} (${target}), which is not on the room's allowlist`);
+      }
+    });
+  }
+
+  it("the phrasebook is data: templates.ts imports nothing at all", () => {
+    // Every sentence an agent can publish is in that one file, so a reviewer
+    // can read the whole room there. An import is the first step to a sentence
+    // built from somewhere a reviewer is not looking — a ledger value, a
+    // setting, a model's words.
+    const f = ROOM_SOURCES.find((x) => path.basename(x) === "templates.ts");
+    assert.ok(f, "templates.ts is missing — the check would be vacuous");
+    assert.deepEqual(specifiers(lexFile(f!).code), []);
+  });
+
   it("only voice.ts reaches the model client", () => {
     // ONE DOOR TO THE MODEL. llm.ts is the fleet's client (resolveLlm would
     // hand the room an owner's key), and voice.ts is where the room's own-key
@@ -315,39 +354,58 @@ describe("the room reaches nothing that trades", () => {
 const MENTION = /groupchat|group_chat|group-chat/i;
 
 /**
- * The trading paths. brain-*.ts is Brain's material and client; peer-* is the
- * peer wire into peers.json; research-files.ts is research.json; strategist/
- * and strategies/ decide; telegram/ is the interpreter an owner talks to;
- * index.ts is the child's tick. store.ts and ledger-mirror.ts are the ledger
- * itself, which the contract says the room adds nothing to.
+ * EVERY WORKER FILE BUT THE ROOM AND ITS ONE WRITER, not a curated list of
+ * trading paths. A list misses the module nobody thought of — research-pass.ts
+ * feeds research.json and so Brain, social-post.ts writes the `posts` table
+ * the doc calls a trading input, trencher-*, builder-pass, class-* — and one
+ * `SELECT body FROM groupchat_messages` added to any of them would have
+ * passed. brain-*.ts, peer-*, research-files.ts, strategist/, strategies/,
+ * telegram/ and index.ts are named below so the walk is known to reach them.
  */
 function tradingFiles(): string[] {
-  const top = readdirSync(WORKER_SRC)
-    .filter(
-      (f) =>
-        f.endsWith(".ts") &&
-        (f.startsWith("brain-") ||
-          f === "peer-theses.ts" ||
-          f === "peer-files.ts" ||
-          f === "research-files.ts" ||
-          f === "index.ts" ||
-          f === "store.ts" ||
-          f === "ledger-mirror.ts"),
-    )
-    .map((f) => path.join(WORKER_SRC, f));
-  const deep = ["strategist", "strategies", "telegram"].flatMap((d) => walk(path.join(WORKER_SRC, d), (f) => f.endsWith(".ts")));
-  return [...top, ...deep];
+  return walk(WORKER_SRC, (f) => f.endsWith(".ts")).filter((f) => !f.startsWith(HERE + path.sep) && !/^orchestrator[^/\\]*\.ts$/.test(path.basename(f)));
+}
+
+/**
+ * THE WEB PATHS THAT LET AN OWNER'S AGENT ACT: the chat that can propose
+ * orders, and the orders route itself. They are the web's side of trading, and
+ * the room is no input to them either.
+ */
+function webTradingFiles(): string[] {
+  const lib = path.join(REPO, "web", "src", "lib");
+  const api = path.join(REPO, "web", "src", "app", "api");
+  const libFiles = readdirSync(lib)
+    .filter((f) => /\.tsx?$/.test(f) && (f === "agent-chat.ts" || f.startsWith("chat-")))
+    .map((f) => path.join(lib, f));
+  const routes = ["chat", "orders"].flatMap((d) => walk(path.join(api, d), (f) => /\.tsx?$/.test(f)));
+  return [...libFiles, ...routes];
 }
 
 describe("nothing that trades knows the room exists", () => {
-  it("no trading-path TypeScript mentions it in code", () => {
+  it("no worker TypeScript outside the room and the orchestrator mentions it in code", () => {
     const files = tradingFiles();
-    for (const must of ["brain-material.ts", "peer-theses.ts", "peer-files.ts", "research-files.ts", "index.ts", "desk.ts", "agent.ts"]) {
+    for (const must of ["brain-material.ts", "peer-theses.ts", "peer-files.ts", "research-files.ts", "index.ts", "desk.ts", "agent.ts", "social-post.ts", "store.ts"]) {
       assert.ok(files.some((f) => path.basename(f) === must), `${must} was not found — the walk is looking in the wrong place`);
     }
-    assert.ok(files.length > 40, `only ${files.length} trading files found`);
+    assert.ok(files.length > 100, `only ${files.length} worker files found`);
+    assert.ok(!files.some((f) => f.startsWith(HERE + path.sep)), "the room's own files are not its readers");
     const guilty = files.filter((f) => MENTION.test(lex(readFileSync(f, "utf8")).code)).map(rel);
-    assert.deepEqual(guilty, [], "a trading path mentions the group chat");
+    assert.deepEqual(guilty, [], "a worker module other than the orchestrator mentions the group chat");
+  });
+
+  it("the web's agent chat and orders never mention the room, nor import it", () => {
+    const files = webTradingFiles();
+    for (const must of ["agent-chat.ts", "chat-commands.ts"]) {
+      assert.ok(files.some((f) => path.basename(f) === must), `${must} was not found — the walk is looking in the wrong place`);
+    }
+    assert.ok(files.some((f) => rel(f).startsWith("web/src/app/api/chat/")) && files.some((f) => rel(f).startsWith("web/src/app/api/orders/")), "the chat and orders routes were not found");
+    const guilty = files
+      .filter((f) => {
+        const { code } = lex(readFileSync(f, "utf8"));
+        return MENTION.test(code) || specifiers(code).some((s) => MENTION.test(s) || resolved(f, s)?.startsWith("worker/src/groupchat/"));
+      })
+      .map(rel);
+    assert.deepEqual(guilty, [], "a web path that can place an order knows the group chat");
   });
 
   it("no file of the Brain service mentions it in code", () => {

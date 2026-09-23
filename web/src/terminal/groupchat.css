@@ -17,10 +17,20 @@
 
    `overflow-y: auto` on `.body`, NOT `hidden`. The shell can mount things
    above the screen (the sign-in entry on a phone, the outage banner, the
-   re-sign prompt), and the log keeps a floor so they cannot squeeze it to
-   nothing. If they ever add up to more than the screen, the page scrolls
-   instead of clipping the composer out of reach — the trap desk-scroll.test.ts
-   records, where three defensible rules together made content unreachable.
+   re-sign prompt, the tour's relaunch row), and the log keeps a floor so they
+   cannot squeeze it to nothing. If they ever add up to more than the screen,
+   the page scrolls instead of clipping the composer out of reach — the trap
+   desk-scroll.test.ts records, where three defensible rules together made
+   content unreachable.
+
+   WHICH ONLY HOLDS IF THE PAGE IS NEVER SMALLER THAN WHAT IT HOLDS. `.gc-page`
+   keeps `min-height: auto`, so its floor is the header + the log's 220px +
+   the composer; with `min-height: 0` it shrank below that, its children spilt
+   out of its box, and `.body`'s end padding — added after the page's own box,
+   not after what spilt out of it — stopped short: the composer sat under the
+   fixed tab bar with no scroll left to bring it out (an open "who's here" on a
+   375x667 phone was enough). `contain: size` on the log keeps the whole
+   history out of that floor, so the log is still the one scroller.
 
    The bottom padding clears the phone's floating tab bar (14px off the edge,
    52px tall) plus the home indicator. */
@@ -35,7 +45,6 @@
 
 :where(.terminal-host) .gc-page {
   flex: 1 1 auto;
-  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -50,15 +59,28 @@
   flex-direction: column;
   gap: 8px;
 }
+/* ONE LINE ON A PHONE. The 34px title beside "38 awake · 12 asleep" does not
+   fit 360–375px; the title used to break into "Group / chat", doubling the
+   header on exactly the screens where the log is tightest. The title never
+   wraps; the pill gives way first (its words end in an ellipsis, the list it
+   opens says the rest), and only below a floor does it drop to its own line. */
 :where(.terminal-host) .gc-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   min-width: 0;
+}
+:where(.terminal-host) .gc-title > h1 {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 :where(.terminal-host) .gc-presence {
   display: inline-flex;
+  flex: 1 1 7.5rem;
+  max-width: max-content;
+  min-width: 0;
   align-items: center;
   gap: 7px;
   min-height: 32px;
@@ -68,6 +90,11 @@
   font-size: 12px;
   color: var(--tx-2);
   white-space: nowrap;
+}
+:where(.terminal-host) .gc-presence-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 :where(.terminal-host) .gc-presence:disabled {
   cursor: default;
@@ -81,6 +108,7 @@
   transition: transform 160ms var(--ease);
 }
 :where(.terminal-host) .gc-dot {
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -237,6 +265,9 @@
 :where(.terminal-host) .gc-log {
   flex: 1 1 auto;
   min-height: 0;
+  /* Sized by the room it is given, never by the history it holds: without
+     this, every line would count toward the page's floor (see the top). */
+  contain: size;
   overflow-y: auto;
   /* A swiped bubble slides right; it must not open a sideways scroll. */
   overflow-x: hidden;
@@ -244,10 +275,22 @@
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
 }
+/* The log is a tab stop so a keyboard can scroll it; its ring is the same as
+   every other control's, not a 1px line nobody can see. */
 :where(.terminal-host) .gc-log:focus-visible {
-  outline: 1px solid var(--line);
+  outline: 2px solid var(--lime);
   outline-offset: 2px;
   border-radius: 12px;
+}
+/* A line "show the original" took the reader to holds focus for the visit. */
+:where(.terminal-host) .gc-row:focus,
+:where(.terminal-host) .gc-system:focus {
+  outline: none;
+}
+:where(.terminal-host) .gc-row:focus-visible .gc-bubble,
+:where(.terminal-host) .gc-system:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
 }
 :where(.terminal-host) .gc-earlier {
   display: flex;
@@ -371,9 +414,14 @@
 :where(.terminal-host) .gc-swipe {
   position: relative;
   max-width: 100%;
-  /* Vertical movement belongs to the browser, so the log still scrolls from
-     anywhere on a bubble; horizontal movement comes to the swipe. */
-  touch-action: pan-y;
+}
+/* Only where a swipe can reply. Vertical movement belongs to the browser, so
+   the log still scrolls from anywhere on a bubble, and so does a pinch — the
+   bubbles cover most of the screen, and zoom is how some people read it at
+   all; only a one-finger sideways drag comes to the swipe. A reader who cannot
+   reply keeps every gesture the browser has. */
+:where(.terminal-host) .gc-swipe.gc-swipeable {
+  touch-action: pan-y pinch-zoom;
 }
 :where(.terminal-host) .gc-swipe-icon {
   position: absolute;
@@ -611,25 +659,32 @@
   background: rgb(255 92 113 / 0.14);
   color: var(--down);
 }
-/* A touch screen has no hover, so an invisible button there would only catch
-   stray taps: the swipe is the gesture, and the button stays reachable to a
-   keyboard without taking any room. */
+/* A TOUCH SCREEN HAS NO HOVER, so the buttons cannot wait for one: they stay in
+   the row, quieter than the words, where a tap reaches them. Clipping them away
+   left "remove my message" with no way in at all on a phone — it has no gesture
+   — and the swipe is not everybody's: the contract (docs/groupchat.md) wants a
+   visible reply button beside it, and a path gesture needs a single-tap
+   alternative. A confirming "Remove?" is at full strength. */
 @media (hover: none) {
-  :where(.terminal-host) .gc-actions:not(:focus-within) {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+  :where(.terminal-host) .gc-actions {
+    opacity: 1;
+  }
+  :where(.terminal-host) .gc-act:not(.on) {
+    opacity: 0.7;
   }
 }
 
-/* The pill that says the reader is missing something below. */
+/* The pill that says the reader is missing something below. Centred with
+   auto margins, not a transform: its entrance animation runs `transform` and
+   holds the last frame, which undid a translateX(-50%) and left it off-centre. */
 :where(.terminal-host) .gc-new {
   position: absolute;
-  left: 50%;
+  left: 0;
+  right: 0;
   bottom: 12px;
-  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 24px);
+  margin-inline: auto;
   display: flex;
   align-items: center;
   gap: 6px;

@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -15,18 +16,24 @@ import { SkeletonRows } from "../Skeleton";
 import { fullDateTime } from "@/lib/format";
 import {
   COMPOSER_MAX,
+  announcements,
   browserZone,
   chatItems,
   clockTime,
   excerpt,
   hideLine,
   isMine,
+  isTakenBack,
   labelDays,
   loadEarlier,
+  loadUntil,
   mentionParts,
   postLine,
   presenceLine,
+  pullMe,
+  replyTarget,
   retry,
+  setFollowing,
   setMuted,
   setZone,
   sortPresence,
@@ -55,6 +62,12 @@ import {
  * to the newest line unless the reader has scrolled away to read — the same
  * follow-unless-away rule the agent chat uses, for the same reason: yanking a
  * reader to the bottom mid-sentence is how a lively room becomes unreadable.
+ *
+ * WHAT A SCREEN READER HEARS is only what is new. The scroller is not the live
+ * region: a live log hears every node inserted anywhere in it, so the reply
+ * buttons appearing when /me lands, a page of history prepended by "load
+ * earlier" and a catch-up burst were all read out. New lines are announced in
+ * a separate, hidden log instead — one by one, or as a count when many land.
  */
 
 const SWIPE_MAX = 72;
@@ -62,8 +75,21 @@ const SWIPE_FIRE = 56;
 const SWIPE_SLOP = 8;
 /** How far from the bottom still counts as "at the bottom". */
 const AWAY_PX = 64;
+/** How recently the reader must have touched the log for a scroll to count as theirs. */
+const READER_SCROLL_MS = 1200;
+/** The hidden announcer keeps this many; older ones are removed, which is never announced. */
+const SPOKEN_KEEP = 5;
 
 type Line = Extract<ChatItem, { type: "line" }>;
+
+/** Focus somewhere sensible when the focused control just went away with the row or bar it lived in. */
+function rescueFocus(to: HTMLElement | null): void {
+  setTimeout(() => {
+    if (typeof document === "undefined") return;
+    const active = document.activeElement;
+    if (!active || active === document.body) to?.focus({ preventScroll: true });
+  }, 0);
+}
 
 export function GroupChat({
   mySlug,
@@ -89,21 +115,29 @@ export function GroupChat({
   const [unseen, setUnseen] = useState(0);
   const [away, setAway] = useState(false);
   const [confirmHide, setConfirmHide] = useState<number | null>(null);
+  const [spoken, setSpoken] = useState<{ key: number; text: string }[]>([]);
 
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const follow = useRef(true);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const anchor = useRef<{ height: number; top: number } | null>(null);
+  /** The oldest loaded row and where it sat on screen, while an earlier page is on its way. */
+  const anchor = useRef<{ id: number; top: number } | null>(null);
+  const spokenKey = useRef(0);
   /**
-   * Lines newer than this animate in. Set once, on the first answer, so opening
-   * the screen does not pop sixty bubbles at once — only what arrives while
-   * the reader is watching.
+   * Lines newer than this animate in. Set on the first answer — and again when
+   * the store replaces the log — so opening the screen does not pop sixty
+   * bubbles at once: only what arrives while the reader is watching.
    */
   const enterAfter = useRef<number | null>(null);
+  const epochSeen = useRef(s.epoch);
 
   const newest = s.messages.length ? s.messages[s.messages.length - 1]!.id : 0;
+  if (s.epoch !== epochSeen.current) {
+    epochSeen.current = s.epoch;
+    enterAfter.current = newest;
+  }
   if (s.status === "ok" && enterAfter.current === null) enterAfter.current = newest;
   const firstId = s.messages[0]?.id ?? null;
 
@@ -112,50 +146,79 @@ export function GroupChat({
     () => labelDays(chatItems(s.messages, s.pending, slug, s.keys), Date.now()),
     [s.messages, s.pending, slug, s.keys],
   );
-  /** Names worth highlighting after an `@`: everyone who has spoken, and everyone present. */
-  const names = useMemo(() => {
+  /**
+   * Names worth highlighting after an `@`: everyone who has spoken, and everyone
+   * present. Keyed on the names themselves, so a poll that brings the same
+   * names keeps the same array and no bubble re-renders for it.
+   */
+  const nameKey = useMemo(() => {
     const all = new Set<string>();
     for (const m of s.messages) if (m.author !== "system") all.add(m.name);
     for (const p of s.room?.presence ?? []) all.add(p.name);
-    return [...all];
+    return [...all].sort().join("\u0000");
   }, [s.messages, s.room]);
+  const names = useMemo(() => (nameKey ? nameKey.split("\u0000") : []), [nameKey]);
+
+  /** Follow the bottom or not — the screen's ref, and the store's trim, told together. */
+  const pin = (on: boolean) => {
+    follow.current = on;
+    setFollowing(on);
+  };
+  useEffect(() => {
+    setFollowing(follow.current);
+  }, []);
 
   const toLatest = () => {
     const node = log.current;
     if (node) node.scrollTop = node.scrollHeight;
-    follow.current = true;
+    pin(true);
     setAway(false);
     setUnseen(0);
+    // The pill that had focus is gone with `away`.
+    rescueFocus(log.current);
   };
 
   // FOLLOW THE NEWEST LINE unless the reader scrolled away; count what they
-  // are missing instead, so the pill can say so.
-  const seenNewest = useRef<number | null>(null);
+  // are missing instead, so the pill can say so. Keyed on the whole list, not
+  // the newest id: a line committed late arrives BELOW the fold with a lower
+  // id, and a follower must still end up on the last line.
+  const seen = useRef<{ ids: Set<number>; floor: number; epoch: number } | null>(null);
   useLayoutEffect(() => {
     const node = log.current;
-    const before = seenNewest.current;
-    seenNewest.current = newest;
+    const prev = seen.current;
+    // Lines at or below `floor` were never "new": they are the first read, or
+    // history an earlier page brought.
+    seen.current = {
+      ids: new Set(s.messages.map((m) => m.id)),
+      floor: s.status === "ok" ? (s.messages[0]?.id ?? 0) : Number.POSITIVE_INFINITY,
+      epoch: s.epoch,
+    };
     if (!node) return;
+    const rebased = !prev || prev.epoch !== s.epoch;
+    if (rebased) pin(true);
+    const fresh = rebased ? [] : s.messages.filter((m) => !prev.ids.has(m.id) && m.id > prev.floor && !isMine(m, slug));
+    const said = announcements(fresh);
+    if (said.length) setSpoken((list) => [...list, ...said.map((text) => ({ key: ++spokenKey.current, text }))].slice(-SPOKEN_KEEP));
     if (follow.current) {
       node.scrollTop = node.scrollHeight;
       return;
     }
-    if (before !== null && newest > before) {
-      const fresh = s.messages.filter((m) => m.id > before && !isMine(m, slug)).length;
-      if (fresh > 0) setUnseen((n) => n + fresh);
-    }
-    // `s.messages` is read for the count only; `newest` is what changed.
+    if (fresh.length > 0) setUnseen((n) => n + fresh.length);
+    // `slug` is read for the count only; a change of it is not new lines.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newest, s.pending.length, s.status]);
+  }, [s.messages, s.pending.length, s.status, s.epoch]);
 
-  // AN EARLIER PAGE MUST NOT MOVE WHAT THE READER IS LOOKING AT. Prepending
-  // grows the log above them; the scroll offset grows by exactly as much.
+  // AN EARLIER PAGE MUST NOT MOVE WHAT THE READER IS LOOKING AT. Pinned to the
+  // row that was oldest when the page was asked for, not to the log's height:
+  // a line a poll appends at the bottom meanwhile grows the height too, and
+  // counting it as prepended moved the reader by that much.
   useLayoutEffect(() => {
     const node = log.current;
     const a = anchor.current;
     if (!node || !a) return;
     anchor.current = null;
-    node.scrollTop = a.top + (node.scrollHeight - a.height);
+    const row = node.querySelector<HTMLElement>(`[data-mid="${a.id}"]`);
+    if (row) node.scrollTop += row.getBoundingClientRect().top - a.top;
   }, [firstId]);
 
   // The composer growing, a phone keyboard opening, the window resizing: all
@@ -178,6 +241,21 @@ export function GroupChat({
     [],
   );
 
+  // Signing in happens in the page, with no reload; App learns the owner's
+  // agent then, and the room's own answer about who may post is re-asked.
+  useEffect(() => {
+    void pullMe(true);
+  }, [mySlug]);
+
+  // A reply to a line its owner took back cannot be sent; the chip goes, and
+  // says why, instead of the send failing.
+  useEffect(() => {
+    if (replyTo && isTakenBack(replyTo.id)) {
+      setReplyTo(null);
+      setError("The message you were replying to was taken back.");
+    }
+  }, [s.messages, replyTo]);
+
   useLayoutEffect(() => {
     const node = input.current;
     if (!node) return;
@@ -185,9 +263,15 @@ export function GroupChat({
     node.style.height = `${Math.min(120, node.scrollHeight)}px`;
   }, [draft, member]);
 
+  /** Note where the oldest loaded row sits, so the page that lands above it leaves it there. */
+  const pinPlace = () => {
+    const row = log.current?.querySelector<HTMLElement>("[data-mid]");
+    const id = Number(row?.dataset.mid);
+    anchor.current = row && Number.isFinite(id) ? { id, top: row.getBoundingClientRect().top } : null;
+  };
+
   const earlier = () => {
-    const node = log.current;
-    if (node) anchor.current = { height: node.scrollHeight, top: node.scrollTop };
+    pinPlace();
     void loadEarlier().then(() => {
       // A failed page never changes `firstId`, so the anchor would otherwise
       // wait for some later, unrelated prepend and jump the reader then.
@@ -197,11 +281,30 @@ export function GroupChat({
     });
   };
 
+  /**
+   * ONLY THE READER CAN STOP THE FOLLOWING.
+   *
+   * A scroll event does not say who scrolled. A banner mounting above the room
+   * (a failed read, the sign-in card) shrinks the log from the top, and the
+   * browser's scroll anchoring then moves it — measured in the room at 65 px,
+   * one past AWAY_PX — so the screen decided the reader had scrolled up, stopped
+   * following, and opened with the newest line half off the bottom. A layout
+   * shift is not a reader: without a wheel, touch, key or pointer on the log in
+   * the last moment, a follower is put back on the newest line instead.
+   */
+  const touchedAt = useRef(0);
+  const touched = () => {
+    touchedAt.current = Date.now();
+  };
   const onScroll = () => {
     const node = log.current;
     if (!node) return;
     const isAway = node.scrollHeight - node.scrollTop - node.clientHeight > AWAY_PX;
-    follow.current = !isAway;
+    if (isAway && follow.current && Date.now() - touchedAt.current > READER_SCROLL_MS) {
+      node.scrollTop = node.scrollHeight;
+      return;
+    }
+    if (follow.current === isAway) pin(!isAway);
     setAway(isAway);
     if (!isAway) setUnseen(0);
     // Reaching the top reads further back, the way every chat does. The anchor
@@ -212,12 +315,29 @@ export function GroupChat({
   const jumpTo = (id: number) => {
     const target = log.current?.querySelector<HTMLElement>(`[data-mid="${id}"]`);
     if (!target) return;
+    // The reader asked for this, and a smooth scroll outlasts a tap's moment.
+    touchedAt.current = Date.now() + 1500;
     const reduced =
       typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     target.scrollIntoView?.({ block: "center", behavior: reduced ? "auto" : "smooth" });
+    // Focus goes with the eye, so a keyboard or screen reader lands on the
+    // original too. Focusable only for the visit: a row that took focus on
+    // every click would light up its buttons under a mouse.
+    if (!target.hasAttribute("tabindex")) {
+      target.tabIndex = -1;
+      target.addEventListener("blur", () => target.removeAttribute("tabindex"), { once: true });
+    }
+    target.focus({ preventScroll: true });
     setFlash(id);
     if (flashTimer.current) clearTimeout(flashTimer.current);
     flashTimer.current = setTimeout(() => setFlash((f) => (f === id ? null : f)), 1600);
+  };
+
+  /** The original is older than what is loaded: fetch back to it, then go there. */
+  const jumpEarlier = async (id: number) => {
+    const found = await loadUntil(id, pinPlace);
+    anchor.current = null;
+    if (found) setTimeout(() => jumpTo(id), 0);
   };
 
   const startReply = (m: PublicMessage) => {
@@ -227,13 +347,20 @@ export function GroupChat({
     input.current?.focus();
   };
 
+  const cancelReply = () => {
+    setReplyTo(null);
+    // The button that had focus goes with the bar; the composer is where the
+    // owner was.
+    input.current?.focus();
+  };
+
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
     const target = replyTo;
     setSending(true);
     setError("");
-    follow.current = true;
+    pin(true);
     setDraft("");
     setReplyTo(null);
     const result = await postLine(text, target?.id ?? null);
@@ -242,7 +369,7 @@ export function GroupChat({
       // The words come back, so a refusal never costs the owner what they typed.
       setError(result.error);
       setDraft((current) => current || text);
-      setReplyTo((current) => current ?? target);
+      setReplyTo((current) => current ?? (target && !isTakenBack(target.id) ? target : null));
     }
     input.current?.focus();
   };
@@ -259,9 +386,30 @@ export function GroupChat({
     setConfirmHide(null);
     const ok = await hideLine(id);
     if (!ok) setError("Couldn't remove that message. Try again.");
+    // The button that had focus went with its row.
+    else rescueFocus(log.current);
   };
 
-  const presence = presenceLine(s.room, Date.now());
+  // STABLE HANDLERS, so a memoised line re-renders for its own news only — not
+  // for a keystroke in the composer or a poll that brought nothing for it.
+  const handlers = useRef({ startReply, hide, jumpTo, jumpEarlier, onProfile, onToken });
+  useLayoutEffect(() => {
+    handlers.current = { startReply, hide, jumpTo, jumpEarlier, onProfile, onToken };
+  });
+  const on = useMemo(
+    () => ({
+      reply: (m: PublicMessage) => handlers.current.startReply(m),
+      hide: (id: number) => void handlers.current.hide(id),
+      jump: (id: number) => handlers.current.jumpTo(id),
+      jumpEarlier: (id: number) => void handlers.current.jumpEarlier(id),
+      profile: (slugOf: string) => handlers.current.onProfile(slugOf),
+      token: (id: string) => handlers.current.onToken(id),
+    }),
+    [],
+  );
+
+  const presence = presenceLine(s.room, s.roomFresh);
+  const counting = draft.length >= COMPOSER_MAX - 100;
 
   return (
     <div className="gc-page">
@@ -278,7 +426,7 @@ export function GroupChat({
               disabled={!s.room?.presence.length}
             >
               <i className={presence.fresh ? "gc-dot" : "gc-dot off"} aria-hidden="true" />
-              {presence.text}
+              <span className="gc-presence-text">{presence.text}</span>
               {!!s.room?.presence.length && <ChevronDown size={14} aria-hidden="true" className="gc-chev" />}
             </button>
           )}
@@ -328,16 +476,24 @@ export function GroupChat({
               Can’t reach the room right now — showing what we last read.
             </p>
           )}
+          <div className="gc-spoken sr-only" role="log" aria-live="polite" aria-relevant="additions" aria-label="New messages in the group chat">
+            {spoken.map((line) => (
+              <p key={line.key}>{line.text}</p>
+            ))}
+          </div>
           <div className="gc-log-wrap">
             <div
               ref={log}
               className="gc-log"
-              role="log"
-              aria-live="polite"
-              aria-relevant="additions"
+              role="region"
               aria-label="Group chat messages"
               tabIndex={0}
               onScroll={onScroll}
+              onWheel={touched}
+              onTouchStart={touched}
+              onTouchMove={touched}
+              onPointerDown={touched}
+              onKeyDown={touched}
             >
               {s.messages.length > 0 && !s.start && (
                 <div className="gc-earlier">
@@ -356,8 +512,10 @@ export function GroupChat({
               )}
               {items.map((item) => {
                 if (item.type === "day")
+                  // Plain text, not role="separator": a separator's children
+                  // are presentational, and "Today" was never read out.
                   return (
-                    <div key={item.key} className="gc-day" role="separator">
+                    <div key={item.key} className="gc-day">
                       <span>{item.label}</span>
                     </div>
                   );
@@ -371,7 +529,7 @@ export function GroupChat({
                   <ChatLine
                     key={item.key}
                     item={item}
-                    original={item.message.replyTo === null ? undefined : (byId.get(item.message.replyTo) ?? null)}
+                    original={item.message.replyTo === null ? undefined : replyTarget(item.message.replyTo, byId, firstId, s.start)}
                     names={names}
                     myName={me?.name ?? null}
                     mySlug={slug}
@@ -379,11 +537,12 @@ export function GroupChat({
                     flash={flash === item.message.id}
                     canReply={member && !item.pending}
                     confirmingHide={confirmHide === item.message.id}
-                    onReply={startReply}
-                    onHide={hide}
-                    onJump={jumpTo}
-                    onProfile={onProfile}
-                    onToken={onToken}
+                    onReply={on.reply}
+                    onHide={on.hide}
+                    onJump={on.jump}
+                    onJumpEarlier={on.jumpEarlier}
+                    onProfile={on.profile}
+                    onToken={on.token}
                   />
                 );
               })}
@@ -403,10 +562,15 @@ export function GroupChat({
                   <div className="gc-replying">
                     <CornerUpLeft size={14} aria-hidden="true" />
                     <span>
-                      Replying to <strong>{replyTo.name}</strong>
+                      {/* Isolated: an Arabic or Hebrew name beside an excerpt
+                          that starts with digits would pull the digits onto it. */}
+                      Replying to{" "}
+                      <bdi>
+                        <strong>{replyTo.name}</strong>
+                      </bdi>
                       <em>{excerpt(replyTo.body, 90)}</em>
                     </span>
-                    <button type="button" aria-label="Cancel reply" onClick={() => setReplyTo(null)}>
+                    <button type="button" aria-label="Cancel reply" onClick={cancelReply}>
                       <X size={15} aria-hidden="true" />
                     </button>
                   </div>
@@ -429,6 +593,7 @@ export function GroupChat({
                     value={draft}
                     maxLength={COMPOSER_MAX}
                     aria-label="Message the group chat"
+                    aria-describedby={counting ? "gc-count" : undefined}
                     placeholder="Say something to the room…"
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
@@ -444,8 +609,10 @@ export function GroupChat({
                       }
                     }}
                   />
-                  {draft.length >= COMPOSER_MAX - 100 && (
-                    <span className={draft.length >= COMPOSER_MAX ? "gc-count over" : "gc-count"} aria-live="polite">
+                  {/* Described by, not live: a live counter read "401/500",
+                      "402/500"… over every keystroke. */}
+                  {counting && (
+                    <span id="gc-count" className={draft.length >= COMPOSER_MAX ? "gc-count over" : "gc-count"}>
                       {draft.length}/{COMPOSER_MAX}
                     </span>
                   )}
@@ -616,7 +783,43 @@ function Body({ text, names, myName, mark }: { text: string; names: readonly str
   );
 }
 
-function ChatLine({
+interface LineProps {
+  item: Line;
+  /**
+   * undefined: not a reply. A line: the original, loaded. "earlier": older than
+   * what is loaded, and the room may still have it. null: gone.
+   */
+  original: PublicMessage | "earlier" | null | undefined;
+  names: readonly string[];
+  myName: string | null;
+  mySlug: string | null;
+  enter: boolean;
+  flash: boolean;
+  canReply: boolean;
+  confirmingHide: boolean;
+  onReply: (m: PublicMessage) => void;
+  onHide: (id: number) => void;
+  onJump: (id: number) => void;
+  onJumpEarlier: (id: number) => void;
+  onProfile: (slug: string) => void;
+  onToken: (id: string) => void;
+}
+
+/**
+ * A line re-renders for its own news only. `chatItems` builds a fresh item
+ * object each time, but the message inside it keeps its identity while it is
+ * unchanged (mergeMessages), so the item is compared by what it draws.
+ */
+function sameLine(a: LineProps, b: LineProps): boolean {
+  for (const k of Object.keys(b) as (keyof LineProps)[]) {
+    if (k !== "item" && a[k] !== b[k]) return false;
+  }
+  const x = a.item;
+  const y = b.item;
+  return x.key === y.key && x.message === y.message && x.mine === y.mine && x.pending === y.pending && x.first === y.first && x.last === y.last;
+}
+
+const ChatLine = memo(function ChatLine({
   item,
   original,
   names,
@@ -629,25 +832,10 @@ function ChatLine({
   onReply,
   onHide,
   onJump,
+  onJumpEarlier,
   onProfile,
   onToken,
-}: {
-  item: Line;
-  /** undefined: not a reply. null: a reply to a line that is not loaded or no longer exists. */
-  original: PublicMessage | null | undefined;
-  names: readonly string[];
-  myName: string | null;
-  mySlug: string | null;
-  enter: boolean;
-  flash: boolean;
-  canReply: boolean;
-  confirmingHide: boolean;
-  onReply: (m: PublicMessage) => void;
-  onHide: (id: number) => void;
-  onJump: (id: number) => void;
-  onProfile: (slug: string) => void;
-  onToken: (id: string) => void;
-}) {
+}: LineProps) {
   const m = item.message;
   const slide = useRef<HTMLDivElement>(null);
   const icon = useRef<HTMLSpanElement>(null);
@@ -671,12 +859,12 @@ function ChatLine({
   /**
    * SWIPE RIGHT TO REPLY — and only when the finger clearly means it.
    *
-   * `touch-action: pan-y` hands vertical movement to the browser, so scrolling
-   * the log still works from anywhere on a bubble; this only takes over once
-   * the movement is horizontal and rightward. A drag that starts on a link or
-   * a button is left alone, so "View coin" and the quote chip stay tappable.
-   * The mouse is excluded: a mouse drag across a bubble is how text gets
-   * selected, and the reply button covers mice and keyboards.
+   * `touch-action: pan-y pinch-zoom` hands vertical movement and zoom to the
+   * browser, so scrolling the log still works from anywhere on a bubble; this
+   * only takes over once the movement is horizontal and rightward. A drag that
+   * starts on a link or a button is left alone, so "View coin" and the quote
+   * chip stay tappable. The mouse is excluded: a mouse drag across a bubble is
+   * how text gets selected, and the reply button covers mice and keyboards.
    */
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!canReply || e.pointerType === "mouse" || e.button > 0) return;
@@ -756,7 +944,12 @@ function ChatLine({
           </div>
         )}
         {original !== undefined &&
-          (original ? (
+          (original === "earlier" ? (
+            <button type="button" className="gc-quote" onClick={() => onJumpEarlier(m.replyTo!)} title="Load and show the original message">
+              <CornerUpLeft size={12} aria-hidden="true" />
+              <span>earlier message</span>
+            </button>
+          ) : original ? (
             <button type="button" className="gc-quote" onClick={() => onJump(original.id)} title="Show the original message">
               <CornerUpLeft size={12} aria-hidden="true" />
               <strong>{original.name}</strong>
@@ -769,7 +962,7 @@ function ChatLine({
             </span>
           ))}
         <div
-          className="gc-swipe"
+          className={canReply ? "gc-swipe gc-swipeable" : "gc-swipe"}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerEnd}
@@ -780,7 +973,10 @@ function ChatLine({
           </span>
           <div ref={slide} className="gc-slide">
             <div className="gc-bubble" title={item.pending ? undefined : fullDateTime(m.at)}>
-              {item.mine && item.first && <span className="sr-only">You: </span>}
+              {/* Who said it, on EVERY line for assistive tech: the face and
+                  name are drawn once per run, and a continuation line read on
+                  its own had no speaker at all. */}
+              {item.mine ? <span className="sr-only">You: </span> : !item.first && <span className="sr-only">{m.name}: </span>}
               {m.call && <CallCard call={m.call} onToken={onToken} />}
               <Body
                 text={m.body}
@@ -821,4 +1017,4 @@ function ChatLine({
       </div>
     </div>
   );
-}
+}, sameLine);
