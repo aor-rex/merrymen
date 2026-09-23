@@ -107,7 +107,8 @@ import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
-import { idleNotice, idleViewRow, modeEmptiedFact } from "./idle-notice";
+import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
+import { classEntryGate, classRouteLooks } from "./class-entry-gate";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
@@ -755,8 +756,13 @@ async function main() {
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */
   let lastLiveBlocker: RefuseRule | null | undefined;
-  /** The last reason a tick proposed nothing, so THAT fires on change only too. */
-  let lastIdleReason: string | null = null;
+  /**
+   * WHY A TICK PROPOSED NOTHING, told once per change — and a warning that
+   * still stands kept on the owner's notice. The state (`lastIdleReason`, as
+   * it was), both writes and the store they go to live in idle-notice.ts,
+   * where a test runs them on the real store.
+   */
+  const idleChannel = idleChannelOnStore((line) => console.log(line));
   /**
    * The last policy refusal an owner was TOLD about, so it fires on change only.
    *
@@ -10962,36 +10968,27 @@ async function main() {
       cfg.assetMode,
       (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
     );
-    // TWO REGISTERS FROM ONE FACT, once per change, and at a level the owner
-    // sees when the fact cannot be a post — all decided in idle-notice.ts,
-    // where a test runs it. This block only writes what it decided.
-    const notice = idleNotice({ idle, modeEmptied, last: lastIdleReason });
-    lastIdleReason = notice.last;
-    if (notice.event) {
-      console.log(`[tick] idle — ${notice.event.message}`);
-      await addEvent(agentId, notice.event.level, notice.event.message);
-      // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
-      //
-      // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
-      // `decisions` can become a post, so the silence is also written as a
-      // `view` (idleViewRow). Inside the same change gate as the event —
-      // renderWhy is deterministic, so an unchanged reason would otherwise
-      // write an identical row every 240 seconds, 12,000 a day.
-      //
-      // renderWhy is the only producer of these strings — the same
-      // property that makes a deterministic strategy's trade reason safe
-      // to publish makes its SILENCE safe to publish.
-      //
-      // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
-      // account's losses, and the refusal it replaces leaves the public
-      // feed; the owner has the event above, as a WARNING, because it is
-      // the only place they will read it. See publishesIdle.
-      if (notice.view !== null) {
-        await addDecision(
-          idleViewRow({ id: newDecisionId(), agentId, strategyName: strategy.name, reason: notice.view }),
-        );
-      }
-    }
+    // THE CLASS ROUTE'S ENTRY GATE, decided before the idle write because it
+    // can be the reason: under a tripped breaker no class entry is proposed,
+    // and when that silenced a route that would have looked — and the
+    // strategy, with no legs of its own, gave no reason — the owner is told
+    // the breaker's (class-entry-gate.ts). The entries themselves are below.
+    const classGate = classEntryGate({
+      snap,
+      routeLooks: classRouteLooks({
+        paper: paperActive(),
+        assetMode: cfg.assetMode,
+        vault: grantPonsClassVault(active?.grant),
+      }),
+      idle,
+    });
+    // TWO REGISTERS FROM ONE FACT, once per change, at a level the owner sees
+    // when the fact cannot be a post, and kept on the owner's notice while it
+    // stands — decided AND written by IdleChannel (idle-notice.ts), where a
+    // test runs it. The view it writes is renderWhy's public register, the
+    // only producer of these strings, which is what makes a silence safe to
+    // publish; a tripped breaker is account state and is never a post.
+    await idleChannel.tell({ agentId, strategyName: strategy.name, idle: classGate.idle, modeEmptied });
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -11075,8 +11072,9 @@ async function main() {
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
     // Not while the breaker is tripped: every class entry is a buy the wall
-    // would refuse. The exits above are never withheld.
-    const entries: Tick = breakerTripped(snap) ? { intents: [], why: [] } : await proposeClassEntries();
+    // would refuse. The exits above are never withheld. The same gate gave the
+    // owner the reason, above.
+    const entries: Tick = classGate.propose ? await proposeClassEntries() : { intents: [], why: [] };
     for (const [at, intent] of entries.intents.entries()) {
       const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       if (!stamped.ok) continue;

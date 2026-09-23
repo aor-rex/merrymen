@@ -3,8 +3,9 @@
  *
  * Lifted out of the tick in index.ts so a test can run it: the decision was
  * three ternaries and a guard inside main(), and a revert of any of them passed
- * every test in the repo. index.ts still does the writing — this only decides
- * what gets written, from the same inputs.
+ * every test in the repo. Then the writing was lifted too (IdleChannel, below),
+ * because a revert of THAT — the change gate, the level, the post's register —
+ * passed every test as well. index.ts now only calls `tell`.
  *
  * An empty intent list is what a healthy quiet tick looks like AND what a
  * strategy that cannot act looks like. Over one weekend that ambiguity read, to
@@ -19,9 +20,10 @@
  *
  * ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and this
  * repo already carries the incident where 1,242 identical rows told nobody
- * anything. `last` is the owner sentence already said; the caller keeps it.
+ * anything. `last` is the owner sentence already said; IdleChannel keeps it.
  */
 import type { AssetMode } from "../../packages/core/src/index";
+import { addDecision, addEvent, newDecisionId, ownerNotice } from "./store";
 import { publishesIdle, renderWhy, type Why } from "./strategies/reasons";
 import { publicationSourceFor } from "./thesis-policy";
 
@@ -125,4 +127,132 @@ export function idleViewRow(args: { id: string; agentId: string; strategyName: s
   reason: string;
 } {
   return { id: args.id, agent_id: args.agentId, source: publicationSourceFor(args.strategyName), reason: args.reason };
+}
+
+/**
+ * WHAT THE OWNER'S NOTICE SHOWS NOW: the newest warn among the agent's newest
+ * events, by the rule the desk, the rail and the Android app apply
+ * (store.ownerNotice). `atMs` is when it was written.
+ */
+export interface ShownNotice {
+  message: string;
+  atMs: number;
+}
+
+/**
+ * HOW LONG A NEWER NOTICE KEEPS THE DESK before a standing reason is said again.
+ *
+ * Long enough that a line somebody else just wrote — a discovery failure, a
+ * refusal — is read before it is covered; short against a breaker that stays
+ * tripped for days. A warn written every tick is younger than this every time
+ * it is asked, so the breaker waits for it rather than alternating with it:
+ * the table never carries two warnings a tick.
+ */
+export const RESTATE_AFTER_MS = 10 * 60_000;
+
+/** Where the idle channel writes, and what it reads back. idleChannelOnStore binds the store's own. */
+export interface IdleSinks {
+  addEvent(agentId: string, level: "ok" | "warn", message: string): Promise<void>;
+  addDecision(row: ReturnType<typeof idleViewRow>): Promise<void>;
+  newDecisionId(): string;
+  /** The owner's notice as it stands: null when none shows, undefined when it could not be read. */
+  shownNotice(agentId: string): Promise<ShownNotice | null | undefined>;
+  now?(): number;
+  log?(line: string): void;
+}
+
+/**
+ * THE TICK'S IDLE WRITE, WHOLE — what used to be the idle block in main().
+ *
+ * That block kept `lastIdleReason` itself and wrote what idleNotice decided,
+ * and no test booted it: dropping the change gate, or publishing the owner's
+ * sentence as the post, passed every test in the repo. So the state and both
+ * writes live here, and index.ts only calls `tell` with the store's sinks.
+ *
+ * AND A WARNING THAT STILL STANDS IS KEPT WHERE THE OWNER READS IT. A reason
+ * that cannot be a post (a tripped breaker) reaches the owner only as a warn
+ * event, and the desk notice, the rail and the Android app show only the
+ * newest warn among the newest 40 events. Written once, at the change, it is
+ * covered by the next warn anybody writes — for a Trencher the discovery
+ * retry line, which then read as the reason for days — or aged out by the
+ * running commentary, and the desk showed nothing while the breaker was still
+ * tripped. So while such a reason stands and the notice no longer shows it,
+ * it is said again: at once when nothing shows, and otherwise once the notice
+ * that replaced it has had RESTATE_AFTER_MS. Still once per change for
+ * everything else — a reason that posts is never restated, because its view
+ * row would repeat with it.
+ */
+export class IdleChannel {
+  /** The owner sentence standing — `lastIdleReason`, as the tick knew it. */
+  private last: string | null = null;
+  /** Whether the standing sentence went out as a warning, the one kind that is restated. */
+  private standingWarn = false;
+  private readonly restateAfterMs: number;
+
+  constructor(
+    private readonly sinks: IdleSinks,
+    opts: { restateAfterMs?: number } = {},
+  ) {
+    this.restateAfterMs = opts.restateAfterMs ?? RESTATE_AFTER_MS;
+  }
+
+  async tell(input: {
+    agentId: string;
+    strategyName: string;
+    idle: Why | null | undefined;
+    modeEmptied: string | null;
+  }): Promise<void> {
+    const notice = idleNotice({ idle: input.idle, modeEmptied: input.modeEmptied, last: this.last });
+    this.last = notice.last;
+    if (notice.event) {
+      this.standingWarn = notice.event.level === "warn";
+      this.sinks.log?.(`[tick] idle — ${notice.event.message}`);
+      await this.sinks.addEvent(input.agentId, notice.event.level, notice.event.message);
+      // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
+      // `decisions` can become a post, so the silence is also written as a
+      // `view` (idleViewRow) — inside the same change gate as the event, or an
+      // unchanged reason would write an identical row every tick. EXCEPT A
+      // SILENCE THAT IS ACCOUNT STATE: idleNotice gives it no view.
+      if (notice.view !== null) {
+        await this.sinks.addDecision(
+          idleViewRow({ id: this.sinks.newDecisionId(), agentId: input.agentId, strategyName: input.strategyName, reason: notice.view }),
+        );
+      }
+      return;
+    }
+    // Nothing new to say. A reason that still stands, and went out as a
+    // warning, is said again if the owner's notice no longer shows it. (A new
+    // reason always arrives with an event above, which resets standingWarn.)
+    if (notice.last !== null && this.standingWarn && (await this.covered(input.agentId, notice.last))) {
+      this.sinks.log?.(`[tick] idle (restated) — ${notice.last}`);
+      await this.sinks.addEvent(input.agentId, "warn", notice.last);
+    }
+  }
+
+  /** Is the standing warning no longer what the owner's notice shows — and past its grace? */
+  private async covered(agentId: string, standing: string): Promise<boolean> {
+    let shown: ShownNotice | null | undefined;
+    try {
+      shown = await this.sinks.shownNotice(agentId);
+    } catch {
+      shown = undefined;
+    }
+    // Unread is not "nothing shows": a write on a guess is how a table fills
+    // with the same line.
+    if (shown === undefined) return false;
+    if (shown === null) return true;
+    if (shown.message === standing) return false;
+    const now = this.sinks.now?.() ?? Date.now();
+    return now - shown.atMs >= this.restateAfterMs;
+  }
+}
+
+/**
+ * THE CHANNEL THE TICK USES: the store's own writers, and the owner's notice
+ * read by the desk's rule (store.ownerNotice). Bound here rather than in
+ * main(), so the binding itself is run by a test — owner-notice.integration
+ * drives this, on the real store — and not only read.
+ */
+export function idleChannelOnStore(log?: (line: string) => void): IdleChannel {
+  return new IdleChannel({ addEvent, addDecision, newDecisionId, shownNotice: ownerNotice, log });
 }

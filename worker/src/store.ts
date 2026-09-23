@@ -2585,6 +2585,41 @@ export async function addEvent(
 }
 
 /**
+ * How many of an agent's newest events its owner's notice is chosen from — the
+ * LIMIT web/src/app/api/feed/route.ts reads them with.
+ */
+export const OWNER_NOTICE_WINDOW = 40;
+
+/**
+ * THE NOTICE THE OWNER'S SURFACES SHOW FOR THIS AGENT, by their own rule.
+ *
+ * The desk reads the agent's newest OWNER_NOTICE_WINDOW events, newest first by
+ * (created_at, id) — api/feed/route.ts — and shows the first warn or err with a
+ * message (terminal/live.ts mineOf; android Core.kt does the same). The rail
+ * reads the same feed. So this is what the owner is reading right now, asked of
+ * the table the child writes — which the mirror copies to the desk's database
+ * row for row. Events another process writes straight into the shared one (the
+ * orchestrator's) are not here; this is the child's own view of its notice.
+ *
+ * Null when nothing shows. UNDEFINED WHEN THE READ FAILED — unread is not
+ * "nothing shows", and a caller that acts on it writes a line it did not need.
+ */
+export async function ownerNotice(agentId: string): Promise<{ message: string; atMs: number } | null | undefined> {
+  try {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT level, message, created_at FROM events
+          WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ${OWNER_NOTICE_WINDOW}`,
+      )
+      .all(agentId)) as { level: string; message: string | null; created_at: number | string }[];
+    const shown = rows.find((r) => (r.level === "warn" || r.level === "err" || r.level === "error") && !!r.message);
+    return shown ? { message: shown.message!, atMs: Number(shown.created_at) * 1000 } : null;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Write a trade row. Returns TRUE if it was persisted, FALSE if the write was
  * caught and swallowed — the caller must not mistake a swallowed failure for a
  * recorded fill. On a network-backed ledger a write can fail routinely, and a
