@@ -2,8 +2,9 @@
 import { fitChatState } from "./chat-state";
 import { conceptsFor, renderConcepts } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
+import { sseEvent, streamSafe } from "./chat-stream";
 import { resolveConfig } from "../../../worker/src/settings";
-import { resolveLlm, llmText, type LlmCreds } from "../../../worker/src/llm";
+import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
 
 /**
  * THIS PROMPT ONCE TOLD THE MODEL THERE WAS NO PAPER/LIVE SWITCH.
@@ -117,11 +118,23 @@ export interface AgentChatOptions {
   surface?: "dashboard" | "partner";
   credentials?: () => LlmCreds | null;
   complete?: typeof llmText;
+  /** The streamed completion, for agentReplyResponse. A test seam, like `complete`. */
+  stream?: typeof llmTextStream;
 }
 
-export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}): Promise<AgentReply> {
+/** The request one reply sends, or the answer that needs no model at all. */
+type Prepared =
+  | { early: AgentReply }
+  | { creds: LlmCreds; request: { system: string; prompt: string; maxTokens: number } };
+
+/**
+ * EVERYTHING UP TO THE MODEL CALL, shared by the answered and the streamed
+ * reply so the two cannot drift: the same state fitting, the same definitions,
+ * the same defanging of every marker in the input, the same system prompt.
+ */
+function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prepared {
   const message = typeof body.message === "string" ? body.message.slice(0, 2000).trim() : "";
-  if (!message) return { reply: null, why: "empty" };
+  if (!message) return { early: { reply: null, why: "empty" } };
   // WHOLE ENTRIES, NEVER A PREFIX. A blind slice cut mid-object and handed the
   // model malformed JSON with no marker, which it answered from anyway. See
   // lib/chat-state.ts for the trace.
@@ -137,7 +150,7 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
   const creds = (options.credentials ?? (() => resolveLlm(resolveConfig())))();
   if (!creds) {
     // No brain configured — the client falls back to its own ledger answers.
-    return { reply: null, why: "no-llm" };
+    return { early: { reply: null, why: "no-llm" } };
   }
 
   // WHICH DEFINITIONS THIS QUESTION NEEDS — decided here, by matching words,
@@ -186,20 +199,123 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     .filter(Boolean)
     .join("\n\n");
 
+  const request = { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 };
+  if (options.surface === "partner") request.system = PARTNER_SYSTEM + PARTNER_COMMANDS;
+  return { creds, request };
+}
+
+/** The complete reply, split: the words, and the proposal only if it ends them. */
+function finishReply(raw: string): AgentReply {
+  const { reply, command } = splitCommand(raw);
+  return { reply: reply || null, ...(command ? { command } : {}) };
+}
+
+export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}): Promise<AgentReply> {
+  const prepared = prepareAgentReply(body, options);
+  if ("early" in prepared) return prepared.early;
   try {
-    const request = { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 };
-    if (options.surface === "partner") request.system = PARTNER_SYSTEM + PARTNER_COMMANDS;
-    const raw = (await (options.complete ?? llmText)(creds, request)).trim();
-    const { reply, command } = splitCommand(raw);
-    return { reply: reply || null, ...(command ? { command } : {}) };
+    const raw = (await (options.complete ?? llmText)(prepared.creds, prepared.request)).trim();
+    return finishReply(raw);
   } catch (e) {
-    // LLM unreachable/rate-limited — degrade to the client's deterministic path,
-    // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that
-    // cover a dead model, a rejected key, a rate limit and an over-long prompt:
-    // four problems with four different fixes, indistinguishable to the one
-    // person who can fix any of them. On the hosted app they cannot read the
-    // logs either, so this is their only channel. Already redacted upstream.
-    const detail = e instanceof Error ? e.message : "";
-    return { reply: null, why: "llm-error", ...(options.surface === "partner" ? {} : { detail: detail.slice(0, 300) || undefined }) };
+    return failedReply(e, options);
   }
+}
+
+function failedReply(e: unknown, options: AgentChatOptions): AgentReply {
+  // LLM unreachable/rate-limited — degrade to the client's deterministic path,
+  // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that
+  // cover a dead model, a rejected key, a rate limit and an over-long prompt:
+  // four problems with four different fixes, indistinguishable to the one
+  // person who can fix any of them. On the hosted app they cannot read the
+  // logs either, so this is their only channel. Already redacted upstream.
+  const detail = e instanceof Error ? e.message : "";
+  return { reply: null, why: "llm-error", ...(options.surface === "partner" ? {} : { detail: detail.slice(0, 300) || undefined }) };
+}
+
+const json = (body: unknown, status: number) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+/**
+ * /api/chat's answer — streamed when the browser asked for it, JSON when not.
+ *
+ * STREAMED, the owner sees the agent's words as they are written instead of
+ * "thinking…" for the length of the whole completion. What may be shown is
+ * decided by streamSafe (lib/chat-stream.ts): nothing from the first `<<` on,
+ * no `<` that could still become one, no reasoning. The COMMAND is decided
+ * once, at the end, by splitCommand on the complete reply — so the end-anchor
+ * that makes a proposal a proposal is checked against the whole text, exactly
+ * as it was when the reply arrived in one piece, and the `done` event carries
+ * the only reply that is final.
+ *
+ * AN ANSWER THAT NEEDS NO MODEL IS JSON EVEN WHEN A STREAM WAS ASKED FOR. An
+ * empty message and a missing brain are known before anything is sent, and the
+ * browser reads the content type before it reads the body.
+ *
+ * A failure after the stream opened is an `error` event with the provider's
+ * own (already redacted) words, never a short reply: the owner may have watched
+ * half a sentence arrive, and the half is not the answer.
+ */
+export async function agentReplyResponse(
+  body: AgentChatBody,
+  how: { stream: boolean; signal?: AbortSignal },
+  options: AgentChatOptions = {},
+): Promise<Response> {
+  if (!how.stream) {
+    const result = await generateAgentReply(body, options);
+    return json(result, result.why === "empty" ? 400 : 200);
+  }
+  const prepared = prepareAgentReply(body, options);
+  if ("early" in prepared) return json(prepared.early, prepared.early.why === "empty" ? 400 : 200);
+  const { creds, request } = prepared;
+  // The owner closing the chat stops the provider too — nobody is reading.
+  const stop = new AbortController();
+  how.signal?.addEventListener("abort", () => stop.abort(), { once: true });
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (s: string) => {
+        try {
+          controller.enqueue(encoder.encode(s));
+        } catch {
+          /* the reader has gone; the abort above ends the provider call */
+        }
+      };
+      let raw = "";
+      let shown = "";
+      try {
+        const full = await (options.stream ?? llmTextStream)(creds, { ...request, signal: stop.signal }, (piece) => {
+          raw += piece;
+          const visible = streamSafe(raw);
+          // Only ever APPENDED: a screen that would rewrite what is already
+          // shown sends nothing more, and `done` settles it.
+          if (visible.length > shown.length && visible.startsWith(shown)) {
+            send(sseEvent("text", { t: visible.slice(shown.length) }));
+            shown = visible;
+          }
+        });
+        send(sseEvent("done", finishReply(full.trim())));
+      } catch (e) {
+        const failed = failedReply(e, options);
+        send(sseEvent("error", { why: failed.why, ...(failed.detail ? { detail: failed.detail } : {}) }));
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* already closed by a cancelled reader */
+        }
+      }
+    },
+    cancel() {
+      stop.abort();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      // no-transform: a compressing proxy that buffers the whole body would
+      // turn the stream back into one late answer.
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+    },
+  });
 }
