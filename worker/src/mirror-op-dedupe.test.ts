@@ -47,6 +47,10 @@ const FEES =
   " fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);";
 const LOGS = [TRADES, EVENTS, EQUITY, FLOWS, FEES].join("\n");
 
+/** One smart account, as EIP-55 spells it and as a lowercasing writer spells it. */
+const CHECKSUMMED = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+const LOWER = CHECKSUMMED.toLowerCase();
+
 interface Row {
   agent?: string;
   hash: string | null;
@@ -244,6 +248,60 @@ for (const [label, destination] of [
       rebuilt.raw.close();
     });
 
+    // THE COPY THAT ARRIVES A PASS LATE, SPELT THE OTHER WAY. The rebuilt
+    // child's first row is often a tick's refusal, mirrored on the rewind pass
+    // before the arm's reconciler has written anything; its copies then arrive
+    // on ORDINARY passes, where only the index probe runs. The account is a
+    // real address here because that is what agent_id holds — spelt EIP-55 by
+    // one incarnation and lowercase by the next.
+    for (const [was, now] of [
+      [CHECKSUMMED, LOWER],
+      [LOWER, CHECKSUMMED],
+    ] as const) {
+      it(`a copy under ${now === LOWER ? "the lowercase" : "the checksummed"} account, one pass after the rewind, is not inserted`, async () => {
+        const shared = dest();
+        const first = ledger([
+          { agent: was, hash: "0xop1", side: "buy", decision: "d1", at: 1000 },
+          { agent: was, hash: null, status: "rejected", decision: "d2", at: 1001 },
+        ]);
+        await mirrorTenant({ tenant: "t1", child: first.db, shared, nowSec: 2000 });
+        const rebuilt = ledger([{ agent: now, hash: null, status: "rejected", decision: "d3", at: 5000 }]);
+        const rewind = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, nowSec: 6000 });
+        assert.ok(rewind.restarted?.trades, "the refusal went up on the rewind pass");
+        rebuilt.raw
+          .prepare(
+            `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+             VALUES (?, 'swap', '0xvault', 5.0, '0xop1', 'landed', 1, 5010)`,
+          )
+          .run(now);
+        const late = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, nowSec: 6015 });
+        assert.equal(late.restarted, undefined, "an ordinary pass");
+        assert.equal(late.copied.trades, 0);
+        assert.equal(late.copied.trades_already_mirrored, 1);
+        const op1 = (await tape(shared)).filter((r) => r.user_op_hash === "0xop1");
+        assert.equal(op1.length, 1, "ONE row for one operation");
+        assert.equal(op1[0]!.fill_side, "buy", "and it is the evidenced one");
+        first.raw.close();
+        rebuilt.raw.close();
+      });
+    }
+
+    it("a hash spelt in capitals on an ordinary pass is the same op", async () => {
+      const shared = dest();
+      const c = ledger([{ agent: CHECKSUMMED, hash: "0xabc1", side: "buy", decision: "d1", at: 1000 }]);
+      await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 2000 });
+      c.raw
+        .prepare(
+          `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+           VALUES (?, 'swap', '0xvault', 5.0, '0xABC1', 'landed', 1, 3000)`,
+        )
+        .run(CHECKSUMMED);
+      const r = await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 4000 });
+      assert.equal(r.copied.trades_already_mirrored, 1);
+      assert.equal((await tape(shared)).length, 1);
+      c.raw.close();
+    });
+
     it("an ordinary pass skips an op the account already holds, and inserts a new one", async () => {
       const shared = dest();
       const c = ledger([{ hash: "0xop1", side: "buy", decision: "d1", at: 1000 }]);
@@ -327,6 +385,30 @@ describe("the duplicate check costs an index seek on an ordinary pass", () => {
     assert.equal(r.restarted, undefined, "an ordinary pass");
     assert.equal(r.copied.trades, 1);
     assert.ok(sent.some((s) => /FROM trades/.test(s.sql)), "sanity: the pass did ask the destination about the op");
+    assert.deepEqual(scansOfTrades(raw, sent), []);
+    c.raw.close();
+    raw.close();
+  });
+
+  it("and a copy spelt the other way is caught by the same seek, still without a scan", async () => {
+    // Every spelling the probe asks for is a key of trades_agent_userop, so the
+    // case-blind half of the check costs a handful of seeks, not the fleet's tape.
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(LOGS + MIRROR_STATE_DDL);
+    raw.exec("CREATE INDEX trades_agent_userop ON trades (agent_id, user_op_hash)");
+    const shared = wrapSqlite(raw);
+    const c = ledger([{ agent: CHECKSUMMED, hash: "0xop1", side: "buy", decision: "d1", at: 1000 }]);
+    await mirrorTenant({ tenant: "t1", child: c.db, shared, nowSec: 2000 });
+    c.raw
+      .prepare(
+        `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+         VALUES (?, 'swap', '0xvault', 5.0, '0xOP1', 'landed', 1, 3000)`,
+      )
+      .run(LOWER);
+    const sent: Sent[] = [];
+    const r = await mirrorTenant({ tenant: "t1", child: c.db, shared: recording(shared, sent), nowSec: 4000 });
+    assert.equal(r.restarted, undefined, "an ordinary pass");
+    assert.equal(r.copied.trades_already_mirrored, 1);
     assert.deepEqual(scansOfTrades(raw, sent), []);
     c.raw.close();
     raw.close();
