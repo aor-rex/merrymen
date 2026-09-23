@@ -134,11 +134,15 @@ export interface MerrymenSettings {
    */
   xHandle?: string;
   /**
-   * PUBLISH THE BOOK: position sizes, dollar P&L and holdings on the agent's
-   * public page. OFF until the owner turns it on, from their own profile.
+   * PUBLISH THE BOOK: trade sizes and dollar P&L (on the agent's public page
+   * and the feed), what it holds and how much (its page), and its name as a
+   * holder on the page of each token it holds (read-token.ts). OFF until the
+   * owner turns it on, from their own profile — and the switch there names all
+   * of it, because it is the consent. A new reader of this flag is a new thing
+   * it publishes, and belongs in that sentence (screens/Profile.tsx BookSwitch).
    *
-   * Percentages are the public default and stay public either way; this only
-   * adds the dollars. A public URL listing what an agent holds and how big each
+   * Returns and per-trade percentages are the public default and stay public
+   * either way. A public URL listing what an agent holds and how big each
    * fill was is the disclosure /api/scoreboard refuses when hosted, so it is the
    * owner's call and nobody else's — never a default, never inferred.
    *

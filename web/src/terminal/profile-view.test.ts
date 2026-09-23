@@ -113,10 +113,17 @@ describe("a top trade", () => {
   const trade = (over: Partial<ProfileTrade>): ProfileTrade => ({
     id: "1", action: "sell", symbol: "CASHCAT", displayName: null, at: 0, paper: false, sizeUsdg: null, realizedPnlUsdg: null, realizedPnlBps: 4_210, ...over,
   });
-  it("prints its return, and dollars only when the server sent them", () => {
-    assert.deepEqual(topTradeFigures(trade({})), { pct: "+42.1%", usd: null, tone: "up" });
-    assert.deepEqual(topTradeFigures(trade({ realizedPnlUsdg: 3.1 })), { pct: "+42.1%", usd: "+$3.10", tone: "up" });
-    assert.deepEqual(topTradeFigures(trade({ realizedPnlBps: -500, realizedPnlUsdg: -0.4 })), { pct: "−5.0%", usd: "−$0.40", tone: "down" });
+  it("prints its return, and dollars only when the server sent them AND the viewer may see them", () => {
+    assert.deepEqual(topTradeFigures(trade({}), true), { pct: "+42.1%", usd: null, tone: "up" });
+    assert.deepEqual(topTradeFigures(trade({ realizedPnlUsdg: 3.1 }), true), { pct: "+42.1%", usd: "+$3.10", tone: "up" });
+    assert.deepEqual(topTradeFigures(trade({ realizedPnlBps: -500, realizedPnlUsdg: -0.4 }), true), { pct: "−5.0%", usd: "−$0.40", tone: "down" });
+  });
+
+  it("a private book's dollars are refused here too, whatever the row carries", () => {
+    // The server nulls them, but the swaps table on the same page refuses a
+    // private dollar it was handed anyway — two rules on one page was one
+    // server line away from printing a private book's P&L.
+    assert.deepEqual(topTradeFigures(trade({ realizedPnlUsdg: 3.1 }), false), { pct: "+42.1%", usd: null, tone: "up" });
   });
 });
 

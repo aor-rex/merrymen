@@ -66,6 +66,11 @@ it("TOP TRADES rank by return, show dollars only when sent, and say when there a
   assert.doesNotMatch(text(), /\$/, "a private book prints no dollar anywhere in the list");
   await render(agent({ topTrades: [trade("1", "CASHCAT", 4_210, 3.1)], topTradesRead: true, publicBook: true }));
   assert.match(ui.container.querySelector(".profile-top-trade")!.textContent!, /\+42\.1% \(\+\$3\.10\)/);
+  // A private book handed a dollar anyway: the page refuses it, as the swaps
+  // table below it does, rather than trusting the one server line that nulls it.
+  await render(agent({ topTrades: [trade("1", "CASHCAT", 4_210, 3.1)], topTradesRead: true, publicBook: false }));
+  assert.equal(ui.container.querySelector(".profile-top-figure")!.textContent, "+42.1%");
+  assert.doesNotMatch(ui.container.querySelector(".profile-top-trades")!.textContent!, /\$/);
   await render(agent({ topTrades: [], topTradesRead: true }));
   assert.match(text(), /No closed trades yet/);
   await render(agent({ topTrades: [], topTradesRead: false }));
@@ -92,6 +97,26 @@ it("the owner's switch is shown only on their own page, and only once the settin
   await render(agent({ publicBook: false }), { isMine: true });
   const sw = ui.container.querySelector(".profile-book [role=switch]")!;
   assert.equal(sw.getAttribute("aria-checked"), "false", "off by default");
+});
+
+it("the switch names everything turning it on publishes: sizes, dollar P&L, holdings, and the token pages", async () => {
+  // It said only "trade sizes and dollar P&L", and "percentages are public
+  // either way". The same flag also publishes what the agent holds and how
+  // much, and lists it by name as a holder on every token page it holds —
+  // this is the consent, so it has to say so.
+  for (const on of [false, true]) {
+    await render(agent({ publicBook: on }), { isMine: true, key: String(on) });
+    const words = ui.container.querySelector(".profile-book small")!.textContent!;
+    const label = ui.container.querySelector(".profile-book [role=switch]")!.getAttribute("aria-label")!;
+    for (const said of [words, label]) {
+      assert.match(said, /trade sizes/, said);
+      assert.match(said, /dollar P&L/, said);
+      assert.match(said, /holds/, said);
+      assert.match(said, /token pages?/, said);
+    }
+    assert.doesNotMatch(words, /Percentages are public either way/, "holdings are not public either way");
+    assert.doesNotMatch(words, /Only percentages are public/);
+  }
 });
 
 it("turning the book on saves a boolean, re-reads the profile, and a failure is said", async () => {

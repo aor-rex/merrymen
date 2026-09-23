@@ -187,12 +187,19 @@ export function statsParts(s: {
   return out;
 }
 
-/** A top trade's figures: its return always, its dollars only when sent. */
-export function topTradeFigures(t: ProfileTrade): { pct: string; usd: string | null; tone: "up" | "down" } {
+/**
+ * A top trade's figures: its return always, its dollars only when the server
+ * sent them AND this viewer may see dollars — a published book, or the owner's
+ * own view. The server already withholds a private book's dollars; this refuses
+ * one it was handed anyway, the rule the swaps table on the same page applies
+ * (swaps.ts), so the page does not rest a private P&L on one server line.
+ */
+export function topTradeFigures(t: ProfileTrade, showMoney: boolean): { pct: string; usd: string | null; tone: "up" | "down" } {
   const bps = t.realizedPnlBps ?? 0;
+  const dollars = showMoney && t.realizedPnlUsdg != null && Number.isFinite(t.realizedPnlUsdg) ? t.realizedPnlUsdg : null;
   return {
     pct: pctBps(t.realizedPnlBps),
-    usd: t.realizedPnlUsdg == null ? null : `${t.realizedPnlUsdg >= 0 ? "+" : "−"}${usd(Math.abs(t.realizedPnlUsdg))}`,
+    usd: dollars === null ? null : `${dollars >= 0 ? "+" : "−"}${usd(Math.abs(dollars))}`,
     tone: bps < 0 ? "down" : "up",
   };
 }

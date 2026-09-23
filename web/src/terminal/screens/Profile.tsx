@@ -102,6 +102,11 @@ export function Profile({
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
   ];
+  /**
+   * DOLLARS ON THIS PAGE: a published book. One rule for every figure on it —
+   * TOP TRADES and Buys & sells alike — so neither leans on the server alone.
+   */
+  const showMoney = agent.publicBook === true;
   const stats = statsParts({
     tradeCount: agent.tradeCount,
     tradeCountFloor: agent.tradeCountFloor,
@@ -244,7 +249,7 @@ export function Profile({
             <ol className="profile-top-trades">
               {agent.topTrades.map((t, i) => {
                 const token = t.symbol ? tokens.find((k) => k.symbol.toUpperCase() === t.symbol!.toUpperCase()) : undefined;
-                const f = topTradeFigures(t);
+                const f = topTradeFigures(t, showMoney);
                 return (
                   <li key={t.id} className="profile-top-trade">
                     <span className="profile-top-rank">#{i + 1}</span>
@@ -275,7 +280,7 @@ export function Profile({
           <SwapsTable
             rows={swapRowsOfProfile(agent.recentTrades)}
             tokens={tokens}
-            showMoney={agent.publicBook === true}
+            showMoney={showMoney}
             emptyTitle="No completed buys or sells recorded in this trading period."
             onToken={onToken}
           />
@@ -475,7 +480,15 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
 }
 
 /**
- * THE OWNER'S SWITCH FOR THE PUBLIC BOOK — sizes and dollar P&L on this page.
+ * THE OWNER'S SWITCH FOR THE PUBLIC BOOK.
+ *
+ * THIS IS THE CONSENT, so it names everything the flag publishes — every
+ * reader of `publicBook`, not only this page's figures: trade sizes and dollar
+ * P&L (this page, and the feed), what the agent holds and how much (this page's
+ * Positions), and its name as a holder on the page of every token it holds
+ * (read-token.ts). It used to say only "trade sizes and dollar P&L" and that
+ * "percentages are public either way", which undersold the holdings on the one
+ * control that decides them.
  *
  * Off by default and off until the owner says otherwise. What it shows is what
  * the SERVER last read, moved only after a save the server confirmed; a save
@@ -505,12 +518,16 @@ function BookSwitch({ on, onChanged }: { on: boolean; onChanged?: () => void }) 
         <strong>Public book</strong>
         <small>
           {shown
-            ? "Anyone can see this agent's trade sizes and dollar P&L. Percentages are public either way."
-            : "Only percentages are public. Turn this on to show trade sizes and dollar P&L too."}
+            ? "Anyone can see this agent's trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds. Its return and the percentage on each trade are public either way."
+            : "Its return and the percentage on each trade are public. Turn this on to also publish its trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds."}
         </small>
         {error && <small role="alert" className="profile-book-error">{error}</small>}
       </div>
-      <Switch on={shown} onChange={saving ? () => {} : (next) => void change(next)} label="Show this agent's trade sizes and dollar P&L publicly" />
+      <Switch
+        on={shown}
+        onChange={saving ? () => {} : (next) => void change(next)}
+        label="Publish this agent's book: its trade sizes and dollar P&L, what it holds and how much, and its name as a holder on token pages"
+      />
     </section>
   );
 }
