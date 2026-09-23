@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { readProfileTrades, readRoundTrips, readTopTrades } from "./profile-trades";
+import { readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
 import { averageHoldSec } from "./hold-time";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
@@ -120,7 +120,7 @@ async function sellsLedger() {
 }
 const sellRow = (id: number, pnl: number | null, cash: number | null, over: Record<string, unknown> = {}) => ({
   id, decision_id: null, agent_id: "a", epoch: 1, kind: "swap", fill_side: "sell", status: "landed", created_at: id,
-  amount_usdg: 5, user_op_hash: `0xop${id}`, fill_symbol: `C${id}`, buy_token: null, sell_token: null,
+  amount_usdg: 5, user_op_hash: `0xop${id}`, fill_symbol: `C${id}`, buy_token: "0xusdg", sell_token: `0xtok${id}`,
   realized_pnl_usdg: pnl, fill_cash_usdg: cash, basis_source: "receipt", fill_qty_raw: "1", ...over,
 });
 async function insert(db: ReturnType<typeof wrapSqlite>, rows: Record<string, unknown>[]) {
@@ -251,4 +251,94 @@ test("a fill whose quantity or coin was not recorded is carried as unread", asyn
     assert.deepEqual(r?.fills.map((f) => [f.side, f.coin, f.qty]), [["buy", "CASH", 10n], ["sell", "CASH", null], ["buy", null, 3n], [null, "CASH", 4n]]);
     assert.equal(averageHoldSec(r!.fills), null);
   } finally { raw.close(); }
+});
+
+// ── PF4: a top trade's return rests on an evidenced cost ─────────────────────
+const buyRow = (id: number, token: string, qty: string, over: Record<string, unknown> = {}) =>
+  sellRow(id, null, null, { fill_side: "buy", buy_token: token, sell_token: "0xusdg", fill_qty_raw: qty, ...over });
+
+test("a sell whose cost a QUOTED buy built is not a top trade, however good it looks", async () => {
+  // realized_pnl_usdg is proceeds minus the running cost basis, and a buy whose
+  // receipt could not be read books that basis from the quote — an estimate.
+  // Checking only the sell's own basis_source let such a sell rank first.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }), // +900% on an estimated cost
+      sellRow(3, 1, 11), // +10%, on no estimate at all
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["3"]);
+  } finally { raw.close(); }
+});
+
+test("an estimate stops counting once the position it built was sold out", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }), // closes the estimated lot: not vouched
+      buyRow(3, "0xmeme", "5"), // a fresh position, from a receipt
+      sellRow(4, 2, 6, { sell_token: "0xmeme", fill_qty_raw: "5" }), // +50%, on that receipt alone
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["4"]);
+    // A PARTIAL sell leaves the estimate in what is still held.
+    await insert(db, [buyRow(5, "0xcat", "10", { basis_source: "quote" }), sellRow(6, 1, 2, { sell_token: "0xcat", fill_qty_raw: "4" }), sellRow(7, 1, 2, { sell_token: "0xcat", fill_qty_raw: "6" })]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["4"]);
+  } finally { raw.close(); }
+});
+
+test("a cost carried in from an earlier period is still that cost", async () => {
+  // cost_basis is not epoch-scoped: a position bought last period is sold
+  // against the basis that period booked.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote", epoch: 0 }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }),
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades, []);
+  } finally { raw.close(); }
+});
+
+test("a movement the ledger cannot size keeps an estimate in, because flat can no longer be told", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      // The reconciler booked a cost for an op it recovered, and wrote no side.
+      sellRow(2, null, null, { fill_side: null, buy_token: "0xmeme", sell_token: "0xusdg", fill_qty_raw: null, basis_source: "receipt" }),
+      sellRow(3, 1, 2, { sell_token: "0xmeme", fill_qty_raw: "10" }),
+      buyRow(4, "0xmeme", "5"),
+      sellRow(5, 1, 2, { sell_token: "0xmeme", fill_qty_raw: "5" }),
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades, []);
+  } finally { raw.close(); }
+});
+
+test("estimates ranked above a real trade cannot push it out of the list, past the first page too", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 1; i <= 30; i++) {
+      rows.push(buyRow(100 + i, `0xq${i}`, "1", { basis_source: "quote", created_at: i }));
+      rows.push(sellRow(200 + i, 9, 10, { sell_token: `0xq${i}`, created_at: 1_000 + i }));
+    }
+    rows.push(sellRow(300, 1, 11, { created_at: 2_000 }));
+    await insert(db, rows);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["300"]);
+  } finally { raw.close(); }
+});
+
+test("the replay that vouches for a cost vouches for nothing it could not read whole", () => {
+  const fills = [
+    { op: "b", side: "buy" as const, token: "0xm", qty: "10", source: "receipt" },
+    { op: "s", side: "sell" as const, token: "0xm", qty: "10", source: "receipt" },
+  ];
+  assert.deepEqual([...vouchedSells(fills, true)], ["s"]);
+  assert.deepEqual([...vouchedSells(fills, false)], [], "a truncated read cannot know what came before its first row");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: null }, fills[1]!], true)], [], "a cost of unknown provenance is not evidence");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: "paper" }, { ...fills[1]!, source: "paper" }], true)], ["s"], "a paper fill is exact");
+  // A row with no side that booked a cost from a quote put that estimate in.
+  assert.deepEqual([...vouchedSells([{ op: "r", side: null, token: "0xm", qty: null, source: "quote" }, fills[1]!], true)], []);
 });

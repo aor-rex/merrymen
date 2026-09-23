@@ -31,13 +31,18 @@ async function mark(db: Db, at: number, equity: number) {
   await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 0, 0, ?, ?, 2, 'live')`).run(ACCOUNT, equity, at);
 }
 let op = 0;
-async function fill(db: Db, over: { side: "buy" | "sell"; coin: string; qty: string; at: number; pnl?: number; cash?: number; sponsored?: boolean }) {
+/** The cash leg, and a coin's address: the ledger keys a fill's coin by the token it moved. */
+const USDG = "0x00000000000000000000000000000000000000c0";
+const tokenOf = (coin: string) => `0x${Buffer.from(coin.toLowerCase()).toString("hex").padStart(40, "0")}`;
+async function fill(db: Db, over: { side: "buy" | "sell"; coin: string; qty: string; at: number; pnl?: number; cash?: number; sponsored?: boolean; epoch?: number; source?: string | null; status?: string }) {
   op += 1;
+  const coin = tokenOf(over.coin);
   await db.prepare(
-    `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw,
+    `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw,
                          fill_cash_usdg, realized_pnl_usdg, basis_source, gas_wei, gas_usdg, sponsored_gas_wei)
-     VALUES (?, 'swap', 'x', 5, ?, 'landed', ?, 2, ?, ?, ?, ?, ?, 'receipt', ?, ?, ?)`,
-  ).run(ACCOUNT, `0xop${op}`, over.at, over.side, over.coin, over.qty, over.cash ?? 5, over.pnl ?? null,
+     VALUES (?, 'swap', 'x', ?, ?, 5, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(ACCOUNT, over.side === "buy" ? USDG : coin, over.side === "buy" ? coin : USDG, `0xop${op}`, over.status ?? "landed", over.at, over.epoch ?? 2,
+    over.side, over.coin, over.qty, over.cash ?? 5, over.pnl ?? null, over.source === undefined ? "receipt" : over.source,
     over.sponsored ? null : "1000", over.sponsored ? null : 0.01, over.sponsored ? "1000" : null);
 }
 const identity = { slug: "shogun", accounts: [ACCOUNT], createdAt: T0 - 86_400 };
@@ -133,10 +138,10 @@ test("a paper agent's stats are its paper book's, and a live agent's are not its
     await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 1 });
     await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 61, pnl: 1, cash: 11 });
     await db.prepare(
-      `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
-       VALUES (?, 'swap', 'x', 5, 'paper', ?, 2, 'buy', 'TSLA', '2', 5, NULL, 'paper'), (?, 'swap', 'x', 5, 'paper', ?, 2, 'sell', 'TSLA', '2', 6, 1, 'paper'),
-              (?, 'swap', 'x', 5, 'paper', ?, 2, 'buy', 'TSLA', '3', 5, NULL, 'paper')`,
-    ).run(ACCOUNT, T0 + 100, ACCOUNT, T0 + 400, ACCOUNT, T0 + 500);
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '2', 5, NULL, 'paper'), (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'sell', 'TSLA', '2', 6, 1, 'paper'),
+              (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '3', 5, NULL, 'paper')`,
+    ).run(ACCOUNT, USDG, tokenOf("TSLA"), T0 + 100, ACCOUNT, tokenOf("TSLA"), USDG, T0 + 400, ACCOUNT, USDG, tokenOf("TSLA"), T0 + 500);
     const live = (await profileOf(db, identity, false))!;
     assert.deepEqual([live.tradeCount, live.avgHoldSec, live.topTrades.map((t) => t.symbol)], [2, 60, ["CASH"]]);
     await db.prepare("UPDATE agents SET mode = 'paper'").run();
@@ -151,10 +156,13 @@ test("a trade count from a capped read is a floor, and no hold is computed from 
     await mark(db, T0, 100);
     raw.exec("BEGIN");
     const ins = raw.prepare(
-      `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, basis_source)
-       VALUES (?, 'swap', 'x', 5, ?, 'landed', ?, 2, ?, 'CASH', '1', 'receipt')`,
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, ?, 'landed', ?, 2, ?, 'CASH', '1', 'receipt')`,
     );
-    for (let i = 0; i < 5_001; i++) ins.run(ACCOUNT, `0xbulk${i}`, T0 + i, i % 2 === 0 ? "buy" : "sell");
+    for (let i = 0; i < 5_001; i++) {
+      const buy = i % 2 === 0;
+      ins.run(ACCOUNT, buy ? USDG : tokenOf("CASH"), buy ? tokenOf("CASH") : USDG, `0xbulk${i}`, T0 + i, buy ? "buy" : "sell");
+    }
     raw.exec("COMMIT");
     const p = (await profileOf(db, identity, false))!;
     assert.equal(p.tradeCount, 5_000);

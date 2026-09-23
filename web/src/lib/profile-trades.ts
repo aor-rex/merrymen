@@ -92,6 +92,123 @@ export async function readProfileTrades(db: Db, account: string, epoch: number, 
 /** How many TOP TRADES a profile shows. */
 export const TOP_TRADES = 5;
 
+/** One basis-moving fill, as the replay below reads it. */
+export interface BasisReplayFill {
+  /** The operation it belongs to — the same key distinct-trades collapses on. */
+  op: string;
+  /** Null when the row moved the coin and did not record which way. */
+  side: "buy" | "sell" | null;
+  /** The coin's address, lowercased. */
+  token: string;
+  /** Raw units, as the ledger's decimal string. Null when not recorded. */
+  qty: string | null;
+  /** `trades.basis_source`. */
+  source: string | null;
+}
+
+const EVIDENCED_SOURCES: ReadonlySet<string> = new Set(["receipt", "paper"]);
+
+/**
+ * WHICH SELLS REALIZED AGAINST A COST NOTHING ESTIMATED.
+ *
+ * A sell's realized_pnl_usdg is its proceeds minus the running cost basis, and
+ * that basis is one total per coin that every buy since the position was last
+ * flat added to — including a buy whose receipt could not be read, which the
+ * worker books from the pre-trade quote (basis_source 'quote', an estimate). The
+ * sell's own basis_source says nothing about those buys. So the fills are
+ * replayed the way the worker's applyFill booked them (desk-positions.ts
+ * costFromQuote does the same for a holding): a buy adds its quantity, a sell
+ * removes up to what is held, a position that reaches zero leaves nothing
+ * behind. A sell is vouched for when no buy still in the basis it sold against
+ * was anything but a receipt or a paper fill.
+ *
+ * NOTHING IS FORGIVEN THAT CANNOT BE COUNTED. A row that moved the coin without
+ * a recorded side or quantity means flat can no longer be told, so an estimate
+ * already in stays in; and a read that was cut short (`complete` false) cannot
+ * know what came before its first row, so it vouches for nothing. A cost of
+ * unknown provenance (no basis_source) is not evidence either.
+ *
+ * `fills` oldest first. Returns the ops of the vouched sells.
+ */
+export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolean): Set<string> {
+  const vouched = new Set<string>();
+  if (!complete) return vouched;
+  const state = new Map<string, { held: bigint; estimated: boolean; exact: boolean }>();
+  for (const f of fills) {
+    const s = state.get(f.token) ?? { held: 0n, estimated: false, exact: true };
+    state.set(f.token, s);
+    const qty = f.qty !== null && /^\d+$/.test(f.qty.trim()) ? BigInt(f.qty.trim()) : null;
+    if (f.side === null || qty === null) {
+      // It moved the coin by an amount nobody recorded, and may have booked a
+      // cost of its own.
+      s.exact = false;
+      if (!EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
+      continue;
+    }
+    if (f.side === "buy") {
+      s.held += qty;
+      if (!EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
+      continue;
+    }
+    if (!s.estimated) vouched.add(f.op);
+    s.held -= qty < s.held ? qty : s.held;
+    // Flat, and known to be: the worker deleted this coin's basis, so nothing
+    // booked before here is in the cost of what comes next.
+    if (s.exact && s.held === 0n) s.estimated = false;
+  }
+  return vouched;
+}
+
+/** Rows one replay reads before it stops and vouches for nothing it could not see. */
+export const BASIS_REPLAY_ROWS = 5_000;
+
+/** The same operation key distinct-trades.ts collapses copies on, as a column. */
+const OP_KEY = "COALESCE(LOWER(NULLIF(t.user_op_hash, '')), 'row:' || CAST(t.id AS TEXT))";
+
+/**
+ * vouchedSells over one book's fills of `tokens`, across EVERY period —
+ * cost_basis is not scoped to one, so a position bought last period is sold
+ * against the basis that period booked. One row per operation; scoped to rows
+ * that could have booked a cost, as readCostFromQuote is.
+ */
+async function readVouchedSells(db: Db, account: string, book: TradeBook, tokens: readonly string[]): Promise<Set<string>> {
+  const want = [...new Set(tokens.map((t) => t.toLowerCase()))];
+  if (want.length === 0) return new Set();
+  const marks = want.map(() => "?").join(", ");
+  const rows = (await db
+    .prepare(
+      `SELECT ${OP_KEY} AS op, t.fill_side, t.fill_qty_raw, t.basis_source,
+              LOWER(t.buy_token) AS buy_token, LOWER(t.sell_token) AS sell_token
+         FROM ${distinctTrades("t.agent_id = ? AND (t.user_op_hash IS NOT NULL OR t.fill_side IS NOT NULL OR t.basis_source IS NOT NULL)")}
+        WHERE t.status = ?
+          AND (t.fill_side IN ('buy','sell') OR t.basis_source IS NOT NULL)
+          AND (LOWER(t.buy_token) IN (${marks}) OR LOWER(t.sell_token) IN (${marks}))
+        ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
+    )
+    .all(account, book, ...want, ...want, BASIS_REPLAY_ROWS)) as Record<string, unknown>[];
+  const complete = rows.length < BASIS_REPLAY_ROWS;
+  const fills: BasisReplayFill[] = [];
+  for (const r of [...rows].reverse()) {
+    const qty = r.fill_qty_raw === null || r.fill_qty_raw === undefined ? null : String(r.fill_qty_raw);
+    const source = typeof r.basis_source === "string" ? r.basis_source : null;
+    const op = String(r.op);
+    if (r.fill_side === "buy" || r.fill_side === "sell") {
+      const token = r.fill_side === "buy" ? r.buy_token : r.sell_token;
+      if (typeof token === "string" && token) fills.push({ op, side: r.fill_side, token, qty, source });
+      continue;
+    }
+    // No side: the coin moved and the row cannot say which way or how much.
+    for (const token of [r.buy_token, r.sell_token]) {
+      if (typeof token === "string" && token) fills.push({ op, side: null, token, qty: null, source });
+    }
+  }
+  return vouchedSells(fills, complete);
+}
+
+/** Ranked candidates read per page, and how many pages before the list settles for what it found. */
+const TOP_TRADES_PAGE = TOP_TRADES * 4;
+const TOP_TRADES_MAX_PAGES = 50;
+
 /**
  * TOP TRADES: this period's best closed trades, by RETURN.
  *
@@ -113,6 +230,15 @@ export const TOP_TRADES = 5;
  *
  * After the op dedupe (distinct-trades.ts), like every trade list here: a
  * redeploy's copy of a sell is not a second best trade.
+ *
+ * AND ONLY ON AN EVIDENCED COST. The sell's own basis_source is a receipt, but
+ * its return is measured against the running basis every buy since the coin
+ * was last flat built — and a buy whose receipt was unreadable booked that from
+ * the quote. A top-five-by-return is exactly where such an estimate floats to
+ * #1, so a sell is ranked only when vouchedSells can replay its coin and finds
+ * no estimate under it (the rule FD5 applies to the feed's realized %). The
+ * ranking is read a page at a time and filtered, so estimates ranked above a
+ * real trade cannot crowd it out of the five.
  */
 export async function readTopTrades(
   db: Db,
@@ -122,8 +248,8 @@ export async function readTopTrades(
   book: TradeBook,
 ): Promise<{ trades: ProfileTrade[]; read: boolean }> {
   try {
-    const rows = await db.prepare(`
-      SELECT ${TRADE_COLUMNS}
+    const ranked = db.prepare(`
+      SELECT ${TRADE_COLUMNS}, ${OP_KEY} AS op_key, LOWER(t.sell_token) AS coin_token
       FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
       ${DECISION_JOIN}
       WHERE t.status = ? AND t.basis_source = ? AND t.kind IN ('swap', 'curve-trade')
@@ -131,13 +257,30 @@ export async function readTopTrades(
         AND t.realized_pnl_usdg IS NOT NULL AND t.fill_cash_usdg IS NOT NULL AND t.fill_cash_usdg >= 0
         AND t.fill_cash_usdg - t.realized_pnl_usdg > 0
       ORDER BY t.realized_pnl_usdg / (t.fill_cash_usdg - t.realized_pnl_usdg) DESC, t.created_at DESC, t.id DESC
-      LIMIT ${TOP_TRADES}
-    `).all(publicBook ? 1 : 0, account, epoch, book, book === "paper" ? "paper" : "receipt") as Record<string, unknown>[];
-    const trades = rows
-      .map(row => profileTradeOf(row, publicBook))
-      // The mapping's own test, again: the SQL is meant to be exactly as strict,
-      // and a row it prices differently must not reach a ranked list unpriced.
-      .filter(t => t.action === "sell" && t.realizedPnlBps !== null);
+      LIMIT ? OFFSET ?
+    `);
+    const trades: ProfileTrade[] = [];
+    const vouched = new Set<string>();
+    const replayed = new Set<string>();
+    for (let page = 0; page < TOP_TRADES_MAX_PAGES && trades.length < TOP_TRADES; page++) {
+      const rows = (await ranked.all(publicBook ? 1 : 0, account, epoch, book, book === "paper" ? "paper" : "receipt", TOP_TRADES_PAGE, page * TOP_TRADES_PAGE)) as Record<string, unknown>[];
+      // Replay each coin once, the first time one of its sells is a candidate.
+      const fresh = [...new Set(rows.map((r) => r.coin_token).filter((t): t is string => typeof t === "string" && t !== "" && !replayed.has(t)))];
+      if (fresh.length > 0) {
+        for (const op of await readVouchedSells(db, account, book, fresh)) vouched.add(op);
+        for (const t of fresh) replayed.add(t);
+      }
+      for (const row of rows) {
+        if (trades.length >= TOP_TRADES) break;
+        if (!vouched.has(String(row.op_key))) continue;
+        const t = profileTradeOf(row, publicBook);
+        // The mapping's own test, again: the SQL is meant to be exactly as
+        // strict, and a row it prices differently must not reach a ranked list
+        // unpriced.
+        if (t.action === "sell" && t.realizedPnlBps !== null) trades.push(t);
+      }
+      if (rows.length < TOP_TRADES_PAGE) break;
+    }
     return { trades, read: true };
   } catch (error) {
     console.error("[profile-trades] top trades read failed", error instanceof Error ? error.name : "unknown");
