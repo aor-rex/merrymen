@@ -41,7 +41,9 @@ export function SwapsTable({
 }) {
   const [tab, setTab] = useState<SwapTab>("all");
   const [expanded, setExpanded] = useState(false);
-  const nowMs = useNow(30_000);
+  // Ages print seconds under a minute ("55s"), so the clock steps at the pace
+  // the feed's rows do (wire.tsx), not once in thirty seconds of a stale "55s".
+  const nowMs = useNow(5_000);
   const items = swapItems(rows, tab, { tapeFull });
   const shown = expanded ? items : items.slice(0, limit);
   const empty = TABS.find((t) => t.id === tab)!.empty || emptyTitle;

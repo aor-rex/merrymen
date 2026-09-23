@@ -11,7 +11,7 @@
  * reaches.
  */
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, it } from "node:test";
+import { afterEach, beforeEach, it, mock } from "node:test";
 import React, { act } from "react";
 import { autonomyOf } from "@merrymen/core";
 import { Agent } from "./screens/Agent";
@@ -19,6 +19,8 @@ import type { LiveMine, Thesis } from "./live";
 import { json, testDom } from "./test-dom";
 import { idleChat } from "./test-chat";
 import { DESK_TAPE_LIMIT } from "@/lib/desk-trades";
+import { SwapsTable } from "./SwapsTable";
+import { swapRowsOfProfile } from "./swaps";
 
 let ui: ReturnType<typeof testDom>;
 const realFetch = globalThis.fetch;
@@ -157,4 +159,22 @@ it("an empty tape says so", async () => {
   assert.equal(tab.textContent, "Trades · 0");
   await act(async () => { tab.click(); });
   assert.match(ui.container.querySelector(".desk-trades")!.textContent!, /No trades yet\./);
+});
+
+it("an age in seconds moves on while it is being read", async () => {
+  // The table prints "55s" but re-rendered every thirty seconds, so a fill
+  // read "55s" for half a minute and then jumped. The feed's rows tick every
+  // five seconds (wire.tsx); the table now keeps the same pace.
+  const start = 1_900_000_000_000;
+  mock.timers.enable({ apis: ["setInterval", "Date"], now: start });
+  try {
+    const rows = swapRowsOfProfile([{ id: "1", action: "sell", symbol: "CASHCAT", displayName: null, at: start / 1000 - 55, paper: false, sizeUsdg: null, realizedPnlUsdg: null, realizedPnlBps: null }]);
+    await ui.render(React.createElement(SwapsTable, { rows, tokens: [], showMoney: false, emptyTitle: "none" }));
+    const age = () => ui.container.querySelector(".swap-age")?.textContent ?? null;
+    assert.equal(age(), "55s");
+    await act(async () => { mock.timers.tick(5_000); });
+    assert.equal(age(), "1m", "five seconds on, the row says so");
+  } finally {
+    mock.timers.reset();
+  }
 });
