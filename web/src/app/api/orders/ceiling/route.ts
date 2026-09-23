@@ -17,5 +17,5 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   if (isHostedMode() && !tenantOf(req)) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  return NextResponse.json({ ceilingUsdg: await ceilingFor(req) });
+  return NextResponse.json({ ceilingUsdg: await ceilingFor(req, isHostedMode()) });
 }

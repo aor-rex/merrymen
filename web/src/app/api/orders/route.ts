@@ -158,7 +158,7 @@ export async function POST(req: Request) {
   // smaller, SAFE direction) when the tenant stored none or the store cannot be
   // read. Enforced again in the worker, which reads the settings.json the
   // orchestrator wrote for that child: two gates, neither relying on the other.
-  const ceiling = await ceilingFor(req);
+  const ceiling = await ceilingFor(req, isHostedMode());
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },

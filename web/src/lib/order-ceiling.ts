@@ -14,16 +14,18 @@
  * whose settings live in the per-tenant store /api/settings reads.
  *
  * Server-only: it reads the session, the settings store and the house file.
+ * `hosted` is the route's to pass — isHostedMode() reads process.env, which is
+ * always false in a browser bundle, so only app/api may call it
+ * (client-env.test.ts).
  */
-import { isHostedMode } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { resolveConfig } from "../../../worker/src/settings";
 import { tenantOf } from "./auth";
 import { chatOrderCeiling } from "./order-state";
 
-export function ceilingFor(req: Request): Promise<number> {
+export function ceilingFor(req: Request, hosted: boolean): Promise<number> {
   return chatOrderCeiling({
-    hosted: isHostedMode(),
+    hosted,
     tenant: tenantOf(req),
     fallback: resolveConfig().telegramMaxActionUsdg,
     stored: (tenant) => getSettingsStore().get(tenant as `0x${string}`),

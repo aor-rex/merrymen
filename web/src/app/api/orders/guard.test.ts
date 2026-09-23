@@ -226,7 +226,7 @@ describe("what a size is allowed to be", () => {
     // that bounded nothing would claim more than the owner's configured limit.
     // The resolution runs in chatOrderCeiling, which the chips' ceiling route
     // runs too (ceiling/route.test.ts executes it end to end).
-    assert.match(CODE, /const ceiling = await ceilingFor\(req\);/);
+    assert.match(CODE, /const ceiling = await ceilingFor\(req, isHostedMode\(\)\);/);
     assert.match(CODE, /over your \$\{ceiling\} USDG limit/);
     assert.equal(await chatOrderCeiling({ hosted: false, tenant: null, fallback: 10, stored: async () => ({ telegramMaxActionUsdg: 99 }) }), 10);
   });
