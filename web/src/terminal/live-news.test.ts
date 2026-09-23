@@ -80,6 +80,28 @@ describe("the shell announcing landed trades", () => {
     }
   });
 
+  it("TWO FILLS OF ONE POST WHILE AWAY ARE TWO IN THE TITLE — and one tone for the read", async () => {
+    // The feed groups every landed copy of a post into one row, so two fills
+    // of a steady leg between two reads are one row whose `said` grew by two.
+    const t = testDom();
+    Object.defineProperty(t.dom.window.document, "hidden", { configurable: true, get: () => true });
+    t.dom.window.document.title = "merrymen";
+    const played: string[] = [];
+    const probe = (theses: Thesis[]) =>
+      createElement(Probe, { theses, read: "ok", soundOn: true, play: (s) => played.push(s) });
+    try {
+      const leg = { ...fill(), at: NOW_MS / 1000 - 3000, said: 1 };
+      await t.render(probe([leg]));
+      await t.render(probe([{ ...leg, at: NOW_MS / 1000 - 5, said: 3 }]));
+      assert.equal(t.dom.window.document.title, "(2) merrymen");
+      assert.deepEqual(played, ["buy"]);
+      await t.render(probe([{ ...leg, at: NOW_MS / 1000 - 5, said: 4 }]));
+      assert.equal(t.dom.window.document.title, "(3) merrymen", "an older order landing late joins the count");
+    } finally {
+      await t.close();
+    }
+  });
+
   it("the sound toggle: off by default, remembered when turned on, and a broken storage is simply off", async () => {
     const t = testDom();
     const store = new Map<string, string>();

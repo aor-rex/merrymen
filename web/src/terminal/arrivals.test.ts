@@ -62,7 +62,7 @@ describe("a landed trade", () => {
 describe("arrivals, read by read", () => {
   it("NEVER ON FIRST LOAD: everything already on the feed is what the reader walked in on", () => {
     const a = createArrivals();
-    assert.deepEqual(a.take([row(), row()], NOW), []);
+    assert.deepEqual(a.take([row(), row()], NOW), { rows: [], fills: 0 });
   });
 
   it("a landed trade that was not there before is news, once", () => {
@@ -70,15 +70,15 @@ describe("arrivals, read by read", () => {
     const old = row();
     a.take([old], NOW);
     const fresh = row({ action: "sell" });
-    assert.deepEqual(a.take([fresh, old], NOW).map((t) => t.postId), [fresh.postId]);
-    assert.deepEqual(a.take([fresh, old], NOW + 10), [], "the next read has nothing new");
+    assert.deepEqual(a.take([fresh, old], NOW).rows.map((t) => t.postId), [fresh.postId]);
+    assert.deepEqual(a.take([fresh, old], NOW + 10).rows, [], "the next read has nothing new");
   });
 
   it("a pending trade that lands is news when it lands — the id is the same, the outcome is not", () => {
     const a = createArrivals();
     const pending = row({ outcome: "pending" });
     a.take([pending], NOW);
-    assert.deepEqual(a.take([{ ...pending, outcome: "landed" }], NOW).length, 1);
+    assert.deepEqual(a.take([{ ...pending, outcome: "landed" }], NOW).rows.length, 1);
   });
 
   it("THE SAME SHAPE FILLING AGAIN IS NEWS — a post id names a thesis, not a trade", () => {
@@ -91,24 +91,82 @@ describe("arrivals, read by read", () => {
     const earlier = NOW - 4 * 3600;
     a.take([], earlier);
     const leg = row({ at: earlier - 10, said: 1 });
-    assert.equal(a.take([leg], earlier).length, 1, "the first fill is news");
+    assert.equal(a.take([leg], earlier).rows.length, 1, "the first fill is news");
     const again = { ...leg, at: NOW - 10, said: 2 };
-    assert.deepEqual(a.take([again], NOW).map((t) => t.at), [NOW - 10], "and so is the next fill of the same shape");
-    assert.deepEqual(a.take([again], NOW + 10), [], "the same copy read again is not");
+    assert.deepEqual(a.take([again], NOW).rows.map((t) => t.at), [NOW - 10], "and so is the next fill of the same shape");
+    assert.deepEqual(a.take([again], NOW + 10).rows, [], "the same copy read again is not");
   });
 
   it("a leg that filled before the page opened still announces its next fill", () => {
     const a = createArrivals();
     const leg = row({ at: NOW - 2 * 3600, said: 3 });
     a.take([leg], NOW - 60);
-    assert.deepEqual(a.take([{ ...leg, at: NOW - 5, said: 4 }], NOW).length, 1);
+    assert.deepEqual(a.take([{ ...leg, at: NOW - 5, said: 4 }], NOW).rows.length, 1);
+  });
+
+  it("AN OLDER ORDER THAT LANDS AFTER A NEWER COPY IS NEWS — `at` stands still, `said` grew", () => {
+    // The row's `at` is MAX(d.at) over its landed copies: the newest DECISION,
+    // not the newest fill. An order sent earlier that lands after a later copy
+    // already has joins the row without moving `at`; only `said` says so.
+    const a = createArrivals();
+    const leg = row({ at: NOW - 3000, said: 1 });
+    a.take([leg], NOW);
+    const newer = { ...leg, at: NOW - 20, said: 2 };
+    assert.deepEqual(a.take([newer], NOW), { rows: [newer], fills: 1 });
+    const older = { ...leg, at: NOW - 20, said: 3 };
+    assert.deepEqual(a.take([older], NOW + 10), { rows: [older], fills: 1 }, "the order that landed late");
+    assert.deepEqual(a.take([older], NOW + 20), { rows: [], fills: 0 }, "and read again it is not");
+  });
+
+  it("TWO FILLS OF ONE POST BETWEEN TWO READS ARE TWO FILLS — the title counts both", () => {
+    const a = createArrivals();
+    const leg = row({ at: NOW - 3000, said: 1 });
+    a.take([leg], NOW);
+    const two = { ...leg, at: NOW - 5, said: 3 };
+    assert.deepEqual(a.take([two], NOW), { rows: [two], fills: 2 }, "one row, one tone, two fills");
+  });
+
+  it("a row seen for the first time is one fill, whatever its count — its older copies may predate the page", () => {
+    const a = createArrivals();
+    a.take([], NOW);
+    const first = row({ at: NOW - 10, said: 3 });
+    assert.deepEqual(a.take([first], NOW), { rows: [first], fills: 1 });
+  });
+
+  it("COPIES LEAVING THE WINDOW ARE NOT NEWS — `said` shrinks with time and must not re-announce", () => {
+    const a = createArrivals();
+    const leg = row({ at: NOW - 60, said: 5 });
+    a.take([leg], NOW);
+    assert.deepEqual(a.take([{ ...leg, said: 4 }], NOW + 10).rows, [], "an old copy left the 24h window");
+    assert.deepEqual(a.take([{ ...leg, said: 3 }], NOW + 20).rows, [], "and another");
+    const late = { ...leg, said: 4 };
+    assert.deepEqual(a.take([late], NOW + 30), { rows: [late], fills: 1 }, "grown against the last read, it is a fill");
+    const next = { ...leg, at: NOW + 35, said: 4 };
+    assert.deepEqual(a.take([next], NOW + 40), { rows: [next], fills: 1 }, "a new copy while an old one left is still one fill");
+  });
+
+  it("a row whose time went BACK is a different grouping of the same post, not news — and not news when it comes back", () => {
+    const a = createArrivals();
+    const leg = row({ at: NOW - 30, said: 4 });
+    a.take([leg], NOW);
+    assert.deepEqual(a.take([{ ...leg, at: NOW - 200, said: 1 }], NOW + 10).rows, []);
+    assert.deepEqual(a.take([leg], NOW + 20).rows, [], "the row it was, read again");
+  });
+
+  it("`said` growing on a row whose last copy is long past is not announced — nor is one with no count", () => {
+    const a = createArrivals();
+    const stale = row({ at: NOW - 3 * 3600, said: 1 });
+    const bare = row({ at: NOW - 30, said: undefined });
+    a.take([stale, bare], NOW);
+    assert.deepEqual(a.take([{ ...stale, said: 2 }], NOW + 10).rows, [], "a deploy that widens the window must not chime old rows");
+    assert.deepEqual(a.take([{ ...bare }], NOW + 20).rows, [], "no count, no growth to read");
   });
 
   it("a fill first seen long after it happened is not news — a reader re-ranking old rows must not chime", () => {
     const a = createArrivals();
     a.take([], NOW);
-    assert.deepEqual(a.take([row({ at: NOW - 3 * 3600 })], NOW), []);
-    assert.deepEqual(a.take([row({ at: undefined })], NOW), [], "and one with no time has no age to judge");
+    assert.deepEqual(a.take([row({ at: NOW - 3 * 3600 })], NOW).rows, []);
+    assert.deepEqual(a.take([row({ at: undefined })], NOW).rows, [], "and one with no time has no age to judge");
   });
 
   it("several at once come back oldest first", () => {
@@ -116,7 +174,7 @@ describe("arrivals, read by read", () => {
     a.take([], NOW);
     const later = row({ at: NOW - 5 });
     const earlier = row({ at: NOW - 50 });
-    assert.deepEqual(a.take([later, earlier], NOW).map((t) => t.at), [NOW - 50, NOW - 5]);
+    assert.deepEqual(a.take([later, earlier], NOW).rows.map((t) => t.at), [NOW - 50, NOW - 5]);
   });
 
   it("remembers a bounded number of ids", () => {

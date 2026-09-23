@@ -35,9 +35,10 @@ export function useLiveNews(opts: {
     if (read !== "ok") return;
     const now = latest.current.nowMs?.() ?? Date.now();
     const news = arrivals.current!.take(theses, now / 1000);
-    if (!news.length) return;
-    if (document.hidden) setUnseen((n) => n + news.length);
-    const side = chimeSide(news);
+    if (!news.rows.length) return;
+    // Fills, not rows: two fills of one post between reads are one row.
+    if (document.hidden) setUnseen((n) => n + news.fills);
+    const side = chimeSide(news.rows);
     if (latest.current.soundOn && side) (latest.current.play ?? playChime)(side);
   }, [theses, read]);
 
