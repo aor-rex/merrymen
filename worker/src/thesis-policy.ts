@@ -365,8 +365,32 @@ export const ACCOUNT_STATE_RULES = [
   "wrong-chain",
   "no-gas",
   "no-cash",
+  // The account's own drawdown against its high-water mark. See the halt rule
+  // below, which is why this one also leaves for a MODEL's refusal.
+  "drawdown-breaker",
 ] as const;
 const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULES);
+
+/**
+ * THE ACCOUNT RULES THAT HALT EVERY BUY, FROM EVERY PRODUCER — dropped from the
+ * public feed whoever proposed the trade.
+ *
+ * The account-state rule above is for strategy sources only, and on purpose: a
+ * model refused on the day's count still stated a view about the coin, and the
+ * wall's answer is an honest ending to it. The breaker is different in kind.
+ * While it is tripped the wall refuses every non-exit intent for the same
+ * reason (policy.ts), so a refusal on it says nothing about the coin at all —
+ * and a Trencher, whose buys ride the Brain's own decision row, re-reviews every
+ * thirty seconds and writes that one fact in fresh model words each time.
+ * Measured on the live feed 2026-09-23: thirty refused buys in fifteen minutes,
+ * none of them collapsing, filling thirty of forty trade slots.
+ *
+ * THE OWNER STILL HEARS IT: `drawdown-breaker` is in owner-refusal.ts's
+ * account-wide set, so the event line fires once per change, and the trade row
+ * keeps its rule for the owner's desk. Only the public post goes.
+ */
+export const ACCOUNT_HALT_RULES = ["drawdown-breaker"] as const;
+const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
@@ -379,7 +403,7 @@ const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULE
 export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(SOURCE_POLICY));
 
 /**
- * THE SQL HALF OF THREE RULES BELOW, for a reader whose scan is bounded.
+ * THE SQL HALF OF FOUR RULES BELOW, for a reader whose scan is bounded.
  *
  * A reader takes the newest N groups and only then asks `publishableThesis`
  * about each. The class route re-proposes a refused entry every tick with
@@ -389,7 +413,7 @@ export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(
  * reached the gate at all. The feed had nothing to show, and the alerts rail
  * said there had been no trades.
  *
- * So the three rules that drop a row for its SOURCE, ACTION or RULE rather than
+ * So the four rules that drop a row for its SOURCE, ACTION or RULE rather than
  * for its words are said in SQL too, built from the same constants, and the
  * scan spends its budget on rows that can publish. The gate still decides: this
  * may only ever be WIDER than publishableThesis, never narrower, and every row
@@ -415,6 +439,10 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
       `NOT (COALESCE(${d}.source, '') IN (${holes(TRADED_ONLY_SOURCES.length)}) AND ${unlanded})`,
       `NOT (COALESCE(${d}.action, '') IN (${holes(CASH_ACTIONS.length)}) AND ${unlanded})`,
       `NOT (COALESCE(${d}.source, '') IN (${holes(strategies.length)}) AND COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_STATE_RULES.length)}))`,
+      // Every source: a rejected trade is always a refused post (or, for a
+      // shadow source, no post at all), and the gate drops a refusal on a halt
+      // rule whoever wrote it — so this drops nothing the gate would publish.
+      `NOT (COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_HALT_RULES.length)}))`,
     ].join(" AND "),
     args: [
       ...TRADED_ONLY_SOURCES,
@@ -424,6 +452,8 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
       ...strategies,
       "rejected",
       ...ACCOUNT_STATE_RULES,
+      "rejected",
+      ...ACCOUNT_HALT_RULES,
     ],
   };
 }
@@ -918,6 +948,9 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   ) {
     return null;
   }
+  // And a HALT rule from any source, the model's included: see
+  // ACCOUNT_HALT_RULES for why the breaker is not a view about the coin.
+  if (outcome === "refused" && IS_ACCOUNT_HALT.has(row.reject_rule ?? "")) return null;
 
   const handle = (row.x_handle ?? "").trim() || null;
 
