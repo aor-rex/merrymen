@@ -24,6 +24,15 @@ export const OWNER_CHANGED_SETTING =
   "this browser is signed in with a different wallet now than the one that confirmed this, so nothing was changed. Sign back in with that wallet and ask again.";
 
 /**
+ * The same refusal for the lookup after a placement whose answer was lost
+ * (GET /api/orders?owner=): what is open under another wallet's session is
+ * that wallet's, and is not read for this one. Not "nothing was placed" — the
+ * placement it follows may have landed before the other wallet signed in.
+ */
+export const OWNER_CHANGED_LOOKUP =
+  "this browser is signed in with a different wallet now than the one that confirmed this, so its open order was not read.";
+
+/**
  * Does the owner a request names differ from the session that sent it? A claim
  * that is not a string, or a claim with no session to hold it against, is a
  * difference: nothing is done on a claim that cannot be checked.

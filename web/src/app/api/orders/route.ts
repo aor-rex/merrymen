@@ -67,7 +67,7 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { ceilingFor } from "@/lib/order-ceiling";
-import { OWNER_CHANGED, ownerMismatch } from "@/lib/order-owner";
+import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
 import {
   LEDGER_UNREADABLE,
   orderTtlMs,
@@ -240,7 +240,14 @@ export async function POST(req: Request) {
 export async function GET(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  const id = new URL(req.url).searchParams.get("id") ?? "";
+  const params = new URL(req.url).searchParams;
+  const id = params.get("id") ?? "";
+  // FOR THE OWNER WHO CONFIRMED, like POST: the chat's lookup after a lost
+  // placement names them, and what is open under another wallet's session
+  // (another tab signed it in) would be followed in their thread as theirs.
+  if (isHostedMode() && ownerMismatch(params.get("owner"), tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED_LOOKUP }, { status: 409 });
+  }
 
   if (!isHostedMode()) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a

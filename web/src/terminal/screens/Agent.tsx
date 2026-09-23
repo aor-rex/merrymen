@@ -275,8 +275,10 @@ export function Agent({
     on.setProposal(null);
     on.say({ role: "owner", text: "✓ Confirmed" });
     // Asked under the session the browser holds NOW: once the owner has
-    // changed, what is open is somebody else's, and it is not looked for.
-    const open = on.alive() ? await fetchOpenOrder() : null;
+    // changed, what is open is somebody else's, and it is not looked for —
+    // and naming the owner who tapped, so a session another tab changed
+    // unseen is refused rather than read as theirs.
+    const open = on.alive() ? await fetchOpenOrder(on.owner) : null;
     if (open) {
       on.say({
         role: "agent",

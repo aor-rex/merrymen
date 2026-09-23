@@ -1084,6 +1084,32 @@ describe("a confirm places its order for the owner who tapped it, or not at all"
     assert.equal(buttons("Yes, do it").length, 1, "nothing was changed, so the card stays");
   });
 
+  it("A PLACEMENT LOST UNDER ANOTHER TAB'S SESSION IS LOOKED UP FOR THE OWNER WHO TAPPED — never followed as theirs", async () => {
+    // A's order went out after B signed in on another tab (the route refused
+    // it: it named A), and that answer was lost. "What is open on my key" then
+    // went out under B's cookie naming nobody, found B's order, and A's thread
+    // followed it as A's. The lookup names A now, and the route refuses B's
+    // session (orders/owner.test.ts) — answered here as B's session answers.
+    const B_ORDER = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => new Response("bad gateway", { status: 502 });
+    routes["GET /api/orders"] = (url) => {
+      const named = new URL(url, "https://app.example.test").searchParams.get("owner");
+      return named !== null && named !== B ? json({ error: "not this session's owner" }, 409) : json({ id: B_ORDER, state: "running" });
+    };
+    await ui.render(h({ chatKey: keyOf(A) }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    await until(() => /couldn't confirm that order reached my key/.test(text()), "the honest line");
+    await settle(10);
+    const asked = calls.filter((c) => c.method === "GET" && c.url.split("?")[0] === "/api/orders");
+    assert.deepEqual(asked.map((c) => c.url), [`/api/orders?owner=${A}`], "asked once, naming A");
+    assert.doesNotMatch(text(), /order open on my key/);
+    assert.equal(chat.messages.some((m) => m.order?.id === B_ORDER), false, "B's order is nowhere in A's thread");
+  });
+
   it("THE OWNER NAMED IS THE WALLET THE THREAD IS KEPT FOR — and self-hosted, nobody", () => {
     const mixed = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
     assert.equal(ownerOfChatKey(chatKeyFor({ hosted: true, address: mixed })), mixed.toLowerCase());

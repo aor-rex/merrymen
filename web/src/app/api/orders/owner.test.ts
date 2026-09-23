@@ -20,7 +20,7 @@ import type { StoredGrant } from "@merrymen/core";
 import { mintSession } from "@/lib/auth";
 import { getGrantStore, resetGrantStoreForTest } from "@merrymen/grant-store";
 import { resetSettingsStoreForTest } from "@merrymen/settings-store";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 import { POST as SNIPE } from "../snipe/route";
 
 const TENANT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -104,6 +104,42 @@ describe("POST /api/orders", () => {
     writeFileSync(path.join(dir, "grant.json"), JSON.stringify({ smartAccount: "0x00000000000000000000000000000000000000a1" }));
     const res = await place(null, TENANT);
     assert.equal(res.status, 200, res.error);
+  });
+});
+
+describe("GET /api/orders, asked what is open after a placement's answer was lost", () => {
+  /** The lookup as the chat makes it, under `session`, naming `owner` when given. */
+  const lookup = async (session: `0x${string}` | null, owner?: string) => {
+    const res = await GET(
+      new Request(`https://app.example.test/api/orders${owner === undefined ? "" : `?owner=${encodeURIComponent(owner)}`}`, {
+        headers: session ? { cookie: `mm_session=${mintSession(session)}` } : {},
+      }),
+    );
+    return { status: res.status, body: (await res.json()) as { error?: string; state?: string } };
+  };
+
+  it("HOSTED, ANOTHER SESSION'S OPEN ORDER IS NOT READ FOR THE OWNER WHO CONFIRMED — it would be followed as theirs", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    const other = await lookup(OTHER, TENANT);
+    assert.equal(other.status, 409);
+    assert.equal(other.body.state, undefined, "no order, and no 'none' either — nothing was read");
+    assert.equal((await lookup(OTHER, "")).status, 409, "a claim that names no wallet is nobody's");
+  });
+
+  it("the owner who confirmed, or a lookup that names nobody, is read as before", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    // No ledger to read here, so the read answers 503 — past the owner check.
+    for (const owner of [TENANT, TENANT.toUpperCase().replace("0X", "0x"), undefined]) {
+      assert.equal((await lookup(TENANT, owner)).status, 503, String(owner));
+    }
+    assert.equal((await lookup(null, TENANT)).status, 401, "signed out is still signed out");
+  });
+
+  it("self-hosted there is no sign-in to hold it against", async () => {
+    writeFileSync(path.join(dir, "grant.json"), JSON.stringify({ smartAccount: "0x00000000000000000000000000000000000000a1" }));
+    const res = await lookup(null, TENANT);
+    assert.equal(res.status, 200, res.body.error);
+    assert.equal(res.body.state, "none");
   });
 });
 

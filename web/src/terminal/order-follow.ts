@@ -165,10 +165,14 @@ export const SNIPE_LOOKUP_MS = 15_000;
  * doing, and its receipt names the order. GET without an id answers the
  * newest order hosted; self-hosted it answers none, and the owner is told to
  * check their trades.
+ *
+ * FOR THE OWNER WHO CONFIRMED (`owner`, ConfirmScope.owner): the route refuses
+ * a session that is not theirs, which reads here as none — another tab may
+ * have signed a different wallet in, and its order is not this owner's.
  */
-export async function fetchOpenOrder(): Promise<string | null> {
+export async function fetchOpenOrder(owner: string | null): Promise<string | null> {
   try {
-    const r = await fetch("/api/orders", { signal: AbortSignal.timeout(8_000) });
+    const r = await fetch(owner ? `/api/orders?owner=${encodeURIComponent(owner)}` : "/api/orders", { signal: AbortSignal.timeout(8_000) });
     if (!r.ok) return null;
     const b = (await r.json()) as { id?: unknown; state?: unknown };
     const open = b.state === "queued" || b.state === "running";
