@@ -28,6 +28,8 @@ import {
 } from "../live";
 import { TvChart } from "../tv";
 import { Coin, Face, Empty } from "../ui";
+import { SkeletonRows } from "../Skeleton";
+import { coverageOf, holdersFigure, holdersList, readTokenPage, type HoldersRead } from "../token-holders";
 import { useWatchlist } from "../watchlist";
 import { shortDateTime } from "@/lib/format";
 
@@ -61,21 +63,29 @@ export function Token({
   const [sortDescending, setSortDescending] = useState(true);
   const [seats,setSeats]=useState<Seat[]>([]);
   const [holderError,setHolderError]=useState("");
+  /** Where the holders read stands — see token-holders.ts. Seats alone cannot say "not answered yet". */
+  const [holdersRead,setHoldersRead]=useState<HoldersRead>("loading");
   const [holderCoverage,setHolderCoverage]=useState<{published:number;total:number}|null>(null);
+  /** Bumped by Try again, which re-runs the holders read — a failure was final until the page remounted. */
+  const [holdersAttempt,setHoldersAttempt]=useState(0);
   const [symbolClash,setSymbolClash]=useState(false);
   const [activity,setActivity]=useState<{coin: DiscoveryRow | null; evidence: PoolEvidence | null; loading: boolean}>({coin:null,evidence:null,loading:true});
   useEffect(()=>{
-    let alive=true;setActivity({coin:null,evidence:null,loading:true});setSeats([]);setHolderError("");setHolderCoverage(null);setSymbolClash(false);
-    fetch(`/api/tokens/${encodeURIComponent(token.id)}?activity=1`).then(r=>{if(!r.ok)throw new Error("Could not load public holdings.");return r.json();}).then((data:{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean;coin:DiscoveryRow|null};evidence:PoolEvidence|null})=>{
+    let alive=true;setActivity({coin:null,evidence:null,loading:true});setSeats([]);setHolderError("");setHoldersRead("loading");setHolderCoverage(null);setSymbolClash(false);
+    // BOUNDED, and a failure is one plain sentence — see readTokenPage.
+    void readTokenPage<{ledger:import("@/lib/read-token").TokenRead;market:{symbolClash:boolean;coin:DiscoveryRow|null};evidence:PoolEvidence|null}>(token.id).then(read=>{
       if(!alive)return;
+      if(!read.ok){setHolderError("Public holdings are unavailable right now.");setHoldersRead("failed");setActivity({coin:null,evidence:null,loading:false});return;}
+      const data=read.data;
       setSymbolClash(data.market.symbolClash);
       setActivity({coin:data.market.coin,evidence:data.evidence,loading:false});
-      if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");return;}
-      setHolderCoverage({published:data.ledger.holders.length,total:data.ledger.holders.length+data.ledger.privateHolders});
+      if(!data.ledger.fillsRead){setHolderError("Public holdings are unavailable right now.");setHoldersRead("failed");return;}
+      setHoldersRead("ok");
+      setHolderCoverage(coverageOf(data.ledger));
       setSeats(data.ledger.holders.filter(h=>h.slug).map(h=>({paper:h.paper,basisSource:h.basisSource,slug:h.slug!,name:h.name,handle:h.handle,owner:null,strategy:"",strategyId:"custom",position:h.valueUsdg,pnlBps:h.pnlBps,avgEntry:h.entryPriceUsd ?? 0,thesis:data.market.symbolClash ? "" : theses.find(t=>t.slug===h.slug && t.symbol?.toUpperCase()===token.symbol.toUpperCase())?.reason ?? "",time:h.enteredAt ?? 0,price:h.entryPriceUsd ?? 0})));
-    }).catch(e=>{if(alive){setHolderError(e.message);setActivity({coin:null,evidence:null,loading:false});}});
+    });
     return()=>{alive=false;};
-  },[token.id,token.symbol,theses]);
+  },[token.id,token.symbol,theses,holdersAttempt]);
   const orderedSeats = useMemo(
     () =>
       [...seats].sort(
@@ -86,6 +96,7 @@ export function Token({
       ),
     [seats, sortBy, sortDescending],
   );
+  const holders = holdersList(holdersRead, seats.length);
   const sortHolders = (next: "position" | "return") => {
     if (sortBy === next) setSortDescending((value) => !value);
     else {
@@ -245,7 +256,8 @@ export function Token({
         </div>
         <div>
           <span>Agents holding</span>
-          <strong>{holderError ? "—" : seats.length}</strong>
+          {/* Every agent holding it, the private ones included — not only the public rows below. */}
+          <strong>{holdersFigure(holdersRead, holderCoverage)}</strong>
         </div>
       </div>
         <div className="token-plot">
@@ -364,6 +376,7 @@ export function Token({
 
       <section className="held-sec">
         {holderError && <p role="status">{holderError}</p>}
+        {holdersRead === "failed" && <button type="button" onClick={()=>setHoldersAttempt(n=>n+1)}>Try again</button>}
         <h3>Holders{seats.length ? ` (${seats.length})` : ""}</h3>
         {holderCoverage && <p className="meta">{holderCoverage.published} of {holderCoverage.total} agents publish their positions.</p>}
         {symbolClash && <p className="meta">Token symbols disagree, so agent reasoning cannot be matched to this token.</p>}
@@ -453,7 +466,8 @@ export function Token({
           </div>
         )}
         {seats.length === 0 ? (
-          !holderError && <Empty compact kind="positions" title="No public agent holdings reported yet."/>
+          holders === "loading" ? <SkeletonRows rows={2} label="Loading holders"/>
+            : holders === "empty" && <Empty compact kind="positions" title="No public agent holdings reported yet."/>
         ) : (
           <div className="helds">
             {seats.map((s) => (

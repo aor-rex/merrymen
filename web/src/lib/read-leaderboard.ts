@@ -1,4 +1,5 @@
 import { readPaperReturn } from "./paper-return";
+import { readOperationCounts } from "./distinct-trades";
 /**
  * WHO IS ACTUALLY ANY GOOD.
  *
@@ -14,8 +15,10 @@ import { readPaperReturn } from "./paper-return";
  * needs percentages; a balance sheet is nobody else's business. The same split
  * the daily public report already makes.
  *
- * All ledger agents are listed. Only live agents with evidenced returns are
- * ranked; paper and idle agents stay visible and explicitly unranked.
+ * Every agent something is still running is listed. Only live agents with
+ * evidenced returns are ranked; paper and idle agents stay visible and
+ * explicitly unranked. Killed, lapsed and unrun agents are folded into a
+ * count instead of a row each — see retired-agent.ts for which, and why.
  *
  * NULL IS NOT ZERO. An agent with no deposit on record has an UNKNOWN return,
  * not a flat one, and publishing "equity minus nothing" as performance is the
@@ -29,6 +32,7 @@ import { sameBookAsLatest } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
+import { isRetired } from "@/lib/retired-agent";
 
 export interface LeaderRow {
   /** The public id. Null means no identity yet, and the row renders unlinked. */
@@ -67,23 +71,46 @@ export interface LeaderRow {
 export interface LeaderboardRead {
   source: "sqlite" | "none";
   agents: LeaderRow[];
+  /**
+   * How many ACCOUNTS were folded into "Retired accounts (N)" rather than listed.
+   *
+   * Accounts, not agents: an agent re-granted before the identity store existed
+   * left an older account that nothing links to its slug, so that account is
+   * folded and counted while the agent itself is listed. Calling the figure
+   * agents would overstate how many there have been.
+   *
+   * NULL WHEN NOBODY COULD TELL — an unreadable ledger, one too old to say how
+   * its agents are doing, or an identity store that could not be read. Zero
+   * would claim there are none. Nothing is folded when it is null.
+   */
+  retired: number | null;
 }
 
 /** Points in the sparkline. Enough to show a shape, few enough to inline. */
 const CURVE_POINTS = 40;
 
 
-export async function readLeaderboard(readDb = withReadDb, identities = () => getIdentityStore().all()): Promise<LeaderboardRead> {
+export async function readLeaderboard(
+  readDb = withReadDb,
+  identities = () => getIdentityStore().all(),
+  nowSec = () => Math.floor(Date.now() / 1000),
+): Promise<LeaderboardRead> {
   return readDb(async (db): Promise<LeaderboardRead> => {
-    if (!db) return { source: "none", agents: [] };
+    if (!db) return { source: "none", agents: [], retired: null };
 
     const slugFor = new Map<string, string>();
+    // Whether the slugs were READ. Without them every row looks unlinked, and
+    // the fold below retires an unlinked row that has not beaten in a day — so
+    // a named agent with a good key would leave the board through a quiet
+    // worker, and the count of it would be built from data nobody read.
+    let slugsRead = false;
     try {
       for (const id of await identities()) {
         for (const a of id.accounts) slugFor.set(a.toLowerCase(), id.slug);
       }
+      slugsRead = true;
     } catch {
-      /* rows render unlinked */
+      /* rows render unlinked, and nothing is folded — see below */
     }
 
     let rows: {
@@ -107,12 +134,62 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
     } catch {
       // A ledger written by an older worker has no `mode`. An empty board is
       // the honest render of that, never a 500.
-      return { source: "sqlite", agents: [] };
+      return { source: "sqlite", agents: [], retired: null };
     }
 
     // One row per public identity after a re-grant; the newest account wins.
     const seen = new Set<string>();
     rows = rows.filter(r => { const key = slugFor.get(r.smart_account.toLowerCase()) ?? r.smart_account.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+
+    // RETIRED ACCOUNTS BECOME A COUNT, NOT A ROW EACH. Applied AFTER the slug
+    // dedupe, so an identity's older key is one agent re-granted, not a second
+    // retired one — for the keys the identity store holds. A key from before
+    // the store existed is linked to no slug, so it is folded and counted
+    // beside the agent it belonged to, which is why the figure is accounts.
+    //
+    // Read separately and defensively, for the reason `contributions_known`
+    // below is: folding these columns into the SELECT above would turn a ledger
+    // that lacks one into an EMPTY BOARD. Here a failed read lists everyone, as
+    // before, and reports the count as unknown rather than as zero.
+    //
+    // AND ONLY WITH THE SLUGS IN HAND. An unread identity store lists everyone
+    // the same way. Killed and expired rows could be folded without a slug but
+    // not counted: the dedupe above could not collapse an identity's keys
+    // either, so its old ones would be counted as agents of their own. And a
+    // fold with no count is rows leaving the board without a word.
+    let retired: number | null = null;
+    if (slugsRead) try {
+      type Lifecycle = { mode: string | null; status: string | null; beat_at: number | null; expires_at: number | null };
+      const life = new Map<string, Lifecycle>();
+      for (const l of (await db
+        .prepare(
+          `SELECT smart_account, mode, status, beat_at, expires_at FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
+        )
+        .all()) as (Lifecycle & { smart_account: string })[]) {
+        life.set(l.smart_account, l);
+      }
+      const now = nowSec();
+      const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+      const before = rows.length;
+      rows = rows.filter((r) => {
+        const l = life.get(r.smart_account);
+        return !isRetired(
+          {
+            slug: slugFor.get(r.smart_account.toLowerCase()) ?? null,
+            // RAW, not the COALESCEd `r.mode` above: that reads a newborn that
+            // has never beaten as idle, and would retire it before its first tick.
+            mode: l?.mode ?? null,
+            status: l?.status ?? null,
+            beatAt: num(l?.beat_at),
+            expiresAt: num(l?.expires_at),
+          },
+          now,
+        );
+      });
+      retired = before - rows.length;
+    } catch {
+      /* lifecycle columns arrive with worker migrations; unknown until they do */
+    }
     const agents = await Promise.all(
       rows.map(async (r): Promise<LeaderRow> => {
         const account = r.smart_account;
@@ -167,19 +244,13 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
         let landed = 0;
         let refused = 0;
         try {
-          const t = (await db
-            .prepare(
-              `SELECT COALESCE(SUM(CASE WHEN status = 'landed' THEN gas_usdg ELSE 0 END), 0) AS gas,
-                      SUM(CASE WHEN status = 'paper' THEN 1 ELSE 0 END) AS paper_filled,
-                      SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed,
-                      SUM(CASE WHEN status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS refused
-                 FROM trades WHERE agent_id = ? AND epoch = ?`,
-            )
-            .get(account, epoch)) as { paper_filled: number; gas: number; landed: number | null; refused: number | null } | undefined;
-          gasUsdg = Number(t?.gas ?? 0);
-          landed = Number(t?.landed ?? 0);
-          filledPaper = Number(t?.paper_filled ?? 0);
-          refused = Number(t?.refused ?? 0);
+          // Operations, not rows — the same count the agent's own page shows,
+          // so a redeploy's re-recorded copies cannot double a board figure.
+          const t = await readOperationCounts(db, account, epoch, "landed");
+          gasUsdg = t.gasUsdg;
+          landed = t.landed;
+          filledPaper = t.filledPaper;
+          refused = t.refused;
         } catch {
           /* older ledger */
         }
@@ -236,7 +307,7 @@ export async function readLeaderboard(readDb = withReadDb, identities = () => ge
       return b.pnlBps - a.pnlBps;
     });
 
-    return { source: "sqlite", agents };
+    return { source: "sqlite", agents, retired };
   });
 }
 

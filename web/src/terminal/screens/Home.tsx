@@ -32,6 +32,7 @@ export function Home({
   onDesk,
   hasAgent,
   read,
+  retired = null,
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -54,6 +55,8 @@ export function Home({
   hasAgent: boolean;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
+  /** Accounts the board folded into a count. See Board. */
+  retired?: number | null;
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
@@ -187,6 +190,7 @@ export function Home({
       <Board
         preview
         read={read}
+        retired={retired}
         agents={agents}
         theses={theses}
         mine={mine}
@@ -235,7 +239,10 @@ export function Home({
                       {t.cast.slice(0, 3).map((a) => (
                         <button key={a.slug} onClick={() => onAgent(a.slug)}>
                           <Face name={a.name} slug={a.slug} small />
-                          <span>{a.handle ?? a.name}</span>
+                          {/* The AGENT heads the row. `handle` is the owner's typed X
+                              handle, unverified on this path (AgentRef carries no
+                              proof), so it never stands in for the agent's name. */}
+                          <span>{a.name}</span>
                         </button>
                       ))}
                     </div>
@@ -278,7 +285,7 @@ export function Home({
                           />
                         ))}
                       </span>
-                      {who.map((a) => a.handle ?? a.name).join(", ")}
+                      {who.map((a) => a.name).join(", ")}
                       {t.cast.length > who.length
                         ? ` +${t.cast.length - who.length}`
                         : ""}

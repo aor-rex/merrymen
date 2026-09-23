@@ -29,6 +29,7 @@ import {
 import { tenantOf } from "@/lib/auth";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { agentNameSave } from "@/lib/settings-agent-name";
 
 export const dynamic = "force-dynamic";
 
@@ -415,35 +416,14 @@ export async function PUT(req: Request) {
 
   // ── enums ───────────────────────────────────────────────────────────────
   if ("agentName" in body) {
-    const v = body.agentName;
-    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), duplicated
-    // deliberately rather than imported: this runs in the web tier and the soul
-    // module touches the filesystem. If the two ever disagree the worker wins
-    // and silently keeps the old name, so the shapes must match exactly.
-    //
-    // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
-    // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
-    // the shared regex admits internal double spaces — so "Little  John" was
-    // kept verbatim here and collapsed to "Little John" by the soul. The two
-    // then never agree, which makes `cfg.agentName !== getName()` true forever:
-    // harmless while the reconcile only ran on re-arm, an identity-file rewrite
-    // every tick once it runs unconditionally. Normalise once, at the door.
-    // NFC is part of the shape that must match: a decomposed "José" and a
-    // precomposed one are the same name, and only one of them is 4 characters.
-    const norm = typeof v === "string" ? v.normalize("NFC").trim().replace(/\s+/g, " ") : v;
-    if (norm === "" || norm === null || norm === undefined) {
-      setOrClear("agentName", undefined);
-    } else if (
-      typeof norm !== "string" ||
-      !/^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u.test(norm)
-    ) {
-      // The old rule was ASCII-only and the old message said "letters and
-      // numbers", which sent anyone called José or Робин round a loop they
-      // could not escape by complying. See worker/src/soul.ts NAME_RE.
-      errors.push("name: 1-24 characters, starting with a letter or number");
-    } else {
-      setOrClear("agentName", norm);
-    }
+    // The rule, the normalisation and the grandfathering of a stored "007"
+    // live in lib/settings-agent-name.ts, where a test runs them. `stored` is
+    // what this tenant's settings hold NOW, read above — never `next`, which
+    // this same save may already have changed.
+    const save = agentNameSave(body.agentName, stored);
+    if (save.kind === "clear") setOrClear("agentName", undefined);
+    else if (save.kind === "error") errors.push(save.message);
+    else setOrClear("agentName", save.name);
   }
 
   if ("xHandle" in body) {

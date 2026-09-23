@@ -25,8 +25,9 @@ export function You({
   onDeposit: () => void;
   onWithdraw: () => void;
   stopped: boolean;
-  perTrade: string;
-  perDay: string;
+  /** Null until the signed caps are read — a dash, never "$0.00 per trade". */
+  perTrade: number | null;
+  perDay: number | null;
   mine: LiveMine | null;
   history: number[];
 }) {
@@ -106,7 +107,7 @@ export function You({
           <span>
             <strong>Trading limits</strong>
             <small>
-              {money(Number(perTrade))} per trade · {money(Number(perDay))} per
+              {money(perTrade)} per trade · {money(perDay)} per
               day
             </small>
           </span>
@@ -119,14 +120,19 @@ export function You({
           <div>
             <span>Used today</span>
             <span>
-              {money(spent)} / {money(Number(perDay))}
+              {money(spent)} / {money(perDay)}
             </span>
           </div>
-          <progress
-            aria-label="Daily trading limit used"
-            max={Math.max(1, Number(perDay) || 1)}
-            value={Math.min(spent, Math.max(1, Number(perDay) || 1))}
-          />
+          {/* NO BAR AGAINST A CAP WE HAVE NOT READ. The old fallback of 1
+              drew any spend at all as a full bar — a limit reached, measured
+              against nothing. */}
+          {perDay !== null && (
+            <progress
+              aria-label="Daily trading limit used"
+              max={Math.max(1, perDay)}
+              value={Math.min(spent, Math.max(1, perDay))}
+            />
+          )}
         </div>
         </section>
       </section>

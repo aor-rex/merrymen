@@ -25,6 +25,7 @@ import type { Db } from "./db";
 import { getIdentityStore, type IdentityStore } from "./identity-store";
 import {
   PUBLISHABLE_SOURCES,
+  publicationNarrowing,
   publishableThesis,
   type PublicThesis,
   type ThesisRow,
@@ -97,6 +98,10 @@ export async function readPeerTheses(
   const since = Math.floor(Date.now() / 1000) - PEER_WINDOW_SEC;
   const holes = accounts.map(() => "?").join(", ");
   const sources = SOURCES.map(() => "?").join(", ");
+  // What the gate drops for its source, action or rule is dropped here too, so
+  // the bounded scan below is not spent on a day of refused class entries. The
+  // policy module builds it from its own constants, and the gate still decides.
+  const narrow = publicationNarrowing("d", "t");
   const published: PublicThesis[] = [];
   try {
     const query = shared
@@ -126,6 +131,7 @@ export async function readPeerTheses(
             AND d.source IN (${sources})
             AND (d.hold_kind IS NULL OR d.hold_kind <> 'GATE_FORCED_HOLD')
             AND (d.dropped_rule IS NULL OR d.dropped_rule NOT LIKE 'brain-%')
+            AND ${narrow.sql}
           GROUP BY a.name, a.x_handle, a.mode, d.agent_id, d.action, d.symbol, d.size_usdg,
                    d.source, d.reason, d.dropped_rule, d.hold_kind, t.status, t.reject_rule, p.body
           ORDER BY MAX(d.at) DESC, MAX(d.id) DESC
@@ -134,7 +140,7 @@ export async function readPeerTheses(
     // Filter before applying the prompt limit. Otherwise 24 newer operational
     // rows hide every real thesis behind them and a followed desk looks silent.
     for (let offset = 0; offset < MAX_SCAN; offset += SCAN_BATCH) {
-      const rows = await query.all(...accounts.map((a) => a.toLowerCase()), since, ...SOURCES, SCAN_BATCH, offset) as ThesisRow[];
+      const rows = await query.all(...accounts.map((a) => a.toLowerCase()), since, ...SOURCES, ...narrow.args, SCAN_BATCH, offset) as ThesisRow[];
       published.push(...rows
         .map((r) => ({ ...r, slug: slugFor.get((r.agent_id ?? "").toLowerCase()) ?? null }))
         .map(publishableThesis)

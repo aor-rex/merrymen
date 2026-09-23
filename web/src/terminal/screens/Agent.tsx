@@ -4,6 +4,7 @@ import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
+import { followOrder as followOrderAnswer, followWindowMs } from "../order-follow";
 import {
   ArrowDown,
   ArrowUp,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   dailyChange,
+  positionFigures,
   positionsOf,
   spentToday,
   type ChatTurn,
@@ -22,59 +24,17 @@ import {
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
+import { NameChip } from "../NameChip";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-
-/**
- * How many recent moves the agent is shown.
- *
- * The whole tape used to go, which on its own overran the prompt's state
- * budget before the positions were even added — so the clamp downstream cut it
- * mid-object. Eight is what fits comfortably and is what a person means by
- * "recently".
- */
-const TAPE_SHOWN = 8;
+import { chatStateOf } from "../chat-payload";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
-
-/**
- * The newest moves, reduced to what the model can actually use.
- *
- * `at` travels so the agent can tell last month's refusal from this morning's.
- * Without it, a tape of stale rejections reads as the present tense — which is
- * exactly how a tester's agent came to report a months-old `no-gas` as its
- * current state. `movesShown`/`movesTotal` go beside it so the agent can say
- * "the last 8 of 30" rather than implying it saw everything.
- *
- * IT WAS HANDING OVER THE OLDEST EIGHT AND CALLING THEM THE LAST EIGHT.
- * `slice(-TAPE_SHOWN)` takes the TAIL, and the tape arrives newest-first —
- * /api/feed selects `ORDER BY created_at DESC` — so the model got the eight
- * stalest rows of the window while `movesShown` told it these were the recent
- * ones. That is the same present-tense-stale-refusal failure this comment was
- * written about, rebuilt one line below it; the 7-day window bounded how old
- * the lie could be and did not stop it being told.
- *
- * Sorted here rather than trusting the caller. The order is a fact about a SQL
- * clause two services away, and reading the tape backwards is silent — nothing
- * throws, nothing looks empty, the agent simply narrates the wrong week.
- */
-const tapeFor = (moves: LiveMine["moves"]) =>
-  [...moves]
-    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
-    .slice(0, TAPE_SHOWN)
-    .map((m) => ({
-      at: m.at,
-      action: m.action,
-      symbol: m.symbol,
-      sizeUsdg: m.sizeUsdg,
-      outcome: m.outcome,
-      outcomeText: m.outcomeText,
-    }));
 
 const ASKS = [
   { label: "My strategy", question: "Explain your trading strategy." },
@@ -103,8 +63,8 @@ export function Agent({
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
-  perTrade: string;
-  perDay: string;
+  perTrade: number | null;
+  perDay: number | null;
   stopped: boolean;
   turns: ChatTurn[];
   draft: string;
@@ -261,35 +221,10 @@ export function Agent({
     follow.current = true;
     try {
       const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      // WHAT IT ACTUALLY HOLDS, under the key the system prompt names.
-      //
-      // `positions` used to be `mine.glance` — a STRATEGY descriptor whose
-      // `legs` are percentage weights. So an owner asked their agent what NVDA
-      // and QQQ had cost and when it would sell, and it answered that it held
-      // nothing but cash, while the panel eighteen inches to its right listed
-      // both. It was not hallucinating; it was reading the payload it was given.
-      //
-      // Cost and P&L travel with each holding, because "should I take this
-      // profit" cannot be answered from a value alone. NULL, never 0, when the
-      // ledger has no basis — the difference between not knowing what something
-      // cost and believing it was free.
-      const sizeOf = (settings?.values ?? {}) as Record<string, unknown>;
-      const num = (k: string) => {
-        const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
-        return typeof v === "number" ? v : null;
-      };
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,basketSymbols:(settings?.values?.basketSymbols ?? settings?.defaults?.basketSymbols ?? null) as string[]|null,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,liveTradingEnabled:settings?.values?.liveTradingEnabled ?? settings?.defaults?.liveTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
-        // THIS holding's own stop, graded when it was bought. Null means it
-        // carries no grade and the book-wide `stopLossBps` below applies — the
-        // distinction matters because "what would make you sell THIS" is the
-        // question owners actually ask, and one number for a whole book was
-        // never the honest answer to it.
-        stopLossBps:p.floorBps,stopWhy:p.floorWhy})),cashUsd:mine.glance.cashUsd ?? null,vaultUsd:mine.glance.vaultUsd ?? null,
-        // The two rules that answer "what would make you get out" — the levels
-        // that sell WITHOUT asking the model. Null means none is armed, which
-        // is a different answer from a level at zero.
-        stopLossBps:num("strategistStopLossBps"),takeProfitBps:num("takeProfitBps"),
-        moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
+      // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
+      // chat-payload.ts, where a test can run it.
+      const state = chatStateOf({mine,settings,liveBlocker,perTrade,perDay,stopped});
+      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify(state),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
       const data = await response.json();
       if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
       onTurn({question:question.trim(),answer:data.reply});
@@ -315,39 +250,18 @@ export function Agent({
    * infers an outcome — a browser guessing at what a trade did is exactly the
    * claim this codebase refuses to make.
    *
-   * Bounded and best-effort: it stops when the answer lands, when the order
-   * outlives its own five-minute window, or when the screen goes away. A poll
-   * that cannot end is a worse bug than a missing sentence.
+   * Bounded and best-effort: it stops when the server answers, when the order
+   * outlives its OWN window and grace — carried back from the POST as a
+   * duration and counted on this browser's clock, never a constant here — or
+   * when the screen goes away. A poll that cannot end is a worse bug than a
+   * missing sentence. See order-follow.ts for why a fixed seven minutes told
+   * owners "nothing was sent" about orders that went on to fill.
    */
-  const followOrder = async (id: string) => {
-    const started = Date.now();
-    while (Date.now() - started < 7 * 60_000) {
-      await new Promise((r) => setTimeout(r, 5_000));
-      if (!alive.current) return;
-      let data: { state?: string; result?: string | null } | null = null;
-      try {
-        const r = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(8_000) });
-        data = r.ok ? await r.json() : null;
-      } catch {
-        continue; // a dropped poll is not an outcome
-      }
-      if (data?.state === "done" && data.result) {
-        onTurn({ question: "", answer: data.result });
-        return;
-      }
-    }
-    // NOT SILENCE. Seven minutes without an answer means the worker never took
-    // it — which is a real thing an owner needs told, and the state they were
-    // left in before was an unexplained absence.
-    if (alive.current) {
-      onTurn({
-        question: "",
-        answer:
-          "I never got to that order — my worker did not pick it up in time, so nothing was sent. " +
-          "Ask again and I will try once more.",
-      });
-    }
-  };
+  const followOrder = (id: string, expiresInMs: number | null) =>
+    followOrderAnswer(id, expiresInMs, {
+      alive: () => alive.current,
+      say: (answer) => onTurn({ question: "", answer }),
+    });
 
   /**
    * DO THE THING THE OWNER JUST CONFIRMED.
@@ -435,7 +349,7 @@ export function Agent({
           body: JSON.stringify(commandPayload(cmd, pending!.args)),
         });
         const body = (await placed.json().catch(() => null)) as
-          | { error?: string; id?: string; duplicate?: boolean }
+          | { error?: string; id?: string; duplicate?: boolean; expiresInMs?: number }
           | null;
         if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
         // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
@@ -455,7 +369,7 @@ export function Agent({
             : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         });
         setPending(null);
-        if (body?.id) void followOrder(body.id);
+        if (body?.id) void followOrder(body.id, followWindowMs(body));
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
@@ -555,6 +469,9 @@ export function Agent({
         <div>
           <h1>{mine.name}</h1>
           <p>{strategyName(mine.glance.id)}</p>
+          {/* An unnamed agent is one of many "Robin"s; this is where its owner
+              finds out, and names it in one tap. Renders nothing otherwise. */}
+          <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
         <span className={`desk-status ${stopped ? "paused" : ""}`}>
           <i />
@@ -657,6 +574,10 @@ export function Agent({
                   const token = tokens.find(
                     (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
                   );
+                  // The value AND the %, never one standing in for the other:
+                  // the small line prints the coin's name when it is listed, so
+                  // this is the only place on the row the money figure can be.
+                  const f = positionFigures(p);
                   return (
                     <button
                       type="button"
@@ -668,14 +589,13 @@ export function Agent({
                       <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
                       <span>
                         <strong>{p.symbol}</strong>
-                        <small>{token?.name ?? p.detail}</small>
+                        {/* The coin's name when it is listed. Not the detail: that is
+                            printed on the right now, and would read twice. */}
+                        {token?.name ? <small>{token.name}</small> : null}
                       </span>
-                      <span
-                        className={
-                          p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"
-                        }
-                      >
-                        {p.pnl == null ? p.detail : pctPts(p.pnl)}
+                      <span>
+                        {f.value}
+                        {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
                       </span>
                     </button>
                   );
@@ -720,7 +640,7 @@ export function Agent({
             >
               Trading limits{" "}
               <span>
-                {money(Number(perTrade))} / trade{" "}
+                {money(perTrade)} / trade{" "}
                 <ArrowUpRight size={14} aria-hidden="true" />
               </span>
             </button>

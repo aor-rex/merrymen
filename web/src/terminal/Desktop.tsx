@@ -26,7 +26,7 @@ import {
   deltaClass,
   type LiveState,
 } from "./live";
-import { positionsOf } from "./account";
+import { positionFigures, positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
@@ -116,9 +116,12 @@ export function DesktopSidebar({
   onScreen,
   onTab,
   reads,
+  retired = null,
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
+  /** Accounts the board folded into a count. See Board. */
+  retired?: number | null;
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -353,6 +356,7 @@ export function DesktopSidebar({
         {section === "board" && <Board
           compact
           read={reads.board}
+          retired={retired}
           agents={agents}
           theses={theses}
           mine={mine}
@@ -377,8 +381,9 @@ export function DesktopPortfolio({
   selectedToken?: LiveToken;
   tokens: LiveToken[];
   stopped: boolean;
-  perTrade: string;
-  perDay: string;
+  /** Null until the signed caps are read — drawn as a dash, never as $0.00. */
+  perTrade: number | null;
+  perDay: number | null;
 }) {
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
@@ -511,6 +516,8 @@ export function DesktopPortfolio({
         </div>
         {positionsOf(mine).map((p) => {
           const t = tokens.find((t) => t.symbol === p.symbol);
+          // The value AND the %, never one standing in for the other — see positionFigures.
+          const f = positionFigures(p);
           return (
             <button
               key={p.symbol}
@@ -520,8 +527,9 @@ export function DesktopPortfolio({
             >
               <Coin symbol={p.symbol} logo={t?.logo ?? ""} />
               <strong>{p.symbol}</strong>
-              <span className={p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"}>
-                {p.pnl == null ? p.detail : pctPts(p.pnl)}
+              <span>
+                {f.value}
+                {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
               </span>
             </button>
           );
@@ -539,11 +547,11 @@ export function DesktopPortfolio({
         </div>
         <div className="desktop-cash">
           <span>Per trade</span>
-          <strong>{money(Number(perTrade))}</strong>
+          <strong>{money(perTrade)}</strong>
         </div>
         <div className="desktop-cash">
           <span>Per day</span>
-          <strong>{money(Number(perDay))}</strong>
+          <strong>{money(perDay)}</strong>
         </div>
         <button className="desktop-chat-link" onClick={() => onTab("agent")}>
           Chat with {mine.name}

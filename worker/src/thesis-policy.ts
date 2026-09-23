@@ -124,6 +124,18 @@ export interface PublicThesis {
    */
   action: "buy" | "sell" | "hold" | null;
   symbol: string | null;
+  /**
+   * THE COIN'S OWN NAME, when the tape gave one that is not the id itself.
+   *
+   * `symbol` for an autonomous Trencher coin is address-derived — `T` plus
+   * eleven hex — and every surface that lays the facts out itself had only
+   * that to print, so it printed "T3139F043B88" at a reader. This is the name
+   * on its own; `symbol` stays the id everything prices and settles against.
+   * Null, never a placeholder, when there is none. Optional only so older
+   * constructions of this shape still type; the publisher always sets it.
+   * Deployer-chosen text, so it passes the same address backstop as the rest.
+   */
+  displayName?: string | null;
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -231,6 +243,8 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   // thinking behind a trade that spent their money more than one that did not.
   brain: "model",
   // Deterministic review of observed public quotes, without execution authority.
+  // Filed under this key only when the review CHANGED — a flipped bias or a
+  // confirmed breakout. An unchanged one is `market-review-private`, below.
   "market-review": "strategy",
   ...Object.fromEntries(PUBLISHABLE_STRATEGIES.map((s) => [`strategy:${s}`, "strategy" as const])),
   /**
@@ -260,7 +274,23 @@ const SOURCE_POLICY: Readonly<Record<string, "strategy" | "model">> = Object.fre
   //   chat     — carries a counterparty address by template
   //   selftest — a dust probe, not a market view; it says so itself
   //   strategy:<a tenant's own file> — a string we did not write
+  //   market-review-private — an unchanged review of one shared oracle series.
+  //              Every quiet agent writes it every five minutes, and when one
+  //              feed was fresh they all wrote the SAME line; published, it was
+  //              one paragraph under five names. The owner's record keeps it.
 });
+
+/**
+ * HOLDS THAT ARE NOT A MARKET VIEW.
+ *
+ * GATE_FORCED_HOLD: a risk gate turned the action into a hold — the agent was
+ * not allowed to decide. STALE_MARK_HOLD: the Brain held on a price the tick
+ * already knew was stale, so what it "saw" was the absence of a market ("price
+ * feed stale, no volume…"), and published that read as a view about the coin.
+ * Both stay in the owner's record, where they explain the silence; neither is
+ * something to say in public.
+ */
+const PRIVATE_HOLD_KINDS: ReadonlySet<string> = new Set(["GATE_FORCED_HOLD", "STALE_MARK_HOLD"]);
 
 /**
  * SOURCES WHOSE DECISIONS CANNOT REACH A TRADE.
@@ -302,8 +332,41 @@ const IS_SHADOW: ReadonlySet<string> = new Set<string>(SHADOW_SOURCES);
 export const TRADED_ONLY_SOURCES = ["class-route"] as const;
 const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
+/**
+ * The trade statuses `outcomeOf` calls "landed" — a fill on chain, or on the
+ * paper book. Exported for the SQL half of the gate below; outcomeOf keeps its
+ * own two arms because the two say different sentences, and thesis-policy.test
+ * holds the two in step.
+ */
+export const LANDED_STATUSES = ["landed", "paper"] as const;
+
 /** Actions that move cash between the account and its vault — plumbing, not a thesis. */
-const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withdraw"]);
+export const CASH_ACTIONS = ["vault-deposit", "vault-withdraw"] as const;
+const IS_CASH: ReadonlySet<string> = new Set<string>(CASH_ACTIONS);
+
+/**
+ * Wall rules that are about the ACCOUNT rather than the trade — the day's
+ * allowance, and whether the key can act at all. A strategy's refusal on one of
+ * these is the owner's fact and not a post; see the rule in publishableThesis.
+ *
+ * The arming half is every RefuseRule the execution fork writes into
+ * `reject_rule` (core's autonomy.ts). account-refusals.test.ts holds a typed
+ * record of that union, so a new rule there fails a test until it is placed.
+ */
+export const ACCOUNT_STATE_RULES = [
+  "ops-cap",
+  "daily-cap",
+  "deposit-cap",
+  "not-armed",
+  "dead-policy",
+  "grant-too-wide",
+  "no-executor",
+  "live-not-enabled",
+  "wrong-chain",
+  "no-gas",
+  "no-cash",
+] as const;
+const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULES);
 
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
@@ -314,6 +377,56 @@ const CASH_ACTIONS: ReadonlySet<string> = new Set(["vault-deposit", "vault-withd
  * silently becomes the rule for anything the policy later admits.
  */
 export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(SOURCE_POLICY));
+
+/**
+ * THE SQL HALF OF THREE RULES BELOW, for a reader whose scan is bounded.
+ *
+ * A reader takes the newest N groups and only then asks `publishableThesis`
+ * about each. The class route re-proposes a refused entry every tick with
+ * drifting evidence, and a basket blocked on its own account refuses every leg
+ * every tick, so the newest ninety groups could all be posts the gate was
+ * always going to drop — and a buy that landed three hours earlier never
+ * reached the gate at all. The feed had nothing to show, and the alerts rail
+ * said there had been no trades.
+ *
+ * So the three rules that drop a row for its SOURCE, ACTION or RULE rather than
+ * for its words are said in SQL too, built from the same constants, and the
+ * scan spends its budget on rows that can publish. The gate still decides: this
+ * may only ever be WIDER than publishableThesis, never narrower, and every row
+ * it lets through is asked again there.
+ *
+ * EVERY NULLABLE COLUMN IS COALESCED, and that is what keeps it wider. A pure
+ * view has no action and a refusal may carry no rule; `NULL IN (…)` is NULL,
+ * `NOT NULL` is NULL, and WHERE drops a NULL — so without them this would
+ * quietly unpublish every thesis that names nothing.
+ *
+ * `d` is the decisions alias and `t` the joined trade's. Every value travels as
+ * a placeholder, in the order it appears, so the Postgres translator that
+ * renumbers `?` has nothing of ours to misread.
+ */
+export function publicationNarrowing(d: string, t: string): { sql: string; args: string[] } {
+  const holes = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+  const unlanded = `COALESCE(${t}.status, '') NOT IN (${holes(LANDED_STATUSES.length)})`;
+  // The account rule is for STRATEGY sources only, and these are exactly the
+  // ones the policy classifies — not a LIKE, which SQLite matches without case.
+  const strategies = PUBLISHABLE_SOURCES.filter((s) => s.startsWith("strategy:"));
+  return {
+    sql: [
+      `NOT (COALESCE(${d}.source, '') IN (${holes(TRADED_ONLY_SOURCES.length)}) AND ${unlanded})`,
+      `NOT (COALESCE(${d}.action, '') IN (${holes(CASH_ACTIONS.length)}) AND ${unlanded})`,
+      `NOT (COALESCE(${d}.source, '') IN (${holes(strategies.length)}) AND COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_STATE_RULES.length)}))`,
+    ].join(" AND "),
+    args: [
+      ...TRADED_ONLY_SOURCES,
+      ...LANDED_STATUSES,
+      ...CASH_ACTIONS,
+      ...LANDED_STATUSES,
+      ...strategies,
+      "rejected",
+      ...ACCOUNT_STATE_RULES,
+    ],
+  };
+}
 
 /**
  * Anything that looks like an on-chain identifier.
@@ -596,11 +709,34 @@ function headOf(row: ThesisRow, shadow: boolean): string {
   // Absent name, absent parenthesis: never a placeholder. And never the
   // name alone, because dropping the id would make the feed the one
   // surface that cannot be reconciled against the ledger.
-  const named =
-    row.display_name && row.display_name !== row.symbol
-      ? `${row.display_name} (${row.symbol})`
-      : row.symbol;
+  const shown = nameOf(row);
+  const named = shown ? `${shown} (${row.symbol})` : row.symbol;
   return [verb, named, size].filter(Boolean).join(" ");
+}
+
+/** The coin's name, or null when there is none worth printing beside the id. */
+function nameOf(row: ThesisRow): string | null {
+  const name = (row.display_name ?? "").trim();
+  return name && name !== row.symbol ? name : null;
+}
+
+/**
+ * THE HEAD A READER SEES: the name, with the id left to a tooltip.
+ *
+ * `head` keeps "JUGGERNAUT (T3139F043B88)" because /why and the peer files are
+ * where the post is reconciled against the ledger, and the id is the only key
+ * that survives two coins calling themselves the same thing. A feed row is not
+ * that place. Built here, beside `headOf`, because it undoes exactly the one
+ * thing `headOf` adds and must not drift from it.
+ */
+export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayName">): string {
+  if (!t.displayName || !t.symbol) return t.head;
+  const name = t.displayName;
+  // A FUNCTION, NEVER THE NAME AS THE REPLACEMENT STRING. `replace` expands
+  // `$$`, `$&`, `` $` `` and `$'` in a string replacement, and the name is
+  // whatever a deployer typed: "$$CASH" printed "$CASH", and "A$`B" spliced
+  // the head into itself. A function's return value is inserted as it is.
+  return t.head.replace(`${name} (${t.symbol})`, () => name);
 }
 
 /** Known operational templates, not a classifier of market sentiment. */
@@ -625,7 +761,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;
   if (!policy) return null;
-  if (row.hold_kind === "GATE_FORCED_HOLD") return null;
+  if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
@@ -752,7 +888,36 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    * and when it does not there is nothing to say. Same shape as the class-route
    * rule above, keyed on the action because these rows ride strategy sources.
    */
-  if (CASH_ACTIONS.has(row.action ?? "") && outcome !== "landed") return null;
+  if (IS_CASH.has(row.action ?? "") && outcome !== "landed") return null;
+
+  /**
+   * A LIMIT ON THE ACCOUNT IS NOT A VIEW ABOUT THE MARKET.
+   *
+   * "Robin tried to buy TSLA · past today's number of trades" was on the feed
+   * once a tick, all day. A deterministic strategy re-proposes its legs on a
+   * schedule, so once the account's own trade count, money or arming stops it,
+   * every tick writes a fresh decision the wall refuses for the same reason —
+   * true each time, and about nothing a stranger can read as a thesis. It says
+   * the agent is stuck, in public, in the agent's name.
+   *
+   * THE OWNER'S FACT, and they still get it: the event log is told once per
+   * change (owner-refusal.ts, and the live-blocker line for the arming rules),
+   * the trade row keeps its `reject_rule` for their desk and the wall tape, and
+   * the decision stays in the ledger. Only the post goes.
+   *
+   * STRATEGY SOURCES ONLY. A model's refused thesis is still its view — "I
+   * wanted X because Y, and the wall said no" — and the TRADED_ONLY rule above
+   * says so. And only these rules: a refusal about the TRADE (an asset the key
+   * does not cover, a price that moved, a curve that graduated) says something
+   * true about the market and keeps publishing.
+   */
+  if (
+    outcome === "refused" &&
+    (row.source ?? "").startsWith("strategy:") &&
+    IS_ACCOUNT_STATE.has(row.reject_rule ?? "")
+  ) {
+    return null;
+  }
 
   const handle = (row.x_handle ?? "").trim() || null;
 
@@ -761,7 +926,8 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // the handle, which are user-typed. A strategy reason cannot contain an
   // address by construction; this exists so the guarantee does not depend on
   // that staying true.
-  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null]) {
+  const displayName = nameOf(row);
+  for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null, displayName]) {
     if (s && ADDRESSY.test(s)) return null;
   }
 
@@ -782,6 +948,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     head,
     action,
     symbol,
+    displayName,
     paper: row.mode === "paper",
     sizeUsdg:
       typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,

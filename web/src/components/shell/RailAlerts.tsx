@@ -7,6 +7,7 @@ import { badgeOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
+import { alertsOf, alertsRead, coinName, emptyAlerts, type AlertsRead } from "@/lib/rail-alerts";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -23,6 +24,9 @@ import { usdAdaptive } from "@/lib/format";
  * It reads /api/theses, which the feed has already fetched and which is cached
  * for thirty seconds, so the rail costs one request per minute and nothing on a
  * page that was already showing it.
+ *
+ * TRADES ONLY — see `alertsOf`. Seventeen of its eighteen rows were scheduled
+ * holds; the feed is where a view has room to say why.
  */
 
 const money = (n: number | null) =>
@@ -38,6 +42,7 @@ function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
 
 export function RailAlerts() {
   const [theses, setTheses] = useState<PublicThesis[] | null>(null);
+  const [read, setRead] = useState<AlertsRead>("partial");
 
   useEffect(() => {
     let alive = true;
@@ -47,9 +52,19 @@ export function RailAlerts() {
       first = false;
       try {
         const d = await fetch("/api/theses").then((r) => r.json());
-        if (alive) setTheses(d.theses ?? []);
+        if (!alive) return;
+        // An unreadable ledger keeps whatever was already on screen — the
+        // last good read is still true — and only says so when there is none.
+        const state = alertsRead(d);
+        setRead(state);
+        if (state !== "unreadable") setTheses(alertsOf(d.theses ?? []));
+        else setTheses((prev) => prev ?? []);
       } catch {
         /* keep what is on screen */
+        if (alive) {
+          setRead("unreadable");
+          setTheses((prev) => prev ?? []);
+        }
       }
     };
     void load();
@@ -71,18 +86,28 @@ export function RailAlerts() {
     );
   }
 
-  if (theses.length === 0) return null;
+  if (theses.length === 0) {
+    // THREE DIFFERENT NOTHINGS — see `emptyAlerts`. A whole day read with no
+    // published trade, the latest posts read with none, and no read at all.
+    return (
+      <div className="mm-alerts">
+        <p className="mm-kicker">Alerts</p>
+        <p className="mm-kicker" role="status">{emptyAlerts(read)}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="mm-alerts">
       <p className="mm-kicker">Alerts</p>
       <ul>
-        {theses.slice(0, 18).map((t, i) => {
+        {theses.map((t, i) => {
           const b = badgeOf(t);
           const size = money(t.sizeUsdg);
+          const coin = coinName(t);
           const row = (
             <>
-              <AgentAvatar name={t.name} size={22} />
+              <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
               <span className="who">
                 <span className="nm">{t.name}</span>
                 <span className={`mm-chip ${badgeClass(b.kind)}${t.outcome === "pending" ? " unsettled" : ""}`}>
@@ -92,7 +117,7 @@ export function RailAlerts() {
               </span>
               {(t.symbol || size) && (
                 <span className="did mono">
-                  {t.symbol && <b>{t.symbol}</b>}
+                  {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
                   {size && <span className="amt">{size}</span>}
                   {t.paper && <span className="pp">paper</span>}
                 </span>

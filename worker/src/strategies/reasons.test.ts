@@ -30,6 +30,7 @@ const ALL: Why[] = [
   { code: "trench-exit", symbol: "WIF", cause: "take", pct: 48.2 },
   { code: "trench-exit", symbol: "WIF", cause: "aged" },
   { code: "trench-exit", symbol: "WIF", cause: "unpriceable" },
+  { code: "ops-spent" },
 ];
 
 describe("every reason is publishable prose", () => {

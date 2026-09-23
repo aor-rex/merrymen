@@ -80,7 +80,7 @@ import { replayLines, scoreDecision, type Observation, type PricedDecision } fro
 import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
-import { MIRROR_STATE_DDL, mirrorTenant, openChildLedger } from "./ledger-mirror";
+import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
@@ -89,7 +89,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
-import { dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
+import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand } from "./command-files";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -1318,8 +1318,38 @@ function parseArgs(raw: string): Record<string, string | number | boolean> {
  * which the row is closed with a reason. Kept here rather than imported from
  * the web tier because the two processes share no module — and stated in both
  * places so a change to one is visibly a change to the other.
+ *
+ * NOW ONLY THE FLOOR, and the fallback for a row that carries no deadline. The
+ * route stopped stamping five minutes when the window became two ticks of the
+ * tenant's own cadence — 8m15s at the hosted 240 s tick — and this constant did
+ * not follow. So a row was closed as "never ran" at seven minutes while the
+ * child was still entitled to fill it, and closing it freed the one-at-a-time
+ * slot early enough to admit a second order beside the first. Each row is now
+ * judged against its own `expiresAt` plus ORDER_GRACE_MS below.
  */
 const ORDER_STALE_MS = 7 * 60_000;
+
+/**
+ * How long past its own deadline an unanswered order keeps its row open.
+ *
+ * The route's ORDER_STALE_GRACE_MS (web/src/lib/order-state.ts), for the same reason:
+ * the child enforces the deadline at the claim, so a row can be a ferry pass and
+ * a tick behind it while genuinely being decided. The route holds the owner's
+ * one-at-a-time slot for exactly this long, and the two must agree — a row this
+ * closes early is a slot the route hands out while the first order can still run.
+ */
+const ORDER_GRACE_MS = 2 * 60_000;
+
+/**
+ * When an unanswered trade row may be closed: its own deadline plus the grace,
+ * or — for a row that carries none — the old fixed age.
+ */
+function orderClosesAt(r: { args: string | null; created_at: number }): number {
+  const expiresAt = r.args ? parseArgs(r.args).expiresAt : undefined;
+  return typeof expiresAt === "number" && Number.isFinite(expiresAt)
+    ? expiresAt + ORDER_GRACE_MS
+    : Number(r.created_at) + ORDER_STALE_MS;
+}
 
 async function ferryCommands(shared: Db): Promise<void> {
   for (const [tenant, child] of [...children.entries()]) {
@@ -1439,19 +1469,80 @@ export async function ferryForChild(
     // shows an eternal spinner while the one-at-a-time rule refuses them any
     // new order. Past its expiry it can no longer legally run, so it is closed
     // with a sentence saying so rather than left to look like it is working.
+    //
+    // THE FLOOR SELECTS, THE ROW'S OWN DEADLINE DECIDES. No window is shorter
+    // than the floor, so nothing younger can qualify; past it, each row is held
+    // to the `expiresAt` it was placed with. `done_at IS NULL` is repeated on
+    // the write so a result the up-leg landed in between is never overwritten.
+    //
+    // "NEVER RAN" ONLY WHERE IT IS TRUE, WHICH MEANS LOOKING IN THE CHILD'S HOME
+    // FIRST. It used to be written onto every unanswered row once deadline and
+    // grace had passed — including rows the child had already CLAIMED and
+    // might be filling that minute, because a live fill waits on its receipt
+    // for up to three reads of two minutes each and a child that claims near
+    // its deadline is still waiting when the grace runs out. The owner's card
+    // repeats `done` word for word, and the closed row freed the one-at-a-time
+    // slot: "nothing happened, ask again", with the first order on chain.
+    //
+    //   - never delivered: nobody has it, and the row is claimed HERE so the
+    //     down-leg — which does not look at done_at — can never hand it over.
+    //   - the file still queued, with a deadline: the child never took it, and
+    //     from here on it refuses it at the claim (isExpired). Nothing went out.
+    //   - a `.running` marker, or the file gone with no answer: the child took
+    //     it. Left OPEN — so the route goes on holding the slot — until the
+    //     in-flight bound has passed as well, and then closed with a sentence
+    //     that does not claim to know. A late answer still replaces it.
+    //   - an answer on disk: the up-leg's to land, never ours to overwrite.
     try {
-      const stale = Date.now() - ORDER_STALE_MS;
-      await shared
+      const now = Date.now();
+      const candidates = (await shared
         .prepare(
-          `UPDATE agent_commands SET done_at = ?, result = ?
+          `SELECT id, args, created_at, claimed_at FROM agent_commands
             WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at < ?`,
         )
-        .run(
-          Date.now(),
-          "never ran — this order sat past its five-minute window and I will not fill it into a different market. Ask again if you still want it.",
-          smartAccount,
-          stale,
-        );
+        .all(smartAccount, now - ORDER_STALE_MS)) as {
+        id: string;
+        args: string | null;
+        created_at: number;
+        claimed_at: number | string | null;
+      }[];
+      const neverRan =
+        "never ran — this order sat in my queue past its window without being picked up, and I will not fill it into a different market, so nothing was sent. Ask again if you still want it.";
+      // Says only what is known: no answer came. Not "took it" — a delivery
+      // whose file write failed after the row was claimed lands here too.
+      const unanswered =
+        "I never heard back from my worker about this order, so I cannot tell you whether it filled — it may have. Check your trades before asking again.";
+      for (const r of candidates) {
+        const closesAt = orderClosesAt(r);
+        if (now <= closesAt) continue;
+        const id = String(r.id);
+        const where = commandWhereabouts(home, id);
+        if (where === "answered") continue;
+        if (r.claimed_at === null || r.claimed_at === undefined) {
+          // Undelivered, so no file can exist yet; a replica that delivers it
+          // in the meantime wins the `claimed_at IS NULL` race and we stand down.
+          if (where !== "gone") continue;
+          await shared
+            .prepare(
+              "UPDATE agent_commands SET done_at = ?, claimed_at = ?, result = ? WHERE id = ? AND done_at IS NULL AND claimed_at IS NULL",
+            )
+            .run(now, now, neverRan, id);
+          continue;
+        }
+        const expiresAt = r.args ? parseArgs(r.args).expiresAt : undefined;
+        if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
+          await shared
+            .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
+            .run(now, neverRan, id);
+          continue;
+        }
+        // Taken, or a deadline-less file the child would still run: either
+        // way it may go out, so nothing is said until it no longer can.
+        if (now <= closesAt + ORDER_IN_FLIGHT_MS) continue;
+        await shared
+          .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
+          .run(now, unanswered, id);
+      }
     } catch {
       /* best effort; the age bound in the route is the other half of this */
     }
@@ -1567,8 +1658,6 @@ async function fleetHealth(): Promise<void> {
       const failed = n((r) => r.status === "reverted");
       const submitted = n((r) => r.status === "submitted") + landed + failed;
       const tooWide = n((r) => r.rule === "grant-too-wide");
-      const holds = (k: string) =>
-        h.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
 
       // SILENT ONLY WHEN NOBODY IS LIVE — because silence means two things and
       // this is a health metric.
@@ -1589,8 +1678,7 @@ async function fleetHealth(): Promise<void> {
           `autonomy| 1h — ${liveAgents ?? "?"} live · proposals ${proposals} · ` +
             `policy-passed ${proposals - rejected} · ` +
             `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
-            `grant-too-wide ${tooWide} · holds ${holds("MODEL_HOLD")} model, ` +
-            `${holds("GATE_FORCED_HOLD")} gate-forced, ${holds("unreported")} unreported`,
+            `grant-too-wide ${tooWide} · holds ${autonomyHolds(h)}`,
         );
         // The refusals, largest first, so a new one announces itself rather
         // than hiding inside a total. Bounded — a fleet refusing in twenty ways
@@ -1636,6 +1724,36 @@ async function fleetHealth(): Promise<void> {
     // A health read that fails is not a fleet that is down. Say nothing rather
     // than raise a false alarm, and never take the loop with it.
   }
+}
+
+/** The kinds the autonomy line names, in the order it names them. */
+const HOLD_BUCKETS: readonly (readonly [kind: string, label: string])[] = [
+  ["MODEL_HOLD", "model"],
+  ["GATE_FORCED_HOLD", "gate-forced"],
+  ["STALE_MARK_HOLD", "stale-mark"],
+  ["unreported", "unreported"],
+];
+
+/**
+ * THE HOLDS CLAUSE OF THE AUTONOMY LINE, and every hold the query read is in it.
+ *
+ * It named three kinds and summed only those. When the writer started stamping
+ * a hold on a stale price as STALE_MARK_HOLD — which had counted as a model
+ * hold until then — those holds fell out of the line entirely, and a fleet
+ * holding on dead feeds read as a fleet holding less. So the named buckets are
+ * always printed (a kind the query found none of is a measured zero), and any
+ * kind this list does not know is printed under its own name rather than
+ * dropped. A new kind at the writer then shows up here the first hour it
+ * happens, instead of being noticed as a gap in a total.
+ */
+export function autonomyHolds(rows: readonly { kind: string; n: number | string }[]): string {
+  const count = (k: string) => rows.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
+  const named = new Set(HOLD_BUCKETS.map(([k]) => k));
+  const unknown = [...new Set(rows.map((r) => r.kind).filter((k) => !named.has(k)))].sort();
+  return [
+    ...HOLD_BUCKETS.map(([k, label]) => `${count(k)} ${label}`),
+    ...unknown.map((k) => `${count(k)} ${k}`),
+  ].join(", ");
 }
 
 /**
@@ -4367,7 +4485,6 @@ async function mirrorLedgers(): Promise<void> {
       // a Trencher's universe is discovered inside the child and lives in this
       // sqlite, which nothing outside this loop opens.
       tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
-      const n = Object.values(r.copied).reduce((a, b) => a + b, 0);
       // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
       //
       // This used to print only when n > 0, which made a stalled table and an
@@ -4391,16 +4508,10 @@ async function mirrorLedgers(): Promise<void> {
           .join(" | ");
         log(`ledger mirror: ${tenant} STALLED — ${why}`);
       }
-      if (n > 0) {
-        const detail = Object.entries(r.copied)
-          .map(([k, v]) => `${k} ${v}`)
-          .join(", ");
-        log(`ledger mirror: ${tenant} +${n} rows (${detail})`);
-      } else if (!r.failed) {
-        // Says "read, nothing new" rather than saying nothing at all, so the
-        // absence of this line means the pass itself did not run.
-        log(`ledger mirror: ${tenant} idle`);
-      }
+      // What arrived, and apart from it what was deliberately not copied; see
+      // mirrorCountsLine for why the two are never summed.
+      const counts = mirrorCountsLine(tenant, r);
+      if (counts) log(counts);
     } catch (e) {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
     } finally {

@@ -11,6 +11,10 @@ import { privyEnabled } from "@/lib/privy-client";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/core";
 import { usd } from "@/lib/format";
+import type { GrantBalances } from "@/lib/grant-balances";
+import { requestJson } from "./request-json";
+import { SkeletonRows } from "./Skeleton";
+import type { ReadState } from "./live";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -22,7 +26,8 @@ export interface AccountState {
    *
    * `balances` is the CHAIN's answer (a multicall in /api/grants), and it is
    * the only figure that may decide whether real money exists. The book's cash
-   * is the simulated balance in paper mode, which is the whole confusion.
+   * is the simulated balance in paper mode, which is the whole confusion. Each
+   * field is null when that read failed — never "0", which is an empty account.
    */
   /**
    * `workerAliveAt` and `grant.grantedAt` travel together for ONE comparison:
@@ -35,14 +40,10 @@ export interface AccountState {
    * mirrored `agents` row that also carries `liveBlocker`. That pairing is what
    * makes the comparison sound: the blocker and the beat are the same row.
    */
-  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: {ethWei: string; cashUsdg: string; vaultUsdg: string}; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
-export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {...init, cache:"no-store", signal: AbortSignal.timeout(20000)});
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || data.errors?.join(" ") || data.why || `Request failed (${response.status})`);
-  return data as T;
-}
+// Moved to its own module so it can be executed in a test; re-exported so no import moves.
+export { requestJson } from "./request-json";
 /**
  * WHICH SIGN-IN THE DEPLOYMENT OFFERS.
  *
@@ -78,9 +79,33 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
   }
   return <div className="hosted-auth"><button className="flow-primary" disabled={busy} onClick={()=>void signIn()}>{busy ? "Waiting for wallet…" : "Sign in with wallet"}</button>{error && <p role="alert" className="flow-error">{error}</p>}</div>;
 }
-export function AccountEntry({account,onRefresh}:{account:AccountState|null;onRefresh:()=>void}) {
-  if(account?.status.exists) return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
-  return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{!account ? <p>Loading your account…</p> : account.session.hosted && !account.session.address ? <SignIn onDone={onRefresh}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
+/**
+ * WHERE THE OWNER'S OWN AGENT WOULD BE, before there is one to show.
+ *
+ * THREE ANSWERS PER READ, NOT ONE. `account` is null both while the first read
+ * is in flight and after it failed, and both said "Loading your account…" — so
+ * a failed read said loading for ever, with nothing to press. And an owner whose
+ * book was still in flight was told "Your portfolio data is not available yet",
+ * a verdict about a request that had not answered. Loading draws a skeleton,
+ * which claims nothing; failed says so and offers Try again; only a read that
+ * succeeded may say what it found.
+ *
+ * `portfolio` is `live.reads.mine` — the feed read that carries the book.
+ *
+ * `retrying` is a pass already running. The failure stays true until a read
+ * succeeds, so without it "We couldn't load your account" stood unchanged
+ * through the retry the reader had just asked for, and Try again looked broken.
+ */
+export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void}) {
+  if(account?.status.exists) {
+    if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
+    if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your portfolio again…" : <>We couldn&apos;t load your portfolio. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
+    return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
+  }
+  if(!account) return accountFailed
+    ? <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
+    : <section className="hosted-entry"><SkeletonRows rows={2} label="Loading your account"/></section>;
+  return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onRefresh}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
 }
 export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";account:AccountState;onClose:()=>void}) {
   const [copied,setCopied]=useState(false);
@@ -196,4 +221,9 @@ function RiskBar({ onDone }: { onDone: () => void }) {
 export function LimitsPanel({account,onClose}:{account:AccountState|null;onClose:()=>void}) {
   const caps=account?.status.grant?.caps;
   return <section className="hosted-entry money-flow"><header className="flow-top"><h2>Trading limits</h2><button aria-label="Close limits" onClick={onClose}><X size={18}/></button></header><RiskBar onDone={()=>{}}/><dl className="fund-breakdown"><div><dt>Per trade</dt><dd>{caps ? usd(caps.perTradeUsdg) : "—"}</dd></div><div><dt>Per day</dt><dd>{caps ? usd(caps.dailyUsdg) : "—"}</dd></div></dl><p>Changing these limits requires a new signature for your agent’s trading permission.</p><a className="flow-primary" href="/grant">Edit signed limits</a><a className="flow-secondary" href="/settings">Strategy and account settings</a></section>;
+}
+
+/** Try again — and, while that retry is running, a button that says so and cannot be pressed twice. */
+export function RetryButton({retrying,onRetry}:{retrying:boolean;onRetry:()=>void}) {
+  return <button className="flow-primary" onClick={onRetry} disabled={retrying}>{retrying ? "Trying again…" : "Try again"}</button>;
 }
