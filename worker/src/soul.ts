@@ -23,62 +23,35 @@ import path from "node:path";
 import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
 import { fnv1a } from "./memory/tokens";
-import { DEFAULT_AGENT_NAME } from "../../packages/core/src/agent-name";
+import {
+  AGENT_NAME_RE,
+  DEFAULT_AGENT_NAME,
+  STORED_AGENT_NAME_RE,
+  normalizeAgentName,
+} from "../../packages/core/src/agent-name";
 import type { NameSeat } from "./name-reconcile";
 
 /** The stock name, defined once in core — the Agent screen's name chip compares against it. */
 export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
 /**
- * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET.
+ * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET, with at least one letter —
+ * the rule for a name somebody is CHOOSING NOW (chat /name here). Why it reads
+ * as it does is written beside it in packages/core/src/agent-name.ts.
  *
- * This was `[A-Za-z0-9]`, which refused José, Müller, Łukasz, Робин, 小红,
- * रोबिन and رَوبِن — and refused them at the END of the create wizard, in the
- * same request that carried the strategy, the caps and the paper/live choice,
- * so one accent discarded the whole form. The message said "letters and
- * numbers", which is worse than unhelpful: é IS a letter, so a reader who
- * complied failed again.
- *
- * `\p{M}` is not decoration. Devanagari, Thai, Bengali, Tamil and vowelled
- * Arabic carry combining marks that NFC does not compose away, so a rule of
- * letters-and-numbers alone still refuses रोबिन and โรบิน. U+200C and U+200D
- * are admitted for the same reason: Persian and several Indic orthographies
- * need them inside a single word.
- *
- * Everything else stays excluded, which keeps out the thing that actually
- * matters — `\p{Cf}` bidi overrides, whose whole purpose is to make text
- * display as something other than what it is.
- *
- * AT LEAST ONE LETTER, which is the lookahead. A name renders beside an
- * agent's return on a page that ranks people, and "99.5" or "1000" there reads
- * as a figure nobody measured. Digits are still welcome inside a name that has
- * a letter — "R2", "Agent 47". This is the rule for a name somebody is
- * CHOOSING NOW (chat /name here; the settings form and the wizard in the web
- * tier). A name already stored is held to STORED_NAME_RE below instead.
- *
- * DUPLICATED, DELIBERATELY, at web/src/app/api/settings/route.ts. The two must
- * stay byte-identical INCLUDING the normalisation below; see the comment there
- * for what happens when they drift.
+ * THE SAME CONSTANT the web tier's settings form, wizard and partner
+ * enrollment test against, not a copy of it. It was a copy, byte-identical by
+ * test, and when the two drifted the worker won and silently kept the old name
+ * while the settings save had told the owner it succeeded.
  */
-const NAME_RE = /^(?=\P{L}*\p{L})[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+const NAME_RE = AGENT_NAME_RE;
 /**
- * THE RULE A NAME WAS STORED UNDER — everything above except the letter.
- *
- * Agents were named "007" before the letter rule existed, and the owner's rule
- * is that an existing agent is not renamed. Read back through NAME_RE, "007"
- * comes out as the default: the reconcile would refuse the configured "007" and
- * tell the owner the agent "is still called Robin", which is false, and the
- * first re-arm — every restart is one — would write "Robin" onto the roster
- * while the owner's own feed and the Brain persona still said 007. So reading the
- * identity file, and carrying a name settings already holds into it, use this;
- * only a name typed now meets the letter rule.
- *
- * Everything else still applies to a stored name: a bidi override, a leading
- * mark or twenty-five characters are refused however they were stored.
- *
- * Declared AFTER NAME_RE on purpose: web/src/app/api/feed/identity.test.ts
- * compiles the first rule in this file as the one the settings form must match.
+ * THE RULE A NAME WAS STORED UNDER — everything above except the letter, so an
+ * agent named "007" before the letter rule is not renamed by reading its own
+ * identity file back, or by a restart carrying the stored name in. Also core's,
+ * and also the web tier's: a re-saved "007" the web accepted and the soul
+ * refused would run as Robin.
  */
-const STORED_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}\p{Join_Control} '.-]{0,23}$/u;
+const STORED_NAME_RE = STORED_AGENT_NAME_RE;
 const MAX_OWNER_FACTS = 60;
 const MAX_NOTES = 120;
 const MAX_JOURNAL_CHARS = 40_000;
@@ -222,8 +195,9 @@ export function carryStoredName(raw: string): NameResult {
 function writeName(raw: string, rule: RegExp, reason: string): NameResult {
   // NFC first, so "José" typed as e + combining acute and "José" typed as the
   // precomposed é are the same name, spend the same number of the 24
-  // characters, and compare equal to whatever the web tier stored.
-  const name = raw.normalize("NFC").trim().replace(/\s+/g, " ");
+  // characters, and compare equal to whatever the web tier stored — which it
+  // stored through this same function.
+  const name = normalizeAgentName(raw);
   if (!rule.test(name)) return { ok: false, reason };
   ensureSoul();
   const current = readSafe(identityFile());

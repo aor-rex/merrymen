@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { GENERATED_NAME_PARTS, SETTINGS_DEFAULTS, TRADEABLE_SYMBOLS } from "@merrymen/core";
+import {
+  AGENT_NAME_RE as CORE_AGENT_NAME_RE,
+  GENERATED_NAME_PARTS,
+  SETTINGS_DEFAULTS,
+  STORED_AGENT_NAME_RE as CORE_STORED_AGENT_NAME_RE,
+  TRADEABLE_SYMBOLS,
+  normalizeAgentName as coreNormalizeAgentName,
+} from "@merrymen/core";
 import { identityOf, type IdentitySources } from "@/lib/feed-identity";
 import { AGENT_NAME_RE, STORED_AGENT_NAME_RE, normalizeAgentName } from "@/lib/agent-name-rule";
 
@@ -25,7 +32,6 @@ import { AGENT_NAME_RE, STORED_AGENT_NAME_RE, normalizeAgentName } from "@/lib/a
  */
 
 const WORKER = readFileSync(new URL("../../../../../worker/src/index.ts", import.meta.url), "utf8");
-const SOUL = readFileSync(new URL("../../../../../worker/src/soul.ts", import.meta.url), "utf8");
 
 
 /**
@@ -169,77 +175,66 @@ describe("the feed says where the name came from", () => {
 });
 
 /**
- * The SOUL's name rule as it ships, compiled from its source.
+ * THE NAME RULE, ONE COPY FOR BOTH TIERS.
  *
- * The web tier's copy is imported and run (lib/agent-name-rule.ts, which the
- * settings route and partner enrollment both write through). The soul's cannot
- * be imported here — the module touches the filesystem at load — so it is read
- * out rather than restated: a copy in the test would let the two drift and
- * still pass. Moving the rule into packages/core would end this read.
+ * The soul and every web writer used to hold their own byte-identical copy of
+ * the rule, and this file held them together by reading the soul's source and
+ * compiling the regex it found there. The rule now lives in packages/core
+ * (agent-name.ts): the soul imports it by relative path and lib/agent-name-rule
+ * re-exports it. So the web half is pinned here as the very objects core
+ * exports, and the soul half is RUN in worker/src/soul-name-rule.test.ts —
+ * names go through the real setName and carryStoredName, which is what
+ * actually decides whether the worker keeps a name.
  */
-function ruleIn(src: string): RegExp {
-  // Found by the one class no other regex in either file carries, not by how
-  // the rule happens to begin — the letter lookahead moved its first token.
-  const m = src.match(/\/\^[^/\n]*\\p\{Join_Control\}[^/\n]*\/u/);
-  assert.ok(m, "the name rule must be present and recognisable");
-  return new RegExp(m[0].slice(1, -2), "u");
-}
-
-describe("the two name normalisers agree", () => {
-  it("the API stores the SAME shape the soul does", () => {
-    // The soul does `raw.normalize("NFC").trim().replace(/\s+/g, " ")`; the API
-    // did a bare `.trim()`. The shared regex admits internal double spaces, so
-    // "Little  John" was stored verbatim and collapsed by the soul — and the
-    // reconcile's `cfg.agentName !== getName()` then stayed true forever. That
-    // was one wasted write per re-arm before; once the reconcile runs every
-    // tick it would be an identity-file rewrite every tick, silently, because
-    // setName returns ok and logs nothing.
-    //
-    // ANCHORED ON BOTH FILES, not on one spelling. Pinning the literal made
-    // this fail the moment NFC was added to both — a true statement reported
-    // as a broken one, which is the failure mode that teaches people to edit
-    // the assertion rather than read it.
-    //
-    // The web half is RUN: every web write stores normalizeAgentName's output
-    // (the settings route and partner enrollment both call it). The soul's half
-    // is still read from its source, because the worker module touches the
-    // filesystem at import.
-    assert.equal(normalizeAgentName("  Little   John "), "Little John", "the API must normalise before it stores");
-    assert.equal(normalizeAgentName("José"), "José", "decomposed and precomposed are one name");
-    const shape = /\.normalize\("NFC"\)\.trim\(\)\.replace\(\/\\s\+\/g, " "\)/;
-    assert.match(SOUL, shape, "and the soul must do the identical thing");
+describe("the name rule, one copy for both tiers", () => {
+  it("the web tier writes with core's rule, the one the soul imports", () => {
+    // Identity, not equal sources: a second regex with the same text would
+    // still be a second copy for somebody to edit alone.
+    assert.equal(AGENT_NAME_RE, CORE_AGENT_NAME_RE);
+    assert.equal(STORED_AGENT_NAME_RE, CORE_STORED_AGENT_NAME_RE);
+    assert.equal(normalizeAgentName, coreNormalizeAgentName);
   });
 
-  it("BOTH ACCEPT A NAME IN THE OWNER'S OWN ALPHABET", () => {
-    // This was `[A-Za-z0-9]` in both places, so José, Müller, Робин and 小红
-    // were refused — at the END of the create wizard, in the same request that
-    // carried the strategy, the caps and the paper/live choice, so one accent
-    // discarded the whole form. And the message said "letters and numbers",
-    // which is wrong guidance rather than merely unhelpful: é IS a letter, so
-    // a reader who complied failed again.
+  it("the API stores the shape the soul stores", () => {
+    // The soul collapsed whitespace and the API did a bare `.trim()`. The
+    // rule admits internal double spaces, so "Little  John" was stored verbatim
+    // and collapsed by the soul — and the reconcile's `cfg.agentName !==
+    // getName()` then stayed true forever: an identity-file rewrite every tick,
+    // silently, because setName returns ok and logs nothing.
+    assert.equal(normalizeAgentName("  Little   John "), "Little John", "the API must normalise before it stores");
+    assert.equal(normalizeAgentName(`Jose${ACUTE}`), "José", "decomposed and precomposed are one name");
+  });
+
+  it("accepts a name in the owner's own alphabet", () => {
+    // This was `[A-Za-z0-9]`, so José, Müller, Робин and 小红 were refused —
+    // at the END of the create wizard, in the same request that carried the
+    // strategy, the caps and the paper/live choice, so one accent discarded
+    // the whole form. And the message said "letters and numbers", which is
+    // wrong guidance rather than merely unhelpful: é IS a letter, so a reader
+    // who complied failed again.
     //
     // RUN, NOT MATCHED. An earlier version of this test compared the source
     // text and passed while `\p{Join_Control}` was silently missing its
-    // backslash — which parses, and admits `{`, `}` and `_`. Building the
-    // shipped rule and running names through it cannot be fooled that way.
-    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
+    // backslash — which parses, and admits `{`, `}` and `_`.
+    for (const [who, re] of [["new name", AGENT_NAME_RE], ["stored name", STORED_AGENT_NAME_RE]] as const) {
       for (const name of [
         "Robin", "José", "Müller", "Łukasz", "Nguyễn", "Робин", "小红", "로빈",
         "रोबिन", "โรบิน", "রোবিন", "ரோபின்", "رَوبِن", "דוד", "Ελένη",
         "O'Brien", "St. John", "Jean-Luc", `محمد${ZWNJ}رضا`,
       ]) {
-        assert.ok(re.test(name), `${who} must accept "${name}"`);
+        assert.ok(re.test(name), `the ${who} rule must accept "${name}"`);
       }
     }
   });
 
-  it("and neither admits a bidi override, which is what the narrow rule really bought", () => {
+  it("admits no bidi override, which is what the narrow rule really bought", () => {
     // `[A-Za-z0-9]` excluded format characters as a side effect. The
     // replacement has to exclude them on purpose: a name is rendered next to
     // an agent's figures, and U+202E exists to make text display as something
     // other than what it is. `\p{Join_Control}` is the one exception, because
     // Persian and several Indic orthographies need ZWNJ inside a single word.
-    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
+    // A STORED name is held to all of this too — only the letter is waived.
+    for (const [who, re] of [["new name", AGENT_NAME_RE], ["stored name", STORED_AGENT_NAME_RE]] as const) {
       for (const [name, why] of [
         [`Robin${RLO}evil`, "right-to-left override"],
         [`Robin${ZWSP}x`, "zero-width space"],
@@ -250,54 +245,34 @@ describe("the two name normalisers agree", () => {
         ["", "empty"],
         ["a".repeat(25), "over 24 characters"],
       ] as const) {
-        assert.ok(!re.test(name), `${who} must refuse a name with a ${why}`);
+        assert.ok(!re.test(name), `the ${who} rule must refuse a name with a ${why}`);
       }
     }
   });
 
-  it("a name has at least one letter, so it can never be read as a figure", () => {
+  it("a new name has at least one letter, so it can never be read as a figure", () => {
     // A name renders beside an agent's return on a page that ranks people.
     // "99.5" or "1000" there reads as a number nobody measured — the same
     // failure as showing a figure for data nobody read, arriving by the name
     // field instead. Digits stay welcome inside a name that has a letter.
-    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
-      for (const name of ["007", "2024", "99.5", "1 2 3", "4-20", "١٢٣", "१२३"]) {
-        assert.ok(!re.test(name), `${who} must refuse the letterless "${name}"`);
-      }
-      for (const name of ["R2", "2Pac", "Agent 47", "7 Oaks", "小红2"]) {
-        assert.ok(re.test(name), `${who} must still accept "${name}"`);
-      }
+    for (const name of ["007", "2024", "99.5", "1 2 3", "4-20", "١٢٣", "१२३"]) {
+      assert.ok(!AGENT_NAME_RE.test(name), `a new name must not be the letterless "${name}"`);
+      // An agent already called this when the letter rule arrived keeps it.
+      assert.ok(STORED_AGENT_NAME_RE.test(name), `a stored "${name}" is carried, not renamed`);
+    }
+    for (const name of ["R2", "2Pac", "Agent 47", "7 Oaks", "小红2"]) {
+      assert.ok(AGENT_NAME_RE.test(name), `must still accept "${name}"`);
     }
   });
 
-  it("the two copies are still byte-identical", () => {
-    // Behaviour above is what matters, but a drift that no listed name happens
-    // to exercise would still split the web tier from the soul, and the worker
-    // then silently keeps the old name. Same source, same rule.
-    assert.equal(AGENT_NAME_RE.source, ruleIn(SOUL).source);
-  });
-
-  it("the STORED-name rule is the same in both tiers too", () => {
-    // A name held before the letter rule is carried under the old rule on both
-    // sides (soul.ts carryStoredName, agent-name-rule.ts agentNameAccepted). If
-    // the web tier grandfathered a name the soul would not, a re-saved "007"
-    // would be accepted here and silently run as Robin there.
-    const rules = SOUL.match(/\/\^[^/\n]*\\p\{Join_Control\}[^/\n]*\/u/g) ?? [];
-    const stored = rules.map((r) => r.slice(1, -2)).filter((r) => !r.startsWith("^(?="));
-    assert.equal(stored.length, 1, "the soul carries exactly one stored-name rule");
-    assert.equal(STORED_AGENT_NAME_RE.source, stored[0]);
-  });
-
-  it("every generated name passes both copies", () => {
+  it("every generated name passes the rule", () => {
     // The grants route writes a generated name into settings, and the worker
-    // reconciles it into the soul. A combination either rule refused would be
+    // reconciles it into the soul. A combination the rule refused would be
     // stored by one tier and refused by the other: the owner is told the
     // agent is called one thing while it keeps answering to "Robin".
-    for (const [who, re] of [["settings", AGENT_NAME_RE], ["soul", ruleIn(SOUL)]] as const) {
-      for (const a of GENERATED_NAME_PARTS.adjectives) {
-        for (const n of GENERATED_NAME_PARTS.nouns) {
-          assert.ok(re.test(`${a} ${n}`), `${who} refuses the generated "${a} ${n}"`);
-        }
+    for (const a of GENERATED_NAME_PARTS.adjectives) {
+      for (const n of GENERATED_NAME_PARTS.nouns) {
+        assert.ok(AGENT_NAME_RE.test(`${a} ${n}`), `the rule refuses the generated "${a} ${n}"`);
       }
     }
   });
