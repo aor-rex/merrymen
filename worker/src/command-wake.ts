@@ -171,6 +171,62 @@ export function tickPlan(kind: TickKind): TickPlan {
 }
 
 /**
+ * WHAT A TICK MAY WRITE DOWN, with each write handed in by the tick.
+ *
+ * `plan.ratchets` was read by five guards inside tick() — the paper peak, the
+ * risk-period observation, the fee and the persisted mark, the in-memory mark
+ * the breaker divides by, and the equity row — and removing all five passed
+ * every test, because the only test read the constant. So the guards live here,
+ * and tick() passes the writer to the one call that decides whether it runs.
+ *
+ * Two more rules than the plan ride along, because they gate the same writes:
+ *
+ *   curveMarked — a holding valued off a bonding curve has no oracle behind it
+ *                 and arrives discontinuously, so no peak may move while one is
+ *                 held (index.ts, at curveMarkedSymbols). The equity row is not
+ *                 a peak, and is still written.
+ *   incomplete  — a book that could not be totalled has no equity to write: a
+ *                 gap is honest, a partial total is not. tick() skips the peaks
+ *                 for it before it gets here; this holds that too.
+ *
+ * The reads stay unconditional. A command tick still needs the peak its order
+ * is judged against — it is asked with `null`, which reads without observing
+ * (risk-period.ts) — and the paper and live marks it already has.
+ */
+export interface TickRatchets {
+  /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
+  paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
+  /** The risk-period peak, read with this tick's equity as an observation only when this tick may. */
+  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
+  /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
+  accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
+  /** The equity row: written on a regular tick whose book could be totalled. */
+  equityRow(write: () => Promise<unknown>): Promise<void>;
+}
+
+export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveMarked: number }): TickRatchets {
+  const peaks = plan.ratchets && !book.incomplete && book.curveMarked === 0;
+  return {
+    async paperPeak(b, equityUsdg, write) {
+      if (peaks && equityUsdg > b.hwmUsdg) {
+        b.hwmUsdg = equityUsdg;
+        await write(b);
+      }
+      return b.hwmUsdg;
+    },
+    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : null),
+    async accrue(accrual, peakUsdg, persist) {
+      if (!peaks) return peakUsdg;
+      if (accrual.profitUsdg > 0n) await persist();
+      return accrual.newHwmUsdg;
+    },
+    async equityRow(write) {
+      if (plan.ratchets && !book.incomplete) await write();
+    },
+  };
+}
+
+/**
  * The tick's drain, run the way its plan says. Resolves to whether the tick
  * goes on to its producers.
  *

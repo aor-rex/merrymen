@@ -38,6 +38,7 @@ import {
   createTickClock,
   drainOnTick,
   tickPlan,
+  tickRatchets,
   type TickKind,
 } from "./command-wake";
 import { staleThresholdSec } from "./orchestrator";
@@ -1019,5 +1020,82 @@ describe("the live-trade count", () => {
     land();
     await run;
     assert.equal(o.since(), null);
+  });
+});
+
+/**
+ * THE RATCHETS, RUN RATHER THAN TRUSTED.
+ *
+ * A command tick skipped the paper peak, the risk-period observation, the fee
+ * and the live mark, the in-memory mark and the equity row only because of five
+ * `plan.ratchets &&` guards inside tick(). Removing all five passed every test:
+ * the only test read a constant. The guards live in tickRatchets now, tick()
+ * hands it each writer, and these tests run it with writers that record.
+ */
+describe("what a tick may write down", () => {
+  const BOOK = { incomplete: false, curveMarked: 0 };
+  /** Every writer, recording what reached it. */
+  function writers() {
+    const calls: string[] = [];
+    return {
+      calls,
+      paper: async (b: { hwmUsdg: number }) => void calls.push(`paper peak ${b.hwmUsdg}`),
+      risk: async (observe: number | null) => (calls.push(`risk peak observe=${observe}`), 150),
+      fee: async () => void calls.push("fee + live mark"),
+      equity: async () => void calls.push("equity row"),
+    };
+  }
+  const ACCRUAL = { profitUsdg: 20_000_000n, newHwmUsdg: 120_000_000n };
+  const PEAK = 100_000_000n;
+
+  it("A COMMAND TICK WRITES NOTHING DOWN — no paper peak, no fee, no mark, no equity row — and observes no peak", async () => {
+    const r = tickRatchets(tickPlan("command"), BOOK);
+    const w = writers();
+    const paperBook = { hwmUsdg: 100 };
+    assert.equal(await r.paperPeak(paperBook, 120, w.paper), 100, "the paper peak it reads is the one on record");
+    assert.equal(paperBook.hwmUsdg, 100, "and the row is not raised in memory either");
+    assert.equal(await r.riskPeak(120, w.risk), 150, "the peak the order is judged against is still read");
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "the in-memory mark the breaker divides by does not move");
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null"], "asked without observing — risk-period.ts reads the peak on null");
+  });
+
+  it("A REGULAR TICK WRITES EACH ONE DOWN", async () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    const w = writers();
+    const paperBook = { hwmUsdg: 100 };
+    assert.equal(await r.paperPeak(paperBook, 120, w.paper), 120);
+    assert.equal(await r.riskPeak(120, w.risk), 150);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), ACCRUAL.newHwmUsdg);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["paper peak 120", "risk peak observe=120", "fee + live mark", "equity row"]);
+  });
+
+  it("a regular tick raises a peak only past it, and writes a fee only on a profit", async () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    const w = writers();
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 90, w.paper), 100);
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 100, w.paper), 100);
+    assert.equal(await r.accrue({ profitUsdg: 0n, newHwmUsdg: PEAK }, PEAK, w.fee), PEAK);
+    assert.deepEqual(w.calls, []);
+  });
+
+  it("A CURVE-MARKED HOLDING RATCHETS NOTHING, on any tick — but the regular tick's equity row is still written", async () => {
+    const r = tickRatchets(tickPlan("regular"), { incomplete: false, curveMarked: 1 });
+    const w = writers();
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 100);
+    await r.riskPeak(120, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
+  });
+
+  it("A BOOK THAT COULD NOT BE TOTALLED WRITES NO EQUITY ROW — a gap is honest, a partial total is not", async () => {
+    const r = tickRatchets(tickPlan("regular"), { incomplete: true, curveMarked: 0 });
+    const w = writers();
+    await r.equityRow(w.equity);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
+    await r.riskPeak(120, w.risk);
+    assert.deepEqual(w.calls, ["risk peak observe=null"]);
   });
 });

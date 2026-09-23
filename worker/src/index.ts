@@ -117,7 +117,7 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
 import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type TickReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -9730,6 +9730,12 @@ async function main() {
     // charged, and a drawdown measured from the last honest peak. The breaker
     // still works -- a curve token falling is still measured against that peak.
     const curveMarked = curveMarkedSymbols(positions);
+    // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
+    // observation, the fee and the mark, and the equity row — decided in
+    // command-wake.ts tickRatchets, where a test runs every guard. A command
+    // tick writes none of them; a curve mark moves no peak; an untotalled book
+    // writes no row. Each write below is handed to the call that decides it.
+    const ratchet = tickRatchets(plan, { incomplete: bookIncomplete, curveMarked: curveMarked.length });
 
     // With an unvaluable holding on the books, equity is UNKNOWN — not lower.
     // Ratcheting the HWM, accruing a performance fee or judging drawdown off a
@@ -9750,13 +9756,10 @@ async function main() {
       // trading on a peak that never happened, which is precisely the signal
       // the owner would be reading to decide whether to go live.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      // Not on a command tick (plan.ratchets): an owner's order is not a sample
-      // of the cadence the peak is measured on. See command-wake.ts tickPlan.
-      if (plan.ratchets && usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
-        bookRow.hwmUsdg = usdgNum(equityUsdg);
-        await setPaperBook(agentId, bookRow);
-      }
-      highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
+      // Raised past the recorded peak and written only on a regular tick with no
+      // curve mark: an owner's order is not a sample of the cadence the peak is
+      // measured on. See command-wake.ts tickRatchets.
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
     } else {
       // Capital first, performance second. Any deposit or withdrawal since the
       // last look moves the high-water mark with it, so what follows can only
@@ -9819,11 +9822,9 @@ async function main() {
       // READ ON EVERY TICK, OBSERVED ONLY ON A REGULAR ONE. A command tick still
       // needs the peak its order is judged against, but an order arriving must
       // not move that reference point at the very moment it judges the order
-      // — null asks without observing (risk-period.ts markRiskPeriod).
-      const riskPeak = await getRiskPeriodPeak(
-        agentId,
-        plan.ratchets && curveMarked.length === 0 ? usdgNum(equityUsdg) : null,
-      );
+      // — null asks without observing (risk-period.ts markRiskPeriod), and
+      // tickRatchets passes null on a command tick or under a curve mark.
+      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -9875,7 +9876,19 @@ async function main() {
       // equity, which only rises as samples are added — so a sample an owner's
       // order added could charge a fee on a transient peak the regular cadence
       // would never have seen. The next regular tick accrues whatever is real.
-      if (plan.ratchets && accrual.profitUsdg > 0n && curveMarked.length === 0) {
+      //
+      // AND THE IN-MEMORY MARK MOVES WITH IT, inside the same guard and not
+      // after it. That is the variable the drawdown BREAKER actually judges
+      // against (it is copied into AgentState and divided by in checkPolicy),
+      // and it is re-read from the database only at arm time and on a capital
+      // flow -- so an inflated value survives for the whole process. Leaving it
+      // outside meant the fee and the DB write were skipped while the peak that
+      // gates trading ratcheted anyway, and a curve mark reverting would then
+      // halt every non-exit intent on a drawdown that never happened.
+      // accrueAboveHwm returns the mark unchanged when there is no profit.
+      // tickRatchets.accrue returns the mark this tick may carry, and runs the
+      // write below only when it may and there is a profit to charge.
+      highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),
@@ -9904,17 +9917,7 @@ async function main() {
             `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${effFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)${circle}`,
           );
         }
-      }
-      // Inside the guard, not after it. This is the variable the drawdown
-      // BREAKER actually judges against (it is copied into AgentState and
-      // divided by in checkPolicy), and it is re-read from the database only
-      // at arm time and on a capital flow -- so an inflated value survives for
-      // the whole process. Leaving it outside meant the fee and the DB write
-      // were skipped while the peak that gates trading ratcheted anyway, and a
-      // curve mark reverting would then halt every non-exit intent on a
-      // drawdown that never happened. accrueAboveHwm returns the mark
-      // unchanged when there is no profit, so this is a no-op in that case.
-      if (plan.ratchets && curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
+      });
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
@@ -9926,8 +9929,9 @@ async function main() {
     // a real drop on the equity curve and in P&L. A gap is honest; a wrong
     // number is not. And none on a command tick: the curve is the regular
     // cadence's record, and an order's extra sample is not a point on it.
-    if (!bookIncomplete && plan.ratchets) {
-      await addEquity(agentId, {
+    // Both decided in tickRatchets.equityRow.
+    await ratchet.equityRow(() =>
+      addEquity(agentId, {
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one
@@ -9958,8 +9962,8 @@ async function main() {
         // The block the balances were read at — where an auditor re-reads from.
         // Non-null by construction: an unreadable market returned above.
         blockNumber: market.blockNumber ?? undefined,
-      });
-    }
+      }),
+    );
     await setPositions(
       agentId,
       positions.map((p) => ({
