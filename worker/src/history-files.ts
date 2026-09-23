@@ -267,10 +267,16 @@ export async function loadHistoryFromShared(
   shared: Db,
   agentId: string,
   nowSec: number,
-  /** Where the carried account ends — the child's ledger starts there. Null: carry no account. */
-  o: { accountUntil?: number | null } = {},
+  /**
+   * Where the child's own ledger begins (default: now). Nothing at or after it
+   * is carried — trades, decisions or the account — because the child holds it
+   * already: a restart that kept the ledger, or a re-read after the startup
+   * repair, would otherwise fill the caps with the child's own rows.
+   */
+  o: { until?: number } = {},
 ): Promise<TradeHistory> {
   const since = nowSec - HISTORY_DAYS * 86_400;
+  const until = Math.min(o.until ?? nowSec, nowSec);
   const who = spellings(agentId);
   const cols = TRADE_COLS.join(", ");
   const ops = (await shared
@@ -282,20 +288,20 @@ export async function loadHistoryFromShared(
            ORDER BY (s.status = 'submitted'), (s.fill_side IS NULL), (s.decision_id IS NULL), s.created_at, s.id
          ) AS op_rank
          FROM scoped s WHERE s.user_op_hash IS NOT NULL AND s.user_op_hash <> ''
-       ) ranked WHERE ranked.op_rank = 1 AND ranked.status <> 'rejected' AND ranked.created_at >= ?
+       ) ranked WHERE ranked.op_rank = 1 AND ranked.status <> 'rejected' AND ranked.created_at >= ? AND ranked.created_at < ?
        UNION ALL
        SELECT s.*, 1 AS op_rank FROM scoped s
-        WHERE (s.user_op_hash IS NULL OR s.user_op_hash = '') AND s.status <> 'rejected' AND s.created_at >= ?
+        WHERE (s.user_op_hash IS NULL OR s.user_op_hash = '') AND s.status <> 'rejected' AND s.created_at >= ? AND s.created_at < ?
        ORDER BY created_at DESC, id DESC
        LIMIT ?`,
     )
-    .all(...who, since - OP_COPY_REACH_SEC, since, since, HISTORY_OPS_MAX)) as unknown as Record<string, unknown>[];
+    .all(...who, since - OP_COPY_REACH_SEC, since, until, since, until, HISTORY_OPS_MAX)) as unknown as Record<string, unknown>[];
   const refusals = (await shared
     .prepare(
-      `SELECT id, ${cols} FROM trades WHERE agent_id IN (?, ?, ?) AND created_at >= ? AND status = 'rejected'
+      `SELECT id, ${cols} FROM trades WHERE agent_id IN (?, ?, ?) AND created_at >= ? AND created_at < ? AND status = 'rejected'
         ORDER BY created_at DESC, id DESC LIMIT ?`,
     )
-    .all(...who, since, HISTORY_REFUSALS_MAX)) as unknown as Record<string, unknown>[];
+    .all(...who, since, until, HISTORY_REFUSALS_MAX)) as unknown as Record<string, unknown>[];
   const trades = [...ops, ...refusals].map(asTrade).filter((t): t is HistoryTrade => t !== null);
   trades.sort((a, b) => b.created_at - a.created_at);
 
@@ -318,11 +324,11 @@ export async function loadHistoryFromShared(
   const recent = (await shared
     .prepare(
       `SELECT ${DECISION_COLS} FROM decisions
-        WHERE agent_id IN (?, ?, ?) AND at >= ? AND source <> 'market-review-private'
+        WHERE agent_id IN (?, ?, ?) AND at >= ? AND at < ? AND source <> 'market-review-private'
           AND (hold_kind IS NULL OR hold_kind <> 'GATE_FORCED_HOLD')
         ORDER BY at DESC LIMIT ?`,
     )
-    .all(...who, since, HISTORY_DECISIONS_MAX)) as unknown as Record<string, unknown>[];
+    .all(...who, since, until, HISTORY_DECISIONS_MAX)) as unknown as Record<string, unknown>[];
   for (const r of recent) {
     const d = asDecision(r);
     if (d && !decisions.has(d.id)) decisions.set(d.id, d);
@@ -331,8 +337,7 @@ export async function loadHistoryFromShared(
   const decisionsFrom = recent.length >= HISTORY_DECISIONS_MAX ? Math.min(...recent.map((r) => num(r.at) ?? nowSec)) : since;
   // The account is the part most likely to be large, and the least essential:
   // an unreadable one costs the P&L's reach across the restart, never the trades.
-  const until = o.accountUntil === undefined ? nowSec : o.accountUntil;
-  const account = until === null ? null : await loadAccountFromShared(shared, agentId, since, until).catch(() => null);
+  const account = await loadAccountFromShared(shared, agentId, since, until).catch(() => null);
   return {
     schema: SCHEMA,
     agentId,
@@ -428,7 +433,10 @@ export async function loadAccountFromShared(shared: Db, agentId: string, since: 
 
   const points: HistoryAccountPoint[] = [];
   const tail: CarriedTail[] = [];
-  for (const book of ["paper", "live", "unknown"] as const) {
+  // Practice and real money only. A mark with no mode is from before the mirror
+  // carried the column; it joins neither book, and carried it could only ever
+  // read as "I switched between practice and real money".
+  for (const book of ["paper", "live"] as const) {
     const m = marks.filter((x) => x.book === book);
     if (!m.length) continue;
     const bookFlows = book === "paper" ? [] : flows;
@@ -526,7 +534,8 @@ function asDecision(v: unknown): HistoryDecision | null {
   };
 }
 
-const BOOKS: readonly BookKey[] = ["paper", "live", "unknown"];
+/** The books a carried account holds (loadAccountFromShared carries no mode-less marks). */
+const BOOKS: readonly BookKey[] = ["paper", "live"];
 
 /**
  * A carried account, or null — and a bad one costs only the account, never the

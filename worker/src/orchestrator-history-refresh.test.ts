@@ -66,3 +66,24 @@ describe("history refresh after the startup repair", () => {
     assert.equal(calls(spawn, "writeHistoryForChild").length, 1);
   });
 });
+
+describe("the bound between carried history and the child's own ledger", () => {
+  it("is where the child's ledger begins, taken before any await, and bounds everything carried", () => {
+    const w = fn("writeHistoryForChild");
+    assert.ok(w);
+    const start = calls(w, "ledgerStartOf")[0];
+    const firstAwait = all(w, (n) => ts.isAwaitExpression(n))[0];
+    assert.ok(start && firstAwait, "reads the ledger's start, and awaits later");
+    assert.ok(start.getEnd() < firstAwait.getStart(), "before any await — so before a spawn's child exists");
+    const load = calls(w, "loadHistoryFromShared")[0];
+    assert.ok(load && load.arguments[3] && /\buntil\b/.test(load.arguments[3].getText()), "the carried rows and account end there");
+  });
+
+  it("the ledger's start is its earliest mark, flow or trade row", () => {
+    const f = fn("ledgerStartOf");
+    assert.ok(f);
+    const text = f.getText();
+    for (const table of ["equity", "flows", "trades"]) assert.ok(text.includes(`FROM ${table}`), table);
+    assert.match(text, /readOnly: true/);
+  });
+});

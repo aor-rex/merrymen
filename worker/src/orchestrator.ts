@@ -980,6 +980,29 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
   }
 }
 
+/**
+ * When a child's own ledger began: its earliest account-value mark, flow or
+ * trade row, or null when it holds none (a home a redeploy just wiped, or a
+ * ledger that cannot be read — the caller then takes the spawn time). Read-only
+ * and synchronous; the child may be writing to it.
+ */
+function ledgerStartOf(tenant: string): number | null {
+  const file = path.join(childHome(tenant), "merrymen.db");
+  if (!existsSync(file)) return null;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const r = db
+      .prepare("SELECT MIN(t) AS t FROM (SELECT MIN(at) AS t FROM equity UNION ALL SELECT MIN(at) FROM flows UNION ALL SELECT MIN(created_at) FROM trades)")
+      .get() as { t: number | null } | undefined;
+    return typeof r?.t === "number" ? r.t : null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
 /** Per tenant, the newest history read — so an older one never lands last. */
 const historyRuns = new Map<string, number>();
 
@@ -993,25 +1016,26 @@ const historyRuns = new Map<string, number>();
  * arming — the chat reads it when asked — so a slow shared database must never
  * hold a trading agent back for it. Nothing that trades or accounts reads it.
  */
-async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string, refresh = false): Promise<void> {
+async function writeHistoryForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return; // self-hosted: the child's own ledger is never wiped
-  // BEFORE ANY AWAIT, and so before spawn(): every account-value mark the new
-  // child writes is at or after this, every carried one before it, and the
-  // chat joins the two only on that condition (history-files.ts HistoryAccount).
+  // WHERE THIS CHILD'S OWN LEDGER BEGINS — BEFORE ANY AWAIT, and so before a
+  // spawn's child exists. Carried rows and account-value marks are all older
+  // than this, the child's own all at or after it, and the chat joins the two
+  // only on that condition (history-files.ts HistoryAccount). A redeploy wipes
+  // the home, so after one the ledger begins now; a crash, watchdog or lease
+  // restart keeps it, and it began at its first row — the spawn time would put
+  // the old run's rows on both sides, and a deposit in both.
   const nowSec = Math.floor(Date.now() / 1000);
+  const until = Math.min(nowSec, ledgerStartOf(tenant) ?? nowSec);
   // Two spawns can overlap (a crash restart while the last read is still
   // running), and the older read must not land last — after a re-sign it would
   // be for the old account, and the chat would refuse it until the next spawn.
   const run = (historyRuns.get(tenant) ?? 0) + 1;
   historyRuns.set(tenant, run);
   try {
-    const { loadHistoryFromShared, readHistory, writeHistoryFile } = await import("./history-files");
-    // A refresh keeps the bound its spawn drew: the child's ledger began then,
-    // and marks it has written since are in the shared ledger now too. No
-    // bound on record, no account — never one that overlaps the child's own.
-    const accountUntil = refresh ? (readHistory(childHome(tenant), smartAccount)?.account?.until ?? null) : nowSec;
-    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, nowSec, { accountUntil });
+    const { loadHistoryFromShared, writeHistoryFile } = await import("./history-files");
+    const file = await loadHistoryFromShared(await makePgDb(url), smartAccount, nowSec, { until });
     if (historyRuns.get(tenant) !== run) return;
     // False when the home is gone: the tenant was removed while this was read.
     if (!writeHistoryFile(childHome(tenant), file)) return;
@@ -1035,7 +1059,7 @@ async function refreshHistoryForLiveChildren(): Promise<void> {
     const held = leases.get(tenant);
     if (!held || !held.healthy()) continue;
     if (children.get(tenant) !== child) continue;
-    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount, true);
+    await writeHistoryForChild(tenant as `0x${string}`, child.smartAccount);
   }
 }
 

@@ -126,19 +126,32 @@ const TEMP_OBJECTS = ["trades", "decisions", "hist_supersede", "hist_meta"];
  * The parsed file, kept while it is the same file. One stat instead of a parse
  * per lookup; the orchestrator replaces it by rename, which changes all three.
  */
-let parsed: { key: string; file: TradeHistory | null } | null = null;
+let parsed: { key: string; file: TradeHistory } | null = null;
 
-function historyFor(agentId: string): TradeHistory | null {
+/** Which history file is on disk right now (size, mtime, inode), or null when there is none. */
+export function historyFileKey(): string | null {
   const home = merrymenHome();
-  let key: string;
   try {
     const st = statSync(historyFilePath(home));
-    key = `${home}\n${agentId.toLowerCase()}\n${st.size}\n${st.mtimeMs}\n${st.ino}`;
+    return `${home}\n${st.size}\n${st.mtimeMs}\n${st.ino}`;
   } catch {
-    return null; // absent: exactly what readHistory says
+    return null;
   }
-  if (parsed?.key !== key) parsed = { key, file: readHistory(home, agentId) };
-  return parsed.file;
+}
+
+function historyFor(agentId: string): TradeHistory | null {
+  const file = historyFileKey();
+  if (file === null) return null; // absent: exactly what readHistory says
+  const key = `${file}\n${agentId.toLowerCase()}`;
+  if (parsed?.key === key) return parsed.file;
+  // ONLY A PARSE IS KEPT. readHistory says null for a file it rejected and for
+  // one it could not read (a spent file-descriptor table, an I/O error) alike;
+  // kept, a passing failure would stand until the orchestrator next rewrote the
+  // file — the whole life of a child. A rejected file is read again next time,
+  // as every lookup did before there was a cache.
+  const read = readHistory(merrymenHome(), agentId);
+  parsed = read ? { key, file: read } : null;
+  return read;
 }
 
 /** The carried history for `agentId` (cached while the file is the same file), or null. */

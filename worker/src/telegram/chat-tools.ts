@@ -38,8 +38,8 @@ import type { ResolvedConfig } from "../settings";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
-import { carriedDecisionsFrom, carriedHistory, overlayHistory } from "./history-overlay";
-import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
+import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
+import { TRADE_LOOKBACK_SEC, accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
 import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
@@ -101,6 +101,8 @@ interface ToolSession {
   version: number | null;
   /** The carried history has been laid over `db` (tried once per connection). */
   overlaid: boolean;
+  /** Which history file was on disk when `db` was opened (history-overlay.ts historyFileKey). */
+  historyKey: string | null;
 }
 
 const sessions = new WeakMap<ToolContext, ToolSession>();
@@ -114,7 +116,7 @@ export function toolSessionStatsForTest(): { opened: number; open: number } {
 /** Share one ledger connection across every lookup made with `ctx` until close(). */
 export function openToolSession(ctx: ToolContext): { close(): void } {
   if (sessions.has(ctx)) return { close() {} }; // an outer session owns it
-  const s: ToolSession = { db: null, version: null, overlaid: false };
+  const s: ToolSession = { db: null, version: null, overlaid: false, historyKey: null };
   sessions.set(ctx, s);
   return {
     close() {
@@ -152,13 +154,18 @@ function ledgerFor(ctx: ToolContext): { db: DatabaseSync; session: ToolSession |
     const db = openRO();
     return db ? { db, session: null } : null;
   }
-  // Written since it was opened: start again, as a fresh lookup would.
-  if (s.db && dataVersion(s.db) !== s.version) dropSessionDb(s);
+  // The ledger written since it was opened, or the history file replaced (the
+  // orchestrator re-reads it after its startup repair): start again, as a
+  // fresh lookup would. One stat per lookup.
+  if (s.db && (dataVersion(s.db) !== s.version || historyFileKey() !== s.historyKey)) dropSessionDb(s);
   if (!s.db) {
+    // The file's key before the overlay reads it, so a file landing in between is caught next time.
+    const key = historyFileKey();
     const db = openRO();
     if (!db) return null; // no ledger yet: the next lookup tries again
     s.db = db;
     s.version = dataVersion(db);
+    s.historyKey = key;
     sessionCount.opened += 1;
     sessionCount.open += 1;
   }
@@ -433,6 +440,9 @@ function periodStart(period: string, now: number): { since: number; label: strin
   return { since: now - (now % 86_400), label: "today (since 00:00 UTC)" };
 }
 
+/** Readings the P&L breakdown reads at most (about 50 days on a fifteen-second tick). */
+const LOCAL_MARKS_MAX = 50_000;
+
 /** A restart copy, over an unaliased trades row — isRestartCopy (token-label.ts). */
 const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) = lower(agent_id) AND decision_id IS NULL AND fill_side IS NULL)";
 
@@ -451,16 +461,25 @@ const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) 
 function accountChange(db: DatabaseSync, who: string, since: number): PeriodChange {
   try {
     const epoch = agentEpoch(db, who);
-    const firstLocal = scalar(db, "SELECT MIN(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ?", who, epoch);
+    // Where this ledger's own record starts: its first reading OR flow. A run
+    // that booked a deposit and died before its first reading still began then.
+    const firstMark = scalar(db, "SELECT MIN(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ?", who, epoch);
+    const firstFlow = scalar(db, "SELECT MIN(at) AS t FROM main.flows WHERE agent_id = ? AND epoch = ?", who, epoch);
+    const firstLocal = firstMark === null ? firstFlow : firstFlow === null ? firstMark : Math.min(firstMark, firstFlow);
     const before = scalar(db, "SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ?", who, epoch, since);
     const acct = before === null ? carriedHistory(who)?.account : null;
     const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
     const from = before ?? 0;
+    // Newest LOCAL_MARKS_MAX readings at most: this runs inside the process
+    // that trades, and "all" on a long-lived ledger is every reading it holds.
+    // Cut short, the period opens at the oldest one read and says so below.
     const local = (
       db
-        .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at, id")
-        .all(who, epoch, from) as { at: number; mode: string | null; equity: number; cash: number }[]
-    ).map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
+        .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?")
+        .all(who, epoch, from, LOCAL_MARKS_MAX) as { at: number; mode: string | null; equity: number; cash: number }[]
+    )
+      .reverse()
+      .map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
     const localFlows = (
       db
         .prepare("SELECT at, direction, amount_usdg, source FROM main.flows WHERE agent_id = ? AND epoch = ? AND at >= ?")
@@ -468,7 +487,7 @@ function accountChange(db: DatabaseSync, who: string, since: number): PeriodChan
     ).map((f) => ({ at: f.at, signed: f.direction === "out" ? -f.amount_usdg : f.amount_usdg, evidenced: isEvidencedFlow(f.source) }));
     // Trades on the carried history too: the step across the restart asks
     // whether a trade explains its cash, and those trades are the old run's.
-    const tradeFrom = carried ? carried.points[carried.points.length - 1]!.at : from;
+    const tradeFrom = (carried ? carried.points[carried.points.length - 1]!.at : (local[0]?.at ?? from)) - TRADE_LOOKBACK_SEC;
     const trades = db
       .prepare(`SELECT created_at AS at, status FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','submitted','paper') AND ${NOT_A_COPY}`)
       .all(who, tradeFrom) as { at: number; status: string }[];
@@ -528,8 +547,13 @@ const pnlBreakdown: ChatTool = {
           if (open.at > since + 3600 && firstTrade !== null && firstTrade < open.at - 3600) {
             lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The trades below go back further, to ${when(firstTrade)}.`);
           }
-        } else if (pc.kind === "switched") {
-          lines.push("I switched between practice and real money in this period, so the two values can't be compared.");
+          if (pc.also) {
+            lines.push(
+              pc.also === "paper"
+                ? "Part of this period I was in practice mode; practice money is kept separate and isn't in these figures."
+                : "Part of this period I traded real money; these are the practice figures, kept separate from it.",
+            );
+          }
         } else {
           lines.push("I don't have enough account-value history for this period.");
         }
