@@ -144,9 +144,10 @@ describe("a hold has no size", () => {
     assert.equal(t.head, "hold NVDA");
   });
 
-  it("keeps the size on a buy and a sell", () => {
-    assert.equal(publishableThesis(row({ source: "strategist", action: "buy", symbol: "NVDA", size_usdg: 5, reason: "x", status: "landed" }))!.head, "buy NVDA 5.00 USDG");
-    assert.equal(publishableThesis(row({ source: "strategist", action: "sell", symbol: "NVDA", size_usdg: 3.6, reason: "x", status: "landed" }))!.head, "sell NVDA 3.60 USDG");
+  // A size is printed only for a PUBLIC book — private-book.test.ts.
+  it("keeps the size on a public book's buy and sell", () => {
+    assert.equal(publishableThesis(row({ source: "strategist", action: "buy", symbol: "NVDA", size_usdg: 5, reason: "x", status: "landed", public_book: true }))!.head, "buy NVDA 5.00 USDG");
+    assert.equal(publishableThesis(row({ source: "strategist", action: "sell", symbol: "NVDA", size_usdg: 3.6, reason: "x", status: "landed", public_book: true }))!.head, "sell NVDA 3.60 USDG");
   });
 });
 

@@ -40,9 +40,11 @@ describe("the coin is named when the tape gave a name", () => {
     assert.equal(head({ display_name: "CASHCAT" }), "hold CASHCAT (T7631DACC21B)");
   });
 
+  // A size is in the head only for a PUBLIC book (private-book.test.ts), so the
+  // layout around one is pinned on one.
   it("names it on a buy, with the size", () => {
     assert.equal(
-      head({ action: "buy", size_usdg: 5, display_name: "CHUMP" }),
+      head({ action: "buy", size_usdg: 5, display_name: "CHUMP", public_book: true }),
       "buy CHUMP (T7631DACC21B) 5.00 USDG",
     );
   });
@@ -66,7 +68,7 @@ describe("what it does when there is no name", () => {
 
   it("leaves an ordinary stock ticker untouched", () => {
     // Stocks already have a name a reader knows; there is nothing to add.
-    assert.equal(head({ symbol: "TSLA", action: "buy", size_usdg: 5 }), "buy TSLA 5.00 USDG");
+    assert.equal(head({ symbol: "TSLA", action: "buy", size_usdg: 5, public_book: true }), "buy TSLA 5.00 USDG");
   });
 });
 
@@ -105,7 +107,7 @@ describe("a reader sees the coin's name, and the ledger keeps its id", () => {
   });
 
   it("names it on a trade with the size kept", () => {
-    const post = publishableThesis(row({ action: "buy", size_usdg: 5, display_name: "CHUMP" }) as never)!;
+    const post = publishableThesis(row({ action: "buy", size_usdg: 5, display_name: "CHUMP", public_book: true }) as never)!;
     assert.equal(readerHead(post), "buy CHUMP 5.00 USDG");
   });
 

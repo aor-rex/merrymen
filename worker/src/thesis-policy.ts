@@ -127,8 +127,10 @@ export interface ThesisRow {
   mcap_usd?: number | null;
   /**
    * The author's owner opted into a public book — decorated by the caller from
-   * settings, like `slug`. Only an explicit `true` publishes a dollar figure;
-   * anything else, including absence, keeps the percentages-only default.
+   * settings, like `slug`. Only an explicit `true` publishes a dollar figure,
+   * and a size is a dollar figure; anything else, including absence, keeps the
+   * percentages-only default. See `sizeUsdg` on PublicThesis for why the size
+   * went with the P&L.
    */
   public_book?: boolean | null;
 }
@@ -168,6 +170,22 @@ export interface PublicThesis {
    * Deployer-chosen text, so it passes the same address backstop as the rest.
    */
   displayName?: string | null;
+  /**
+   * THE TRADE'S SIZE — published only for a PUBLIC book, and null otherwise.
+   *
+   * It was published for every book, and on its own it looked harmless. Beside
+   * `realizedPct` it is not: a sell's size is about its proceeds, so the P&L
+   * the dollar gate withholds is `size × pct / (100 + pct)` — measured on the
+   * ledger, "sell AAPL 4.00 USDG" at −20% is exactly the −1.00 that
+   * `realizedUsd: null` was hiding. And a buy's size over `entryPriceUsd` is
+   * the quantity it now holds. So the one opt-in that keeps a book private had
+   * to cover the size too, or it covered nothing.
+   *
+   * The owner's rule is that percentages are the public default and `publicBook`
+   * is opt-in; the profile already hides sizes for a private book, and this is
+   * the feed agreeing with it. The HEAD drops the size with it (`headOf`), since
+   * "sell AAPL 4.00 USDG" is the same figure in a sentence.
+   */
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -814,12 +832,16 @@ export function outcomeOf(
  * back to another agent. Only one of those three is a React component, so a
  * claim that is only made conditional by CSS is not made conditional.
  */
-function headOf(row: ThesisRow, shadow: boolean): string {
+function headOf(row: ThesisRow, shadow: boolean, sized: boolean): string {
   // A HOLD HAS NO SIZE. Brain forces delta to 0 on a hold, which arrived here
   // as size_usdg 0 and rendered "hold NVDA 0.00 USDG" — a figure that means
   // nothing and reads as a bug. A hold is an answer, not a quantity.
+  //
+  // AND A PRIVATE BOOK'S TRADE HAS NO SIZE IN PUBLIC, whatever it traded: the
+  // head is the one string every surface prints, so a size withheld from
+  // `sizeUsdg` and left here would be withheld from nothing. See `sizeUsdg`.
   const size =
-    row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
+    sized && row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
       ? `${row.size_usdg.toFixed(2)} USDG`
       : null;
   // A hold is already the conditional's answer — "would hold" is not English an
@@ -967,7 +989,11 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
-  const head = headOf(row, shadow);
+  // Strictly `=== true`, the same test the dollars take below: a settings blob
+  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
+  // publish their book.
+  const bookPublic = row.public_book === true;
+  const head = headOf(row, shadow, bookPublic);
 
   // DECIDED, versus FAILED TO HAPPEN.
   //
@@ -1094,9 +1120,8 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   const proceeds = positive(row.closed_cash_usdg);
   const cost = pnl !== null && proceeds !== null ? proceeds - pnl : null;
   const realizedPct = pnl !== null && cost !== null && cost > 0 ? (pnl * 100) / cost : null;
-  // DOLLARS ARE OPT-IN. Strictly `=== true`: a settings blob is JSON, and a
-  // stray "true" string or a 1 is not the owner deciding to publish their book.
-  const realizedUsd = realizedPct !== null && row.public_book === true ? pnl : null;
+  // DOLLARS ARE OPT-IN — the P&L and, for the reason on `sizeUsdg`, the size.
+  const realizedUsd = realizedPct !== null && bookPublic ? pnl : null;
 
   return {
     name,
@@ -1108,7 +1133,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     displayName,
     paper: row.mode === "paper",
     sizeUsdg:
-      typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
+      bookPublic && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
     outcomeText: text,
     shadow,

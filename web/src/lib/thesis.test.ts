@@ -43,7 +43,9 @@ describe("what may be published", () => {
     const t = publishableThesis(ok())!;
     assert.equal(t.name, "Much");
     assert.equal(t.handle, "much_miller");
-    assert.equal(t.head, "buy NVDA 16.66 USDG");
+    // No size in public unless the owner opened the book — private-book.test.ts.
+    assert.equal(t.head, "buy NVDA");
+    assert.equal(publishableThesis(ok({ public_book: true }))!.head, "buy NVDA 16.66 USDG");
     assert.equal(t.outcome, "landed");
     assert.equal(t.said, 38);
     assert.match(t.reason!, /the schedule says buy/);
@@ -303,7 +305,7 @@ describe("shadow decisions say the conditional out loud", () => {
     const t = publishableThesis(shadow())!;
     assert.equal(t.shadow, true);
     assert.equal(t.outcome, "shadow");
-    assert.equal(t.head, "would buy TSLA 5.00 USDG");
+    assert.equal(t.head, "would buy TSLA");
     assert.match(t.outcomeText, /not traded/);
     // The three outcomes that assert something reached the chain, and the one
     // that asserts it is on its way. A shadow decision is none of them.
@@ -312,7 +314,9 @@ describe("shadow decisions say the conditional out loud", () => {
 
   it("says 'would sell' rather than 'sell'", () => {
     const t = publishableThesis(shadow({ action: "sell" }))!;
-    assert.equal(t.head, "would sell TSLA 5.00 USDG");
+    assert.equal(t.head, "would sell TSLA");
+    // The conditional survives the size coming back on a public book.
+    assert.equal(publishableThesis(shadow({ action: "sell", public_book: true }))!.head, "would sell TSLA 5.00 USDG");
   });
 
   it("leaves a hold alone — there is nothing to disclaim", () => {

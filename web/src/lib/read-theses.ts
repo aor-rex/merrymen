@@ -544,6 +544,12 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
           slug: post.slug,
           action: post.action,
           symbol: post.symbol,
+          // THE PUBLISHED SIZE, which is null for a private book — never the
+          // row's. The id is served beside every other input to it, and a size
+          // is a handful of round numbers, so hashing the one the gate withheld
+          // would publish it as an encoding. The cost is paid once: a private
+          // book's posts that named a size get new ids, and likes cast on the
+          // old ones stay with the old ids.
           sizeUsdg: post.sizeUsdg,
           reason: post.reason,
           shadow: post.shadow,

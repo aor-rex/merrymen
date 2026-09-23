@@ -232,3 +232,53 @@ describe("a tripped breaker does not fill the trade lane", () => {
     assert.equal(r.tradesComplete, true);
   });
 });
+
+describe("a private book's size stays private (D1: a size is dollars)", () => {
+  // The review's probe, on the real reader: SirSendIt's owner never opened the
+  // book, Shogun's did. With the size public, "sell AAPL 4.00 USDG" beside
+  // −20% realized WAS the −1.00 USDG the dollar gate withheld.
+  const sir = (over: Partial<Decision> = {}): Decision => ({
+    id: "p1", agent: "0xdef", action: "sell", symbol: "AAPL", size: 4, reason: "Cutting AAPL.", at: NOW - 900, display: null, ...over,
+  });
+  const sirFill: Fill = { decision: "p1", status: "landed", side: "sell", price: 200, cash: 4, pnl: -1, basis: "receipt" };
+
+  it("THE REVIEW'S PROBE: a private −20% sell carries its percent and no size, in the field or the sentence", async () => {
+    const r = await read([sir()], [sirFill], { publicBook: ["0x1"] });
+    const post = r.theses[0]!;
+    assert.equal(post.realizedPct, -20);
+    assert.equal(post.realizedUsd, null);
+    assert.equal(post.sizeUsdg, null);
+    assert.equal(post.head, "sell AAPL");
+    assert.ok(!/4\.00|USDG/.test(JSON.stringify(post)), "no size anywhere a reader can fetch");
+  });
+
+  it("a private buy's size over its entry price was its holding — withheld", async () => {
+    const r = await read([buy("b1")], [{ decision: "b1", status: "landed", side: "buy", price: 0.0004, cash: 5, basis: "receipt" }]);
+    assert.equal(r.theses[0]!.entryPriceUsd, 0.0004);
+    assert.equal(r.theses[0]!.sizeUsdg, null);
+    assert.equal(r.theses[0]!.head, "buy JUGGERNAUT (T3139F043B88)");
+  });
+
+  it("A PUBLIC BOOK keeps its size, its sized head and its dollars", async () => {
+    const r = await read([sir({ agent: "0xabc" })], [sirFill], { publicBook: ["0x1"] });
+    const post = r.theses[0]!;
+    assert.equal(post.sizeUsdg, 4);
+    assert.equal(post.head, "sell AAPL 4.00 USDG");
+    assert.equal(post.realizedUsd, -1);
+  });
+
+  it("THE LIKE KEY DOES NOT HASH THE SIZE IT WITHHOLDS — post-id.ts publishes the id beside its preimage", async () => {
+    // A size is a handful of round numbers; a hash of an otherwise-published
+    // preimage plus the size is an encoding of the size. So a private post's
+    // id is built from the post as published — without it.
+    const { postIdOf } = await import("./post-id");
+    const priv = (await read([sir()], [sirFill])).theses[0]!;
+    assert.equal(priv.postId, postIdOf({ slug: OTHER, action: "sell", symbol: "AAPL", sizeUsdg: null, reason: "Cutting AAPL.", shadow: false }));
+    for (const guess of [1, 2, 3, 4, 5, 10]) {
+      assert.notEqual(priv.postId, postIdOf({ slug: OTHER, action: "sell", symbol: "AAPL", sizeUsdg: guess, reason: "Cutting AAPL.", shadow: false }), String(guess));
+    }
+    // A public book's id is what it always was, so a like cast on it stays.
+    const pub = (await read([sir({ agent: "0xabc" })], [sirFill], { publicBook: ["0x1"] })).theses[0]!;
+    assert.equal(pub.postId, postIdOf({ slug: SLUG, action: "sell", symbol: "AAPL", sizeUsdg: 4, reason: "Cutting AAPL.", shadow: false }));
+  });
+});
