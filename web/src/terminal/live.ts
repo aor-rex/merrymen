@@ -251,11 +251,15 @@ export interface Thesis {
    * `txHash` is the fill's transaction, which is how a receipt the chat heard
    * about is matched to the row that shows it filled. `realizedPnlUsdg` is
    * what the executor booked on a sell, in whole USDG; a loss is negative and
-   * zero is a result, never a stand-in for unknown.
+   * zero is a result, never a stand-in for unknown. `realizedVouched` is true
+   * only when the tape checked both the sell's proceeds and the cost it closed
+   * (lib/desk-trades.ts `realized_vouched`); the desk prints the dollars only
+   * then, so anything else — absent included — withholds them.
    */
   displayName?: string | null;
   txHash?: string | null;
   realizedPnlUsdg?: number | null;
+  realizedVouched?: boolean;
 }
 
 export interface ChainHolder {
@@ -1209,6 +1213,10 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         displayName:typeof t.display_name==="string" && t.display_name.trim() ? t.display_name.trim() : null,
         txHash:typeof t.tx_hash==="string" && t.tx_hash ? t.tx_hash : null,
         realizedPnlUsdg:ledgerNumber(t.realized_pnl_usdg),
+        // WHETHER THAT FIGURE IS A MEASUREMENT (R3P-2). The tape says so per
+        // sell and the route carries it; dropped here, the desk withheld the
+        // dollars of every sell, vouched ones too. Only an explicit true.
+        realizedVouched:t.realized_vouched === true,
       };
     }),
     glance: {
@@ -1468,6 +1476,8 @@ interface Feed {
     reason?: string | null;
     /** Whole USDG, booked on a sell. A driver may hand a NUMERIC back as text. */
     realized_pnl_usdg?: number | string | null;
+    /** The tape checked both halves of that figure — see lib/desk-trades.ts. */
+    realized_vouched?: boolean;
     /** The fill's transaction; null for a refusal and for a paper fill. */
     tx_hash?: string | null;
   }[];
