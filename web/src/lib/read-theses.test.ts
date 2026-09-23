@@ -447,6 +447,83 @@ describe("a changed view is not held off the lane by names that only repeated", 
   });
 });
 
+describe("unchanged since means nothing else was said about the name — in either lane", () => {
+  const thin = "Depth remains thin; I am holding until liquidity recovers.";
+
+  it("A HOLD, A LANDED BUY ON THE SAME NAME, THE SAME HOLD — the hold is not 'unchanged since' the first", async () => {
+    // The reviewer's reproduction. Each lane looked only at itself, so the hold
+    // printed "×2 · since 2h" and sat two hours down, about an agent that
+    // bought the name an hour ago.
+    const rows: Row[] = [
+      { id: "a1", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 7200 },
+      { id: "b1", action: "buy", symbol: "TSLA", size: 5, source: "strategist", reason: "Taking a starter position here.", at: NOW - 3600 },
+      { id: "a2", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 60 },
+    ];
+    const r = await read(rows, [{ decision: "b1", status: "landed" }]);
+    const hold = r.theses.find((t) => t.action === "hold")!;
+    assert.equal(hold.said, 2);
+    assert.equal(hold.unchangedSince, null, "a trade on the name came in between");
+    const buy = r.theses.find((t) => t.action === "buy")!;
+    assert.equal(buy.unchangedSince, null, "and the buy is not the latest word on the name either");
+  });
+
+  it("A REFUSAL RE-PROPOSED ACROSS A HOLD ON ITS NAME is not 'unchanged since' either", async () => {
+    const legs = Array.from({ length: 30 }, (_, i): Row => ({
+      id: `r${i}`, action: "buy", symbol: "TSLA", size: 8.33, source: "strategy:steady-basket",
+      reason: "the schedule says buy — 8.33 USDG into TSLA, its 33% of a 3-leg basket", at: NOW - (29 - i) * 300,
+    }));
+    const refusals = legs.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" }));
+    const between: Row = { id: "h", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 3600 };
+    const broken = (await read([...legs, between], refusals)).theses.find((t) => t.outcome === "refused")!;
+    assert.equal(broken.unchangedSince, null);
+
+    // Something said about the name before the run began, or about another
+    // name during it, leaves the run unbroken.
+    const before: Row = { ...between, at: NOW - 30 * 300 };
+    const elsewhere: Row = { ...between, symbol: "NVDA" };
+    for (const other of [before, elsewhere]) {
+      const kept = (await read([...legs, other], refusals)).theses.find((t) => t.outcome === "refused")!;
+      assert.equal(kept.unchangedSince, NOW - 29 * 300, `${other.symbol} at ${NOW - other.at}s ago`);
+    }
+  });
+
+  it("a trade on the name BEFORE the hold began does not break the hold's run", async () => {
+    const rows: Row[] = [
+      { id: "b1", action: "buy", symbol: "TSLA", size: 5, source: "strategist", reason: "Taking a starter position here.", at: NOW - 3 * 3600 },
+      ...Array.from({ length: 24 }, (_, i): Row => ({ id: `h${i}`, action: "hold", symbol: "TSLA", reason: thin, at: NOW - i * 300 })),
+    ];
+    const r = await read(rows, [{ decision: "b1", status: "landed" }]);
+    const hold = r.theses.find((t) => t.action === "hold")!;
+    assert.equal(hold.unchangedSince, NOW - 23 * 300);
+  });
+
+  it("A ROW THE FEED NEVER PUBLISHES DOES NOT BREAK A RUN — a gate-forced hold, an account refusal, the owner's chat order", async () => {
+    // The other lane is read with the lane's own WHERE. A Brain on a gated key
+    // files a forced hold on every tick, and a basket past its day's count
+    // refuses every leg; counted as "something else said", either would take
+    // the "since" off every repeat on the name and put it back on top of the
+    // feed each tick — for words nobody reading the feed can see.
+    const legs = Array.from({ length: 30 }, (_, i): Row => ({
+      id: `r${i}`, action: "buy", symbol: "TSLA", size: 8.33, source: "strategy:steady-basket",
+      reason: "the schedule says buy — 8.33 USDG into TSLA, its 33% of a 3-leg basket", at: NOW - (29 - i) * 300,
+    }));
+    const forced = Array.from({ length: 20 }, (_, i): Row => ({ id: `f${i}`, action: "hold", symbol: "TSLA", reason: "Held.", holdKind: "GATE_FORCED_HOLD", at: NOW - i * 300 - 7 }));
+    const refused = (await read([...legs, ...forced], legs.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" })))).theses.find((t) => t.outcome === "refused")!;
+    assert.equal(refused.unchangedSince, NOW - 29 * 300, "a gate-forced hold is not a word on the feed");
+
+    const holds24 = Array.from({ length: 24 }, (_, i): Row => ({ id: `h${i}`, action: "hold", symbol: "TSLA", reason: thin, at: NOW - i * 300 }));
+    const blocked = Array.from({ length: 10 }, (_, i): Row => ({ id: `ops${i}`, action: "buy", symbol: "TSLA", size: 4, source: "strategy:steady-basket", reason: "the schedule says buy", at: NOW - i * 600 - 11 }));
+    const chat: Row = { id: "chat", action: "buy", symbol: "TSLA", size: 5, source: "chat", reason: "owner asked in chat", at: NOW - 3600 };
+    const r = await read([...holds24, ...blocked, chat], [
+      ...blocked.map((b) => ({ decision: b.id, status: "rejected", rule: "ops-cap" })),
+      { decision: "chat", status: "landed" },
+    ]);
+    const hold = r.theses.find((t) => t.action === "hold")!;
+    assert.equal(hold.unchangedSince, NOW - 23 * 300, "nor a refusal for the account's own budget, nor the owner's chat trade");
+    assert.equal(r.theses.filter((t) => t.action === "buy").length, 0, "none of which is published, either");
+  });
+});
+
 describe("what the gate refuses stays refused", () => {
   it("the split re-ranks rows and publishes nothing new", async () => {
     // An operational notice was never a post. Two queries must not make it one.
