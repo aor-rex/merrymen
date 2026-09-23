@@ -31,7 +31,8 @@ try {
   process.chdir(originalCwd);
 }
 const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME, "merrymen.db"));
-const { idleChannelOnStore } = await import("./idle-notice");
+const { breakerResetLine, idleChannelOnStore, RESTATE_AFTER_MS, withEarlier } = await import("./idle-notice");
+const { drawdownOf } = await import("./strategies/types");
 const { renderWhy } = await import("./strategies/reasons");
 
 after(() => {
@@ -109,6 +110,53 @@ describe("the idle channel on the real store", () => {
     const warns = raw.prepare("SELECT COUNT(*) AS c FROM events WHERE agent_id = ? AND level = 'warn'").get(a) as { c: number };
     assert.equal(warns.c, 2, "said again once, not once a tick");
     assert.deepEqual(decisions(a), []);
+  });
+
+  const TRIPPED = drawdownOf({ peakUsdg: 1_000_000_000n, equityUsdg: 875_000_000n, equityKnown: true, maxDrawdownBps: 1_000 });
+  const CLEAR = drawdownOf({ peakUsdg: 1_000_000_000n, equityUsdg: 990_000_000n, equityKnown: true, maxDrawdownBps: 1_000 });
+  const warnCount = (a: string) => (raw.prepare("SELECT COUNT(*) AS c FROM events WHERE agent_id = ? AND level = 'warn'").get(a) as { c: number }).c;
+
+  it("TRIP, RESTATE, RESET on the real store: the desk says buying resumes, and nothing is written after it", async () => {
+    const a = agent();
+    const ch = channel();
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    for (let i = 0; i < 45; i++) await store.addEvent(a, "ok", `1 buy proposal(s) withheld ${i}`);
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal((await store.ownerNotice(a))?.message, renderWhy(breaker), "restated");
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal((await store.ownerNotice(a))?.message, breakerResetLine(null));
+    const warns = warnCount(a);
+    for (let i = 0; i < 3; i++) await ch.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(warnCount(a), warns);
+    assert.deepEqual(decisions(a), []);
+  });
+
+  it("A WARN WRITTEN ONCE AFTER THE TRIP is carried by the restatement and the reset, on the real store", async () => {
+    const a = agent();
+    const ch = channel();
+    const blocker = "NOT trading for real yet: your trading key is not active yet.";
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await store.addEvent(a, "warn", blocker);
+    // The blocker has had its time on the desk: both rows stamped past the grace, in order.
+    const back = Math.ceil(RESTATE_AFTER_MS / 1000) + 60;
+    raw.prepare("UPDATE events SET created_at = created_at - ? WHERE agent_id = ? AND message = ?").run(back + 1, a, renderWhy(breaker));
+    raw.prepare("UPDATE events SET created_at = created_at - ? WHERE agent_id = ? AND message = ?").run(back, a, blocker);
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal((await store.ownerNotice(a))?.message, withEarlier(renderWhy(breaker), blocker));
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(warnCount(a), 3, "our own carried line is not covered, so it is not said again");
+    await ch.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal((await store.ownerNotice(a))?.message, withEarlier(breakerResetLine(null), blocker));
+  });
+
+  it("A TRIP THAT CLEARS ACROSS A RESTART is taken down by the new process, on the real store", async () => {
+    const a = agent();
+    await channel().tell({ agentId: a, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    const restarted = channel();
+    await restarted.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal((await store.ownerNotice(a))?.message, breakerResetLine(null));
+    await restarted.tell({ agentId: a, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(warnCount(a), 2);
   });
 
   it("A REASON THAT POSTS writes one row, in the public register, and is not said again", async () => {

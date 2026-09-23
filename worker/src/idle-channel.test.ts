@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { IdleChannel, MODE_EMPTIED_REMEDY, RESTATE_AFTER_MS, type ShownNotice } from "./idle-notice";
+import { breakerResetLine, IdleChannel, MODE_EMPTIED_REMEDY, RESTATE_AFTER_MS, withEarlier, type ShownNotice } from "./idle-notice";
 import { makeLlmStrategist } from "./strategist/strategy";
 import { renderWhy, type Why } from "./strategies/reasons";
 import { steadyBasketTick, type SteadyBasketConfig } from "./strategies/steady-basket";
@@ -37,6 +37,7 @@ const AGENT = "0xagent";
 const TICK_MS = 240_000;
 
 const TRIPPED = drawdownOf({ peakUsdg: 1_000_000_000n, equityUsdg: 875_000_000n, equityKnown: true, maxDrawdownBps: 1_000 });
+const CLEAR = drawdownOf({ peakUsdg: 1_000_000_000n, equityUsdg: 990_000_000n, equityKnown: true, maxDrawdownBps: 1_000 });
 
 const basket: SteadyBasketConfig = {
   legs: [
@@ -74,6 +75,7 @@ type Ev = { agentId: string; level: string; message: string; atMs: number; id: n
  * first warn or err.
  */
 function desk(opts: { shown?: "unreadable" | "throws" } = {}) {
+  const read = { shown: opts.shown as "unreadable" | "throws" | undefined, dropWrites: false };
   let clock = 1_800_000_000_000;
   let seq = 0;
   let ids = 0;
@@ -92,14 +94,17 @@ function desk(opts: { shown?: "unreadable" | "throws" } = {}) {
     events.push({ agentId, level, message, atMs: Math.floor(clock / 1000) * 1000, id: ++seq });
   };
   const sinks = {
-    addEvent: async (agentId: string, level: "ok" | "warn", message: string) => write(level, message, agentId),
+    // store.addEvent swallows a failed insert; dropWrites is that failure.
+    addEvent: async (agentId: string, level: "ok" | "warn", message: string) => {
+      if (!read.dropWrites) write(level, message, agentId);
+    },
     addDecision: async (row: { id: string; agent_id: string; source: string; reason: string }) => {
       rows.push(row);
     },
     newDecisionId: () => `d${++ids}`,
     shownNotice: async (agentId: string): Promise<ShownNotice | null | undefined> => {
-      if (opts.shown === "unreadable") return undefined;
-      if (opts.shown === "throws") throw new Error("database is locked");
+      if (read.shown === "unreadable") return undefined;
+      if (read.shown === "throws") throw new Error("database is locked");
       return noticeOf(agentId);
     },
     now: () => clock,
@@ -116,6 +121,10 @@ function desk(opts: { shown?: "unreadable" | "throws" } = {}) {
       clock += ms;
     },
     warns: (message: string) => events.filter((e) => e.level === "warn" && e.message === message).length,
+    /** Warn lines that lead with this sentence — said alone, or carrying another warn after it. */
+    leads: (head: string) => events.filter((e) => e.level === "warn" && (e.message === head || e.message.startsWith(`${head}. `))).length,
+    /** Switch the desk's read while the test runs: readable (undefined), unreadable, or throwing. */
+    read,
   };
 }
 
@@ -215,8 +224,12 @@ describe("the owner's notice stays current while the breaker is tripped", () => 
     await tick();
     assert.equal(d.shows(), failure, "a newer notice gets its time on the desk");
     for (let i = 0; i < 500; i++) await tick();
-    assert.equal(d.shows(), sentence, "and then the reason that still stands is the notice again");
-    assert.equal(d.warns(sentence), 2, "said again once — not once a tick");
+    assert.equal(
+      d.shows(),
+      withEarlier(sentence, failure),
+      "and then the reason that still stands leads the notice again — carrying the line it is written over, never burying it",
+    );
+    assert.equal(d.leads(sentence), 2, "said again once — not once a tick");
     assert.deepEqual(d.rows, []);
   });
 
@@ -269,13 +282,16 @@ describe("the owner's notice stays current while the breaker is tripped", () => 
       d.write("warn", "Trencher: Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.");
       await ch.tell({ agentId: AGENT, strategyName: "trencher", idle: breaker, modeEmptied: null });
     }
-    assert.equal(d.warns(sentence), 1, "no event storm while somebody else is warning");
-    // …and once the other line stops, the breaker comes back.
+    assert.equal(d.leads(sentence), 1, "no event storm while somebody else is warning");
+    // …and once the other line stops, the breaker comes back — with it.
     for (let i = 0; i < 5; i++) {
       d.advance(TICK_MS);
       await ch.tell({ agentId: AGENT, strategyName: "trencher", idle: breaker, modeEmptied: null });
     }
-    assert.equal(d.shows(), sentence);
+    assert.equal(
+      d.shows(),
+      withEarlier(sentence, "Trencher: Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized."),
+    );
   });
 
   it("the grace is measured from the notice that replaced it", async () => {
@@ -290,7 +306,7 @@ describe("the owner's notice stays current while the breaker is tripped", () => 
     assert.equal(d.shows(), "something newer", "not before it has had its time");
     d.advance(1_000);
     await ch.tell({ agentId: AGENT, strategyName: "trencher", idle: breaker, modeEmptied: null });
-    assert.equal(d.shows(), sentence);
+    assert.equal(d.shows(), withEarlier(sentence, "something newer"));
   });
 
   it("A REASON THAT POSTS IS NEVER RESTATED — its view row would repeat, and the owner meets it as the post", async () => {
@@ -321,12 +337,461 @@ describe("the owner's notice stays current while the breaker is tripped", () => 
     }
   });
 
-  it("a breaker that clears and trips again is a new warning, as before", async () => {
+  it("a breaker that clears and trips again is a new warning, as before — and each reset is said", async () => {
     const d = desk();
     const ch = new IdleChannel(d.sinks);
-    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null });
-    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null });
-    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
     assert.equal(d.warns(renderWhy(breaker)), 2);
+    assert.equal(d.shows(), renderWhy(breaker), "tripped again: the breaker is the notice");
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.warns(breakerResetLine(null)), 2);
+    assert.equal(d.shows(), breakerResetLine(null));
+  });
+});
+
+/**
+ * R3WK-1. The restatement keeps the breaker as the newest warn right up to the
+ * moment it clears — and then nothing replaced it. The desk, the rail and
+ * Android went on showing "nothing bought — the breaker refuses buys until it
+ * recovers" after it had recovered, until forty newer events pushed it out,
+ * and for an agent that writes little after a reset, indefinitely.
+ */
+describe("when the breaker resets, the owner's notice says buying resumed", () => {
+  const sentence = renderWhy(breaker);
+
+  it("THE CHECKER'S PROBE: a long trip, restated as the commentary aged it out, then the reset — the breaker is never the notice again", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    let clock = 0;
+    const strategist = makeLlmStrategist({
+      driver: { name: "stub", propose: async () => ({ actions: [{ action: "buy", symbol: "NVDA", sizeUsdg: 5, reason: "dip" }] }) } as never,
+      universe: { legs: new Map([["NVDA", NVDA]]), swapRouter: ROUTER, usdg: USDG, maxPerActionUsdg: 10_000_000n, maxActionsPerTick: 4 },
+      decisionIntervalMs: 30 * 60_000,
+      now: () => clock,
+      onNote: (level, message) => d.write(level, message),
+    });
+    const holdings = new Map([["NVDA", { token: NVDA, rawBalance: 10n ** 18n, valueUsdg: 50_000_000n, costUsdg: 60_000_000n, priceStale: false }]]) as never;
+    let tick = 0;
+    for (; tick < 700; tick++) {
+      clock = tick * TICK_MS;
+      const t = takeTick(await strategist.tick(snap({ drawdown: TRIPPED, holdings })));
+      await ch.tell({ agentId: AGENT, strategyName: "llm-strategist", idle: t.idle, modeEmptied: null, drawdown: TRIPPED });
+      d.advance(TICK_MS);
+    }
+    assert.equal(d.shows(), sentence, "at the reset the breaker is the notice — restated all trip long");
+    assert.ok(d.warns(sentence) > 1, "and it was restated as the notes aged it out");
+    const eventsAtReset = d.events.length;
+    // Recovered: the model's buys go through, one ok fill line per buy.
+    for (let k = 0; k < 400; k++, tick++) {
+      clock = tick * TICK_MS;
+      const t = takeTick(await strategist.tick(snap({ drawdown: CLEAR, holdings })));
+      if (t.intents.length) d.write("ok", `simulated ✓ fill ${k}`);
+      await ch.tell({ agentId: AGENT, strategyName: "llm-strategist", idle: t.idle, modeEmptied: null, drawdown: CLEAR });
+      if (k === 0) assert.equal(d.shows(), breakerResetLine(null), "the first tick after the reset says so");
+      assert.ok(!d.shows().startsWith(sentence), `tick ${k} after the reset: the desk still shows the breaker`);
+      d.advance(TICK_MS);
+    }
+    assert.equal(
+      d.events.slice(eventsAtReset).filter((e) => e.level === "warn").map((e) => e.message).join(" | "),
+      breakerResetLine(null),
+      "one line at the reset, and nothing warned after it",
+    );
+  });
+
+  it("the reset line says buying resumes, and does not repeat the breaker's claim", () => {
+    assert.match(breakerResetLine(null), /buying resumes/);
+    assert.match(breakerResetLine("nothing bought — the cash on hand is short of one buy"), /no longer stops buying/);
+    for (const line of [breakerResetLine(null), breakerResetLine("x")]) {
+      assert.doesNotMatch(line, /refuses buys until it recovers/);
+      assert.match(line, /breaker has reset/);
+    }
+  });
+
+  it("TRIP, RESTATE, CLEAR: the reset line — and nothing written after it, even once the commentary ages it out", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    for (let i = 0; i < 45; i++) d.write("ok", `note ${i}`);
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.warns(sentence), 2, "restated once it aged out");
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), breakerResetLine(null));
+    const written = d.events.length;
+    for (let i = 0; i < 50; i++) {
+      d.advance(TICK_MS);
+      if (i % 10 === 0) for (let j = 0; j < 45; j++) d.write("ok", `note ${i}.${j}`);
+      const before = d.events.length;
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      assert.equal(d.events.length, before, `tick ${i}: the channel wrote after the reset`);
+    }
+    assert.ok(d.events.length > written, "the notes did land");
+    assert.equal(d.warns(breakerResetLine(null)), 1);
+    assert.equal(d.shows(), "(no notice)", "aged out, and nothing false put back");
+  });
+
+  it("A REASON THAT TAKES OVER AT THE RESET: the breaker is taken down, the reason is told as it always was", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: underOne, modeEmptied: null, drawdown: CLEAR });
+    assert.deepEqual(
+      d.events.map((e) => [e.level, e.message]),
+      [
+        ["warn", sentence],
+        ["warn", breakerResetLine(renderWhy(underOne))],
+        ["ok", renderWhy(underOne)],
+      ],
+    );
+    assert.equal(d.shows(), breakerResetLine(renderWhy(underOne)));
+    assert.equal(d.rows.length, 1, "the reason's view row, as before");
+    assert.equal(d.rows[0]!.reason, renderWhy(underOne, "public"));
+    // That reset line is the channel's own too: tripped again, it is written over, not carried.
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), sentence);
+  });
+
+  it("AN UNMEASURED BREAKER IS NOT A RESET, and neither is one still tripped", async () => {
+    const unread = [
+      null,
+      undefined,
+      TRIPPED,
+      // At the limit is tripped: checkPolicy refuses at bps >= limit.
+      { bps: 1_000, limitBps: 1_000 },
+      // Figures nobody could read are not a recovery.
+      { bps: Number.NEGATIVE_INFINITY, limitBps: 1_000 },
+      { bps: 0, limitBps: Number.POSITIVE_INFINITY },
+      { bps: Number.NaN, limitBps: 1_000 },
+    ];
+    for (const drawdown of unread) {
+      const d = desk();
+      const ch = new IdleChannel(d.sinks);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      for (let i = 0; i < 10; i++) {
+        d.advance(TICK_MS);
+        // A book that could not be totalled, or a tick that sold: no reason, and no measured recovery.
+        await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown });
+      }
+      assert.equal(d.warns(breakerResetLine(null)), 0, JSON.stringify(drawdown));
+      assert.equal(d.shows(), sentence, JSON.stringify(drawdown));
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      assert.equal(d.shows(), breakerResetLine(null), `measured clear after ${JSON.stringify(drawdown)}`);
+    }
+  });
+
+  it("A TICK STILL GIVING THE BREAKER'S REASON is not its reset, whatever the figure says", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    for (let i = 0; i < 5; i++) {
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: CLEAR });
+    }
+    assert.deepEqual(d.events.map((e) => e.message), [sentence]);
+  });
+
+  it("AN UNREADABLE DESK DEFERS THE RESET LINE — it is said on the first tick that can read, once", async () => {
+    for (const shown of ["unreadable", "throws"] as const) {
+      const d = desk();
+      const ch = new IdleChannel(d.sinks);
+      // A process that has been running: its one look for a leftover line is spent.
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      d.read.shown = shown;
+      for (let i = 0; i < 3; i++) {
+        d.advance(TICK_MS);
+        await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      }
+      assert.equal(d.events.length, 1, `${shown}: nothing written on a guess`);
+      d.read.shown = undefined;
+      for (let i = 0; i < 3; i++) {
+        d.advance(TICK_MS);
+        await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      }
+      assert.equal(d.warns(breakerResetLine(null)), 1, shown);
+      assert.equal(d.shows(), breakerResetLine(null), shown);
+    }
+  });
+
+  it("NEVER TOLD, NOTHING TO TAKE BACK — and a reset is this agent's only", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    // Tripped, but nothing gave the breaker as the reason: the owner was never told it.
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: undefined, modeEmptied: null, drawdown: TRIPPED });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.events.length, 0);
+    // Told a reason that posts — not the breaker — so a clear tick has nothing to take down.
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: underOne, modeEmptied: null, drawdown: CLEAR });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.deepEqual(d.events.map((e) => [e.level, e.message]), [["ok", renderWhy(underOne)]]);
+    d.events.length = 0;
+    // Told for this agent; a clear tick for another agent is not its reset.
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await ch.tell({ agentId: "0xother", strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.deepEqual(d.events.map((e) => [e.agentId, e.message]), [[AGENT, sentence]]);
+  });
+});
+
+/**
+ * R3WK-2. The restatement wrote the breaker over whatever warn had held the
+ * desk for ten minutes — including one that is still standing but was written
+ * once per change (the live-rail blocker, a per-key refusal, a Trencher
+ * notice), which never says itself again. So the covered line was gone for the
+ * rest of the trip. Now the restatement carries it: the breaker leads, and the
+ * line it was written over stays on the notice after it.
+ */
+describe("the restatement never buries another warn", () => {
+  const sentence = renderWhy(breaker);
+  const blocker =
+    "NOT trading for real yet: your trading key is not active yet — the agent has no permission to trade with. " +
+    "Fills below are simulated at live prices until that is fixed. Live trading is a switch in Settings, and it stays off until you turn it on.";
+
+  it("THE CHECKER'S PROBE: a warn written once after the trip is on the notice every tick of the trip — and after the reset", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.advance(TICK_MS);
+    d.write("warn", blocker);
+    let led = 0;
+    for (let i = 0; i < 360; i++) {
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      assert.ok(d.shows().includes(blocker), `tick ${i}: the blocker was buried — the desk shows ${d.shows().slice(0, 60)}`);
+      if (d.shows().startsWith(sentence)) led++;
+      d.advance(TICK_MS);
+    }
+    assert.ok(led >= 355, `the breaker led the notice on ${led}/360 ticks`);
+    assert.equal(d.shows(), withEarlier(sentence, blocker));
+    assert.equal(d.leads(sentence), 2, "restated once, not once a tick");
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), withEarlier(breakerResetLine(null), blocker), "the reset takes the breaker down and keeps the blocker");
+  });
+
+  it("A WARN THAT COVERED OURS is the one carried — never a chain of every line before it", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.write("warn", "first other line");
+    d.advance(RESTATE_AFTER_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, "first other line"));
+    d.write("warn", "second other line");
+    d.advance(RESTATE_AFTER_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, "second other line"));
+    // Our own carried line on the desk for hours is not covered, and is not said again.
+    for (let i = 0; i < 100; i++) {
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    }
+    assert.equal(d.leads(sentence), 3);
+  });
+
+  it("AGED OUT, NOTHING TO CARRY: said again alone", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.write("warn", "an older line");
+    d.advance(RESTATE_AFTER_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, "an older line"));
+    for (let i = 0; i < 45; i++) d.write("ok", `note ${i}`);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), sentence, "the carried line aged out with ours; nothing is dug back up");
+  });
+
+  it("THE RESET CARRIES a warn somebody else wrote over the breaker, too", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.write("warn", blocker);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), withEarlier(breakerResetLine(null), blocker));
+  });
+
+  it("A TICK THAT COULD NOT MEASURE THE BREAKER, then the breaker again: what our line carried is still carried", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.write("warn", blocker);
+    d.advance(RESTATE_AFTER_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, blocker));
+    // A book that could not be totalled: no breaker reason this tick, so the next one is a change.
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: null });
+    d.advance(TICK_MS);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.leads(sentence), 3, "said again, as a change");
+    assert.equal(d.shows(), withEarlier(sentence, blocker), "and the blocker rode with it");
+  });
+
+  it("THE TRIP ITSELF keeps a warn that stands on the desk — and on a desk it cannot read, it is still said, alone", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    d.write("warn", blocker);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, blocker));
+    for (const shown of ["unreadable", "throws"] as const) {
+      const u = desk({ shown });
+      const cu = new IdleChannel(u.sinks);
+      u.write("warn", blocker);
+      await cu.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      assert.deepEqual(
+        u.events.map((e) => [e.level, e.message]),
+        [
+          ["warn", blocker],
+          ["warn", sentence],
+        ],
+        `${shown}: a change is said even unread`,
+      );
+    }
+  });
+
+  it("withEarlier: the head alone when there is nothing to carry", () => {
+    assert.equal(withEarlier("head", null), "head");
+    assert.equal(withEarlier("head", "tail"), "head. Also from earlier: tail");
+  });
+});
+
+/**
+ * A worker restarted mid-trip — a redeploy, the watchdog — starts a new
+ * channel with no memory, over the same desk. The lines an earlier process left
+ * there are still the channel's own, read from their words.
+ */
+describe("across a restart, the lines on the desk are still the channel's own", () => {
+  const sentence = renderWhy(breaker);
+  const blocker = "NOT trading for real yet: your trading key is not active yet.";
+
+  it("THE FIRST BREAKER LINE AFTER A RESTART does not carry the old one — the same sentence twice", async () => {
+    for (const carried of [false, true]) {
+      const d = desk();
+      const before = new IdleChannel(d.sinks);
+      await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      if (carried) {
+        d.write("warn", blocker);
+        d.advance(RESTATE_AFTER_MS);
+        await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      }
+      d.advance(TICK_MS);
+      const after = new IdleChannel(d.sinks);
+      await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      assert.equal(d.shows(), withEarlier(sentence, carried ? blocker : null), `carried: ${carried}`);
+      // …and the restarted channel does not count its predecessor's line as covering it.
+      for (let i = 0; i < 20; i++) {
+        d.advance(TICK_MS);
+        await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      }
+      assert.equal(d.leads(sentence), carried ? 3 : 2, `carried: ${carried}`);
+    }
+  });
+
+  it("A TRIP THAT CLEARED ACROSS THE RESTART is still taken down — keeping what the old line carried", async () => {
+    for (const carried of [false, true]) {
+      const d = desk();
+      const before = new IdleChannel(d.sinks);
+      await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      if (carried) {
+        d.write("warn", blocker);
+        d.advance(RESTATE_AFTER_MS);
+        await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      }
+      const after = new IdleChannel(d.sinks);
+      // The first ticks after a restart may not value the book yet.
+      await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: null });
+      assert.ok(d.shows().startsWith(sentence), "unmeasured: nothing said yet");
+      await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      assert.equal(d.shows(), withEarlier(breakerResetLine(null), carried ? blocker : null), `carried: ${carried}`);
+      await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      assert.equal(d.leads(breakerResetLine(null)), 1, "once");
+    }
+  });
+
+  it("A BREAKER LINE UNDER ANOTHER LIMIT is still the breaker's — a re-sign widened it", async () => {
+    const d = desk();
+    const old = renderWhy({ code: "breaker-tripped", limitBps: 1_250 });
+    d.write("warn", old);
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), breakerResetLine(null));
+  });
+
+  it("A RESTART WITH NO BREAKER STANDING says nothing, and looks once", async () => {
+    const d = desk();
+    let reads = 0;
+    const counted = { ...d.sinks, shownNotice: async (a: string) => (reads++, d.sinks.shownNotice(a)) };
+    d.write("warn", blocker);
+    d.write("warn", withEarlier("the drawdown breaker has reset", null) + " (not ours: a lookalike)");
+    const ch = new IdleChannel(counted);
+    for (let i = 0; i < 10; i++) {
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    }
+    assert.equal(d.events.length, 2, "nothing written");
+    assert.equal(reads, 1, "the desk is read once for a leftover, not every tick");
+  });
+
+  it("OUR OWN RESET LINE on the desk while the breaker stands is not the breaker — a lost write is made good", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), breakerResetLine(null));
+    // Tripped again, and the insert is lost: the desk still says buying resumes.
+    d.read.dropWrites = true;
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    d.read.dropWrites = false;
+    assert.equal(d.shows(), breakerResetLine(null));
+    for (let i = 0; i < 4; i++) {
+      d.advance(RESTATE_AFTER_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    }
+    assert.equal(d.shows(), sentence, "the standing breaker is said again, over our own stale line, carrying nothing of it");
+    assert.equal(d.leads(sentence), 2);
+  });
+
+  it("A RESET ALREADY SAID before the restart is not said again", async () => {
+    const d = desk();
+    const before = new IdleChannel(d.sinks);
+    await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    await before.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    const after = new IdleChannel(d.sinks);
+    await after.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.deepEqual(d.events.map((e) => e.message), [sentence, breakerResetLine(null)]);
+  });
+
+  it("an unread desk leaves the leftover check for the next tick that can read", async () => {
+    const d = desk();
+    d.write("warn", sentence);
+    const ch = new IdleChannel(d.sinks);
+    d.read.shown = "throws";
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.events.length, 1);
+    d.read.shown = undefined;
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+    assert.equal(d.shows(), breakerResetLine(null));
+  });
+
+  it("a line that merely starts like ours is somebody else's", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    // The breaker's opening words, then something else: not ours, so carried whole.
+    const lookalike = `${sentence} — and a longer sentence nobody here wrote`;
+    d.write("warn", lookalike);
+    await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d.shows(), withEarlier(sentence, lookalike));
+    // The breaker's words around something that is not a figure: not ours either.
+    const d2 = desk();
+    const ch2 = new IdleChannel(d2.sinks);
+    const noFigure = sentence.replace("10%", "most of it%");
+    assert.notEqual(noFigure, sentence);
+    d2.write("warn", noFigure);
+    await ch2.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+    assert.equal(d2.shows(), withEarlier(sentence, noFigure));
   });
 });
