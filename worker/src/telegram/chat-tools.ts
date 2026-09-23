@@ -81,33 +81,124 @@ function str(v: unknown, max = 64): string {
 }
 
 /**
+ * ONE LEDGER CONNECTION FOR A WHOLE ANSWER.
+ *
+ * Laying the carried history over the ledger copies every trade and decision
+ * this agent has (history-overlay.ts): a quarter of a second on a busy ledger,
+ * synchronous, in the process that trades — and one answer can make twenty
+ * lookups. Inside openToolSession they share one overlaid connection, opened
+ * by the first lookup that needs the ledger and closed when the answer ends.
+ * It is rebuilt whenever the ledger has been written since (PRAGMA
+ * data_version), so a lookup never sees less than a fresh connection would.
+ * Outside a session — /trades, the tests, anything else — every lookup opens
+ * and closes its own, as before.
+ */
+interface ToolSession {
+  db: DatabaseSync | null;
+  /** The ledger's data_version when `db` was opened. */
+  version: number | null;
+  /** The carried history has been laid over `db` (tried once per connection). */
+  overlaid: boolean;
+}
+
+const sessions = new WeakMap<ToolContext, ToolSession>();
+const sessionCount = { opened: 0, open: 0 };
+
+/** Test seam: session connections opened so far, and open right now. */
+export function toolSessionStatsForTest(): { opened: number; open: number } {
+  return { ...sessionCount };
+}
+
+/** Share one ledger connection across every lookup made with `ctx` until close(). */
+export function openToolSession(ctx: ToolContext): { close(): void } {
+  if (sessions.has(ctx)) return { close() {} }; // an outer session owns it
+  const s: ToolSession = { db: null, version: null, overlaid: false };
+  sessions.set(ctx, s);
+  return {
+    close() {
+      sessions.delete(ctx);
+      dropSessionDb(s);
+    },
+  };
+}
+
+function dropSessionDb(s: ToolSession): void {
+  if (!s.db) return;
+  try {
+    s.db.close();
+  } catch {
+    /* already closed */
+  }
+  s.db = null;
+  s.version = null;
+  s.overlaid = false;
+  sessionCount.open -= 1;
+}
+
+function dataVersion(db: DatabaseSync): number | null {
+  try {
+    return (db.prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+  } catch {
+    return null;
+  }
+}
+
+/** This lookup's ledger: the session's, or its own (no session: the lookup closes it). */
+function ledgerFor(ctx: ToolContext): { db: DatabaseSync; session: ToolSession | null } | null {
+  const s = sessions.get(ctx);
+  if (!s) {
+    const db = openRO();
+    return db ? { db, session: null } : null;
+  }
+  // Written since it was opened: start again, as a fresh lookup would.
+  if (s.db && dataVersion(s.db) !== s.version) dropSessionDb(s);
+  if (!s.db) {
+    const db = openRO();
+    if (!db) return null; // no ledger yet: the next lookup tries again
+    s.db = db;
+    s.version = dataVersion(db);
+    sessionCount.opened += 1;
+    sessionCount.open += 1;
+  }
+  return { db: s.db, session: s };
+}
+
+/** The carried history, laid once per connection. */
+function lay(l: { db: DatabaseSync; session: ToolSession | null }, who: string): void {
+  if (l.session?.overlaid) return;
+  overlayHistory(l.db, who);
+  if (l.session) l.session.overlaid = true;
+}
+
+/**
  * Open the ledger and resolve this owner's agent, or say why not. The trades
  * and decisions from before a hosted redeploy are laid over it
  * (history-overlay.ts), so every lookup here sees the whole tape.
  */
-function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T): T {
-  const db = openRO();
-  if (!db) return none;
+function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T, history = true): T {
+  const l = ledgerFor(ctx);
+  if (!l) return none;
   try {
-    const who = resolveAgent(db, ctx.status.agentId);
+    const who = resolveAgent(l.db, ctx.status.agentId);
     if (!who) return none;
-    overlayHistory(db, who);
-    return fn(db, who);
+    // A lookup that reads neither trades nor decisions (the log, the agent row) skips the copy.
+    if (history) lay(l, who);
+    return fn(l.db, who);
   } finally {
-    db.close();
+    if (!l.session) l.db.close();
   }
 }
 
 async function withLedgerAsync(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => Promise<string>, none: string): Promise<string> {
-  const db = openRO();
-  if (!db) return none;
+  const l = ledgerFor(ctx);
+  if (!l) return none;
   try {
-    const who = resolveAgent(db, ctx.status.agentId);
+    const who = resolveAgent(l.db, ctx.status.agentId);
     if (!who) return none;
-    overlayHistory(db, who);
-    return await fn(db, who);
+    lay(l, who);
+    return await fn(l.db, who);
   } finally {
-    db.close();
+    if (!l.session) l.db.close();
   }
 }
 
@@ -560,6 +651,7 @@ const recentActivity: ChatTool = {
         return cap(rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${r.message.slice(0, 220)}`).join("\n"));
       },
       NO_AGENT,
+      false,
     );
   },
 };
@@ -845,6 +937,7 @@ const permissionStatus: ChatTool = {
         }
       },
       null as string | null,
+      false,
     );
     const lines = [
       `Signed on network ${g.chainId === 4663 ? "Robinhood Chain (real)" : `${g.chainId} (test network — not real money)`}.`,

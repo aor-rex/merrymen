@@ -26,10 +26,11 @@
  * ONE ROW PER OPERATION across the two. See planHistoryMerge.
  */
 
+import { statSync } from "node:fs";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 
 import { merrymenHome } from "../home";
-import { readHistory, type HistoryTrade, type TradeHistory } from "../history-files";
+import { historyFilePath, readHistory, type HistoryTrade, type TradeHistory } from "../history-files";
 import { isRestartCopy } from "../token-label";
 import { UNCONFIRMED } from "./trade-rows";
 
@@ -112,7 +113,33 @@ const COPY_SQL = `(l.kind = 'swap' AND l.target IS NOT NULL AND lower(l.target) 
 /** Columns no chat read uses, and the heaviest in the ledger. Copied as NULL. */
 const NOT_COPIED = new Set(["signals_json", "evidence_json"]);
 
+/**
+ * Ledger indexes the copy does without. No chat read looks a trade up by its
+ * op hash, and every one is scoped to one agent first — and the copy holds one
+ * agent — so the time-only indexes only repeat (agent_id, time).
+ */
+const NOT_INDEXED = new Set(["trades_agent_userop", "trades_time", "decisions_time"]);
+
 const TEMP_OBJECTS = ["trades", "decisions", "hist_supersede", "hist_meta"];
+
+/**
+ * The parsed file, kept while it is the same file. One stat instead of a parse
+ * per lookup; the orchestrator replaces it by rename, which changes all three.
+ */
+let parsed: { key: string; file: TradeHistory | null } | null = null;
+
+function historyFor(agentId: string): TradeHistory | null {
+  const home = merrymenHome();
+  let key: string;
+  try {
+    const st = statSync(historyFilePath(home));
+    key = `${home}\n${agentId.toLowerCase()}\n${st.size}\n${st.mtimeMs}\n${st.ino}`;
+  } catch {
+    return null; // absent: exactly what readHistory says
+  }
+  if (parsed?.key !== key) parsed = { key, file: readHistory(home, agentId) };
+  return parsed.file;
+}
 
 const q = (c: string) => `"${c.replace(/"/g, '""')}"`;
 
@@ -153,7 +180,7 @@ function materialize(db: DatabaseSync, table: string, agentId: string, where = "
   // Plus the primary key's, which a copy loses and whose index has no SQL to copy:
   // `t.id = (SELECT MAX(id) …)` and `d.id = t.decision_id` are lookups by it.
   const defs = [
-    ...indexes.map((ix) => ({ name: ix.name, on: /\bON\s+("?)\w+\1\s*(\([\s\S]*)$/i.exec(ix.sql)?.[2] ?? null })),
+    ...indexes.filter((ix) => !NOT_INDEXED.has(ix.name)).map((ix) => ({ name: ix.name, on: /\bON\s+("?)\w+\1\s*(\([\s\S]*)$/i.exec(ix.sql)?.[2] ?? null })),
     { name: `${table}_id`, on: "(id)" },
     // The chat looks trades up by coin — `lower(buy_token) = ? OR lower(sell_token) = ?`,
     // once per coin it names. The ledger scans for that; the copy need not.
@@ -225,7 +252,7 @@ export function carriedDecisionsFrom(db: DatabaseSync): number | null {
  */
 export function overlayHistory(db: DatabaseSync, agentId: string, history?: TradeHistory | null): boolean {
   if (overlaid(db)) return true;
-  const file = history === undefined ? readHistory(merrymenHome(), agentId) : history;
+  const file = history === undefined ? historyFor(agentId) : history;
   if (!file || (!file.trades.length && !file.decisions.length)) return false;
   let began = false;
   try {
@@ -271,6 +298,15 @@ export function overlayHistory(db: DatabaseSync, agentId: string, history?: Trad
     db.prepare("INSERT INTO temp.hist_meta (k, v) VALUES ('decisions_from', ?), ('written_at', ?)").run(file.decisionsFrom, file.writtenAt);
     db.exec("COMMIT");
     began = false;
+    // STATISTICS FOR THE COPY. It holds one agent, and with no statistics the
+    // planner takes `agent_id = ?` for selective: it searched the agent_id
+    // prefix of whichever index came first — the whole copy — for every coin
+    // name and every decision's trade, and the indexes above sat unused.
+    try {
+      db.exec("ANALYZE temp");
+    } catch {
+      /* a speed-up only */
+    }
     return true;
   } catch {
     try {
