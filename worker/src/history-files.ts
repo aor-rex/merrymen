@@ -66,7 +66,7 @@ export interface HistoryTrade {
   reject_rule: string | null;
   decision_id: string | null;
   fill_side: string | null;
-  /** The coin's own symbol() read off the receipt — Postgres only, and chosen by whoever launched the coin. */
+  /** The coin's name, stored with the fill (store.ts fillSymbolOfRow) or read off its receipt by the repair; untrusted unless curated. */
   fill_symbol: string | null;
   fill_qty_raw: string | null;
   fill_price_usd: number | null;
