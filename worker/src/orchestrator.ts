@@ -90,6 +90,7 @@ import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
+import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -1491,9 +1492,36 @@ export const COMMAND_RECEIPT_DDL = "ALTER TABLE agent_commands ADD COLUMN receip
  * reaches the table, and bounded like every other status column here.
  */
 function receiptJson(r: FileCommandResult): string | null {
-  if (!r.receipt || typeof r.receipt !== "object") return null;
-  const json = JSON.stringify(r.receipt);
+  return receiptColumn(r.receipt);
+}
+
+/** Any receipt as the column holds it, or null — the one serialisation both writers use. */
+function receiptColumn(receipt: OrderReceipt | undefined): string | null {
+  if (!receipt || typeof receipt !== "object") return null;
+  const json = JSON.stringify(receipt);
   return json.length <= 1_000 ? json : null;
+}
+
+/**
+ * Close a row with its sentence AND its receipt, or — on a table that has not
+ * grown the column yet — with the sentence alone, exactly as landResults does:
+ * the receipt waits, the answer does not. `where` is the row's own guard and is
+ * the same on both writes, so the fallback can never close a row the first
+ * write would have left alone.
+ */
+async function closeWithReceipt(
+  shared: Db,
+  set: { sql: string; args: unknown[] },
+  receipt: OrderReceipt,
+  where: { sql: string; args: unknown[] },
+): Promise<void> {
+  try {
+    await shared
+      .prepare(`UPDATE agent_commands SET ${set.sql}, receipt = ? WHERE ${where.sql}`)
+      .run(...set.args, receiptColumn(receipt), ...where.args);
+  } catch {
+    await shared.prepare(`UPDATE agent_commands SET ${set.sql} WHERE ${where.sql}`).run(...set.args, ...where.args);
+  }
 }
 
 /**
@@ -1685,22 +1713,33 @@ export async function ferryForChild(
         const id = String(r.id);
         const where = commandWhereabouts(home, id);
         if (where === "answered") continue;
+        const args = r.args ? parseArgs(r.args) : undefined;
+        // "NEVER RAN" IS C3's `expired`, whichever process noticed it: the
+        // child answers an order that expired in its queue with this same
+        // receipt, and the chat must not render one fact two ways depending on
+        // who got there first. Only here, where nothing went out — the
+        // "may have filled" closure below knows nothing, so templates nothing.
+        const expired = expiredOrderReceipt(args);
         if (r.claimed_at === null || r.claimed_at === undefined) {
           // Undelivered, so no file can exist yet; a replica that delivers it
           // in the meantime wins the `claimed_at IS NULL` race and we stand down.
           if (where !== "gone") continue;
-          await shared
-            .prepare(
-              "UPDATE agent_commands SET done_at = ?, claimed_at = ?, result = ? WHERE id = ? AND done_at IS NULL AND claimed_at IS NULL",
-            )
-            .run(now, now, neverRan, id);
+          await closeWithReceipt(
+            shared,
+            { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRan] },
+            expired,
+            { sql: "id = ? AND done_at IS NULL AND claimed_at IS NULL", args: [id] },
+          );
           continue;
         }
-        const expiresAt = r.args ? parseArgs(r.args).expiresAt : undefined;
+        const expiresAt = args?.expiresAt;
         if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
-          await shared
-            .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
-            .run(now, neverRan, id);
+          await closeWithReceipt(
+            shared,
+            { sql: "done_at = ?, result = ?", args: [now, neverRan] },
+            expired,
+            { sql: "id = ? AND done_at IS NULL", args: [id] },
+          );
           continue;
         }
         // Taken, or a deadline-less file the child would still run: either
