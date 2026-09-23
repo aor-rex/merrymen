@@ -28,7 +28,11 @@
  * leave that order to the four-minute wait this exists to remove.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 import { ORDER_IN_FLIGHT_MS } from "./command-files";
+import type { FlowStanding } from "./flow-witness";
 
 /** How close the regular tick may be before the watcher leaves the order to it. */
 export const COMMAND_WAKE_MIN_LEAD_MS = 5_000;
@@ -43,6 +47,40 @@ export const COMMAND_WAKE_EVERY_MS = 2_000;
  * trade out for six minutes is a dozen writes of one small file.
  */
 export const ALIVE_BEAT_EVERY_MS = 30_000;
+
+/** What one heartbeat says. */
+export interface Beat {
+  /** The published mode (exec-mode.ts publishedMode). */
+  mode: string;
+  /** Who pays gas, as this process resolved it. */
+  sponsorGas: boolean;
+  /** The chain height, when it was read. Omitted rather than zeroed: a zero is a claim about the chain. */
+  block?: bigint;
+}
+
+/**
+ * THE HEARTBEAT FILE, and the only writer of it: `{at, block?, mode, sponsorGas}`,
+ * `at` in unix seconds — what the orchestrator's watchdog (orchestrator.ts
+ * heartbeatAt) reads to decide a child is alive. Throws when it cannot write;
+ * every caller treats a beat as best-effort.
+ */
+export function writeHeartbeat(
+  file: string,
+  beat: Beat,
+  nowMs: number,
+  write: (file: string, body: string) => void = writeBeatFile,
+): void {
+  const at = Math.floor(nowMs / 1000);
+  write(
+    file,
+    JSON.stringify({ at, ...(beat.block === undefined ? {} : { block: beat.block.toString() }), mode: beat.mode, sponsorGas: beat.sponsorGas }),
+  );
+}
+
+function writeBeatFile(file: string, body: string): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, body, "utf8");
+}
 
 /**
  * May a command tick start now?
@@ -192,14 +230,34 @@ export function tickPlan(kind: TickKind): TickPlan {
  * The reads stay unconditional. A command tick still needs the peak its order
  * is judged against — it is asked with `null`, which reads without observing
  * (risk-period.ts) — and the paper and live marks it already has.
+ *
+ * AND HOW THE TICK'S FLOW RECONCILE ENDED (flow-witness.ts FlowStanding), for
+ * the live peaks and the fee, which are the writes a capital flow moves:
+ *
+ *   held    — an op was out, or the reconcile aborted, so part of this equity
+ *             may be a deposit not yet booked. No fee, the live mark is kept,
+ *             and the risk peak is read without observing: a peak raised on an
+ *             unbooked deposit would be raised a second time when it is booked,
+ *             and read as a drawdown the size of the deposit.
+ *   waived  — a held window closed without the figures to separate it, and was
+ *             absorbed. The peaks rise as usual, at no fee, so a deposit in it
+ *             is carried by the peak and never charged.
+ *   settled — as before.
  */
 export interface TickRatchets {
   /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
   paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
   /** The risk-period peak, read with this tick's equity as an observation only when this tick may. */
-  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
+  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>, flows: FlowStanding): Promise<P>;
+  /** The fee rate this tick accrues at: none while contributions are unknown, or while a flow is held or was waived. */
+  feeBps(bps: number, contributionsKnown: boolean, flows: FlowStanding): number;
   /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
-  accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
+  accrue(
+    accrual: { profitUsdg: bigint; newHwmUsdg: bigint },
+    peakUsdg: bigint,
+    persist: () => Promise<unknown>,
+    flows: FlowStanding,
+  ): Promise<bigint>;
   /** The equity row: written on a regular tick whose book could be totalled. */
   equityRow(write: () => Promise<unknown>): Promise<void>;
 }
@@ -214,9 +272,10 @@ export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveM
       }
       return b.hwmUsdg;
     },
-    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : null),
-    async accrue(accrual, peakUsdg, persist) {
-      if (!peaks) return peakUsdg;
+    riskPeak: (equityUsdg, read, flows) => read(peaks && flows !== "held" ? equityUsdg : null),
+    feeBps: (bps, contributionsKnown, flows) => (contributionsKnown && flows === "settled" ? bps : 0),
+    async accrue(accrual, peakUsdg, persist, flows) {
+      if (!peaks || flows === "held") return peakUsdg;
       if (accrual.profitUsdg > 0n) await persist();
       return accrual.newHwmUsdg;
     },
@@ -550,6 +609,13 @@ export function createTickClock(deps: {
  * past it nothing legitimate is still going, the beat stops, and the watchdog
  * judges the child as it always did. An idle worker gets no beat from here:
  * between ticks that is tick()'s job, and a stall there must still show.
+ *
+ * THE CLOCK WRITES THE FILE ITSELF. It used to call whatever `beat` main()
+ * handed it, so `beat: () => {}` in main() typechecked, passed every test, and
+ * put the hosted child back to being SIGKILLed mid-order on the 15-second
+ * preset. main() now hands it the file's path (`heartbeat`, required) and the
+ * two facts a beat states, and writeHeartbeat below is the one writer — tick()'s
+ * own beat goes through it too, so the two cannot drift into different shapes.
  */
 export interface CommandClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -573,15 +639,21 @@ export function createCommandClock(deps: {
   pending: () => readonly string[];
   regular: () => Promise<number>;
   command: () => Promise<void>;
-  /** Write the heartbeat file — what the orchestrator's watchdog reads. */
-  beat: () => void;
+  /**
+   * The heartbeat file the orchestrator's watchdog reads, and what a beat from
+   * the clock says in it: the mode heartbeat() would publish and who pays gas.
+   * No block — this is a claim about the process being alive, not about the
+   * chain. Always the real writer: a test reads the file it wrote.
+   */
+  heartbeat: { file: string; mode: () => string; sponsorGas: () => boolean };
 }): CommandClock {
   const live = () => deps.orders.busy() || deps.trades.busy();
   let beatAt = -Infinity;
   const beat = () => {
     beatAt = deps.now();
     try {
-      deps.beat();
+      const hb = deps.heartbeat;
+      writeHeartbeat(hb.file, { mode: hb.mode(), sponsorGas: hb.sponsorGas() }, beatAt);
     } catch {
       // A beat that failed to write is the watchdog's to judge, not a reason to stop the clock.
     }

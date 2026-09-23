@@ -76,6 +76,30 @@ export function orderReadsOf(tick: TickReads, owner: { paused: boolean; ceilingU
 type Side = "buy" | "sell";
 
 /**
+ * A TICK THAT COULD NOT READ CANNOT JUDGE AN ORDER. The breaker judges an order
+ * against this tick's equity, and a tick that could not read the market, a
+ * balance or a price returns before equity is composed ("trading + equity
+ * paused"), so the figure it would judge against is exactly the one missing.
+ * Both sides are refused, as the tick itself trades nothing. Null when the
+ * reads are whole.
+ */
+function unreadRefusal(reads: TickReads): string | null {
+  if (reads.marketUnreadable) {
+    return (
+      "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
+      "not about your order. Ask again in a minute."
+    );
+  }
+  if (reads.bookUnreadable) {
+    return (
+      "I could not value your book this tick, so I did not place it — that is a fact about my reads, " +
+      "not about your order. Ask again in a minute."
+    );
+  }
+  return null;
+}
+
+/**
  * A BOOK THAT CANNOT BE TOTALLED CANNOT JUDGE A BUY. Equity is unknown, so
  * policy.ts runs the breaker only `if (state.equityKnown !== false)` — a buy
  * would go out with the loss limit switched off. A sell is an exit, which the
@@ -90,22 +114,118 @@ function untotalledBuy(side: Side, equityKnown: boolean): string | null {
   );
 }
 
+/** The book as the latest tick left it: what it read, and the last equity it composed. */
+export interface TickState {
+  reads: TickReads;
+  /** The last equity a tick composed. 0n before any has, when the drawdown check would judge garbage. */
+  equityUsdg: bigint;
+}
+
 /**
  * THE GATE EVERY ORDER MEETS AT submitChatTrade — typed in Telegram, placed
  * from the app, or handed over by the Brain. Null when it may go on to the
  * wall; otherwise the sentence the owner reads, and nothing is built or sent.
  *
- * The untotalled-buy refusal lived only in placeOrder, which only an app order
- * reaches, so a buy typed in Telegram went out with equity unknown and the
- * breaker skipped. It is one rule, so it is one function, and both paths say
- * the same sentence.
+ * The same refusals, in the same words, as placeOrder: a tick that could not
+ * read the market or value the book, and a buy on a book that could not be
+ * totalled. They lived only in placeOrder, which only an app order reaches, so
+ * after a tick that could not read, a buy typed in Telegram went out judged on
+ * the equity the tick BEFORE it had left behind — the breaker judging a figure
+ * the tick had just said it could not produce, while the owner's own feed said
+ * "trading + equity paused". It is one set of rules, so it is one function.
  *
- * `equityUsdg` is the last tick's; 0n is its initialiser, before any tick has
- * read the book, when the drawdown check would judge garbage.
+ * `book` is the latest tick's (createTickBook), never a pair of globals that a
+ * tick which returned early did not write.
  */
-export function chatOrderGate(side: Side, book: { equityUsdg: bigint; equityKnown: boolean }): string | null {
+export function chatOrderGate(side: Side, book: TickState): string | null {
   if (book.equityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
-  return untotalledBuy(side, book.equityKnown);
+  return unreadRefusal(book.reads) ?? untotalledBuy(side, book.reads.equityKnown);
+}
+
+/**
+ * Reads a tick has STATED to the book — the only reads a drain accepts.
+ *
+ * Branded so they cannot be built anywhere but createTickBook: a drain site
+ * that hands the drain `tickReads.bookUnread()` without telling the book does
+ * not compile. That is what keeps the app's drain and the Telegram gate on one
+ * record — a tick that could not read says so once, and both see it.
+ */
+declare const STATED: unique symbol;
+export type StatedReads = TickReads & { readonly [STATED]: true };
+
+/** What the gate hands back: a refusal, or the book the order is judged against. */
+export type BookJudgement = { ok: false; line: string } | { ok: true; equityUsdg: bigint; equityKnown: boolean };
+
+/**
+ * THE BOOK AS THE LATEST TICK LEFT IT, and the one gate every order placed
+ * between ticks meets.
+ *
+ * This was `lastEquityUsdg` and `lastEquityKnown`, two globals written only
+ * after a tick had composed equity. The three returns that end a tick which
+ * could not read the market, a balance or a price never wrote them, so they
+ * kept the previous tick's `equityKnown: true` — and a buy typed in Telegram
+ * went out on it while an app order drained on the same tick was refused by
+ * name. Every way a tick can end now states its reads here, and both surfaces
+ * judge against the same record:
+ *
+ *   unread(what)        — the tick could not read the market, or the book (a
+ *                         balance, or a price for a holding). The last composed
+ *                         equity is kept (for display), and every order is
+ *                         refused until a tick composes again.
+ *   composed(eq, known) — the tick composed equity; `known` is whether the
+ *                         book could be totalled.
+ *   during(tick)        — runs one tick. A tick that FAILS before it states
+ *                         anything cannot vouch for the book either, so it
+ *                         leaves the book unread. One that returns early
+ *                         without reading (nothing armed, a grant that expired)
+ *                         leaves the last reading standing, as it read nothing.
+ *   judge(side)         — chatOrderGate against the latest state, and the
+ *                         equity the order is then judged against, taken from
+ *                         the same record in the same breath.
+ *
+ * `unread` and `composed` return the reads branded as stated, and the drains
+ * take nothing else — so a tick cannot drain an order on reads the gate for a
+ * Telegram order never heard about.
+ */
+export interface TickBook {
+  unread(what: "market" | "book"): StatedReads;
+  composed(equityUsdg: bigint, equityKnown: boolean): StatedReads;
+  during<T>(tick: () => Promise<T>): Promise<T>;
+  judge(side: Side): BookJudgement;
+  /** The latest state, for what only displays it or judges an exit (a transfer). */
+  latest(): Readonly<TickState>;
+}
+
+export function createTickBook(): TickBook {
+  // Before any tick nothing has been read. The saddling-up refusal answers
+  // first while equity is its 0n initialiser; this answers after that.
+  let state: TickState = { reads: tickReads.marketUnread(), equityUsdg: 0n };
+  let stated = false;
+  const stateThat = (reads: TickReads, equityUsdg: bigint): StatedReads => {
+    state = { reads: { ...reads }, equityUsdg };
+    stated = true;
+    return state.reads as StatedReads;
+  };
+  return {
+    unread: (what) => stateThat(what === "market" ? tickReads.marketUnread() : tickReads.bookUnread(), state.equityUsdg),
+    composed: (equityUsdg, equityKnown) => stateThat(tickReads.composed(equityKnown), equityUsdg),
+    async during(tick) {
+      stated = false;
+      try {
+        return await tick();
+      } catch (e) {
+        if (!stated) state = { reads: tickReads.bookUnread(), equityUsdg: state.equityUsdg };
+        throw e;
+      }
+    },
+    judge(side) {
+      const book = state;
+      const line = chatOrderGate(side, book);
+      if (line) return { ok: false, line };
+      return { ok: true, equityUsdg: book.equityUsdg, equityKnown: book.reads.equityKnown };
+    },
+    latest: () => state,
+  };
 }
 
 /**
@@ -123,23 +243,11 @@ export async function placeOrder<R>(
   // ANSWERED, NOT STARVED. The tick's unreadable-market return sits a thousand
   // lines above the regular drain, so an order on such a tick used to be
   // skipped until it expired. It drains there now, with this flag set, and is
-  // refused by name at once.
-  if (reads.marketUnreadable) {
-    return no(
-      "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
-        "not about your order. Ask again in a minute.",
-    );
-  }
-  // THE BOOK, FOR THE SAME REASON. A tick that could not read a balance or price
-  // a holding returns before equity is composed ("trading + equity paused"), so
-  // the figure the breaker would judge this order against is exactly the one
-  // missing.
-  if (reads.bookUnreadable) {
-    return no(
-      "I could not value your book this tick, so I did not place it — that is a fact about my reads, " +
-        "not about your order. Ask again in a minute.",
-    );
-  }
+  // refused by name at once. The book, for the same reason: a tick that could
+  // not read a balance or price a holding returns before equity is composed.
+  // The same sentences a Telegram order gets from chatOrderGate.
+  const unread = unreadRefusal(reads);
+  if (unread) return no(unread);
   // PAUSE IS HONOURED HERE, not at the drain. The drain runs above the tick's
   // own pause return, deliberately — a paused agent can still be probed. An
   // order is the opposite: pause is the owner's stop button, and a trade that

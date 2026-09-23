@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { chatOrderGate, orderReadsOf, placeOrder, tickReads, type OrderReads } from "./order-gate";
+import { chatOrderGate, createTickBook, orderReadsOf, placeOrder, tickReads, type OrderReads, type StatedReads } from "./order-gate";
 
 const READ: OrderReads = { marketUnreadable: false, bookUnreadable: false, equityKnown: true, paused: false, ceilingUsdg: 0 };
 const BUY = { side: "buy", symbol: "TSLA", usdgAmount: 5 };
@@ -185,34 +185,184 @@ describe("every drain states what its tick read", () => {
 });
 
 /**
- * ONE GATE FOR THE APP AND FOR TELEGRAM.
+ * ONE GATE FOR EVERY ORDER, WHOEVER PLACED IT — judged on the book the latest
+ * tick actually left.
  *
- * The "buy with the book untotalled" refusal lived only in placeOrder, which
- * only an app order reaches. A buy typed in Telegram went straight to
- * submitChatTrade, which hands lastEquityKnown to checkPolicy — and when that
- * is false the drawdown breaker is skipped. submitChatTrade now asks
- * chatOrderGate first, so the app, Telegram and Brain orders all meet it.
+ * The refusals lived only in placeOrder, which only an app order reaches. A
+ * buy typed in Telegram went straight to submitChatTrade, which judged it on
+ * two globals — lastEquityUsdg and lastEquityKnown — that only a tick which
+ * COMPOSED equity wrote. The three returns that end a tick which could not read
+ * the market, a balance or a price left them as the tick before had set them,
+ * `equityKnown: true` included, so the Telegram buy went on to the wall with
+ * the previous tick's equity while an app order drained on the same tick was
+ * refused by name, and the owner's own feed said "trading + equity paused".
+ *
+ * Both now judge against one record, createTickBook, which every way a tick
+ * ends writes. The tests drive it the way tick() does and compare each
+ * Telegram answer with what placeOrder says to an app order drained on the
+ * very reads the book handed that drain.
  */
-describe("one gate for an order, whoever placed it", () => {
+describe("one gate for every order, whoever placed it", () => {
+  const EQUITY = 100_000_000n;
+  /** The app's answer to `args`, drained with the reads the tick stated to the book. */
+  const appSays = async (args: Record<string, unknown>, reads: StatedReads) => {
+    const sent: string[] = [];
+    const reply = await placeOrder(args, orderReadsOf(reads, { paused: false, ceilingUsdg: 0 }), async (side) => {
+      sent.push(side);
+      return { ok: true, line: "submitted" };
+    });
+    return { reply, sent };
+  };
+  /** A book whose last tick composed and totalled its equity. */
+  const good = () => {
+    const book = createTickBook();
+    book.composed(EQUITY, true);
+    return book;
+  };
+
+  for (const what of ["market", "book"] as const) {
+    it(`AFTER A TICK THAT COULD NOT READ THE ${what.toUpperCase()}, A TELEGRAM BUY IS REFUSED EXACTLY AS THE APP ORDER IS`, async () => {
+      const book = good();
+      // The early return: it states its reads, and drains the app's order with them.
+      const drained = book.unread(what);
+      const app = await appSays(BUY, drained);
+      assert.equal(app.reply.ok, false);
+      assert.deepEqual(app.sent, [], "the app's order was refused");
+      // A buy typed in Telegram a moment later, before the next tick.
+      const telegram = book.judge("buy");
+      assert.equal(telegram.ok, false, "the Telegram buy must not go on to the wall on the last tick's equity");
+      assert.equal(telegram.ok ? "" : telegram.line, (app.reply as { line: string }).line, "the same sentence");
+      assert.match(telegram.ok ? "" : telegram.line, what === "market" ? /could not read the market/ : /could not value your book/);
+    });
+
+    it(`and a sell after it is answered the same way on both surfaces (${what})`, async () => {
+      const book = good();
+      const app = await appSays(SELL, book.unread(what));
+      const telegram = book.judge("sell");
+      assert.equal(telegram.ok, false);
+      assert.equal(telegram.ok ? "" : telegram.line, (app.reply as { line: string }).line);
+    });
+  }
+
+  it("THE NEXT TICK THAT COMPOSES LIFTS IT — the book, not a latch, decides", () => {
+    const book = good();
+    book.unread("book");
+    book.composed(120_000_000n, true);
+    assert.deepEqual(book.judge("buy"), { ok: true, equityUsdg: 120_000_000n, equityKnown: true });
+  });
+
+  it("an unread tick keeps the last composed figure for display, and vouches for none of it", () => {
+    const book = good();
+    book.unread("market");
+    assert.equal(book.latest().equityUsdg, EQUITY);
+    assert.equal(book.latest().reads.equityKnown, false);
+    assert.equal(book.latest().reads.marketUnreadable, true);
+  });
+
   it("A TELEGRAM BUY WITH THE BOOK UNTOTALLED IS REFUSED WITH THE APP ORDER'S OWN SENTENCE", async () => {
-    const app = await place(BUY, { equityKnown: false });
+    const book = createTickBook();
+    const drained = book.composed(EQUITY, false);
+    const app = await appSays(BUY, drained);
     assert.equal(app.reply.ok, false);
-    assert.equal(chatOrderGate("buy", { equityUsdg: 100_000_000n, equityKnown: false }), app.reply.line);
+    const telegram = book.judge("buy");
+    assert.equal(telegram.ok ? "" : telegram.line, (app.reply as { line: string }).line);
   });
 
-  it("BUT A SELL STILL GOES THROUGH — the owner can always get out of the holding that untotals the book", () => {
-    assert.equal(chatOrderGate("sell", { equityUsdg: 100_000_000n, equityKnown: false }), null);
+  it("BUT A SELL STILL GOES THROUGH — the owner can always get out of the holding that untotals the book", async () => {
+    const book = createTickBook();
+    const drained = book.composed(EQUITY, false);
+    assert.deepEqual((await appSays(SELL, drained)).sent, ["sell"]);
+    // And the wall is told the book could not be totalled, not the opposite.
+    assert.deepEqual(book.judge("sell"), { ok: true, equityUsdg: EQUITY, equityKnown: false });
   });
 
-  it("with the book totalled nothing is refused here — the wall judges the rest", () => {
-    assert.equal(chatOrderGate("buy", { equityUsdg: 100_000_000n, equityKnown: true }), null);
-    assert.equal(chatOrderGate("sell", { equityUsdg: 100_000_000n, equityKnown: true }), null);
+  it("with the book read and totalled nothing is refused here — the wall judges the rest, on this tick's equity", async () => {
+    const book = good();
+    for (const side of ["buy", "sell"] as const) {
+      assert.deepEqual(book.judge(side), { ok: true, equityUsdg: EQUITY, equityKnown: true });
+    }
+    assert.deepEqual((await appSays(BUY, book.composed(EQUITY, true))).sent, ["buy"]);
   });
 
   it("BEFORE THE FIRST TICK HAS READ THE BOOK, NOTHING IS PLACED — a buy or a sell", () => {
     // Equity is still its 0n initialiser, and the breaker would judge garbage.
+    const book = createTickBook();
     for (const side of ["buy", "sell"] as const) {
-      assert.match(chatOrderGate(side, { equityUsdg: 0n, equityKnown: true }) ?? "", /still saddling up \(first tick pending\)/);
+      const j = book.judge(side);
+      assert.match(j.ok ? "" : j.line, /still saddling up \(first tick pending\)/);
     }
+    // Nor after a first tick that could not read.
+    book.unread("book");
+    assert.match((j => (j.ok ? "" : j.line))(book.judge("buy")), /still saddling up/);
+  });
+
+  it("chatOrderGate itself: the saddle, then the reads, then the untotalled buy", () => {
+    assert.match(chatOrderGate("buy", { reads: tickReads.composed(true), equityUsdg: 0n }) ?? "", /saddling up/);
+    assert.match(chatOrderGate("buy", { reads: tickReads.marketUnread(), equityUsdg: EQUITY }) ?? "", /could not read the market/);
+    assert.match(chatOrderGate("sell", { reads: tickReads.bookUnread(), equityUsdg: EQUITY }) ?? "", /could not value your book/);
+    assert.match(chatOrderGate("buy", { reads: tickReads.composed(false), equityUsdg: EQUITY }) ?? "", /can't judge a buy/);
+    assert.equal(chatOrderGate("sell", { reads: tickReads.composed(false), equityUsdg: EQUITY }), null);
+    assert.equal(chatOrderGate("buy", { reads: tickReads.composed(true), equityUsdg: EQUITY }), null);
+  });
+});
+
+/**
+ * A TICK THAT FAILS BEFORE IT SAYS WHAT IT READ CANNOT VOUCH FOR THE BOOK.
+ *
+ * A tick that throws between its market read and its equity leaves nothing
+ * behind but the previous tick's statement, which is the stale-global shape the
+ * book exists to end. tick() runs through during(), so such a tick leaves the
+ * book unread; one that composed before it failed, or returned early having
+ * read nothing, leaves what it last stated.
+ */
+describe("a tick that fails states that it failed", () => {
+  it("A TICK THAT THROWS BEFORE STATING ITS READS REFUSES EVERY ORDER UNTIL ONE DOES", async () => {
+    const book = createTickBook();
+    book.composed(100_000_000n, true);
+    await assert.rejects(book.during(async () => {
+      throw new Error("getBasis failed");
+    }));
+    const j = book.judge("buy");
+    assert.equal(j.ok, false);
+    assert.match(j.ok ? "" : j.line, /could not value your book this tick/);
+  });
+
+  it("one that composed before it threw keeps what it composed", async () => {
+    const book = createTickBook();
+    await assert.rejects(book.during(async () => {
+      book.composed(90_000_000n, true);
+      throw new Error("a producer failed after the book was read");
+    }));
+    assert.deepEqual(book.judge("buy"), { ok: true, equityUsdg: 90_000_000n, equityKnown: true });
+  });
+
+  it("one that returned early having read nothing leaves the last statement standing", async () => {
+    const book = createTickBook();
+    book.composed(90_000_000n, true);
+    assert.equal(await book.during(async () => 7), 7);
+    assert.deepEqual(book.judge("sell"), { ok: true, equityUsdg: 90_000_000n, equityKnown: true });
+  });
+
+  it("the tick is called before during() first awaits — a flag it reads in its first statement is still set", () => {
+    const book = createTickBook();
+    let flag = true;
+    let seen: boolean | null = null;
+    const run = book.during(async () => {
+      seen = flag;
+    });
+    flag = false;
+    assert.equal(seen, true);
+    return run;
+  });
+
+  it("a failure that follows a good tick does not leak into the one after it", async () => {
+    const book = createTickBook();
+    await assert.rejects(book.during(async () => {
+      throw new Error("x");
+    }));
+    await book.during(async () => {
+      book.composed(80_000_000n, true);
+    });
+    assert.deepEqual(book.judge("buy"), { ok: true, equityUsdg: 80_000_000n, equityKnown: true });
   });
 });
