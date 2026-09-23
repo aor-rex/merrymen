@@ -17,13 +17,17 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { beatsOf, emptyFor, lanesOf, pillBeats, pillOf, type Beat, type FeedRow, type TradeBeat } from "./beat";
+import { IN_FLIGHT_TEXT } from "@merrymen/thesis";
+import { beatsOf, emptyFor, lanesOf, pillBeats, pillOf, verbOf, type Beat, type FeedRow, type TradeBeat } from "./beat";
 import type { LiveAgent } from "./live";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 
 const NOW = 1_790_000_000;
 const none = new Map<string, unknown>();
+/** The publisher's two "pending" sentences (thesis-policy.ts outcomeOf). */
+const SENT = IN_FLIGHT_TEXT;
+const NOTHING = "no trade came of it";
 
 let seq = 0;
 const row = (over: Partial<FeedRow> = {}): FeedRow =>
@@ -81,7 +85,21 @@ describe("the pill says what kind of trade, and whether money moved", () => {
   });
 
   it("an order still in flight wears its colour with an unsettled edge", () => {
-    assert.deepEqual(pillOf(trade({ outcome: "pending" })), { label: "Buy", tone: "buy", unsettled: true });
+    assert.deepEqual(pillOf(trade({ outcome: "pending", outcomeText: SENT })), { label: "Buy", tone: "buy", unsettled: true });
+  });
+
+  it("A DECISION NO TRADE CAME OF IS NOT IN FLIGHT — it is muted and says so (FE7)", async () => {
+    // The publisher files every buy or sell decision with no trade row and
+    // no dropped rule as "pending", "no trade came of it" (thesis-policy.ts
+    // outcomeOf). Only "sent, waiting on the chain" is an order on its way;
+    // the other is a permanent non-event, and it wore the money colour.
+    const nothing = trade({ outcome: "pending", outcomeText: NOTHING });
+    assert.deepEqual(pillOf(nothing), { label: "Tried", tone: "muted", unsettled: false });
+    assert.equal(verbOf(nothing), "tried to buy", "never 'is buying' about an order that was never sent");
+    const html = await render([row({ outcome: "pending", outcomeText: NOTHING })]);
+    assert.ok(!html.includes("wire-pill buy"));
+    assert.match(html, /no trade came of it/);
+    assert.match(html, /class="wire-beat buy turned/, "and the row's accent is not the money colour either");
   });
 
   it("the row renders the pill beside the sentence, which keeps its tense", async () => {
@@ -113,7 +131,8 @@ describe("the size, at the market cap it was bought at", () => {
 describe("the Trades pill shows trades", () => {
   const read = [
     row({ outcome: "landed", symbol: "A", head: "buy A 5.00 USDG" }),
-    row({ outcome: "pending", symbol: "B", head: "buy B 5.00 USDG" }),
+    row({ outcome: "pending", outcomeText: SENT, symbol: "B", head: "buy B 5.00 USDG" }),
+    row({ outcome: "pending", outcomeText: NOTHING, symbol: "H", head: "buy H 5.00 USDG" }),
     row({ outcome: "refused", symbol: "C", head: "buy C 5.00 USDG", outcomeText: "past today's spending cap" }),
     row({ outcome: "reverted", symbol: "D", head: "buy D 5.00 USDG" }),
     row({ outcome: "dropped", symbol: "E", head: "buy E 5.00 USDG" }),
@@ -121,7 +140,7 @@ describe("the Trades pill shows trades", () => {
     row({ outcome: undefined, symbol: "G", head: "buy G 5.00 USDG" }),
   ];
 
-  it("LANDED AND PENDING ONLY — a refusal is not a trade", () => {
+  it("LANDED AND IN FLIGHT ONLY — a refusal is not a trade, and neither is a decision nothing was sent for", () => {
     const shown = pillBeats(beatsOf(read, agents), "trades", none, {});
     assert.deepEqual(shown.map((b) => (b as TradeBeat).symbol).sort(), ["A", "B"]);
   });

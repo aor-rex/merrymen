@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { beatsOf, emptyFor, lanesOf, mentionTargets, pillBeats, type Beat, type Pill } from "../beat";
-import { freshAmong, markSeen } from "../feed-fresh";
+import { freshAmong, freshKeyOf, markSeen } from "../feed-fresh";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
@@ -175,7 +175,9 @@ export function Feed({
  * only after commit, so a render React throws away cannot use the news up.
  */
 function useFresh(beats: Beat[]): ReadonlySet<string> {
-  const joined = beats.map((b) => b.id).join("\n");
+  // A landed trade's key carries its newest fill's time (`freshKeyOf`), so a
+  // new fill grouped into a row already on screen still arrives.
+  const joined = beats.map(freshKeyOf).join("\n");
   const fresh = useMemo(() => freshAmong(joined ? joined.split("\n") : []), [joined]);
   useEffect(() => {
     markSeen(joined ? joined.split("\n") : []);

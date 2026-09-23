@@ -40,7 +40,9 @@ describe("a class trade reaches the feed at all", () => {
     assert.ok(t !== null, "a class decision must not be dropped by the publication gate");
     assert.equal(t.symbol, "MOON");
     assert.equal(t.action, "buy");
-    assert.equal(t.sizeUsdg, 5);
+    // The size is the owner's to publish (private-book.test.ts); a public book shows it.
+    assert.equal(t.sizeUsdg, null);
+    assert.equal(publishableThesis(row({ public_book: true }))!.sizeUsdg, 5);
   });
 
   it("carries the ticker into the head, not a bare figure", () => {

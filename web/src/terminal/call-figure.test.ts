@@ -177,9 +177,60 @@ describe("the live price is read only when it is unambiguous", () => {
   });
 
   it("TWO TOKENS SHARE A TICKER: no price, because one of them is a guess", () => {
-    // Memecoin tickers are not unique. A since-entry figure computed against
-    // the wrong PEPE is a false number about the agent's call.
     assert.equal(livePriceOf([token({ id: "0xa" }), token({ id: "0xb", priceUsd: 1 })], "TSLA"), null);
+  });
+});
+
+describe("a coin is found by its ADDRESS, never by a ticker its deployer chose (FE2)", () => {
+  // Trench and class rows carry `T` + the last eleven hex of the contract,
+  // because a coin's own symbol() is text anybody can set (class-evidence.ts).
+  // A memecoin LiveToken takes its symbol from exactly that text — the pool
+  // name or symbol() — so matching a row to a price by ticker let the
+  // deployer choose the row's figure.
+  const TID = "TE21291018B4";
+  const own = token({ id: "0x00000000000000000000000000000e21291018b4", symbol: "CASHCAT", name: "CASHCAT", priceUsd: 0.00012, kind: "memecoin" });
+  const spoof = token({ id: "0xdeadbeef00000000000000000000000000000001", symbol: TID, name: TID, priceUsd: 0.5, kind: "memecoin" });
+
+  it("A T-ID ROW FINDS ITS OWN COIN by the address its id was minted from", () => {
+    assert.equal(livePriceOf([own], TID), 0.00012);
+    const f = callFigure(one(row({ symbol: TID, displayName: "CASHCAT", entryPriceUsd: 0.0001 })), livePriceOf([own], TID));
+    assert.ok(f && Math.abs(f.pct - 20) < 1e-6, "+20% since entry, against its own price");
+  });
+
+  it("A COIN NAMED AFTER THE ID IS NOT THE COIN — the spoof's $0.50 never becomes +499900%", () => {
+    assert.equal(livePriceOf([own, spoof], TID), 0.00012);
+    assert.equal(livePriceOf([spoof], TID), null);
+  });
+
+  it("A MEMECOIN CALLED TSLA NEITHER PRICES A TSLA ROW NOR BLANKS IT", () => {
+    const meme = token({ id: "0xmeme", symbol: "TSLA", priceUsd: 0.01, kind: "memecoin" });
+    assert.equal(livePriceOf([token(), meme], "TSLA"), 220, "the stock's price, as if the impostor were not there");
+    assert.equal(livePriceOf([meme], "TSLA"), null, "and never the impostor's");
+  });
+
+  it("an ETF is a listed instrument like a stock", () => {
+    assert.equal(livePriceOf([token({ symbol: "SPY", kind: "etf", priceUsd: 500 })], "SPY"), 500);
+  });
+
+  it("two coins whose addresses end alike are a guess, and a guess is no price", () => {
+    const twin = token({ id: "0x11111111111111111111111111111e21291018b4", symbol: "OTHER", priceUsd: 3, kind: "memecoin" });
+    assert.equal(livePriceOf([own, twin], TID), null);
+  });
+
+  it("the row measures, draws and links the coin it is about, not the impostor", async () => {
+    // The logo and the click come from the same lookup as the price: the row's
+    // click opens that token, so a ticker match sent readers to the impostor.
+    const html = await render(
+      [row({ symbol: TID, displayName: "CASHCAT", head: `buy CASHCAT (${TID})`, entryPriceUsd: 0.0001 })],
+      [{ ...spoof, logo: "/spoof.png" }, { ...own, logo: "/own.png" }],
+    );
+    assert.match(html, /\+20\.0%/);
+    assert.ok(!/499/.test(html));
+    assert.match(html, /src="\/own\.png"/);
+    assert.ok(!html.includes("/spoof.png"));
+    const stock = await render([row({ entryPriceUsd: 200 })], [token({ id: "0xmeme", kind: "memecoin", logo: "/meme.png", priceUsd: 0.01 }), token({ logo: "/tsla.png" })]);
+    assert.match(stock, /src="\/tsla\.png"/, "a TSLA row draws the listed stock");
+    assert.ok(!stock.includes("/meme.png"), "never the memecoin that took its ticker");
   });
 
   it("an unpriced or missing token has no price", () => {
@@ -228,6 +279,30 @@ describe("the row", () => {
     const html = await render([row({ action: "hold", head: "hold TSLA", outcome: "view", sizeUsdg: null, markUsd: 200 })], [token({ priceUsd: 190 })]);
     assert.match(html, /−5\.0%/u);
     assert.match(html, /since posted/);
+  });
+
+  it("A PRIVATE SELL AS AN OLDER SERVER SENT IT — size, percent, no dollars — prints no size beside the percent (FE3)", async () => {
+    // size × pct / (100 + pct) is the dollar P&L the book withheld. The gate
+    // no longer sends the size for a private book (D1); the row does not
+    // trust that alone.
+    const html = await render(
+      [row({ action: "sell", head: "sell TSLA 5.00 USDG", sizeUsdg: 5, realizedPct: -4, realizedUsd: null })],
+      [token()],
+    );
+    assert.match(html, /−4\.0%/u);
+    assert.ok(!/\$5\.00/.test(html), "no size a reader could turn back into dollars");
+  });
+
+  it("a public sell keeps its size beside its dollars", async () => {
+    const html = await render([row({ action: "sell", head: "sell TSLA 5.00 USDG", sizeUsdg: 5, realizedPct: 12.5, realizedUsd: 0.62 })], [token()]);
+    assert.match(html, /<b>\$5\.00<\/b>/);
+  });
+
+  it("A SIGNED ZERO IS A CLAIM — under half a cent prints $0.00 with no sign (FE8)", () => {
+    assert.deepEqual(callFigureText({ basis: "realized", pct: -0.04, usd: -0.004 }), { pct: "0.0%", usd: "$0.00", tone: "flat" });
+    assert.equal(callFigureText({ basis: "realized", pct: 0.03, usd: 0.003 }).usd, "$0.00");
+    assert.equal(callFigureText({ basis: "realized", pct: 0.2, usd: 0.005 }).usd, "+$0.01", "half a cent rounds to a cent, and is signed");
+    assert.equal(callFigureText({ basis: "realized", pct: -0.2, usd: -0.006 }).usd, "−$0.01");
   });
 
   it("a loss reads the same in both halves, and a rounded zero is not green", () => {

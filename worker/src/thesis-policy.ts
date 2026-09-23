@@ -127,8 +127,10 @@ export interface ThesisRow {
   mcap_usd?: number | null;
   /**
    * The author's owner opted into a public book — decorated by the caller from
-   * settings, like `slug`. Only an explicit `true` publishes a dollar figure;
-   * anything else, including absence, keeps the percentages-only default.
+   * settings, like `slug`. Only an explicit `true` publishes a dollar figure,
+   * and a size is a dollar figure; anything else, including absence, keeps the
+   * percentages-only default. See `sizeUsdg` on PublicThesis for why the size
+   * went with the P&L.
    */
   public_book?: boolean | null;
 }
@@ -168,6 +170,22 @@ export interface PublicThesis {
    * Deployer-chosen text, so it passes the same address backstop as the rest.
    */
   displayName?: string | null;
+  /**
+   * THE TRADE'S SIZE — published only for a PUBLIC book, and null otherwise.
+   *
+   * It was published for every book, and on its own it looked harmless. Beside
+   * `realizedPct` it is not: a sell's size is about its proceeds, so the P&L
+   * the dollar gate withholds is `size × pct / (100 + pct)` — measured on the
+   * ledger, "sell AAPL 4.00 USDG" at −20% is exactly the −1.00 that
+   * `realizedUsd: null` was hiding. And a buy's size over `entryPriceUsd` is
+   * the quantity it now holds. So the one opt-in that keeps a book private had
+   * to cover the size too, or it covered nothing.
+   *
+   * The owner's rule is that percentages are the public default and `publicBook`
+   * is opt-in; the profile already hides sizes for a private book, and this is
+   * the feed agreeing with it. The HEAD drops the size with it (`headOf`), since
+   * "sell AAPL 4.00 USDG" is the same figure in a sentence.
+   */
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -530,10 +548,21 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
  * position of those fills cost per unit; a plain mean of prices is not. Each
  * division is guarded per row, because Postgres raises on a zero divisor.
  * Each column ends in a comma, for splicing into a SELECT list.
+ *
+ * A SELL'S RESULT IS ONLY AS READ AS THE BASIS IT CLOSED. Its P&L is its
+ * proceeds minus the average cost of what it sold, and that cost was booked by
+ * the BUYS — any one of which may have been booked from the quote because its
+ * receipt could not be parsed (index.ts says so in the log: "cost basis booked
+ * from the quote (an estimate)"). A receipt-read sell over that basis is an
+ * estimated return, and checking the sell's own row alone published it as a
+ * read one. So a live fill counts as booked only when no quote-sourced trade
+ * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
+ * it sold" is the cash, which no figure here reads: only a sell's P&L is
+ * published.) See `estimatedBasis`.
  */
 export function fillFigures(t: string): string {
   const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
-  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL`;
+  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL AND NOT ${estimatedBasis(t)}`;
   const every = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
   return `
     CASE WHEN ${every(evidenced)} AND MIN(${t}.fill_price_usd) = MAX(${t}.fill_price_usd) THEN MIN(${t}.fill_price_usd)
@@ -541,6 +570,31 @@ export function fillFigures(t: string): string {
          THEN SUM(${t}.fill_cash_usdg) / SUM(CASE WHEN ${evidenced} THEN ${t}.fill_cash_usdg / ${t}.fill_price_usd END) END AS entry_price_usd,
     CASE WHEN ${every(booked)} THEN SUM(${t}.realized_pnl_usdg) END AS realized_pnl_usdg,
     CASE WHEN ${every(booked)} THEN SUM(${t}.fill_cash_usdg) END AS closed_cash_usdg,`;
+}
+
+/**
+ * WHETHER THE COST A LIVE FILL CLOSED WAS AN ESTIMATE — a SQL predicate over the
+ * trades alias `t`, true when a quote-sourced trade by the same account bought
+ * the coin `t` sold, at or before it. Exported for any reader of a realized
+ * P&L, because "when is a realized figure read" must have one answer.
+ *
+ * "Before it", not "since the position was last flat", on purpose: an average
+ * cost carries every buy since the last time the book was empty, and the
+ * ledger has no column a reader can trust to say when that was (the quantities
+ * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
+ * later round trip its figure — nothing is shown — and never shows a guess.
+ * A paper fill closes the paper book, which no quote ever priced, so it is
+ * never estimated here. No index is added for this: `trades_agent_time`
+ * already leads with the account. Every column is one the base schema or the
+ * fill migration created, on both engines.
+ */
+export function estimatedBasis(t: string): string {
+  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
+      SELECT 1 FROM trades q
+       WHERE q.agent_id = ${t}.agent_id
+         AND q.basis_source = 'quote'
+         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
+         AND q.created_at <= ${t}.created_at))`;
 }
 
 /**
@@ -787,6 +841,17 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
   }
 }
 
+/**
+ * THE ONE "PENDING" THAT IS AN ORDER ON ITS WAY — a submitted trade.
+ *
+ * `outcomeOf` files two different facts under "pending": this one, and every
+ * buy or sell decision that has no trade row at all ("no trade came of it"),
+ * which is usually a permanent non-event. Exported so a renderer that colours
+ * an order in flight tells the two apart by the publisher's own sentence
+ * rather than by a copy of it (beat.ts `inFlight`).
+ */
+export const IN_FLIGHT_TEXT = "sent, waiting on the chain";
+
 /** What the wall said, from the slug alone — the detail is never selected. */
 export function outcomeOf(
   status: string | null | undefined,
@@ -795,7 +860,7 @@ export function outcomeOf(
   if (status === "landed") return { outcome: "landed", text: "landed" };
   if (status === "paper") return { outcome: "landed", text: "filled on paper" };
   if (status === "reverted") return { outcome: "reverted", text: "reverted on-chain" };
-  if (status === "submitted") return { outcome: "pending", text: "sent, waiting on the chain" };
+  if (status === "submitted") return { outcome: "pending", text: IN_FLIGHT_TEXT };
   if (status !== "rejected") return { outcome: "pending", text: "no trade came of it" };
 
   // `reject_rule` is NOT a closed vocabulary — some paths write free-form text
@@ -814,12 +879,16 @@ export function outcomeOf(
  * back to another agent. Only one of those three is a React component, so a
  * claim that is only made conditional by CSS is not made conditional.
  */
-function headOf(row: ThesisRow, shadow: boolean): string {
+function headOf(row: ThesisRow, shadow: boolean, sized: boolean): string {
   // A HOLD HAS NO SIZE. Brain forces delta to 0 on a hold, which arrived here
   // as size_usdg 0 and rendered "hold NVDA 0.00 USDG" — a figure that means
   // nothing and reads as a bug. A hold is an answer, not a quantity.
+  //
+  // AND A PRIVATE BOOK'S TRADE HAS NO SIZE IN PUBLIC, whatever it traded: the
+  // head is the one string every surface prints, so a size withheld from
+  // `sizeUsdg` and left here would be withheld from nothing. See `sizeUsdg`.
   const size =
-    row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
+    sized && row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
       ? `${row.size_usdg.toFixed(2)} USDG`
       : null;
   // A hold is already the conditional's answer — "would hold" is not English an
@@ -967,7 +1036,11 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
-  const head = headOf(row, shadow);
+  // Strictly `=== true`, the same test the dollars take below: a settings blob
+  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
+  // publish their book.
+  const bookPublic = row.public_book === true;
+  const head = headOf(row, shadow, bookPublic);
 
   // DECIDED, versus FAILED TO HAPPEN.
   //
@@ -1094,9 +1167,8 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   const proceeds = positive(row.closed_cash_usdg);
   const cost = pnl !== null && proceeds !== null ? proceeds - pnl : null;
   const realizedPct = pnl !== null && cost !== null && cost > 0 ? (pnl * 100) / cost : null;
-  // DOLLARS ARE OPT-IN. Strictly `=== true`: a settings blob is JSON, and a
-  // stray "true" string or a 1 is not the owner deciding to publish their book.
-  const realizedUsd = realizedPct !== null && row.public_book === true ? pnl : null;
+  // DOLLARS ARE OPT-IN — the P&L and, for the reason on `sizeUsdg`, the size.
+  const realizedUsd = realizedPct !== null && bookPublic ? pnl : null;
 
   return {
     name,
@@ -1108,7 +1180,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     displayName,
     paper: row.mode === "paper",
     sizeUsdg:
-      typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
+      bookPublic && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
     outcomeText: text,
     shadow,

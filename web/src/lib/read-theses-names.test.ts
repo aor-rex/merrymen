@@ -114,7 +114,7 @@ describe("a sell names the coin its buy named", () => {
     );
     const exit = r.theses.find((t) => t.action === "sell")!;
     assert.equal(exit.displayName, "JUGGERNAUT");
-    assert.equal(exit.head, `sell JUGGERNAUT (${COIN}) 5.01 USDG`, "the id stays beside it for /why");
+    assert.equal(exit.head, `sell JUGGERNAUT (${COIN})`, "the id stays beside it for /why");
   });
 
   it("an unnamed hold does too", async () => {
@@ -132,7 +132,7 @@ describe("a sell names the coin its buy named", () => {
     ], [{ decision: "s1", status: "landed", side: "sell", basis: "receipt" }]);
     const exit = r.theses.find((t) => t.name === "Shogun")!;
     assert.equal(exit.displayName, null);
-    assert.equal(exit.head, `sell ${COIN} 5.00 USDG`);
+    assert.equal(exit.head, `sell ${COIN}`);
   });
 
   it("A STOCK IS NEVER RENAMED — its name is its ticker, whatever a stray row says", async () => {
@@ -142,7 +142,7 @@ describe("a sell names the coin its buy named", () => {
     ], [{ decision: "s1", status: "landed", side: "sell", basis: "receipt" }]);
     const exit = r.theses.find((t) => t.action === "sell")!;
     assert.equal(exit.displayName, null);
-    assert.equal(exit.head, "sell TSLA 5.00 USDG");
+    assert.equal(exit.head, "sell TSLA");
   });
 
   it("and a coin nobody ever named stays unnamed — absent, never a placeholder", async () => {

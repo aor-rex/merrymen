@@ -4,8 +4,11 @@ import { xProfileUrl } from "@/lib/x-handle";
 import {
   callFigure,
   callFigureText,
+  cameToNothing,
+  dealSizeOf,
   livePriceOf,
   pillOf,
+  tokenFor,
   verbOf,
   watchCount,
   whenLabel,
@@ -23,9 +26,43 @@ import { isFresh } from "./feed-fresh";
 import { money, type LiveToken } from "./live";
 import { Coin, Face, FaceOn } from "./ui";
 
+/**
+ * The coin a row is about, for its logo and its link: the same one its price
+ * is read from (beat.ts `tokenFor`), by address, never by a ticker a
+ * deployer chose. It picked the first ticker match — "a wrong logo is
+ * cosmetic" — but the row's click opens that token, so a memecoin named TSLA
+ * sent a reader of an agent's TSLA trade to somebody else's coin.
+ */
 function logoOf(tokens: LiveToken[], symbol: string | null): LiveToken | undefined {
-  if (!symbol) return undefined;
-  return tokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase());
+  return tokenFor(tokens, symbol) ?? undefined;
+}
+
+/**
+ * THE AGENT'S LINE, AND THE REASON BEHIND "WHY" — for a summary row, which
+ * leads with its latest member's words (lib/post-line.ts). The expander is a
+ * SIBLING of `wire-hit`, never inside that <button>.
+ */
+function SaidWhy({ say, why, post, who }: { say: string | null; why: string | null; post: boolean; who?: string }) {
+  return (
+    <>
+      {say ? (
+        <p className={post ? "wire-why wire-post" : "wire-why"}>
+          {who ? (
+            <>
+              <b>{who}</b>:{" "}
+            </>
+          ) : null}
+          {say}
+        </p>
+      ) : null}
+      {why ? (
+        <details className="wire-more">
+          <summary>why</summary>
+          <p className="wire-why">{why}</p>
+        </details>
+      ) : null}
+    </>
+  );
 }
 
 /**
@@ -138,9 +175,10 @@ function WatchRow({
   const tok = logoOf(tokens, latest.symbol);
   const actor = beat.actor;
   const open = () => onAgent?.(actor.slug);
-  // The agent's own line when the latest hold has one; the Holds pill lays the
-  // member out in full, reason behind its "why".
-  const said = latest.post ?? latest.reason;
+  // The agent's own line when the latest hold has one, and the reason behind
+  // "why" — the same pair the member's own row shows.
+  const { say, why } = sayOf({ post: latest.post, reason: latest.reason });
+  const lead = say && say !== latest.head ? say : null;
   return (
     <div className={`wire-beat view watch${isNew ? " wire-new" : ""}`}>
       <button type="button" className="wire-mark" onClick={open}>
@@ -158,7 +196,7 @@ function WatchRow({
           </span>
         </button>
         <OwnerLine actor={actor} />
-        {said && said !== latest.head ? <p className="wire-why">{said}</p> : null}
+        <SaidWhy say={lead} why={why && why !== latest.head ? why : null} post={!!latest.post} />
       </div>
     </div>
   );
@@ -251,8 +289,9 @@ function ChorusRow({
   };
   const paper = beat.members.filter((m) => m.paper).length;
   // Still the latest member's OWN words, attributed to them — its post when it
-  // wrote one.
-  const said = beat.latest.post ?? beat.latest.reason;
+  // wrote one, and then the reason behind "why": the reason is the sentence
+  // the crowd was grouped on (`chorusOf`), and no other row shows it.
+  const { say, why } = sayOf({ post: beat.latest.post, reason: beat.latest.reason });
   return (
     <div className={`wire-beat view chorus${isNew ? " wire-new" : ""}`}>
       <button type="button" className="wire-mark" onClick={open}>
@@ -268,11 +307,7 @@ function ChorusRow({
             </span>
           </span>
         </button>
-        {said ? (
-          <p className="wire-why">
-            <b>{beat.latest.actor.name}</b>: {said}
-          </p>
-        ) : null}
+        <SaidWhy say={say} why={why} post={!!beat.latest.post} who={beat.latest.actor.name} />
         <p className="wire-mentions">
           {beat.actors.map((a, i) => (
             <span key={a.slug}>
@@ -326,9 +361,7 @@ function BeatRow({
    * Added ALONGSIDE the action class rather than replacing it, so anything
    * keying off buy/sell still works and only the accent is neutralised.
    */
-  const turned =
-    beat.kind === "trade" &&
-    (beat.outcome === "refused" || beat.outcome === "reverted" || beat.outcome === "dropped");
+  const turned = beat.kind === "trade" && cameToNothing(beat);
   // THE AMBER AND THE BYLINE COME FROM THE ROW. They were keyed on the
   // author's current strategy, so a TSLA hold from an agent that has since
   // switched to Trencher read "Trench thesis". The badge alone still speaks
@@ -358,6 +391,8 @@ function BeatRow({
   const figure = callFigure(beat, livePriceOf(tokens, beat.symbol));
   const shown = figure ? callFigureText(figure) : null;
   const pill = beat.kind === "trade" ? pillOf(beat) : null;
+  // Never a size beside a realized percent whose dollars were withheld.
+  const size = dealSizeOf(beat);
 
   return (
     <div className={cls}>
@@ -398,13 +433,9 @@ function BeatRow({
                   commonest reason by far is a limit they set themselves ("past
                   today's spending cap"). The publisher already writes the
                   sentence; the rail just never showed it. */}
-              {beat.kind === "trade" &&
-                beat.outcomeText &&
-                (beat.outcome === "refused" ||
-                  beat.outcome === "reverted" ||
-                  beat.outcome === "dropped") && (
-                  <i className="wire-refused">— {beat.outcomeText}</i>
-                )}{" "}
+              {beat.kind === "trade" && beat.outcomeText && cameToNothing(beat) && (
+                <i className="wire-refused">— {beat.outcomeText}</i>
+              )}{" "}
               {/* "×24 · since 2h" for a view that has only been repeated, or a
                   refusal that has: its newest copy is not news, and printing
                   its age as "now" is what kept a scheduled hold looking like
@@ -438,12 +469,12 @@ function BeatRow({
                     moved (`pillOf`), the size is what the decision named, and
                     the market cap is the one recorded AT DECISION TIME, shown
                     only when it was. */}
-                {pill || beat.sizeUsd != null ? (
+                {pill || size != null ? (
                   <span className="wire-deal">
                     {pill ? (
                       <span className={`wire-pill ${pill.tone}${pill.unsettled ? " unsettled" : ""}`}>{pill.label}</span>
                     ) : null}
-                    {beat.sizeUsd != null ? <b>{money(beat.sizeUsd)}</b> : null}
+                    {size != null ? <b>{money(size)}</b> : null}
                     {beat.kind === "trade" && beat.mcapUsd !== null ? (
                       <small className="wire-mc">at {compactUsd(beat.mcapUsd)} MC</small>
                     ) : null}

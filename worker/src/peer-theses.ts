@@ -166,7 +166,11 @@ export async function readPeerTheses(
   // THE ONLY WAY OUT OF THIS MODULE. Everything above is a row shape; this is
   // the gate, and it is the same one the public feed publishes through.
   // Dollars never ride along: `public_book` is not decorated here, so a
-  // realized figure reaches another agent's prompt as a percentage only.
+  // realized figure reaches another agent's prompt as a percentage only — and,
+  // since a size is dollars too (thesis-policy.ts `sizeUsdg`), no post here
+  // carries a size or a sized head either. That includes the agent's OWN
+  // memory, which the orchestrator reads through this same gate so that memory
+  // and publication cannot disagree about what the agent said.
   const gate = (rows: ThesisRow[]) =>
     rows
       .map((r) => ({ ...r, slug: slugFor.get((r.agent_id ?? "").toLowerCase()) ?? null }))

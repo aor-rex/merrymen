@@ -4,7 +4,8 @@
  *
  * Possible only since beats are keyed on `postId` (beat.ts, contract C2): with
  * `at` in the key every row was "new" on every refresh. Now a key the page has
- * not seen is a post it has not shown.
+ * not seen is a post it has not shown — or, for a landed trade, a fill it has
+ * not shown (`freshKeyOf`).
  *
  * MODULE-LEVEL, NOT COMPONENT STATE, on purpose. Switching tabs unmounts the
  * Feed; component state would forget everything and coming back would slide in
@@ -48,16 +49,34 @@ export function markSeen(keys: readonly string[]): void {
 }
 
 /**
- * WHETHER A ROW ON SCREEN IS NEW. A post is new by its own key. A summary — a
- * watch line or a chorus — is not a post and has no key of its own worth
- * diffing (its id is the agent or the crowd, which is always "seen"), so it is
- * new when the member it leads with is: a fresh hold that joined a watch line
- * moves the line, exactly as it would have moved its own row.
+ * WHAT MAKES A ROW NEWS: its key — and, for a trade that landed, its key AT
+ * THE TIME of its newest fill.
+ *
+ * The reader groups identical copies into one row with a count (read-theses.ts
+ * has no `d.at` in its GROUP BY), so the day's second DCA leg — same reason,
+ * same size — arrives as the same row with `said` 2 and a newer `at`. By key
+ * alone it had been seen: the row jumped to the top as "now" and did not move.
+ * A new fill is news whether or not it has a row of its own, so a landed
+ * trade is new when its newest fill is. Everything else stays keyed on the
+ * post alone: a view re-said every five minutes, a refusal re-proposed every
+ * tick and an order re-sent while in flight are not new every time they recur.
+ */
+export function freshKeyOf(beat: Beat): string {
+  return beat.kind === "trade" && !beat.shadow && beat.outcome === "landed" ? `${beat.id}@${beat.atMs}` : beat.id;
+}
+
+/**
+ * WHETHER A ROW ON SCREEN IS NEW, against the keys `freshKeyOf` gave the read.
+ * A summary — a watch line or a chorus — is not a post and has no key of its
+ * own worth diffing (its id is the agent or the crowd, which is always
+ * "seen"), so it is new when the member it leads with is: a fresh hold that
+ * joined a watch line moves the line, exactly as it would have moved its own
+ * row.
  */
 export function isFresh(beat: Beat, fresh: ReadonlySet<string> | undefined): boolean {
   if (!fresh || fresh.size === 0) return false;
-  if (fresh.has(beat.id)) return true;
-  return (beat.kind === "watch" || beat.kind === "chorus") && fresh.has(beat.latest.id);
+  if (fresh.has(freshKeyOf(beat))) return true;
+  return (beat.kind === "watch" || beat.kind === "chorus") && fresh.has(freshKeyOf(beat.latest));
 }
 
 /** Tests only: a fresh page load. */

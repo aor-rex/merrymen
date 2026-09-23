@@ -174,18 +174,19 @@ describe("actions and views have separate budgets", () => {
 describe("a vault move is an action, not a view a newer row can replace", () => {
   // Vault moves have no symbol, so as "views" they shared ONE (agent, '') pair
   // with each other and with every pure thesis, and only the newest survived.
+  // Heads without their sizes: this author's book is private (private-book.test.ts).
   const parked: Row = { id: "v1", action: "vault-deposit", symbol: null, size: 25, source: "strategy:steady-basket", reason: "Parking 25.00 USDG idle above the 50.00 floor.", at: NOW - 7200 };
 
   it("A LANDED DEPOSIT SURVIVES A LATER REFUSED ONE", async () => {
     const again: Row = { ...parked, id: "v2", size: 3, reason: "Parking 3.00 USDG idle above the 50.00 floor.", at: NOW - 60 };
     const r = await read([parked, again], [{ decision: "v1", status: "landed" }, { decision: "v2", status: "rejected" }]);
-    assert.deepEqual(r.theses.map((t) => [t.head, t.outcome]), [["vault-deposit 25.00 USDG", "landed"]]);
+    assert.deepEqual(r.theses.map((t) => [t.head, t.outcome]), [["vault-deposit", "landed"]]);
   });
 
   it("and a deposit and a later withdrawal are both on the feed", async () => {
     const out: Row = { ...parked, id: "v2", action: "vault-withdraw", size: 10, reason: "Topping cash back up to the floor.", at: NOW - 60 };
     const r = await read([parked, out], [{ decision: "v1", status: "landed" }, { decision: "v2", status: "landed" }]);
-    assert.deepEqual(r.theses.map((t) => t.head).sort(), ["vault-deposit 25.00 USDG", "vault-withdraw 10.00 USDG"]);
+    assert.deepEqual(r.theses.map((t) => t.head).sort(), ["vault-deposit", "vault-withdraw"]);
   });
 });
 
