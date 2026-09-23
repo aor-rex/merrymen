@@ -18,6 +18,7 @@ import { Agent } from "./screens/Agent";
 import type { LiveMine, Thesis } from "./live";
 import { json, testDom } from "./test-dom";
 import { idleChat } from "./test-chat";
+import { DESK_TAPE_LIMIT } from "@/lib/desk-trades";
 
 let ui: ReturnType<typeof testDom>;
 const realFetch = globalThis.fetch;
@@ -78,14 +79,68 @@ it("fills show as rows, refusals fold into one line per reason, and the count is
 
 it("a full tape's counts are floors, because there may be more past its end", async () => {
   const ops = "past today's number of trades";
-  // A paper agent at its cap: the whole tape is this morning's refusals.
-  await render(Array.from({ length: 30 }, (_, i) => move({ at: now() - 60 * (i + 1), outcome: "refused", outcomeText: ops })));
+  // A paper agent at its cap: the whole tape is this morning's refusals, as
+  // many rows as the owner's tape read returns at most (desk-trades.ts).
+  await render(Array.from({ length: DESK_TAPE_LIMIT }, (_, i) => move({ at: now() - 60 * (i + 1), outcome: "refused", outcomeText: ops })));
   const tab = Array.from(ui.container.querySelectorAll("button")).find((b) => /^Trades · /.test(b.textContent ?? ""))!;
   assert.equal(tab.textContent, "Trades · 0+");
   await act(async () => { tab.click(); });
   const line = ui.container.querySelector(".desk-trades .swap-tried")!.textContent!;
   // Today, unless the test runs in the first half hour after midnight.
-  assert.match(line, /^Refused 30\+× (today|since .+): past today's number of trades$/);
+  assert.match(line, new RegExp(`^Refused ${DESK_TAPE_LIMIT}\\+× (today|since .+): past today's number of trades$`));
+});
+
+it("a tape one row short of the read's limit was not cut, so its count is exact", async () => {
+  // The floor is the READ's limit, not a copy of it the desk keeps: a desk that
+  // floored at a smaller number would call a whole tape partial.
+  await render(Array.from({ length: DESK_TAPE_LIMIT - 1 }, (_, i) => move({ at: now() - 60 * (i + 1), outcome: "refused", outcomeText: "ops" })));
+  const tab = Array.from(ui.container.querySelectorAll("button")).find((b) => /^Trades · /.test(b.textContent ?? ""))!;
+  assert.equal(tab.textContent, "Trades · 0");
+});
+
+it("a vault move or a transfer is not a swap of an unlabelled token, and is not a trade", async () => {
+  // The owner's tape carries every kind the worker records. A steady basket
+  // parks its idle cash in a vault and the chat can send USDG out; neither has
+  // a side or a coin, so each read "Swap · Token label unavailable" and was
+  // counted in "Trades · N". The profile reads only swaps and curve trades.
+  await render([
+    move({ at: now() - 60, action: "buy", symbol: "TSLA", head: "swap" }),
+    move({ at: now() - 120, action: null, symbol: null, head: "vault-deposit", sizeUsdg: 50, reason: null }),
+    move({ at: now() - 180, action: null, symbol: null, head: "transfer", sizeUsdg: 20, reason: null }),
+    move({ at: now() - 240, action: null, symbol: null, head: "vault-withdraw", sizeUsdg: 10, reason: null }),
+    // A refused vault move is still a refusal the owner is told about.
+    move({ at: now() - 300, action: null, symbol: null, head: "vault-deposit", outcome: "refused", outcomeText: "vault paused" }),
+  ]);
+  const tab = Array.from(ui.container.querySelectorAll("button")).find((b) => /^Trades · /.test(b.textContent ?? ""))!;
+  assert.equal(tab.textContent, "Trades · 1", "one buy; the moves of cash are not trades");
+  await act(async () => { tab.click(); });
+  const table = ui.container.querySelector(".desk-trades .swaps")!;
+  const lines = [...table.querySelectorAll(".swap-row")].map((r) => r.querySelector(".swap-pill")!.textContent + " " + (r.querySelector(".swap-tried")?.textContent ?? r.querySelector(".swap-coin strong")!.textContent));
+  assert.deepEqual(lines, [
+    "Buy TSLA",
+    "Vault Moved to a vault",
+    "Transfer Sent out of the account",
+    "Vault Taken back from a vault",
+    "Tried Refused 1× today: vault paused",
+  ]);
+  assert.doesNotMatch(table.textContent!, /Token label unavailable/);
+  assert.match(table.textContent!, /\$50\.00/, "the owner still sees how much moved");
+});
+
+it("the desk names the coin and prints the owner's realized dollars on a sell", async () => {
+  // D3: the owner's tape already reads the coin's name and the fill's realized
+  // P&L; mineOf carries them onto each move.
+  await render([
+    { ...move({ at: now() - 60, action: "sell", symbol: "T3139F043B88" }), displayName: "JUGGERNAUT", realizedPnlUsdg: 1.25 } as Thesis,
+    { ...move({ at: now() - 120, action: "sell", symbol: "CASHCAT" }), realizedPnlUsdg: -0.5 } as Thesis,
+  ]);
+  const tab = Array.from(ui.container.querySelectorAll("button")).find((b) => /^Trades · /.test(b.textContent ?? ""))!;
+  await act(async () => { tab.click(); });
+  const rows = [...ui.container.querySelectorAll(".desk-trades .swap-row")];
+  assert.match(rows[0]!.textContent!, /JUGGERNAUT/, "the coin's own name beside its symbol");
+  assert.equal(rows[0]!.querySelector(".swap-pnl")?.textContent, "+$1.25");
+  assert.equal(rows[1]!.querySelector(".swap-pnl")?.textContent, "−$0.50");
+  assert.equal(rows[1]!.querySelector(".swap-pnl")?.className, "swap-pnl down");
 });
 
 it("an empty tape says so", async () => {

@@ -3,7 +3,7 @@ import { Coin, Empty } from "./ui";
 import { elapsed, useNow } from "./clock";
 import { dayLabel, fullDateTime } from "@/lib/format";
 import type { LiveToken } from "./live";
-import { pnlChip, sizeText, swapItems, triedLine, type SwapRow, type SwapTab } from "./swaps";
+import { OP_WORDS, pnlChip, sizeText, swapItems, triedLine, type SwapRow, type SwapTab } from "./swaps";
 
 const TABS: { id: SwapTab; label: string; empty: string }[] = [
   { id: "all", label: "All", empty: "" },
@@ -93,9 +93,32 @@ function SwapLine({
   nowMs: number;
   onToken?: (id: string) => void;
 }) {
+  const size = sizeText(row, showMoney);
+  if (row.op !== "trade") {
+    // A MOVE OF CASH, NOT A SWAP: a vault deposit or withdrawal, or USDG sent
+    // out. It has no coin and no side, and read "Swap · Token label
+    // unavailable" when it was drawn as one. It says what it did instead.
+    const words = OP_WORDS[row.op];
+    return (
+      <li className="swap-row is-move">
+        <span className="swap-pill move">{words.pill}</span>
+        <span className="swap-token">
+          <span className="swap-coin">
+            <strong>{words.line}</strong>
+            {row.why && <small className="swap-why" title={row.why}>{row.why}</small>}
+          </span>
+        </span>
+        <span className="swap-figures">{size && <strong>{size}</strong>}</span>
+        <span className="swap-meta">
+          {row.status === "pending" && <em>Pending</em>}
+          {row.paper && <em>Paper</em>}
+          <Age at={row.at} nowMs={nowMs} />
+        </span>
+      </li>
+    );
+  }
   const token = row.symbol ? tokens.find((t) => t.symbol.toUpperCase() === row.symbol!.toUpperCase()) : undefined;
   const name = row.displayName ?? token?.name ?? null;
-  const size = sizeText(row, showMoney);
   const chip = pnlChip(row, showMoney);
   const coin = (
     <>

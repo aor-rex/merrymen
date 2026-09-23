@@ -21,14 +21,49 @@
  *    from the owner is the one thing this may not do — just not thirty times.
  */
 import type { ProfileTrade } from "@/lib/profile-trades";
+import { DESK_TAPE_LIMIT } from "@/lib/desk-trades";
 import { pctBps, usd } from "@/lib/format";
 import type { Thesis } from "./live";
 
 export type SwapSide = "buy" | "sell" | null;
 export type SwapStatus = "filled" | "pending" | "refused" | "reverted";
 
+/**
+ * WHAT KIND OF OPERATION A ROW IS. Only a trade is a swap.
+ *
+ * The owner's tape carries every kind the worker records — the default steady
+ * basket parks idle cash in a vault and takes it back, and the chat can send
+ * USDG out — and none of those has a side or a coin. Mapped as trades, each
+ * read "Swap · Token label unavailable" and was counted in "Trades · N". Each
+ * now says what it did, and is not a trade.
+ */
+export type SwapOp = "trade" | "vault-in" | "vault-out" | "transfer" | "other";
+
+/** The worker's trade kinds — the intents that buy or sell something. */
+const TRADE_KINDS: ReadonlySet<string> = new Set(["swap", "curve-trade", "equity-order"]);
+
+/** A tape row's kind (`trades.kind`, carried as `Thesis.head`) as an operation. */
+export function opOfKind(kind: string | null | undefined): SwapOp {
+  if (typeof kind !== "string") return "other";
+  if (TRADE_KINDS.has(kind)) return "trade";
+  if (kind === "vault-deposit") return "vault-in";
+  if (kind === "vault-withdraw") return "vault-out";
+  if (kind === "transfer") return "transfer";
+  return "other";
+}
+
+/** How a row that is not a trade is named: its pill, and the line in place of a coin. */
+export const OP_WORDS: Record<Exclude<SwapOp, "trade">, { pill: string; line: string }> = {
+  "vault-in": { pill: "Vault", line: "Moved to a vault" },
+  "vault-out": { pill: "Vault", line: "Taken back from a vault" },
+  transfer: { pill: "Transfer", line: "Sent out of the account" },
+  other: { pill: "Other", line: "Not a trade" },
+};
+
 export interface SwapRow {
   id: string;
+  /** A trade, or a move of cash that is not one — see SwapOp. */
+  op: SwapOp;
   /** Null when nothing recorded which way it went — a "Swap", never a guess. */
   side: SwapSide;
   status: SwapStatus;
@@ -46,10 +81,11 @@ export interface SwapRow {
   why: string | null;
 }
 
-/** From the public profile's fills (profile-trades.ts): every one filled. */
+/** From the public profile's fills (profile-trades.ts): every one filled, every one a trade. */
 export function swapRowsOfProfile(trades: readonly ProfileTrade[]): SwapRow[] {
   return trades.map((t) => ({
     id: t.id,
+    op: "trade",
     side: t.action === "swap" ? null : t.action,
     status: "filled",
     symbol: t.symbol,
@@ -65,30 +101,46 @@ export function swapRowsOfProfile(trades: readonly ProfileTrade[]): SwapRow[] {
 }
 
 /**
+ * The fields the owner's tape carries beside a Thesis (D3): live.ts mineOf maps
+ * them from the columns desk-trades.ts already selects. Optional, because a
+ * feed from before them sends none — and absent is then "not read", never a
+ * zero or an empty name.
+ */
+type DeskMove = Thesis & { displayName?: string | null; realizedPnlUsdg?: number | null; txHash?: string | null };
+
+/**
  * From the owner's own tape (live.ts `mine.moves`, from /api/feed).
  *
- * The tape carries no realized P&L today, so a desk sell shows no chip rather
- * than a zero; the day the tape carries it, this is the one line that maps it.
+ * The coin's own name and a sell's realized DOLLARS travel when the tape
+ * carries them. Not a percentage: the tape holds no cost, and the order's size
+ * is what was asked for rather than what the fill cost, so a % made from it
+ * would be invented — the chip shows the dollars alone (see pnlChip).
  */
 export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
-  return moves.map((m, i) => {
+  return moves.map((raw, i) => {
+    const m = raw as DeskMove;
     const status: SwapStatus =
       m.outcome === "landed" ? "filled"
         : m.outcome === "refused" ? "refused"
         : m.outcome === "reverted" ? "reverted"
         : "pending";
     const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : null;
+    const side: SwapSide = m.action === "buy" || m.action === "sell" ? m.action : null;
+    const realized = typeof m.realizedPnlUsdg === "number" && Number.isFinite(m.realizedPnlUsdg) ? m.realizedPnlUsdg : null;
     return {
       id: `${at ?? "t"}-${i}`,
-      side: m.action === "buy" || m.action === "sell" ? m.action : null,
+      op: opOfKind(m.head),
+      side,
       status,
       symbol: m.symbol,
-      displayName: null,
+      displayName: admitName(m.displayName, m.symbol),
       at,
       paper: m.paper,
       sizeUsdg: m.sizeUsdg,
       realizedBps: null,
-      realizedUsd: null,
+      // A sell that filled is the only row that realized anything; a buy's
+      // stored zero is "nothing to realize", not a result.
+      realizedUsd: side === "sell" && status === "filled" ? realized : null,
       reason: status === "refused" || status === "reverted" ? m.outcomeText ?? null : null,
       why: m.reason ?? null,
     };
@@ -96,17 +148,30 @@ export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
 }
 
 /**
- * The P&L chip: on a SELL only, its return always, its dollars only where
- * dollars may be shown. Null when there is nothing read to put on it — a buy,
- * or a sell whose cost basis was never evidenced — and then no chip is drawn.
+ * A coin names itself on chain, so its name is admitted rather than echoed —
+ * the same rule profile-trades.ts applies to the public list: printable, short,
+ * not an address, and not the symbol again.
+ */
+function admitName(raw: unknown, symbol: string | null): string | null {
+  const named = typeof raw === "string" ? raw.trim() : "";
+  if (!named || named.length > 64 || /[\u0000-\u001f\u007f]/.test(named) || /^0x/i.test(named)) return null;
+  return symbol && named.toUpperCase() === symbol.toUpperCase() ? null : named;
+}
+
+/**
+ * The P&L chip: on a SELL only, its return when it was read, its dollars only
+ * where dollars may be shown. Null when there is nothing read to put on it — a
+ * buy, or a sell whose cost basis was never evidenced — and then no chip is
+ * drawn. The owner's desk has the dollars and no cost to make a % from, so its
+ * chip is the dollars alone.
  */
 export function pnlChip(r: SwapRow, showMoney: boolean): { text: string; tone: "up" | "down" } | null {
-  if (r.side !== "sell" || r.realizedBps === null || !Number.isFinite(r.realizedBps)) return null;
-  const pct = pctBps(r.realizedBps);
-  const usdPart = showMoney && r.realizedUsd !== null && Number.isFinite(r.realizedUsd)
-    ? ` · ${r.realizedUsd >= 0 ? "+" : "−"}${usd(Math.abs(r.realizedUsd))}`
-    : "";
-  return { text: `${pct}${usdPart}`, tone: r.realizedBps < 0 ? "down" : "up" };
+  if (r.side !== "sell") return null;
+  const bps = r.realizedBps !== null && Number.isFinite(r.realizedBps) ? r.realizedBps : null;
+  const dollars = showMoney && r.realizedUsd !== null && Number.isFinite(r.realizedUsd) ? r.realizedUsd : null;
+  const usdText = dollars === null ? null : `${dollars >= 0 ? "+" : "−"}${usd(Math.abs(dollars))}`;
+  if (bps === null) return usdText === null ? null : { text: usdText, tone: dollars! < 0 ? "down" : "up" };
+  return { text: `${pctBps(bps)}${usdText === null ? "" : ` · ${usdText}`}`, tone: bps < 0 ? "down" : "up" };
 }
 
 /** A size, only where dollars may be shown, and never a measured zero. */
@@ -115,11 +180,12 @@ export function sizeText(r: SwapRow, showMoney: boolean): string | null {
 }
 
 /**
- * How many rows the owner's tape holds at most — readDeskTrades' own default
- * (desk-trades.ts). A tape that came back this full may have been cut at its
- * old end, so a count reaching back to that end is a FLOOR and says "12+×".
+ * How many rows the owner's tape holds at most — readDeskTrades' own limit,
+ * read from desk-trades.ts rather than copied. A tape that came back this full
+ * may have been cut at its old end, so a count reaching back to that end is a
+ * FLOOR and says "12+×".
  */
-export const DESK_TAPE_ROWS = 30;
+export const DESK_TAPE_ROWS = DESK_TAPE_LIMIT;
 
 export type SwapTab = "all" | "buys" | "sells";
 
@@ -140,8 +206,11 @@ export type SwapItem =
       cutAt: number | null;
     };
 
-/** A fill, or an order still on its way — what "Trades · N" counts. */
-export const isTrade = (r: SwapRow) => r.status === "filled" || r.status === "pending";
+/**
+ * A fill, or an order still on its way — what "Trades · N" counts. A trade
+ * KIND only: a vault move or a transfer that landed is not a trade.
+ */
+export const isTrade = (r: SwapRow) => r.op === "trade" && (r.status === "filled" || r.status === "pending");
 
 /**
  * The rows one tab shows, newest first, with every refusal of one reason
@@ -156,7 +225,7 @@ export function swapItems(rows: readonly SwapRow[], tab: SwapTab, opts: { tapeFu
     for (const r of rows) if (r.at !== null && (cutAt === null || r.at < cutAt)) cutAt = r.at;
   }
   const inTab = rows
-    .filter((r) => (tab === "buys" ? r.side === "buy" : tab === "sells" ? r.side === "sell" : true))
+    .filter((r) => (tab === "all" ? true : r.op === "trade" && r.side === (tab === "buys" ? "buy" : "sell")))
     .slice()
     .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity));
   const out: SwapItem[] = [];
