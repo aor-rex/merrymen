@@ -132,7 +132,7 @@ import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock, quietReviewRow } from "./market-review";
-import { ChainCoinNames, makeDecisionNamer } from "./decision-name";
+import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -679,6 +679,9 @@ async function main() {
     const current=active;
     void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape()).then(result=>{
       if (autoTrenchContext===context) autoTrench=result;
+      // The held coins' names are read now, minutes before any exit needs one:
+      // a decision never waits for the chain (decision-name.ts).
+      if (autoTrenchContext===context) warmHeldNames(coinNames, result);
     }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
   }
   const trenchTapeReader = new TrenchTapeReader();
@@ -6016,8 +6019,9 @@ async function main() {
    * the one this agent's buy used, else the coin's own contract — the one
    * source a redeploy does not wipe. See decision-name.ts. Mainnet, like
    * discovery's own reads of these tokens: a paper Trencher trades mainnet
-   * coins too. Bounded and cached there, so an exit waits at most once per
-   * coin for a word nobody prices against.
+   * coins too. NEVER WAITED FOR: a decision takes what is already known and
+   * the read names the next one, so no exit sits behind a word nobody prices
+   * against. Discovery starts the reads for held coins (warmHeldNames).
    */
   const coinNames = new ChainCoinNames((address) =>
     mainnetClient().readContract({ address, abi: erc20Abi, functionName: "symbol" }),
