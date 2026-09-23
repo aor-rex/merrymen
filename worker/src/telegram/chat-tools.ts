@@ -22,6 +22,7 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { PublicClient } from "viem";
 
 import {
+  CASH,
   STOCK_TOKENS,
   conceptsFor,
   liveBlockerText,
@@ -36,6 +37,7 @@ import type { ResolvedConfig } from "../settings";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label";
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
+import { carriedDecisionsFrom, overlayHistory } from "./history-overlay";
 import { agentEpoch, netContributions, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
@@ -78,13 +80,18 @@ function str(v: unknown, max = 64): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
 
-/** Open the ledger and resolve this owner's agent, or say why not. */
+/**
+ * Open the ledger and resolve this owner's agent, or say why not. The trades
+ * and decisions from before a hosted redeploy are laid over it
+ * (history-overlay.ts), so every lookup here sees the whole tape.
+ */
 function withLedger<T>(ctx: ToolContext, fn: (db: DatabaseSync, who: string) => T, none: T): T {
   const db = openRO();
   if (!db) return none;
   try {
     const who = resolveAgent(db, ctx.status.agentId);
     if (!who) return none;
+    overlayHistory(db, who);
     return fn(db, who);
   } finally {
     db.close();
@@ -97,6 +104,7 @@ async function withLedgerAsync(ctx: ToolContext, fn: (db: DatabaseSync, who: str
   try {
     const who = resolveAgent(db, ctx.status.agentId);
     if (!who) return none;
+    overlayHistory(db, who);
     return await fn(db, who);
   } finally {
     db.close();
@@ -105,22 +113,58 @@ async function withLedgerAsync(ctx: ToolContext, fn: (db: DatabaseSync, who: str
 
 const NO_AGENT = "No agent is set up yet, so there is nothing on record.";
 
+/** The cash token, lowercased: the leg of a trade that is not the coin. */
+const USDG_L = CASH.USDG.toLowerCase();
+
+/** One number — the column `t` of the first row — or null. Never throws. */
+function scalar(db: DatabaseSync, sql: string, ...args: SQLInputValue[]): number | null {
+  try {
+    const r = db.prepare(sql).get(...args) as { t: number | null } | undefined;
+    return typeof r?.t === "number" ? r.t : null;
+  } catch {
+    return null;
+  }
+}
+
+const EARLIER = "Anything earlier may have happened but isn't in what I can read.";
+
 /**
- * Where my records start. A hosted agent's ledger is rebuilt on every
+ * Where my trade records start. A hosted agent's ledger is rebuilt on every
  * redeploy, so "I have no trades before X" must never read as "there were no
  * trades before X".
+ *
+ * PER KIND. Trades from before a redeploy are carried with fills and refusals
+ * capped separately (history-files.ts), so each kind is complete only from its
+ * own first row on — the oldest carried fill says nothing about how far back
+ * the refusals reach.
  */
-function horizon(db: DatabaseSync, who: string): string {
-  try {
-    const t = db.prepare("SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ?").get(who) as { t: number | null } | undefined;
-    const e = db.prepare("SELECT MIN(at) AS t FROM equity WHERE agent_id = ?").get(who) as { t: number | null } | undefined;
-    const first = [t?.t, e?.t].filter((x): x is number => typeof x === "number").sort((a, b) => a - b)[0];
-    return first
-      ? `My records here start ${when(first)}. Anything earlier may have happened but isn't in what I can read.`
-      : "I have no records yet.";
-  } catch {
-    return "";
-  }
+function horizon(db: DatabaseSync, who: string, kind: "filled" | "refused" | "all" = "all"): string {
+  const fills = scalar(db, "SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND status <> 'rejected'", who);
+  const refusals = scalar(db, "SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND status = 'rejected'", who);
+  const readings = scalar(db, "SELECT MIN(at) AS t FROM equity WHERE agent_id = ?", who);
+  let first = kind === "filled" ? fills : kind === "refused" ? refusals : fills !== null && refusals !== null ? Math.max(fills, refusals) : (fills ?? refusals);
+  // My own readings start when this ledger did, and from then on it holds every kind.
+  if (readings !== null && (first === null || readings < first)) first = readings;
+  return first ? `My trade records here start ${when(first)}. ${EARLIER}` : "I have no records yet.";
+}
+
+/** Where my log starts. The log is never carried over a redeploy. */
+function logHorizon(db: DatabaseSync, who: string): string {
+  const first = scalar(db, "SELECT MIN(created_at) AS t FROM events WHERE agent_id = ?", who);
+  return first ? `My log here starts ${when(first)} — it restarts when I'm redeployed. ${EARLIER}` : "I have no log yet.";
+}
+
+/**
+ * Where my decisions start. Before a redeploy only the newest decisions and
+ * the ones behind trades I made are carried, so older ones are not "none".
+ */
+function decisionHorizon(db: DatabaseSync, who: string): string {
+  const local = scalar(db, "SELECT MIN(at) AS t FROM main.decisions WHERE agent_id = ?", who);
+  const carried = carriedDecisionsFrom(db);
+  const first = carried !== null && (local === null || carried < local) ? carried : local;
+  if (!first) return "I have no decisions on record yet.";
+  const older = carried !== null ? " Before that I only kept the decisions behind trades I made." : "";
+  return `My decision records here start ${when(first)}.${older} ${EARLIER}`;
 }
 
 /**
@@ -197,9 +241,15 @@ const agentStatus: ChatTool = {
         }
 
         try {
+          // COUNTED ON THIS LEDGER ONLY (main.trades). Refusals from before a
+          // redeploy are carried capped at the newest hundred, so a count over
+          // them would be the cap, not the count. And when the ledger is younger
+          // than a day, the window says so.
+          const start = scalar(db, "SELECT MIN(created_at) AS t FROM main.trades WHERE agent_id = ?", who);
+          const young = start === null || start > ctx.now - 86_400;
           const refused = db
             .prepare(
-              `SELECT reject_rule AS rule, COUNT(*) AS n, MAX(created_at) AS last FROM trades
+              `SELECT reject_rule AS rule, COUNT(*) AS n, MAX(created_at) AS last FROM main.trades
                 WHERE agent_id = ? AND status IN ('rejected','reverted') AND created_at > ?
                 GROUP BY reject_rule ORDER BY n DESC LIMIT 5`,
             )
@@ -207,7 +257,22 @@ const agentStatus: ChatTool = {
           for (const r of refused) {
             const label = rejectRuleLabel(r.rule) ?? r.rule ?? "refused";
             const fix = rejectRuleRemedy(r.rule);
-            lines.push(`Blocked ${r.n}× in the last day: ${label}${fix ? ` — fix: ${fix}` : ""}.`);
+            lines.push(`Blocked ${r.n}× ${young ? `since ${when(start!)}` : "in the last day"}: ${label}${fix ? ` — fix: ${fix}` : ""}.`);
+          }
+          // And what blocked me just before a redeploy, from the carried rows
+          // (negative ids, history-overlay.ts) — as a sample, never a count.
+          if (young) {
+            const before = db
+              .prepare(
+                `SELECT reject_rule AS rule, COUNT(*) AS n FROM trades
+                  WHERE agent_id = ? AND id < 0 AND status IN ('rejected','reverted') AND created_at > ?
+                  GROUP BY reject_rule ORDER BY n DESC LIMIT 3`,
+              )
+              .all(who, ctx.now - 86_400) as { rule: string | null; n: number }[];
+            if (before.length) {
+              const kinds = before.map((r) => `${rejectRuleLabel(r.rule) ?? r.rule ?? "refused"} (${r.n})`).join("; ");
+              lines.push(`Before my last restart, the newest refusals I kept were: ${kinds}. That is a sample, not a full count.`);
+            }
           }
         } catch {
           /* no trades table yet */
@@ -260,7 +325,7 @@ const listTrades: ChatTool = {
         const head = views.length ? views.map((v) => tradeViewLine(v, false)).join("\n") : "No trades match.";
         const copies = views.some((v) => v.copy) ? "\nRows marked 'after a restart' were re-recorded when I restarted; the trade itself happened on chain." : "";
         const trustNote = views.some((v) => !v.trusted && v.token) ? "\nLaunchpad coin names are chosen by whoever launched them." : "";
-        return cap(`${head}${copies}${trustNote}\n${horizon(db, who)}`);
+        return cap(`${head}${copies}${trustNote}\n${horizon(db, who, filter)}`);
       },
       NO_AGENT,
     );
@@ -317,24 +382,55 @@ const pnlBreakdown: ChatTool = {
           } else {
             lines.push("No money was put in or taken out in this period, so the change is all trading and price moves.");
           }
+          // Account-value readings are this ledger's own, and a hosted redeploy
+          // restarts them; trades from before one are carried. Said only when
+          // the trades below really do reach further back than the readings,
+          // so the two are never read as covering the same stretch.
+          const firstTrade = scalar(
+            db,
+            "SELECT MIN(created_at) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','paper')",
+            who,
+            since,
+          );
+          if (open.at > since + 3600 && firstTrade !== null && firstTrade < open.at - 3600) {
+            lines.push(`My account-value readings only go back to ${when(open.at)}, so the change above starts there, not at the start of the period. The trades below go back further, to ${when(firstTrade)}.`);
+          }
         } else if (open && close) {
           lines.push("I switched between practice and real money in this period, so the two values can't be compared.");
         } else {
           lines.push("I don't have enough account-value history for this period.");
         }
 
-        const views = await loadTradeViews(db, who, { ...lookupOpts(ctx), filter: "filled", since, limit: 50 });
-        // Real money and practice are different money: two buckets, never summed.
+        // SUMMED IN SQL, by coin. A list capped at a page of rows undercounted
+        // any agent that trades more than that — and 30 days of carried history
+        // is more than that. Real money and practice are different money: two
+        // buckets, never summed.
         const real = new Map<string, { n: number; pnl: number }>();
         const practice = new Map<string, { n: number; pnl: number }>();
-        for (const v of views) {
-          if (v.side !== "sell" || v.realized === null) continue;
-          const m = v.status === "landed" ? real : v.status === "paper" ? practice : null;
-          if (!m) continue;
-          const e = m.get(v.label) ?? { n: 0, pnl: 0 };
-          e.n += 1;
-          e.pnl += v.realized;
-          m.set(v.label, e);
+        let closed: { token: string | null; status: string; n: number; pnl: number }[] = [];
+        try {
+          closed = db
+            .prepare(
+              `SELECT lower(CASE WHEN lower(buy_token) = ? THEN sell_token ELSE buy_token END) AS token, status,
+                      COUNT(*) AS n, SUM(realized_pnl_usdg) AS pnl
+                 FROM trades
+                WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','paper') AND realized_pnl_usdg IS NOT NULL
+                  AND (fill_side = 'sell' OR (fill_side IS NULL AND lower(buy_token) = ?))
+                GROUP BY 1, status`,
+            )
+            .all(USDG_L, who, since, USDG_L) as typeof closed;
+        } catch {
+          /* older ledger */
+        }
+        for (const c of closed) {
+          const m = c.status === "landed" ? real : practice;
+          const name = c.token
+            ? labelText(await tokenLabel(db, who, c.token, { customTokens: ctx.cfg.customTokens, own: ctx.book, client: ctx.client }))
+            : "a coin I can't name";
+          const e = m.get(name) ?? { n: 0, pnl: 0 };
+          e.n += Number(c.n);
+          e.pnl += Number(c.pnl);
+          m.set(name, e);
         }
         const emit = (title: string, m: Map<string, { n: number; pnl: number }>) => {
           lines.push(title);
@@ -345,7 +441,14 @@ const pnlBreakdown: ChatTool = {
         if (real.size) emit("Closed trades (real money):", real);
         if (practice.size) emit("Closed practice trades (no real money):", practice);
         if (!real.size && !practice.size) lines.push("No sales with a known cost closed in this period.");
-        const buys = views.filter((v) => v.side === "buy" && (v.status === "landed" || v.status === "paper")).length;
+        const buys = scalar(
+          db,
+          `SELECT COUNT(*) AS t FROM trades WHERE agent_id = ? AND created_at >= ? AND status IN ('landed','paper')
+              AND (fill_side = 'buy' OR (fill_side IS NULL AND lower(sell_token) = ?))`,
+          who,
+          since,
+          USDG_L,
+        );
         if (buys) lines.push(`Bought ${buys} time${buys === 1 ? "" : "s"} in this period (buys don't book a result until sold).`);
 
         try {
@@ -453,7 +556,7 @@ const recentActivity: ChatTool = {
         } catch {
           return "No log yet.";
         }
-        if (!rows.length) return `Nothing logged in that window.\n${horizon(db, who)}`;
+        if (!rows.length) return `Nothing logged in that window.\n${logHorizon(db, who)}`;
         return cap(rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${r.message.slice(0, 220)}`).join("\n"));
       },
       NO_AGENT,
@@ -496,7 +599,7 @@ const decisionHistory: ChatTool = {
         } catch {
           return "No decisions on record.";
         }
-        if (!rows.length) return `No decisions${coin ? ` about ${coin}` : ""} on record.\n${horizon(db, who)}`;
+        if (!rows.length) return `No decisions${coin ? ` about ${coin}` : ""} on record.\n${decisionHorizon(db, who)}`;
         const out = rows.map((d) => {
           const name = d.display_name || (d.symbol && !/^T[0-9A-F]{11}$/.test(d.symbol) ? d.symbol : null) || "a coin";
           const act = d.action ?? "no action";
@@ -532,9 +635,19 @@ function candidates(db: DatabaseSync, who: string, query: string, ctx: ToolConte
        FROM trades t JOIN decisions d ON d.id = t.decision_id AND d.agent_id = t.agent_id
       WHERE t.agent_id = ? AND (UPPER(d.symbol) = ? OR UPPER(d.display_name) = ?) AND t.buy_token IS NOT NULL AND t.sell_token IS NOT NULL LIMIT 5`,
     "my trades",
-    "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    USDG_L,
     who,
     S,
+    S,
+  );
+  // The symbol read off a fill's receipt — the name /trades shows for a coin
+  // carried from before a redeploy, so it must find the coin too.
+  add(
+    `SELECT DISTINCT lower(CASE WHEN lower(buy_token) = ? THEN sell_token ELSE buy_token END) AS a FROM trades
+      WHERE agent_id = ? AND UPPER(fill_symbol) = ? AND buy_token IS NOT NULL AND sell_token IS NOT NULL LIMIT 5`,
+    "my trades",
+    USDG_L,
+    who,
     S,
   );
   add("SELECT address AS a FROM discovered_pools WHERE UPPER(symbol) = ? ORDER BY first_seen DESC LIMIT 5", "coins I've spotted on the market", S);
@@ -607,15 +720,31 @@ const tokenReport: ChatTool = {
           /* no discovery table */
         }
 
-        const views = await loadTradeViews(db, who, { ...lookupOpts(ctx), filter: "filled", token: a, limit: 15 });
-        if (views.length) {
-          const bought = views.filter((v) => v.side === "buy").reduce((s, v) => s + (v.usdg ?? 0), 0);
-          const sold = views.filter((v) => v.side === "sell").reduce((s, v) => s + (v.usdg ?? 0), 0);
-          const pnl = views.reduce((s, v) => s + (v.side === "sell" && v.realized !== null ? v.realized : 0), 0);
-          lines.push(`My trades in it: ${views.length} (bought ${dollars(bought)}, sold ${dollars(sold)}, closed result ${pnl >= 0 ? "+" : "−"}${dollars(Math.abs(pnl))}).`);
-        } else {
-          lines.push("I haven't traded it (in what I can read).");
+        // SUMMED IN SQL, real money and practice apart: a coin traded eighty
+        // times is not "15 trades" because a list stopped at a page.
+        type Totals = { status: string; n: number; bought: number | null; sold: number | null; pnl: number | null };
+        let totals: Totals[] = [];
+        try {
+          totals = db
+            .prepare(
+              `SELECT status, COUNT(*) AS n,
+                      SUM(CASE WHEN fill_side = 'buy' OR (fill_side IS NULL AND lower(sell_token) = ?) THEN COALESCE(fill_cash_usdg, amount_usdg) END) AS bought,
+                      SUM(CASE WHEN fill_side = 'sell' OR (fill_side IS NULL AND lower(buy_token) = ?) THEN COALESCE(fill_cash_usdg, amount_usdg) END) AS sold,
+                      SUM(CASE WHEN fill_side = 'sell' OR (fill_side IS NULL AND lower(buy_token) = ?) THEN realized_pnl_usdg END) AS pnl
+                 FROM trades WHERE agent_id = ? AND status IN ('landed','paper') AND (lower(buy_token) = ? OR lower(sell_token) = ?)
+                GROUP BY status`,
+            )
+            .all(USDG_L, USDG_L, USDG_L, who, a, a) as Totals[];
+        } catch {
+          /* older ledger */
         }
+        for (const t of totals) {
+          const pnl = Number(t.pnl ?? 0);
+          lines.push(
+            `${t.status === "paper" ? "Practice trades (no real money)" : "My trades"} in it: ${t.n} (bought ${dollars(Number(t.bought ?? 0))}, sold ${dollars(Number(t.sold ?? 0))}, closed result ${pnl >= 0 ? "+" : "−"}${dollars(Math.abs(pnl))}).`,
+          );
+        }
+        if (!totals.length) lines.push("I haven't traded it (in what I can read).");
 
         try {
           const reasons = db
