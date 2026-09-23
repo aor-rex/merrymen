@@ -5,7 +5,7 @@ import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
 import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt } from "../order-follow";
-import type { ChatContext, ChatController } from "../chat-controller";
+import type { ChatContext, ChatController, ConfirmScope } from "../chat-controller";
 import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
 import type { OrderReceipt } from "@/lib/order-state";
 import {
@@ -251,8 +251,13 @@ export function Agent({
    * so closing the dock mid-order lost the answer. The controller keeps the
    * order and its deadline and follows it whatever the screens do — see
    * order-follow.ts for the deadline and chat-controller.ts for the resume.
+   *
+   * AND FOR THE OWNER WHO TAPPED. Everything below changes the conversation
+   * through `on`, the controller's scope for this one confirm: if the owner
+   * changes on this browser while the order is being placed, what it would
+   * have said, followed or cleared goes nowhere, rather than into the next
+   * owner's thread (chat-controller.ts `confirm`).
    */
-  const followOrder = (id: string, expiresInMs: number | null) => chat.followOrder(id, expiresInMs);
 
   /**
    * AN ORDER WHOSE PLACING NEVER ANSWERED IS NOT A REFUSAL.
@@ -263,20 +268,20 @@ export function Agent({
    * open order is followed to its answer like any other; otherwise the owner
    * is told plainly that it is unknown, and where to look.
    */
-  const orderLost = async () => {
-    setPending(null);
-    chat.say({ role: "owner", text: "✓ Confirmed" });
+  const orderLost = async (on: ConfirmScope) => {
+    on.setProposal(null);
+    on.say({ role: "owner", text: "✓ Confirmed" });
     const open = await fetchOpenOrder();
     if (open) {
-      chat.say({
+      on.say({
         role: "agent",
         text: "I lost the line while placing that, but there is an order open on my key now — I'll tell you how it ends.",
         order: { id: open },
       });
-      followOrder(open, null);
+      on.followOrder(open, null);
       return;
     }
-    chat.say({
+    on.say({
       role: "agent",
       text: "I couldn't confirm that order reached my key — the connection dropped before I heard back. Check your trades before asking again.",
     });
@@ -286,7 +291,7 @@ export function Agent({
    * Place one order through the ONE channel orders take, and say what is true
    * the moment it exists — placed, not filled — then follow it to its answer.
    */
-  const placeOrder = async (payload: unknown, words: (duplicate: boolean) => string) => {
+  const placeOrder = async (on: ConfirmScope, payload: unknown, words: (duplicate: boolean) => string) => {
     const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresAt?: number; expiresInMs?: number }>("/api/orders", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -294,7 +299,7 @@ export function Agent({
     });
     // A 200 is a row that exists, but one whose id could not be read cannot be
     // followed — so it is looked for, exactly like an answer that was lost.
-    if (!placed || (placed.ok && typeof placed.body?.id !== "string")) return orderLost();
+    if (!placed || (placed.ok && typeof placed.body?.id !== "string")) return orderLost(on);
     if (!placed.ok) throw new Error(placed.body?.error ?? `that was refused (${placed.status})`);
     const body = placed.body!;
     // THE SERVER'S OWN TIME FOR THE PLACEMENT goes on the line that says it,
@@ -302,10 +307,10 @@ export function Agent({
     // from the two, on the ledger's clock, so a browser minutes off cannot make
     // its fill a second line (chat-thread.ts lifeOf).
     const serverAt = serverPlacedAt(body);
-    chat.say({ role: "owner", text: "✓ Confirmed" });
-    chat.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id!, ...(serverAt !== null ? { serverPlacedAt: serverAt } : {}) } });
-    setPending(null);
-    followOrder(body.id!, followWindowMs(body));
+    on.say({ role: "owner", text: "✓ Confirmed" });
+    on.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id!, ...(serverAt !== null ? { serverPlacedAt: serverAt } : {}) } });
+    on.setProposal(null);
+    on.followOrder(body.id!, followWindowMs(body));
   };
 
   /**
@@ -315,7 +320,7 @@ export function Agent({
    * authenticated route the buttons already call. Nothing here is a new way
    * into the app — it is the existing way, reached by asking.
    */
-  const confirm = () => chat.confirm(async (proposal) => {
+  const confirm = () => chat.confirm(async (proposal, on) => {
     const cmd = commandFor(proposal.id);
     if (!cmd) return;
     try {
@@ -345,7 +350,7 @@ export function Agent({
         // A lookup places nothing, so a lost answer costs only the asking —
         // and the card stays for exactly that.
         if (!found) {
-          chat.say({ role: "agent", text: "I couldn't look that coin up — the connection dropped before I heard back, and nothing was placed. Try again." });
+          on.say({ role: "agent", text: "I couldn't look that coin up — the connection dropped before I heard back, and nothing was placed. Try again." });
           return;
         }
         const out = found.body;
@@ -363,16 +368,16 @@ export function Agent({
           // so it gets the same follow, the same receipt, and the same care
           // when its answer is lost.
           const said = out.say;
-          await placeOrder({ side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }, (duplicate) =>
+          await placeOrder(on, { side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }, (duplicate) =>
             duplicate
               ? `${said} I already had that one queued, so I have not placed it twice.`
               : `${said} Placed, not filled — my key's limits still decide, and I will tell you which.`,
           );
           return;
         }
-        chat.say({ role: "owner", text: "✓ Confirmed" });
-        chat.say({ role: "agent", text: out?.say ?? "I could not tell how that went." });
-        setPending(null);
+        on.say({ role: "owner", text: "✓ Confirmed" });
+        on.say({ role: "agent", text: out?.say ?? "I could not tell how that went." });
+        on.setProposal(null);
         return;
       }
       if (cmd.via === "order") {
@@ -400,7 +405,7 @@ export function Agent({
         // What is true the moment the row exists is only that it was placed. So
         // that is what this says, and the outcome is followed and said in its
         // own turn — from the worker's own words, not from a guess here.
-        await placeOrder(commandPayload(cmd, proposal.args), (duplicate) =>
+        await placeOrder(on, commandPayload(cmd, proposal.args), (duplicate) =>
           duplicate
             ? `That exact order is already queued — I have not placed a second one.`
             : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
@@ -420,27 +425,27 @@ export function Agent({
       // again so what the model is told catches up whichever it was. A setting
       // is one value, so asking again is safe, and the card stays for that.
       if (!put) {
-        chat.say({
+        on.say({
           role: "agent",
           text: "I couldn't tell whether that change was saved — the connection dropped before I heard back. Asking again is safe: it only sets the same value.",
         });
-        chat.refreshSettings();
+        on.refreshSettings();
         return;
       }
       if (!put.ok) throw new Error(put.body?.errors?.join(" ") ?? `that was refused (${put.status})`);
       // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
       // agent did on your instruction belongs in the record of what you asked.
-      chat.say({ role: "owner", text: "✓ Confirmed" });
-      chat.say({ role: "agent", text: `Done — ${cmd.say(proposal.args)}` });
-      setPending(null);
+      on.say({ role: "owner", text: "✓ Confirmed" });
+      on.say({ role: "agent", text: `Done — ${cmd.say(proposal.args)}` });
+      on.setProposal(null);
       // What the model is told about the settings has just changed.
-      chat.refreshSettings();
+      on.refreshSettings();
     } catch (e) {
       // NEVER A SILENT REFUSAL, and said in the thread where the owner is
       // looking, with the route's own reason — only a body the route wrote
       // reaches here (routeAnswer). The card stays, so asking again is one
       // tap — and never automatic, because this may be an order.
-      chat.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
+      on.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
     }
   });
 

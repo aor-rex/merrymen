@@ -839,6 +839,69 @@ describe("whose thread", () => {
     assert.doesNotMatch(text(), /first owner/);
     assert.equal(localStorage.getItem("merrymen.chat.0xbbb"), null, "and the old thread was not written under the new key");
   });
+
+  /** One held answer per POST /api/orders, in the order they were asked. */
+  function heldOrders() {
+    const held: ReturnType<typeof deferred<Response>>[] = [];
+    routes["POST /api/orders"] = () => {
+      const d = deferred<Response>();
+      held.push(d);
+      return d.promise;
+    };
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    return held;
+  }
+  const card = () => Array.from(ui.container.querySelectorAll(".desk-confirm button")).map((b) => b.textContent);
+  const placed = (id = ORDER_ID) => json({ id, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+
+  /** Owner A asks for a buy and taps Yes; then B signs in on the same browser and gets a card of their own. */
+  async function switchMidConfirm() {
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    await ui.render(h({ chatKey: "merrymen.chat.0xaaa" }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    assert.deepEqual(card(), ["Doing it…", "Not now"]);
+    await ui.render(h({ chatKey: "merrymen.chat.0xbbb" }));
+    await settle();
+    routes["POST /api/chat"] = () => json({ reply: "Sure.", command: { id: "buy", args: { symbol: "WIF", usdgAmount: 5 } } });
+    await typeAndSend("buy $5 of WIF");
+    await until(() => /Sure\./.test(text()), "B's reply");
+  }
+
+  it("A CONFIRM IN FLIGHT BELONGS TO THE OWNER WHO TAPPED IT — the next owner's card, thread and orders stay theirs", async () => {
+    // The guard moved to the controller and was carried across owners: B's
+    // card sat at "Doing it…" behind A's request, and when A's POST answered,
+    // A's "✓ Confirmed" and "Placed it — …TSLA" were written into B's kept
+    // thread, B's thread followed A's order, and B's own proposal was cleared.
+    const held = heldOrders();
+    await switchMidConfirm();
+    assert.deepEqual(card(), ["Yes, do it", "Not now"], "B's card is not held by A's request");
+    held[0]!.resolve(placed());
+    await settle(20);
+    assert.deepEqual(chat.messages.map((m) => m.text), ["buy $5 of WIF", "Sure."], "nothing of A's order is said in B's thread");
+    assert.deepEqual((JSON.parse(localStorage.getItem("merrymen.chat.0xbbb")!) as { orders: unknown[] }).orders, [], "B's thread follows no order of A's");
+    assert.equal(count("GET", "/api/orders"), 0, "and nobody polls it under B's session");
+    assert.deepEqual(card(), ["Yes, do it", "Not now"], "B's own proposal is still there");
+  });
+
+  it("AND THE OLD OWNER'S REQUEST ENDING DOES NOT FREE THE NEW OWNER'S CARD mid-order", async () => {
+    // B's own confirm in flight is held by B's guard. A's finishing first must
+    // not release it, or B's card is ready again while B's POST is out.
+    const held = heldOrders();
+    await switchMidConfirm();
+    await ui.click("Yes, do it");
+    assert.deepEqual(card(), ["Doing it…", "Not now"], "B's order is being placed");
+    held[0]!.resolve(placed());
+    await settle(10);
+    assert.deepEqual(card(), ["Doing it…", "Not now"], "and still is, after A's answered");
+    held[1]!.resolve(placed("b".repeat(32)));
+    await until(() => /Placed it — /.test(text()), "B's order placed");
+    assert.equal(count("POST", "/api/orders"), 2, "one order each, nothing twice");
+    assert.match(text(), /WIF/);
+    assert.doesNotMatch(text(), /TSLA/, "and still nothing of A's");
+  });
 });
 
 describe("the agent's own fills", () => {

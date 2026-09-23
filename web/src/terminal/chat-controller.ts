@@ -82,9 +82,11 @@ export interface ChatController {
   confirming: boolean;
   /**
    * Carry out the card ONCE: `run` is handed the proposal, and a second call
-   * while one is in flight does nothing, from whichever screen it came.
+   * while one is in flight does nothing, from whichever screen it came. `run`
+   * changes the conversation only through `on`, which is bound to the owner
+   * who tapped — see `confirm` in useChatController.
    */
-  confirm(run: (p: Proposal) => Promise<void>): Promise<void>;
+  confirm(run: (p: Proposal, on: ConfirmScope) => Promise<void>): Promise<void>;
   /** Something arrived while the chat was not on screen. */
   unread: boolean;
   /** /api/settings as last read, or null when it has not been. */
@@ -106,6 +108,17 @@ export interface ChatController {
   refreshSettings(): void;
   /** Empty this owner's thread. */
   clearThread(): void;
+}
+
+/**
+ * What a confirmed card may do to the conversation, BOUND TO THE OWNER WHO
+ * TAPPED IT: once that owner has gone from this browser, each is a no-op.
+ */
+export interface ConfirmScope {
+  say(line: Omit<ChatMessage, "id" | "at">): void;
+  followOrder(id: string, expiresInMs: number | null): void;
+  setProposal(p: Proposal | null): void;
+  refreshSettings(): void;
 }
 
 /** Test seams: time, and the pause between order polls. */
@@ -240,7 +253,8 @@ export function useChatController(o: {
   const proposalRef = useRef(proposal);
   proposalRef.current = proposal;
   const [confirming, setConfirming] = useState(false);
-  const confirmingRef = useRef(false);
+  /** The hold of the confirm in flight — its own, so only it can let go of it. */
+  const confirmingRef = useRef<object | null>(null);
   const [unread, setUnread] = useState(false);
   const [settings, setSettings] = useState<ChatSettings | null>(null);
   const [ceiling, setCeiling] = useState<number | null>(null);
@@ -275,6 +289,10 @@ export function useChatController(o: {
     lastKey.current = o.chatKey;
     setThread({ key: o.chatKey, ...loadThread(o.chatKey) });
     setProposal(null);
+    // A confirm still in flight is the previous owner's: it does not hold this
+    // owner's card (see `confirm`).
+    confirmingRef.current = null;
+    setConfirming(false);
     setStreaming(null);
     setUnread(false);
     settingsCache.current = null;
@@ -466,30 +484,6 @@ export function useChatController(o: {
     [clock, update],
   );
 
-  // ── the card, carried out once ──────────────────────────────────────────
-  //
-  // THE GUARD LIVES WITH THE PROPOSAL, NOT WITH A SCREEN. It was the Agent
-  // screen's own `running` state while the proposal became the App's: a phone
-  // tab switch, or the dock closed with Escape and reopened, while the POST was
-  // in flight brought the same card back READY, and one more tap placed the
-  // same order again — and desktop can draw two Agent screens at once, each
-  // with its own guard over the one proposal. The minute-bucket id and the
-  // one-at-a-time slot catch most repeats, but not a tap after the minute
-  // rolled once the first order had already been answered. A ref, so two taps
-  // in the same instant — before either screen has redrawn — are still one.
-  const confirm = useCallback(async (run: (p: Proposal) => Promise<void>) => {
-    const p = proposalRef.current;
-    if (!p || confirmingRef.current) return;
-    confirmingRef.current = true;
-    setConfirming(true);
-    try {
-      await run(p);
-    } finally {
-      confirmingRef.current = false;
-      if (mounted.current) setConfirming(false);
-    }
-  }, []);
-
   // ── orders, followed at App level ──────────────────────────────────────
   const followOrder = useCallback(
     (id: string, expiresInMs: number | null) => {
@@ -581,6 +575,62 @@ export function useChatController(o: {
     void readSettings();
     void readCeiling();
   }, [readSettings, readCeiling]);
+
+  // ── the card, carried out once ──────────────────────────────────────────
+  //
+  // THE GUARD LIVES WITH THE PROPOSAL, NOT WITH A SCREEN. It was the Agent
+  // screen's own `running` state while the proposal became the App's: a phone
+  // tab switch, or the dock closed with Escape and reopened, while the POST was
+  // in flight brought the same card back READY, and one more tap placed the
+  // same order again — and desktop can draw two Agent screens at once, each
+  // with its own guard over the one proposal. The minute-bucket id and the
+  // one-at-a-time slot catch most repeats, but not a tap after the minute
+  // rolled once the first order had already been answered. A ref, so two taps
+  // in the same instant — before either screen has redrawn — are still one.
+  //
+  // AND IT IS THE TAPPING OWNER'S, like everything else here. A confirm still
+  // in flight when the owner changed on this browser held the next owner's
+  // card at "Doing it…", and when it answered it wrote the previous owner's
+  // "✓ Confirmed" and "Placed it" into the next owner's kept thread, had that
+  // thread follow the previous owner's order, and cleared the next owner's own
+  // proposal. So `run` is handed a scope bound to the owner who tapped: every
+  // change it makes does nothing once that owner has gone. The guard is let go
+  // when the owner changes, and a confirm that ends later lets go only its OWN
+  // hold — never the next owner's order in flight.
+  const confirm = useCallback(
+    async (run: (p: Proposal, on: ConfirmScope) => Promise<void>) => {
+      const p = proposalRef.current;
+      if (!p || confirmingRef.current) return;
+      const key = keyRef.current;
+      const hold = {};
+      confirmingRef.current = hold;
+      setConfirming(true);
+      const theirs = () => keyRef.current === key;
+      const on: ConfirmScope = {
+        say: (line) => {
+          if (theirs()) say(line);
+        },
+        followOrder: (id, expiresInMs) => {
+          if (theirs()) followOrder(id, expiresInMs);
+        },
+        setProposal: (next) => {
+          if (theirs()) setProposal(next);
+        },
+        refreshSettings: () => {
+          if (theirs()) refreshSettings();
+        },
+      };
+      try {
+        await run(p, on);
+      } finally {
+        if (confirmingRef.current === hold) {
+          confirmingRef.current = null;
+          if (mounted.current) setConfirming(false);
+        }
+      }
+    },
+    [say, followOrder, refreshSettings],
+  );
 
   return {
     messages: thread.key === o.chatKey ? thread.messages : [],
