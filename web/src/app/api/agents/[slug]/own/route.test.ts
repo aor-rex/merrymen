@@ -95,17 +95,27 @@ it("the owner's session gets its own sizes and dollars, never cached for anyone 
   assert.deepEqual(body.topTrades.map((t) => t.realizedPnlUsdg), [3]);
 });
 
-it("no session, or somebody else's, gets nothing — and the ledger is not what decides", async () => {
-  const signedOut = await OWN(request(null), ctx());
-  assert.equal(signedOut.status, 401);
-  assert.equal((await signedOut.json() as { recentTrades?: unknown }).recentTrades, undefined);
-  const stranger = await OWN(request(B), ctx());
-  assert.equal(stranger.status, 403);
-  assert.equal((await stranger.json() as { recentTrades?: unknown }).recentTrades, undefined);
-  // A query string naming the owner changes nothing: only the cookie is read.
-  const forged = await OWN(request(B, `https://app.example.test/api/agents/${slug}/own?tenant=${A}`), ctx());
-  assert.equal(forged.status, 403);
-  assert.equal((await OWN(request(A), ctx("no-such-agent"))).status, 404);
+it("no session, or somebody else's, gets the same 404 as no agent at all — and the ledger is not what decides", async () => {
+  // Anyone but the owner is told nothing, not even that an owner's view exists
+  // here: signed out, a stranger, a forged tenant and an unknown slug all get
+  // one answer, private and uncached, so none can be told from the others.
+  const answers = [
+    await OWN(request(null), ctx()),
+    await OWN(request(B), ctx()),
+    // A query string naming the owner changes nothing: only the cookie is read.
+    await OWN(request(B, `https://app.example.test/api/agents/${slug}/own?tenant=${A}`), ctx()),
+    await OWN(request(A), ctx("no-such-agent")),
+    await OWN(request(null), ctx("no-such-agent")),
+  ];
+  const seen = [];
+  for (const res of answers) {
+    assert.match(res.headers.get("cache-control") ?? "", /private/);
+    assert.match(res.headers.get("cache-control") ?? "", /no-store/);
+    seen.push([res.status, await res.text()]);
+  }
+  assert.deepEqual(seen.map(([status]) => status), [404, 404, 404, 404, 404]);
+  assert.equal(new Set(seen.map(([, body]) => body)).size, 1, "one body for all of them");
+  assert.doesNotMatch(String(seen[1]![1]), /recentTrades|topTrades/);
   assert.equal((await OWN(request(A), ctx("../etc"))).status, 400);
 });
 
