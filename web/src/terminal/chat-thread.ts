@@ -130,24 +130,57 @@ export function newestAt(moves: Thesis[]): number {
 const isFill = (m: Thesis) =>
   m.outcome === "landed" && !m.paper && (m.action === "buy" || m.action === "sell") && typeof m.at === "number";
 
-/** How far back a receipt's fill may be when the order's placing was not kept. */
+/**
+ * How far a buy's fill may be from its answer, either side, when its size
+ * agrees and the order's life is only known on this browser's clock — and
+ * how far back a fill may be when the placing line was not kept at all.
+ */
 const SAME_TRADE_MS = 30 * 60_000;
 
 /**
- * How far the browser's clock (a line's `at`) and the ledger's (a fill's)
- * may disagree, for a join by time.
+ * How far the order's life may be missed by, for a join by time: two servers'
+ * clocks, and the trip the placement's answer took back.
  */
 const CLOCK_SKEW_MS = 2 * 60_000;
 
-/** When the order a receipt answers was placed — the line that said so — or null when it was not kept. */
-function placedAtOf(messages: ChatMessage[], line: ChatMessage): number | null {
-  const id = line.order?.id;
-  if (!id) return null;
-  return messages.find((m) => m !== line && m.order?.id === id && !m.order.receipt && m.at !== null)?.at ?? null;
+/**
+ * WHEN THE ORDER A RECEIPT ANSWERS WAS ALIVE, on the LEDGER's clock where the
+ * thread can tell — or null for an answer with no time at all.
+ *
+ * A LINE'S `at` IS THIS BROWSER'S CLOCK AND A FILL'S IS THE WORKER'S. Held one
+ * against the other with two minutes of slack, a browser three minutes off
+ * made one chat trade two "Filled" lines, and order-follow.ts has seen a
+ * browser eleven minutes fast. So the placing line keeps the SERVER's own
+ * placement time (POST's expiresAt less expiresInMs, one `now` on the
+ * server), and the gap between that and the line's own `at` is this browser's
+ * offset — measured to within the reply's trip back. The order's life is then
+ * from the server's placement to the answer's moment moved by that offset:
+ * both on the server's clock, whatever this browser's says.
+ *
+ * `anchored` is false when the placing line has no server time — a thread kept
+ * from before it did, or an order found after its placing was lost. The life
+ * is then this browser's own reading of it, or half an hour before the answer
+ * when nobody kept the placing either.
+ */
+interface OrderLife {
+  from: number;
+  to: number;
+  anchored: boolean;
 }
 
-/** How far a fill is from the answer that describes it. */
-const gap = (line: ChatMessage, fill: Thesis) => (line.at === null ? 0 : Math.abs(fill.at! * 1000 - line.at));
+function lifeOf(messages: ChatMessage[], line: ChatMessage): OrderLife | null {
+  if (line.at === null) return null;
+  const id = line.order?.id;
+  const placing = id ? messages.find((m) => m !== line && m.order?.id === id && !m.order.receipt && m.at !== null) : undefined;
+  const server = placing?.order?.serverPlacedAt;
+  if (placing && typeof server === "number" && Number.isFinite(server)) {
+    return { from: server, to: line.at + (server - placing.at!), anchored: true };
+  }
+  return { from: placing?.at ?? line.at - SAME_TRADE_MS, to: line.at, anchored: false };
+}
+
+/** How far a fill is from the answer that describes it, on the clock the life is read on. */
+const gap = (life: OrderLife | null, fill: Thesis) => (life === null ? 0 : Math.abs(fill.at! * 1000 - life.to));
 
 /**
  * IS THIS FILL THE TRADE THAT CHAT ORDER'S RECEIPT DESCRIBES?
@@ -162,25 +195,27 @@ const gap = (line: ChatMessage, fill: Thesis) => (line.at === null ? 0 : Math.ab
  * position while a curve sell exits it whole. Two measurements of different
  * things; demanding they agree to the cent made every chat sell two "Filled"
  * lines. So a sell is matched on side, coin and TIME, and the time is the
- * order's own life: after it was placed and before it was answered, give or
- * take the two clocks. The agent's own earlier sell of the same coin is
- * therefore never taken for it. When the placing line was not kept, the
- * window falls back to half an hour before the answer.
+ * order's own life (lifeOf): after it was placed and before it was answered,
+ * give or take CLOCK_SKEW_MS. The agent's own earlier or later sell of the
+ * same coin is therefore never taken for it.
+ *
+ * A BUY WHOSE SIZE AGREES, with its order's life known only on this browser's
+ * clock, keeps the half hour either side of its answer it always had: its
+ * size is what tells it apart, and a browser minutes off must not split it.
  */
-function sameTrade(message: ChatMessage, fill: Thesis, placedAt: number | null): boolean {
+function sameTrade(message: ChatMessage, fill: Thesis, life: OrderLife | null): boolean {
   const r = message.order?.receipt;
   if (!r || r.status !== "filled" || message.tradeKey) return false;
   if (r.side !== fill.action) return false;
   if (!r.symbol || !fill.symbol || r.symbol.toUpperCase() !== fill.symbol.toUpperCase()) return false;
   const tx = txOf(fill);
   if (r.txHash && tx) return r.txHash.toLowerCase() === tx;
-  if (r.side === "buy" && r.usdgActual !== null && fill.sizeUsdg !== null && Math.abs(r.usdgActual - fill.sizeUsdg) >= 0.005) {
-    return false;
-  }
-  if (message.at === null) return true;
+  const sized = r.side === "buy" && r.usdgActual !== null && fill.sizeUsdg !== null;
+  if (sized && Math.abs(r.usdgActual! - fill.sizeUsdg!) >= 0.005) return false;
+  if (life === null) return true;
   const at = fill.at! * 1000;
-  const from = placedAt ?? message.at - SAME_TRADE_MS;
-  return at >= from - CLOCK_SKEW_MS && at <= message.at + CLOCK_SKEW_MS;
+  if (sized && !life.anchored) return Math.abs(at - life.to) <= SAME_TRADE_MS;
+  return at >= life.from - CLOCK_SKEW_MS && at <= life.to + CLOCK_SKEW_MS;
 }
 
 /** A receipt that said "filled" and has not been joined to its fill yet. */
@@ -240,16 +275,19 @@ export function mergeFills(messages: ChatMessage[], moves: Thesis[], since: numb
   });
   const known = new Set(out.map((l) => current(l.tradeKey)).filter(Boolean));
   const fresh = [...byKey.entries()].filter(([key, m]) => !known.has(key) && m.at! > since).sort((a, b) => a[1].at! - b[1].at!);
-  // Each receipt still waiting takes the matching fill NEAREST its answer.
+  // Each receipt still waiting takes the matching fill NEAREST its answer —
+  // and a fill one receipt took is no other's. Two sells of one coin can both
+  // hold the first fill in their lives; claimed twice, the second fill found
+  // both receipts taken and became a line of its own: one sell, shown twice.
   const joined = new Set<string>();
   for (let i = 0; i < out.length; i++) {
     const line = out[i]!;
     if (!awaitsFill(line)) continue;
-    const placedAt = placedAtOf(out, line);
+    const life = lifeOf(out, line);
     let best: [string, Thesis] | null = null;
     for (const entry of fresh) {
-      if (joined.has(entry[0]) || !sameTrade(line, entry[1], placedAt)) continue;
-      if (!best || gap(line, entry[1]) < gap(line, best[1])) best = entry;
+      if (joined.has(entry[0]) || !sameTrade(line, entry[1], life)) continue;
+      if (!best || gap(life, entry[1]) < gap(life, best[1])) best = entry;
     }
     if (best) {
       replace(i, { ...line, tradeKey: best[0], trade: best[1] });
@@ -323,11 +361,11 @@ export function absorbFill(messages: ChatMessage[], id: string): ChatMessage[] {
   const at = messages.findIndex((m) => m.id === id);
   const receiptLine = messages[at];
   if (!receiptLine) return messages;
-  const placedAt = placedAtOf(messages, receiptLine);
+  const life = lifeOf(messages, receiptLine);
   let fillAt = -1;
   messages.forEach((m, i) => {
-    if (m.role !== "event" || m.order || !m.tradeKey || !m.trade || !sameTrade(receiptLine, m.trade, placedAt)) return;
-    if (fillAt < 0 || gap(receiptLine, m.trade) < gap(receiptLine, messages[fillAt]!.trade!)) fillAt = i;
+    if (m.role !== "event" || m.order || !m.tradeKey || !m.trade || !sameTrade(receiptLine, m.trade, life)) return;
+    if (fillAt < 0 || gap(life, m.trade) < gap(life, messages[fillAt]!.trade!)) fillAt = i;
   });
   if (fillAt < 0) return messages;
   const fill = messages[fillAt]!;
@@ -415,10 +453,20 @@ export interface ChatChip {
  * nobody checked against the wall is one the wall may refuse. A ceiling of 0
  * is "no chat ceiling" (the orders route reads it that way), so the sealed cap
  * alone clamps.
+ *
+ * ROUNDED DOWN TO THE CENT. A chip is printed and sent to the cent, and the
+ * orders route refuses `usdgAmount > ceiling` — while /api/settings takes any
+ * float, so a ceiling of 9.999 printed as "$10.00 (max)": an order the route
+ * refused. The cent is taken with a hair of slack, because 8.2 × 100 comes
+ * out a hair below 820 and 8.20 must not become 8.19, and then checked, so the
+ * result never exceeds the limit. Less than a cent is no amount to offer.
  */
 export function amountCeiling(perTrade: number | null, ceiling: number | null): number | null {
   if (perTrade === null || ceiling === null || !Number.isFinite(perTrade) || perTrade <= 0) return null;
-  return ceiling > 0 ? Math.min(perTrade, ceiling) : perTrade;
+  const limit = ceiling > 0 ? Math.min(perTrade, ceiling) : perTrade;
+  let cents = Math.floor(limit * 100 + 1e-6);
+  if (cents / 100 > limit) cents -= 1;
+  return cents > 0 ? cents / 100 : null;
 }
 
 const ASKS_AMOUNT = /\bhow much\b|\bwhat size\b|\bhow big\b|\bwhich amount\b|\bhow many dollars\b/i;

@@ -41,8 +41,14 @@ export interface ChatMessage {
   text: string;
   /** An event's side, for its Buy/Sell pill. */
   side?: "buy" | "sell" | null;
-  /** The order this line is about, and — once the worker answered — its receipt (C3). */
-  order?: { id: string; receipt?: OrderReceipt | null };
+  /**
+   * The order this line is about, and — once the worker answered — its receipt
+   * (C3). The line that placed it also keeps `serverPlacedAt`: the SERVER's
+   * epoch ms for the placement, the one time on a line not read off this
+   * browser's clock, which lets the thread read the order's life on the
+   * ledger's clock (chat-thread.ts lifeOf).
+   */
+  order?: { id: string; receipt?: OrderReceipt | null; serverPlacedAt?: number };
   /** Which trade this line is, so the tape can join it exactly once. */
   tradeKey?: string;
   /** That trade, as the tape last read it. Never stored: re-read each session. */

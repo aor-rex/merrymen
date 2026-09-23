@@ -128,6 +128,21 @@ describe("round trip", () => {
     assert.equal(back[1]!.failed, "network", "a failure stays a failure, so the model is never told it said it");
   });
 
+  it("THE SERVER'S TIME FOR A PLACEMENT SURVIVES A RELOAD — it is what reads the order's life on the ledger's clock", () => {
+    // Without it, a reloaded thread held the order's life to this browser's
+    // clock again, and a browser minutes off split one trade into two lines.
+    const s = memStore();
+    const key = "merrymen.chat.self";
+    const placing: ChatMessage = { ...line(1, "agent"), order: { id: ORDER, serverPlacedAt: 1_800_000_000_000 } };
+    saveThread(key, thread([placing]), s);
+    assert.equal(loadThread(key, s).messages[0]!.order?.serverPlacedAt, 1_800_000_000_000);
+    // Written by anything else on this origin, it is checked like every field.
+    for (const bad of ["1800000000000", Number.NaN, -5, null]) {
+      s.setItem(key, JSON.stringify({ v: 2, messages: [{ ...placing, order: { id: ORDER, serverPlacedAt: bad } }], orders: [], since: null }));
+      assert.equal(loadThread(key, s).messages[0]!.order?.serverPlacedAt, undefined, String(bad));
+    }
+  });
+
   it("EVERY KIND OF FAILURE STAYS ONE after a reload — none is read back as the agent's words", () => {
     // A failure that lost its mark on the way back in would be handed to the
     // model as something it said ("I couldn't get an answer through…").

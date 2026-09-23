@@ -82,9 +82,11 @@ export interface ChatController {
   confirming: boolean;
   /**
    * Carry out the card ONCE: `run` is handed the proposal, and a second call
-   * while one is in flight does nothing, from whichever screen it came.
+   * while one is in flight does nothing, from whichever screen it came. `run`
+   * changes the conversation only through `on`, which is bound to the owner
+   * who tapped — see `confirm` in useChatController.
    */
-  confirm(run: (p: Proposal) => Promise<void>): Promise<void>;
+  confirm(run: (p: Proposal, on: ConfirmScope) => Promise<void>): Promise<void>;
   /** Something arrived while the chat was not on screen. */
   unread: boolean;
   /** /api/settings as last read, or null when it has not been. */
@@ -108,6 +110,17 @@ export interface ChatController {
   clearThread(): void;
 }
 
+/**
+ * What a confirmed card may do to the conversation, BOUND TO THE OWNER WHO
+ * TAPPED IT: once that owner has gone from this browser, each is a no-op.
+ */
+export interface ConfirmScope {
+  say(line: Omit<ChatMessage, "id" | "at">): void;
+  followOrder(id: string, expiresInMs: number | null): void;
+  setProposal(p: Proposal | null): void;
+  refreshSettings(): void;
+}
+
 /** Test seams: time, and the pause between order polls. */
 export interface ChatDeps {
   now?: () => number;
@@ -117,7 +130,7 @@ export interface ChatDeps {
 /** How long a whole reply may take, streamed or not, before it is given up on. */
 export const CHAT_TIMEOUT_MS = 60_000;
 
-/** Settings older than this are re-read in the background after a reply. */
+/** Settings older than this are re-read in the background after a reply; a ceiling, as a message goes out. */
 const SETTINGS_FRESH_MS = 30_000;
 
 export type Asked =
@@ -240,7 +253,8 @@ export function useChatController(o: {
   const proposalRef = useRef(proposal);
   proposalRef.current = proposal;
   const [confirming, setConfirming] = useState(false);
-  const confirmingRef = useRef(false);
+  /** The hold of the confirm in flight — its own, so only it can let go of it. */
+  const confirmingRef = useRef<object | null>(null);
   const [unread, setUnread] = useState(false);
   const [settings, setSettings] = useState<ChatSettings | null>(null);
   const [ceiling, setCeiling] = useState<number | null>(null);
@@ -267,16 +281,23 @@ export function useChatController(o: {
   // what keying it was meant to prevent.
   const lastKey = useRef<string | null>(null);
   const settingsCache = useRef<{ key: string | null; value: ChatSettings; at: number } | null>(null);
+  /** When the ceiling was last read, on this clock — see readCeiling. */
+  const ceilingAt = useRef<number | null>(null);
   useEffect(() => {
     const previous = lastKey.current;
     if (previous && previous !== o.chatKey) forgetThread(previous);
     lastKey.current = o.chatKey;
     setThread({ key: o.chatKey, ...loadThread(o.chatKey) });
     setProposal(null);
+    // A confirm still in flight is the previous owner's: it does not hold this
+    // owner's card (see `confirm`).
+    confirmingRef.current = null;
+    setConfirming(false);
     setStreaming(null);
     setUnread(false);
     settingsCache.current = null;
     setSettings(null);
+    ceilingAt.current = null;
     setCeiling(null);
   }, [o.chatKey]);
 
@@ -332,6 +353,13 @@ export function useChatController(o: {
   // so a house ceiling below 25 offered a "(max)" chip it refused. Read with
   // the settings; a read that fails leaves the last good one, and one never
   // read is null, which offers no amount at all.
+  //
+  // AND AGAIN WHEN A MESSAGE GOES OUT ONCE IT IS STALE. On desktop the dock
+  // stays open while the owner uses the Settings screen, so "when the chat
+  // opens" never comes round again; the chips kept a ceiling the owner had
+  // since lowered and offered a "(max)" POST now refused. Read as the message
+  // is sent rather than after its reply, so the chips that come with the
+  // reply are drawn against the fresh one.
   const readCeiling = useCallback(async () => {
     const key = keyRef.current;
     let value: number | null = null;
@@ -344,8 +372,11 @@ export function useChatController(o: {
     } catch {
       /* unread — no amount is offered against a limit nobody read */
     }
-    if (value !== null && keyRef.current === key && mounted.current) setCeiling(value);
-  }, []);
+    if (value !== null && keyRef.current === key && mounted.current) {
+      ceilingAt.current = clock();
+      setCeiling(value);
+    }
+  }, [clock]);
   useEffect(() => {
     if (!o.open || !o.chatKey) return;
     void readSettings();
@@ -379,6 +410,9 @@ export function useChatController(o: {
       // THE DRAFT CLEARS AT ONCE — unless the owner has already started typing
       // something else, which is theirs.
       setDraft((d) => (d.trim() === q ? "" : d));
+      // A ceiling not read lately is read beside the question, not after the
+      // answer: the chips come with the reply (see readCeiling).
+      if (ceilingAt.current === null || clock() - ceilingAt.current > SETTINGS_FRESH_MS) void readCeiling();
       try {
         const cached = settingsCache.current;
         const settingsNow = cached && cached.key === key ? cached.value : await readSettings();
@@ -431,7 +465,7 @@ export function useChatController(o: {
         }
       }
     },
-    [arrived, clock, readSettings, update],
+    [arrived, clock, readSettings, readCeiling, update],
   );
 
   const retry = useCallback(
@@ -449,30 +483,6 @@ export function useChatController(o: {
     },
     [clock, update],
   );
-
-  // ── the card, carried out once ──────────────────────────────────────────
-  //
-  // THE GUARD LIVES WITH THE PROPOSAL, NOT WITH A SCREEN. It was the Agent
-  // screen's own `running` state while the proposal became the App's: a phone
-  // tab switch, or the dock closed with Escape and reopened, while the POST was
-  // in flight brought the same card back READY, and one more tap placed the
-  // same order again — and desktop can draw two Agent screens at once, each
-  // with its own guard over the one proposal. The minute-bucket id and the
-  // one-at-a-time slot catch most repeats, but not a tap after the minute
-  // rolled once the first order had already been answered. A ref, so two taps
-  // in the same instant — before either screen has redrawn — are still one.
-  const confirm = useCallback(async (run: (p: Proposal) => Promise<void>) => {
-    const p = proposalRef.current;
-    if (!p || confirmingRef.current) return;
-    confirmingRef.current = true;
-    setConfirming(true);
-    try {
-      await run(p);
-    } finally {
-      confirmingRef.current = false;
-      if (mounted.current) setConfirming(false);
-    }
-  }, []);
 
   // ── orders, followed at App level ──────────────────────────────────────
   const followOrder = useCallback(
@@ -565,6 +575,62 @@ export function useChatController(o: {
     void readSettings();
     void readCeiling();
   }, [readSettings, readCeiling]);
+
+  // ── the card, carried out once ──────────────────────────────────────────
+  //
+  // THE GUARD LIVES WITH THE PROPOSAL, NOT WITH A SCREEN. It was the Agent
+  // screen's own `running` state while the proposal became the App's: a phone
+  // tab switch, or the dock closed with Escape and reopened, while the POST was
+  // in flight brought the same card back READY, and one more tap placed the
+  // same order again — and desktop can draw two Agent screens at once, each
+  // with its own guard over the one proposal. The minute-bucket id and the
+  // one-at-a-time slot catch most repeats, but not a tap after the minute
+  // rolled once the first order had already been answered. A ref, so two taps
+  // in the same instant — before either screen has redrawn — are still one.
+  //
+  // AND IT IS THE TAPPING OWNER'S, like everything else here. A confirm still
+  // in flight when the owner changed on this browser held the next owner's
+  // card at "Doing it…", and when it answered it wrote the previous owner's
+  // "✓ Confirmed" and "Placed it" into the next owner's kept thread, had that
+  // thread follow the previous owner's order, and cleared the next owner's own
+  // proposal. So `run` is handed a scope bound to the owner who tapped: every
+  // change it makes does nothing once that owner has gone. The guard is let go
+  // when the owner changes, and a confirm that ends later lets go only its OWN
+  // hold — never the next owner's order in flight.
+  const confirm = useCallback(
+    async (run: (p: Proposal, on: ConfirmScope) => Promise<void>) => {
+      const p = proposalRef.current;
+      if (!p || confirmingRef.current) return;
+      const key = keyRef.current;
+      const hold = {};
+      confirmingRef.current = hold;
+      setConfirming(true);
+      const theirs = () => keyRef.current === key;
+      const on: ConfirmScope = {
+        say: (line) => {
+          if (theirs()) say(line);
+        },
+        followOrder: (id, expiresInMs) => {
+          if (theirs()) followOrder(id, expiresInMs);
+        },
+        setProposal: (next) => {
+          if (theirs()) setProposal(next);
+        },
+        refreshSettings: () => {
+          if (theirs()) refreshSettings();
+        },
+      };
+      try {
+        await run(p, on);
+      } finally {
+        if (confirmingRef.current === hold) {
+          confirmingRef.current = null;
+          if (mounted.current) setConfirming(false);
+        }
+      }
+    },
+    [say, followOrder, refreshSettings],
+  );
 
   return {
     messages: thread.key === o.chatKey ? thread.messages : [],

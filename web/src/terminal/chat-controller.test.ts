@@ -36,6 +36,8 @@ type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>
 let routes: Record<string, Handler>;
 let calls: { method: string; url: string; body: Record<string, unknown> | null }[];
 let chat: ChatController;
+/** How far this browser's clock runs ahead of the true one (the server's, the ledger's). */
+let clockAhead = 0;
 
 beforeEach(() => {
   ui = testDom();
@@ -48,6 +50,7 @@ beforeEach(() => {
   (globalThis as { self?: unknown }).self = ui.dom.window;
   localStorage.clear();
   calls = [];
+  clockAhead = 0;
   routes = {
     "GET /api/settings": () => json({ values: { liveTradingEnabled: true }, defaults: { telegramMaxActionUsdg: 25 } }),
     "GET /api/orders/ceiling": () => json({ ceilingUsdg: 25 }),
@@ -97,7 +100,7 @@ function Harness(p: {
     open: p.open ?? true,
     moves: p.moves ?? null,
     onOutcome: p.onOutcome,
-    deps: { sleep: () => new Promise((r) => setTimeout(r, 1)) },
+    deps: { sleep: () => new Promise((r) => setTimeout(r, 1)), now: () => Date.now() + clockAhead },
   });
   chat = c;
   const screen = (key: string) =>
@@ -431,6 +434,31 @@ describe("chips", () => {
     await typeAndSend("buy some");
     await until(() => buttons("$10.00 (max)").length === 1, "the route's ceiling");
     assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
+  });
+
+  it("A CEILING LOWERED WHILE THE CHAT STAYS OPEN IS THE ONE THE NEXT CHIPS OFFER", async () => {
+    // On desktop the dock stays open while the owner uses the Settings screen,
+    // so "read when the chat opens" never runs again, and the background
+    // re-read after a reply read the settings but not the ceiling. The chips
+    // went on offering a "(max)" that POST /api/orders now refused.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 25 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    // The owner lowers it on the Settings screen; ten minutes pass; the dock stays open.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    clockAhead = 10 * 60_000;
+    await typeAndSend("buy some");
+    await until(() => /How much should I put in\?/.test(text()), "reply");
+    await settle(5);
+    const chips = () => Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent);
+    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
+    // And a ceiling just read is not read again for every message.
+    await typeAndSend("buy some more");
+    await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
+    await settle(5);
+    assert.equal(count("GET", "/api/orders/ceiling"), 2, "once when the chat opened, once when it had gone stale");
+    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
   });
 
   it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
@@ -811,6 +839,69 @@ describe("whose thread", () => {
     assert.doesNotMatch(text(), /first owner/);
     assert.equal(localStorage.getItem("merrymen.chat.0xbbb"), null, "and the old thread was not written under the new key");
   });
+
+  /** One held answer per POST /api/orders, in the order they were asked. */
+  function heldOrders() {
+    const held: ReturnType<typeof deferred<Response>>[] = [];
+    routes["POST /api/orders"] = () => {
+      const d = deferred<Response>();
+      held.push(d);
+      return d.promise;
+    };
+    routes["GET /api/orders"] = () => json({ id: ORDER_ID, state: "running" });
+    return held;
+  }
+  const card = () => Array.from(ui.container.querySelectorAll(".desk-confirm button")).map((b) => b.textContent);
+  const placed = (id = ORDER_ID) => json({ id, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+
+  /** Owner A asks for a buy and taps Yes; then B signs in on the same browser and gets a card of their own. */
+  async function switchMidConfirm() {
+    routes["POST /api/chat"] = () => json({ reply: "I'll place it.", command: { id: "buy", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    await ui.render(h({ chatKey: "merrymen.chat.0xaaa" }));
+    await settle();
+    await typeAndSend("buy $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "A's card");
+    await ui.click("Yes, do it");
+    assert.deepEqual(card(), ["Doing it…", "Not now"]);
+    await ui.render(h({ chatKey: "merrymen.chat.0xbbb" }));
+    await settle();
+    routes["POST /api/chat"] = () => json({ reply: "Sure.", command: { id: "buy", args: { symbol: "WIF", usdgAmount: 5 } } });
+    await typeAndSend("buy $5 of WIF");
+    await until(() => /Sure\./.test(text()), "B's reply");
+  }
+
+  it("A CONFIRM IN FLIGHT BELONGS TO THE OWNER WHO TAPPED IT — the next owner's card, thread and orders stay theirs", async () => {
+    // The guard moved to the controller and was carried across owners: B's
+    // card sat at "Doing it…" behind A's request, and when A's POST answered,
+    // A's "✓ Confirmed" and "Placed it — …TSLA" were written into B's kept
+    // thread, B's thread followed A's order, and B's own proposal was cleared.
+    const held = heldOrders();
+    await switchMidConfirm();
+    assert.deepEqual(card(), ["Yes, do it", "Not now"], "B's card is not held by A's request");
+    held[0]!.resolve(placed());
+    await settle(20);
+    assert.deepEqual(chat.messages.map((m) => m.text), ["buy $5 of WIF", "Sure."], "nothing of A's order is said in B's thread");
+    assert.deepEqual((JSON.parse(localStorage.getItem("merrymen.chat.0xbbb")!) as { orders: unknown[] }).orders, [], "B's thread follows no order of A's");
+    assert.equal(count("GET", "/api/orders"), 0, "and nobody polls it under B's session");
+    assert.deepEqual(card(), ["Yes, do it", "Not now"], "B's own proposal is still there");
+  });
+
+  it("AND THE OLD OWNER'S REQUEST ENDING DOES NOT FREE THE NEW OWNER'S CARD mid-order", async () => {
+    // B's own confirm in flight is held by B's guard. A's finishing first must
+    // not release it, or B's card is ready again while B's POST is out.
+    const held = heldOrders();
+    await switchMidConfirm();
+    await ui.click("Yes, do it");
+    assert.deepEqual(card(), ["Doing it…", "Not now"], "B's order is being placed");
+    held[0]!.resolve(placed());
+    await settle(10);
+    assert.deepEqual(card(), ["Doing it…", "Not now"], "and still is, after A's answered");
+    held[1]!.resolve(placed("b".repeat(32)));
+    await until(() => /Placed it — /.test(text()), "B's order placed");
+    assert.equal(count("POST", "/api/orders"), 2, "one order each, nothing twice");
+    assert.match(text(), /WIF/);
+    assert.doesNotMatch(text(), /TSLA/, "and still nothing of A's");
+  });
 });
 
 describe("the agent's own fills", () => {
@@ -919,6 +1010,53 @@ describe("the agent's own fills", () => {
     assert.match(text(), /\$4\.97 TSLA · Filled/);
     assert.doesNotMatch(text(), /\$5\.01/, "and one figure: the receipt's");
   });
+
+  /**
+   * Place a chat sell of TSLA from a browser whose clock is `aheadMin` off,
+   * and bring its fill and its answer in the given order. POST's reply carries
+   * the server's true times, as the route writes them.
+   */
+  async function skewedSell(aheadMin: number, tapeFirst: boolean) {
+    clockAhead = aheadMin * 60_000;
+    const now = Math.floor(Date.now() / 1000);
+    let answered = false;
+    routes["POST /api/chat"] = () => json({ reply: "Selling.", command: { id: "sell", args: { symbol: "TSLA", usdgAmount: 5 } } });
+    routes["POST /api/orders"] = () => json({ id: ORDER_ID, queued: true, expiresAt: Date.now() + 300_000, expiresInMs: 300_000 });
+    routes["GET /api/orders"] = () =>
+      json(
+        answered
+          ? { id: ORDER_ID, state: "done", result: "sold TSLA", receipt: { ...FILLED, side: "sell", usdgActual: null } }
+          : { id: ORDER_ID, state: "running" },
+      );
+    await ui.render(h({ moves: [] }));
+    await settle();
+    await typeAndSend("sell $5 of TSLA");
+    await until(() => buttons("Yes, do it").length === 1, "the card");
+    await ui.click("Yes, do it");
+    await until(() => /Placed it —/.test(text()), "placed");
+    const tape = [fill(now + 1, { action: "sell", symbol: "TSLA", sizeUsdg: 5.01 })];
+    if (tapeFirst) {
+      await ui.render(h({ moves: tape }));
+      await until(() => /· Filled/.test(text()), "the fill, off the tape");
+    }
+    answered = true;
+    await until(() => /sold TSLA/.test(text()), "the receipt");
+    await settle(5);
+    await ui.render(h({ moves: tape }));
+    await settle(5);
+  }
+
+  for (const [aheadMin, tapeFirst] of [[5, false], [-5, true], [11, true]] as const) {
+    it(`A BROWSER CLOCK ${aheadMin} MINUTES OFF STILL MAKES A CHAT SELL ONE LINE (${tapeFirst ? "tape" : "receipt"} first) — its life is read on the server's clock`, async () => {
+      // Every line here is stamped by this browser and the fill by the worker.
+      // With two minutes of slack between them, a browser three minutes off
+      // showed one sell as two "Filled" lines. POST's reply carries the
+      // server's own placement time, and the placing line keeps it.
+      await skewedSell(aheadMin, tapeFirst);
+      assert.equal((text().match(/· Filled/g) ?? []).length, 1, "one trade, one line");
+      assert.equal(chat.messages.filter((m) => m.role === "event").length, 0);
+    });
+  }
 
   it("with the tape unread, nothing is merged and no watermark is set", async () => {
     await ui.render(h({ moves: null }));

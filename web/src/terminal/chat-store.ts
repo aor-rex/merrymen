@@ -106,9 +106,13 @@ function messageOf(x: unknown): ChatMessage | null {
     text: m.text.slice(0, 8_000),
   };
   if (m.side === "buy" || m.side === "sell") out.side = m.side;
-  const order = m.order as { id?: unknown; receipt?: unknown } | null | undefined;
+  const order = m.order as { id?: unknown; receipt?: unknown; serverPlacedAt?: unknown } | null | undefined;
   if (order && typeof order === "object" && typeof order.id === "string" && ORDER_ID.test(order.id)) {
     out.order = { id: order.id, receipt: receiptOf(order.receipt) };
+    // The server's own time for the placement, so a reloaded thread still
+    // reads the order's life on the ledger's clock (chat-thread.ts lifeOf).
+    const at = order.serverPlacedAt;
+    if (typeof at === "number" && Number.isFinite(at) && at > 0) out.order.serverPlacedAt = at;
   }
   if (typeof m.tradeKey === "string" && m.tradeKey.length <= 200) out.tradeKey = m.tradeKey;
   if (typeof m.failed === "string" && FAILURES.has(m.failed as ChatFailure)) out.failed = m.failed as ChatFailure;

@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { ORDER_STALE_GRACE_MS } from "@/lib/order-state";
-import { followDeadline, followOrder, followOrderUntil, followWindowMs, type OrderPoll } from "./order-follow";
+import { followDeadline, followOrder, followOrderUntil, followWindowMs, serverPlacedAt, type OrderPoll } from "./order-follow";
 
 const MIN = 60_000;
 const T = 1_800_000_000_000;
@@ -174,6 +174,15 @@ describe("what the card takes from the POST", () => {
       assert.equal(followWindowMs(bad), null, JSON.stringify(bad));
     }
     assert.equal(followWindowMs({ expiresInMs: 0 }), 0);
+  });
+
+  it("AND THE SERVER'S OWN PLACEMENT TIME, which the thread holds against the ledger's clock", () => {
+    // POST computed both from one `now`, so their difference is that `now` —
+    // on the server's clock, whatever this browser's says.
+    assert.equal(serverPlacedAt({ id: "a1", expiresAt: EXPIRES, expiresInMs: WINDOW_MS }), EXPIRES - WINDOW_MS);
+    for (const bad of [null, undefined, {}, { expiresAt: EXPIRES }, { expiresInMs: WINDOW_MS }, { expiresAt: String(EXPIRES), expiresInMs: WINDOW_MS }, { expiresAt: EXPIRES, expiresInMs: -1 }, { expiresAt: Number.NaN, expiresInMs: 0 }, { expiresAt: 5, expiresInMs: 10 }]) {
+      assert.equal(serverPlacedAt(bad), null, JSON.stringify(bad));
+    }
   });
 });
 

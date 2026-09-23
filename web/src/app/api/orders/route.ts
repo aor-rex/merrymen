@@ -57,8 +57,12 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { openCommands, readCommandState, writeCommand } from "@merrymen/command-files";
-import { resolveConfig } from "@merrymen/settings";
+// RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
+// resolves against the root tsconfig, which has no @merrymen/command-files or
+// @merrymen/settings; the build resolves either way (lib/order-ceiling.ts
+// reaches settings the same way). ceiling/route.test.ts runs POST for real.
+import { openCommands, readCommandState, writeCommand } from "../../../../../worker/src/command-files";
+import { resolveConfig } from "../../../../../worker/src/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
