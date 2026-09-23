@@ -1054,8 +1054,8 @@ describe("what a tick may write down", () => {
     const paperBook = { hwmUsdg: 100 };
     assert.equal(await r.paperPeak(paperBook, 120, w.paper), 100, "the paper peak it reads is the one on record");
     assert.equal(paperBook.hwmUsdg, 100, "and the row is not raised in memory either");
-    assert.equal(await r.riskPeak(120, w.risk), 150, "the peak the order is judged against is still read");
-    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "the in-memory mark the breaker divides by does not move");
+    assert.equal(await r.riskPeak(120, w.risk, "settled"), 150, "the peak the order is judged against is still read");
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "settled"), PEAK, "the in-memory mark the breaker divides by does not move");
     await r.equityRow(w.equity);
     assert.deepEqual(w.calls, ["risk peak observe=null"], "asked without observing — risk-period.ts reads the peak on null");
   });
@@ -1065,8 +1065,8 @@ describe("what a tick may write down", () => {
     const w = writers();
     const paperBook = { hwmUsdg: 100 };
     assert.equal(await r.paperPeak(paperBook, 120, w.paper), 120);
-    assert.equal(await r.riskPeak(120, w.risk), 150);
-    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), ACCRUAL.newHwmUsdg);
+    assert.equal(await r.riskPeak(120, w.risk, "settled"), 150);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "settled"), ACCRUAL.newHwmUsdg);
     await r.equityRow(w.equity);
     assert.deepEqual(w.calls, ["paper peak 120", "risk peak observe=120", "fee + live mark", "equity row"]);
   });
@@ -1076,7 +1076,7 @@ describe("what a tick may write down", () => {
     const w = writers();
     assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 90, w.paper), 100);
     assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 100, w.paper), 100);
-    assert.equal(await r.accrue({ profitUsdg: 0n, newHwmUsdg: PEAK }, PEAK, w.fee), PEAK);
+    assert.equal(await r.accrue({ profitUsdg: 0n, newHwmUsdg: PEAK }, PEAK, w.fee, "settled"), PEAK);
     assert.deepEqual(w.calls, []);
   });
 
@@ -1084,8 +1084,8 @@ describe("what a tick may write down", () => {
     const r = tickRatchets(tickPlan("regular"), { incomplete: false, curveMarked: 1 });
     const w = writers();
     assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 100);
-    await r.riskPeak(120, w.risk);
-    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
+    await r.riskPeak(120, w.risk, "settled");
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "settled"), PEAK);
     await r.equityRow(w.equity);
     assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
   });
@@ -1094,8 +1094,43 @@ describe("what a tick may write down", () => {
     const r = tickRatchets(tickPlan("regular"), { incomplete: true, curveMarked: 0 });
     const w = writers();
     await r.equityRow(w.equity);
-    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
-    await r.riskPeak(120, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "settled"), PEAK);
+    await r.riskPeak(120, w.risk, "settled");
     assert.deepEqual(w.calls, ["risk peak observe=null"]);
+  });
+
+  /**
+   * A DEPOSIT THAT IS NOT YET CAPITAL MUST NOT BE CHARGED, NOR COUNTED AS A PEAK.
+   *
+   * While an op of unknown outcome is out the flow reconcile holds its window
+   * (flow-witness.ts), so a deposit that landed inside it is in this equity and
+   * not yet booked. A fee on it charges the owner their own money; a peak
+   * raised on it is raised a second time when the deposit is booked, and the
+   * breaker then reads a drawdown the size of the deposit.
+   */
+  it("A HELD FLOW CHARGES NO FEE, KEEPS THE LIVE MARK, AND OBSERVES NO RISK PEAK", async () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    const w = writers();
+    assert.equal(r.feeBps(2000, true, "held"), 0);
+    assert.equal(await r.riskPeak(120, w.risk, "held"), 150, "the peak is still read, for the breaker");
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "held"), PEAK);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
+  });
+
+  it("A WAIVED FLOW CHARGES NO FEE BUT STILL RAISES THE PEAKS — what it absorbed is carried, never charged", async () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    const w = writers();
+    assert.equal(r.feeBps(2000, true, "waived"), 0);
+    assert.equal(await r.riskPeak(120, w.risk, "waived"), 150);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee, "waived"), ACCRUAL.newHwmUsdg);
+    assert.deepEqual(w.calls, ["risk peak observe=120", "fee + live mark"]);
+  });
+
+  it("a settled flow charges the owner's rate, and unknown contributions still charge none", () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    assert.equal(r.feeBps(2000, true, "settled"), 2000);
+    assert.equal(r.feeBps(2000, false, "settled"), 0);
+    assert.equal(r.feeBps(2000, false, "waived"), 0);
   });
 });

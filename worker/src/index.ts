@@ -120,7 +120,7 @@ import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOu
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
 import { createTickBook, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
-import { createFlowWitness, opsStillOut } from "./flow-witness";
+import { createFlowWitness, opUsdgMoved, type FlowMark, type FlowStanding } from "./flow-witness";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -2885,6 +2885,12 @@ async function main() {
       });
       for (const r of resolved) {
         const row = mine.find((m) => m.userOpHash === r.userOpHash)!;
+        // WHAT IT MOVED IN THIS ACCOUNT'S CASH, told to the flow witness BEFORE
+        // the row stops reading 'submitted', so no reconcile can see the op
+        // settled without knowing its move. A window the op held books what is
+        // left once that move is set aside; a receipt that cannot be read is
+        // null, and that window is waived instead (flow-witness.ts).
+        flowWitness.settled(r.userOpHash, r.success ? await opUsdgMoved(chain, r.txHash, smartAccount, CASH.USDG) : 0n);
         await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
@@ -3136,13 +3142,13 @@ async function main() {
     cashUsdg: bigint,
     equityUsdg: bigint,
     /** flowWitness.mark(), taken just before `cashUsdg` was read. See flow-witness.ts. */
-    flowMark: number,
+    flowMark: FlowMark,
     /** Present when flows can be READ instead of inferred. See scanChainFlows. */
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
-  ): Promise<void> => {
+  ): Promise<FlowStanding> => {
     const record = async (
       deltaUsdg: bigint,
       why: string,
@@ -3331,18 +3337,8 @@ async function main() {
       return true;
     };
 
-    // AN OP OUT WITH NO OUTCOME, read before anything is booked so a failed
-    // read aborts the whole pass (reconcileFlowsOrRetry retries it). Its landing
-    // time is unknown, so while one is out — and for the look after — no cash
-    // change can be called the owner's. See flow-witness.ts.
-    const opsOutstanding = opsStillOut(await listSubmittedOps(agentId), Date.now());
-
-    // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
-    // truth about money crossing the boundary, and inference must not book the
-    // same movement a second time from the balance change it already explains.
-    const covered = scan ? await scanChainFlows(scan) : false;
-
-    if (!covered && lastCashUsdg === null) {
+    /** This process's first reading: the accounting anchor's branch, never inference. */
+    const firstObservation = async (): Promise<void> => {
       // FIRST OBSERVATION OF THIS PROCESS. Everything hard about hosted
       // accounting is in this branch, so it is worth being exact about what
       // changed and why.
@@ -3416,12 +3412,39 @@ async function main() {
       }
       // `resume-clean` is the remaining arm and it does nothing on purpose: a
       // funded account came back with the cash the anchor said it had.
-    } else if (!covered && lastCashUsdg !== null && flowWitness.unexplained({ opsOutstanding })) {
-      await record(cashUsdg - lastCashUsdg, "no trade explains this");
-    }
+    };
 
+    // THE DECISION IS flow-witness.ts look(), where a test runs it against a
+    // real ledger; this hands it the reads and the writers. In its order:
+    //   • the ledger's ops still out with no outcome, read before anything is
+    //     booked, so a failed read aborts the pass (reconcileFlowsOrRetry
+    //     retries it). While one is out its landing time is unknown, so the
+    //     window is held and judged once it closes — its own ops' moves set
+    //     aside and the rest booked as capital, or waived when they cannot be;
+    //   • EXACT BEFORE INFERRED: when the chain scan covered the window it is
+    //     the whole truth about money crossing the boundary, and inference must
+    //     not book the same movement a second time;
+    //   • this process's first reading goes to the anchor above.
+    // What it returns decides what this tick may write down after it: a held
+    // window charges no fee and moves no peak, a waived one charges no fee.
+    const standing = await flowWitness.look({
+      cash: cashUsdg,
+      mark: flowMark,
+      now: Date.now(),
+      outstanding: () => listSubmittedOps(agentId),
+      covered: () => (scan ? scanChainFlows(scan) : Promise.resolve(false)),
+      first: firstObservation,
+      book: (deltaUsdg, why) => record(deltaUsdg, why),
+    });
+    if (standing === "held") {
+      console.log(`[flows] held — an order's outcome is not known yet, so nothing is booked and no fee or peak is taken this tick`);
+    } else if (standing === "waived") {
+      console.log(
+        `[flows] a window an order held closed without the figures to separate it — absorbed, and this tick's fee waived`,
+      );
+    }
     lastCashUsdg = cashUsdg;
-    flowWitness.settle({ mark: flowMark, opsOutstanding });
+    return standing;
   };
 
   /**
@@ -3432,37 +3455,44 @@ async function main() {
    * for money the ledger has no record of is the split this whole design exists
    * to prevent. That throw has to stop three things, and stopping it here stops
    * all three at once: `chainScanCursor` is left where it was (the assignment
-   * that advances it is downstream of the throw), `lastCashUsdg` is not updated
-   * so the next tick sees the same unexplained delta and tries again, and the
-   * tick itself survives — an accounting write that failed is not a reason to
-   * take an armed agent down.
+   * that advances it is downstream of the throw), the witness's baseline is not
+   * moved so the next tick sees the same unexplained delta and tries again, and
+   * the tick itself survives — an accounting write that failed is not a reason
+   * to take an armed agent down.
+   *
+   * AND THE TICK IS TOLD IT DID NOT FINISH. An aborted pass is a tick that
+   * could not say which part of its equity is capital, so it stands as held:
+   * no fee and no peak on it. A deposit whose row failed to land used to be
+   * charged as profit by the same tick, and then raised the peak a second time
+   * when the retry booked it.
    */
   const reconcileFlowsOrRetry = async (
     agentId: string,
     cashUsdg: bigint,
     equityUsdg: bigint,
-    flowMark: number,
+    flowMark: FlowMark,
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
-  ): Promise<void> => {
+  ): Promise<FlowStanding> => {
     try {
-      await reconcileFlows(agentId, cashUsdg, equityUsdg, flowMark, scan);
+      return await reconcileFlows(agentId, cashUsdg, equityUsdg, flowMark, scan);
     } catch (e) {
       console.log(
         `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
           `cash baseline are left where they were, so the next tick retries the same window`,
       );
+      return "held";
     }
   };
   let highWaterMarkUsdg = 0n;
   let riskHighWaterMarkUsdg: bigint | null = null;
   const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? highWaterMarkUsdg);
-  // Cash as of the last live snapshot, and how many rows the ledger had then.
-  // Together they are the whole basis for inferring an external flow: if cash
-  // moved and NOTHING was written to the ledger in between, the money came from
-  // outside. Deliberately narrow — see reconcileFlows.
+  // Cash as of the last live reading the flow reconcile finished — what the
+  // rail (execMode) and the owner's alerts read. The baseline inference judges
+  // against is the flow witness's own (flow-witness.ts): it stays where it was
+  // while an op of unknown outcome is out, which this must not.
   let lastCashUsdg: bigint | null = null;
   /**
    * WHAT THIS PROCESS IS ENTITLED TO CLAIM ABOUT THE OWNER'S CAPITAL.
@@ -3551,7 +3581,7 @@ async function main() {
     //
     // The asymmetry is what makes that fatal rather than untidy. The two places
     // that clear the flag — `resume-with-drift` and `stand-down` — sit behind
-    // `lastCashUsdg === null`, so they can fire at most ONCE per process, while
+    // the flow witness's first reading, so they can fire at most ONCE per process, while
     // this runs every re-arm. One-way false against two-way true means the
     // doubt always loses, and `contributionsKnown` is the sole gate on the
     // performance fee: the fee would quietly come back at full rate on a book
@@ -7095,8 +7125,9 @@ async function main() {
           if (!wrote) throw new NotRecorded(userOpHash);
           // AND FROM HERE THE OP CAN MOVE CASH, before any outcome row does —
           // counted now, because a receipt that cannot be read leaves no other
-          // write behind and the op may still land (flow-witness.ts).
-          flowWitness.wrote();
+          // write behind and the op may still land (flow-witness.ts). By hash,
+          // so a window it holds can set its own move aside once it settles.
+          flowWitness.sent(userOpHash);
         },
       };
       const send = (calls: Call[]) => executor.execute(calls, submitHooks);
@@ -8415,8 +8446,9 @@ async function main() {
         if (landed) {
           await adjustAgentHwm(agentId, -usdgNum(intent.amountUsdg));
           highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-          // The next tick's cash reading already reflects this, and it now has
-          // an explanation, so inference must not double-count it.
+          // The next tick's cash reading already reflects this. Inference does
+          // not double-count it — its row is a write the flow witness counted —
+          // and the cash the rail and the alerts read is current at once.
           if (lastCashUsdg !== null) lastCashUsdg -= intent.amountUsdg;
         } else {
           // Durable, not just stderr: the transfer LANDED on chain and the
@@ -9797,7 +9829,11 @@ async function main() {
       // it a transaction hash, instead of a balance change nobody can point at.
       // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
       // figure is measured against those.
-      await reconcileFlowsOrRetry(
+      //
+      // HOW IT ENDED DECIDES WHAT FOLLOWS: while an op of unknown outcome is out
+      // (or the pass aborted) part of this equity may be a deposit not yet
+      // booked, so the fee and the peaks below wait for it (tickRatchets).
+      const flows = await reconcileFlowsOrRetry(
         agentId,
         balances.cashUsdg,
         equityUsdg,
@@ -9849,7 +9885,7 @@ async function main() {
       // not move that reference point at the very moment it judges the order
       // — null asks without observing (risk-period.ts markRiskPeriod), and
       // tickRatchets passes null on a command tick or under a curve mark.
-      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe), flows);
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -9860,7 +9896,10 @@ async function main() {
         // zero for an absence. See packages/core/src/gas-basis.ts.
         gasAccounting: gasBasisOf(gasCov),
       });
-      const feeBpsThisTick = accounting.contributionsKnown ? effFeeBps : 0;
+      // No fee while contributions are unknown (above), nor while a capital
+      // flow is held or was waived (flow-witness.ts): the owner's own money is
+      // not charged as profit because an order's outcome was unread.
+      const feeBpsThisTick = ratchet.feeBps(effFeeBps, accounting.contributionsKnown, flows);
       if (!accounting.contributionsKnown && effFeeBps > 0 && !feeSuppressionLogged) {
         feeSuppressionLogged = true;
         await addEvent(
@@ -9942,7 +9981,7 @@ async function main() {
             `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${effFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)${circle}`,
           );
         }
-      });
+      }, flows);
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
