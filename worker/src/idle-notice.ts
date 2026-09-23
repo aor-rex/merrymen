@@ -25,7 +25,7 @@
 import type { AssetMode } from "../../packages/core/src/index";
 import { addDecision, addEvent, newDecisionId, ownerNotice } from "./store";
 import { publishesIdle, renderWhy, type Why } from "./strategies/reasons";
-import type { Snapshot } from "./strategies/types";
+import { breakerIdle, type Snapshot } from "./strategies/types";
 import { publicationSourceFor } from "./thesis-policy";
 
 /**
@@ -225,9 +225,10 @@ function breakerLead(line: string): number {
  * carrying another warn — and if so, what does it carry?
  *
  * Read from the words, not remembered: a worker restarted mid-trip starts with
- * no memory, and the line an earlier process left on the desk must still be
- * known as ours — or the first breaker line after the restart would carry the
- * old one after it, the same sentence twice.
+ * no memory, and the line an earlier process left on the desk (where its own
+ * table survived the restart) must still be known as ours — or the first
+ * breaker line after the restart would carry the old one after it, the same
+ * sentence twice.
  */
 function ownLine(line: string): { head: string; earlier: string | null } | null {
   let lead = breakerLead(line);
@@ -277,9 +278,21 @@ export interface IdleSinks {
  * a reason that posts is never restated, because its view row would repeat
  * with it.
  *
- * AND THE BREAKER'S RESET IS SAID. Once the owner has been told the breaker,
- * the first tick that measures it clear writes breakerResetLine over it, so
- * the notice never goes on saying buys are refused after they no longer are.
+ * AND THE BREAKER'S RESET IS SAID, AND ITS TRIP. Once the owner has been told
+ * the breaker, the first tick that measures it clear writes breakerResetLine
+ * over it, so the notice never goes on saying buys are refused after they no
+ * longer are. And a trip the channel has not told is told on the tick that
+ * measures it, whatever reason that tick gives, so the reset line never goes
+ * on saying buying resumes while the wall refuses every buy.
+ *
+ * ACROSS A RESTART the channel starts with no memory, and the only notice it
+ * can read is the child's own table (store.ownerNotice) — which a hosted
+ * redeploy wipes, while the desk reads the shared table that keeps every line.
+ * So nothing here looks for what an earlier process left. A trip still
+ * standing is told again on the new process's first tripped tick, and its
+ * reset follows. A trip that CLEARED across the restart is unknown to the new
+ * process: the owner goes on seeing the old breaker line until a newer warn
+ * covers it or the newest 40 events pass it by.
  */
 export class IdleChannel {
   /** The owner sentence standing — `lastIdleReason`, as the tick knew it. */
@@ -288,12 +301,6 @@ export class IdleChannel {
   private standing: string | null = null;
   /** The agent whose owner was told the breaker, until they are told it reset. */
   private breakerTold: string | null = null;
-  /**
-   * Whether this process has yet to look for a breaker line an earlier one
-   * left standing. A restart forgets `breakerTold`, and a trip that cleared
-   * across it would otherwise leave "the breaker refuses buys" on the desk.
-   */
-  private leftoverUnchecked = true;
   private readonly restateAfterMs: number;
 
   constructor(
@@ -318,20 +325,29 @@ export class IdleChannel {
     const notice = idleNotice({ idle: input.idle, modeEmptied: input.modeEmptied, last: this.last });
     this.last = notice.last;
     if (notice.last === null) this.standing = null;
-    // THE RESET, before whatever reason follows it: the breaker was told —
-    // by this process, or by one before a restart, whose line still shows —
-    // and this tick measured it clear. Said once; an unread desk defers it to
-    // the next tick that can read one, rather than writing it on a guess.
-    const told = this.breakerTold === input.agentId;
-    if ((told || this.leftoverUnchecked) && input.idle?.code !== "breaker-tripped" && breakerClear(input.drawdown)) {
+    // THE RESET, before whatever reason follows it: the owner was told the
+    // breaker and this tick measured it clear. Said once; an unread desk
+    // defers it to the next tick that can read one, rather than writing it on
+    // a guess.
+    if (this.breakerTold === input.agentId && input.idle?.code !== "breaker-tripped" && breakerClear(input.drawdown)) {
       const shown = await this.shown(input.agentId);
       if (shown !== undefined) {
         this.breakerTold = null;
-        this.leftoverUnchecked = false;
-        if (told || (shown !== null && breakerLead(shown.message) >= 0)) {
-          await this.writeOver(input.agentId, breakerResetLine(notice.last), shown);
-        }
+        await this.writeOver(input.agentId, breakerResetLine(notice.last), shown);
       }
+    }
+    // AND THE TRIP, whatever reason the tick gives. The class gate gives the
+    // breaker's only when something would have bought, and even-keel in band
+    // or weekend-gap while it holds give none — so a re-trip after a reset
+    // left "buying resumes" on the desk while the wall refused every buy. A
+    // measured trip this channel has not told is told now: after its own
+    // reset, and on a restarted process's first tripped tick, which cannot
+    // know what an earlier one left. A tick that gives the breaker's reason
+    // says it below, as a change. Written even unread, as a change is.
+    const trip = breakerIdle({ drawdown: input.drawdown });
+    if (trip && this.breakerTold !== input.agentId && input.idle?.code !== "breaker-tripped") {
+      this.breakerTold = input.agentId;
+      await this.writeOver(input.agentId, renderWhy(trip), (await this.shown(input.agentId)) ?? null);
     }
     if (notice.event) {
       const warn = notice.event.level === "warn";
