@@ -18,7 +18,7 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { beatsOf, forgetKeysForTest, lanesOf, pillBeats, type Beat, type FeedRow } from "./beat";
+import { beatsOf, fitOf, forgetKeysForTest, lanesOf, matchTwins, pillBeats, type Beat, type FeedRow, type Fit } from "./beat";
 import { forgetSeenForTest, freshAmong, freshKeyOf, isFresh, markSeen } from "./feed-fresh";
 import type { LiveAgent } from "./live";
 
@@ -353,6 +353,169 @@ describe("twins keep their own keys (CF3)", () => {
     assert.equal(aged.get(b + 100)!.key, first.get(b + 10)!.key);
     assert.equal(aged.get(b + 100)!.fresh, false);
   });
+
+  // R3F-1: the review's probe. Twin A has copies at 100 and 400, twin B at 150
+  // and 300, so A is the older by its first copy. Between two reads (a sleeping
+  // laptop, a hidden tab read once a minute) both first copies leave the
+  // window, and now B (300) is the older. B, handled first, took A's key — a
+  // same-words key whose span covers 300 — and A was left to slide in under a
+  // key nobody had seen: a refusal flashing as news, a fill flashing as a fill
+  // that never came. Each twin is its own newest copy; nothing was said.
+  const twin = (outcome: "refused" | "landed", first: number, last: number, said: number) =>
+    row({
+      outcome,
+      outcomeText: outcome === "refused" ? "the wall turned it back" : "landed",
+      sizeUsdg: null,
+      head: "buy TSLA",
+      at: last,
+      firstAt: first,
+      said,
+      unchangedSince: first,
+    });
+  for (const outcome of ["refused", "landed"] as const) {
+    it(`TWO TWINS' FIRST COPIES AGE OUT IN ONE READ AND THEIR ORDER FLIPS (${outcome}): each keeps its own key, neither is news`, () => {
+      const [A, B] = [NOW + 400, NOW + 300];
+      read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]); // the page, primed
+      const before = read([twin(outcome, NOW + 100, A, 2), twin(outcome, NOW + 150, B, 2)]);
+      assert.notEqual(before.get(A)!.key, before.get(B)!.key);
+      const aged = read([twin(outcome, A, A, 1), twin(outcome, B, B, 1)]);
+      for (const [name, t] of [["A", A], ["B", B]] as const) {
+        assert.equal(aged.get(t)!.key, before.get(t)!.key, `twin ${name} kept its own key`);
+        assert.equal(aged.get(t)!.fresh, false, `twin ${name}: nothing arrived`);
+      }
+      const again = read([twin(outcome, A, A, 1), twin(outcome, B, B, 1)]);
+      assert.ok([...again.values()].every((r) => !r.fresh), "and read again, nothing is news");
+    });
+  }
+
+  it("A TWIN SAID AGAIN AS BOTH AGE OUT takes its own key, not the one whose span its first copy falls in", () => {
+    // Y's copies are 100, 250, 300 and X's 150, 200, 400; Y is the older, so
+    // it holds the bare id. Between two reads both oldest copies leave and X
+    // is said again at 500: X is now 200..500 and Y 250..300, and X is the
+    // older. X's first copy (200) falls inside Y's old span as well as its own
+    // — but Y's newest copy is where it was, so that key is Y's; X takes its
+    // own. Handed out in list order, the two swapped.
+    const [X, Y] = [NOW + 400, NOW + 300];
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const before = read([twin("refused", NOW + 150, X, 3), twin("refused", NOW + 100, Y, 3)]);
+    assert.equal(before.get(Y)!.key, PID, "the older twin holds the bare id");
+    const aged = read([twin("refused", NOW + 200, NOW + 500, 3), twin("refused", NOW + 250, Y, 2)]);
+    assert.equal(aged.get(Y)!.key, before.get(Y)!.key, "Y kept its key");
+    assert.equal(aged.get(NOW + 500)!.key, before.get(X)!.key, "X, said again, kept its key");
+    assert.ok([...aged.values()].every((r) => !r.fresh), "a refusal said again is not news");
+  });
+
+  it("BOTH SAID AGAIN AS BOTH AGE OUT: the twin that fits one key only gets it, and the other takes its own", () => {
+    // A's copies 100, 350, 400 → 350..600; B's 150, 250, 300 → 250..500. B's
+    // new span fits both old keys and fits A's more closely; A's fits A's
+    // alone. First come, first served, B took A's key and A slid in as news.
+    const [A, B] = [NOW + 400, NOW + 300];
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const before = read([twin("refused", NOW + 100, A, 3), twin("refused", NOW + 150, B, 3)]);
+    const aged = read([twin("refused", NOW + 350, NOW + 600, 3), twin("refused", NOW + 250, NOW + 500, 3)]);
+    assert.equal(aged.get(NOW + 600)!.key, before.get(A)!.key, "A kept its key");
+    assert.equal(aged.get(NOW + 500)!.key, before.get(B)!.key, "B kept its key");
+    assert.ok([...aged.values()].every((r) => !r.fresh));
+  });
+
+  it("A TWIN BACK ON THE PAGE WITH ITS OLD NEWEST COPY AS ITS FIRST is that row, whatever other key its span fits", () => {
+    // X (633, 1181) and Y (1090..1470). Then Y is off the page (the action
+    // lane shows the newest rows) while X, said again at 1727, has lost 633:
+    // X is 1181..1727. Its span fits Y's old key more closely than its own —
+    // but it still has X's newest copy, 1181, so it is X. Y, back, is Y.
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const X = twin("refused", NOW + 633, NOW + 1181, 2);
+    const Y = twin("refused", NOW + 1090, NOW + 1470, 2);
+    const before = read([X, Y]);
+    const back = read([twin("refused", NOW + 1181, NOW + 1727, 2)]);
+    assert.equal(back.get(NOW + 1727)!.key, before.get(NOW + 1181)!.key, "X kept its key");
+    assert.equal(back.get(NOW + 1727)!.fresh, false);
+    const both = read([twin("refused", NOW + 1181, NOW + 1727, 2), twin("refused", NOW + 1090, NOW + 1829, 3)]);
+    assert.equal(both.get(NOW + 1829)!.key, before.get(NOW + 1470)!.key, "Y, back on the page, has its own key");
+    assert.ok([...both.values()].every((r) => !r.fresh));
+  });
+
+  it("A STALE BODY AFTER THE TWINS AGED: each old row is found by its newest copy and takes its own key back", () => {
+    // /api/theses is stale-while-revalidate: after the read where both twins'
+    // first copies left, an older body can be served again, with the rows as
+    // they were. Each still has its newest copy where it was, so each is the
+    // row that holds that key — its first copy going back is what a stale body
+    // looks like, not a different row.
+    const [A, B] = [NOW + 400, NOW + 300];
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const old = [twin("refused", NOW + 100, A, 2), twin("refused", NOW + 150, B, 2)];
+    const before = read(old);
+    read([twin("refused", A, A, 1), twin("refused", B, B, 1)]);
+    const stale = read(old);
+    for (const t of [A, B]) {
+      assert.equal(stale.get(t)!.key, before.get(t)!.key, `the twin last said at ${t} kept its key`);
+      assert.equal(stale.get(t)!.fresh, false);
+    }
+  });
+
+  it("A TWIN FROM BELOW THE PAGE, WITH A COPY OLDER THAN THE HOLDER EVER HAD, does not take the key from the holder's own row", () => {
+    // The action lane shows the newest rows. H (200..400) was on the page; N
+    // (150, 350) was below it. By the next read H lost 200 and was said again
+    // (300..600), and N was said at 500 and is on the page now. N's span
+    // covers H's key too — but N has a copy (150) from before H's first, which
+    // H's row never had. H's own row keeps the key; N is news to the page.
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const before = read([twin("refused", NOW + 200, NOW + 400, 2)]);
+    const after = read([twin("refused", NOW + 300, NOW + 600, 2), twin("refused", NOW + 150, NOW + 500, 3)]);
+    assert.equal(after.get(NOW + 600)!.key, before.get(NOW + 400)!.key, "H's row kept its key");
+    assert.equal(after.get(NOW + 600)!.fresh, false);
+    assert.equal(after.get(NOW + 500)!.fresh, true, "N was never on the page");
+  });
+
+  it("A NEW TWIN SAID BETWEEN A KEPT TWIN'S COPIES takes no key a row on screen holds", () => {
+    // X is on screen (100..200). By the next read X was said again at 400 and
+    // a new twin said once at 300 — inside X's span. X is still here under its
+    // key; the newcomer is news, drawn under a key of its own.
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW, firstAt: NOW })]);
+    const before = read([twin("refused", NOW + 100, NOW + 200, 2)]);
+    const beats = beatsOf([twin("refused", NOW + 100, NOW + 400, 3), twin("refused", NOW + 300, NOW + 300, 1)], agents);
+    assert.equal(new Set(beats.map((b) => b.id)).size, 2, "two rows, two keys");
+    assert.equal(beats.find((b) => b.atMs === (NOW + 400) * 1000)!.id, before.get(NOW + 200)!.key, "X kept its key");
+    const fresh = freshAmong(beats.map(freshKeyOf));
+    assert.equal(isFresh(beats.find((b) => b.atMs === (NOW + 300) * 1000)!, fresh), true, "the new twin is news");
+  });
+});
+
+/**
+ * THE MATCHING ITSELF (R3F-1): how a newcomer's span fits a departed key of
+ * the same words, and who gets which key when several could.
+ */
+describe("which departed key a twin may take", () => {
+  it("fitOf: never a key whose every copy is older than the row's first; best when the holder's newest copy is still there", () => {
+    const was = { first: 100, last: 400 };
+    assert.equal(fitOf({ first: 401, last: 500 }, was), null, "every copy the page saw has left: a new row");
+    assert.equal(fitOf({ first: 250, last: 400 }, was), 0, "only old copies left");
+    assert.equal(fitOf({ first: 400, last: 700 }, was), 0, "said again, and all before the holder's newest left");
+    assert.equal(fitOf({ first: 50, last: 400 }, was), 0, "an older body served stale: first went back, newest where it was");
+    assert.equal(fitOf({ first: 250, last: 700 }, was), 1, "said again: the span only moved forward");
+    assert.equal(fitOf({ first: 50, last: 700 }, was), 2, "said again with a first copy the holder never had");
+    assert.equal(fitOf({ first: 250, last: 300 }, was), 2, "its newest is older than the holder's and not one of its copies");
+  });
+
+  it("matchTwins: a better fit wins a key over a newcomer tried first", () => {
+    const got = matchTwins(new Map<number, Fit[]>([[0, [{ key: "k", rank: 1 }]], [1, [{ key: "k", rank: 0 }]]]));
+    assert.deepEqual([...got], [["k", 1]]);
+  });
+
+  it("matchTwins: a pair settled on a better fit is never undone by a worse one", () => {
+    // Newcomer 1 fits only k (rank 2); newcomer 0 fits k at rank 0 and j at 2.
+    // More rows would keep a key if 0 moved to j — but 0 is k's row by the
+    // strongest evidence there is, and 1 is not.
+    const got = matchTwins(new Map<number, Fit[]>([[0, [{ key: "j", rank: 2 }, { key: "k", rank: 0 }]], [1, [{ key: "k", rank: 2 }]]]));
+    assert.equal(got.get("k"), 0);
+    assert.ok(![...got.values()].includes(1));
+  });
+
+  it("matchTwins: within a fit, as many rows keep a key as can", () => {
+    // Tried first, 0 would take k — the only key 1 fits. 0 moves to j.
+    const got = matchTwins(new Map<number, Fit[]>([[0, [{ key: "k", rank: 1 }, { key: "j", rank: 1 }]], [1, [{ key: "k", rank: 1 }]]]));
+    assert.deepEqual(new Map(got), new Map([["k", 1], ["j", 0]]));
+  });
 });
 
 /**
@@ -397,6 +560,22 @@ describe("the next leg of a post already on screen (CF4)", () => {
     const stale = read([leg("pending", NOW - 3000), leg("landed", NOW - 3000)]);
     assert.equal(stale.find((b) => b.outcome === "landed")!.key, PID);
     assert.equal(stale.find((b) => b.outcome === "landed")!.fresh, false);
+  });
+
+  it("AN ORDER RE-SENT WHILE IN FLIGHT, WHOSE FIRST SEND LANDS: the order still in flight keeps its element; the fill is the news", () => {
+    // One in-flight row with two copies (sent, re-sent). The first send lands:
+    // the row in flight is still there, now only its newer copy, so it is the
+    // same row and keeps its key. The in-flight hand-over is for an order that
+    // is gone — here the fill is a new row, and it is what slides in.
+    const sent = (first: number, last: number, said: number) =>
+      row({ outcome: "pending", outcomeText: "sent, waiting on the chain", at: last, firstAt: first, said, sizeUsdg: null, head: "buy TSLA" });
+    read([row({ postId: "f".repeat(32), symbol: "AAPL", at: NOW - 9000, firstAt: NOW - 9000 })]); // the page, primed
+    const inFlight = read([sent(NOW - 200, NOW - 100, 2)]);
+    const landed = read([sent(NOW - 100, NOW - 100, 1), leg("landed", NOW - 200)]);
+    assert.deepEqual(landed.find((b) => b.outcome === "pending"), { outcome: "pending", key: inFlight[0]!.key, fresh: false });
+    const fill = landed.find((b) => b.outcome === "landed")!;
+    assert.notEqual(fill.key, inFlight[0]!.key);
+    assert.equal(fill.fresh, true);
   });
 
   it("a landed row pushed out and replaced by a new order does not lend the order its key", () => {
