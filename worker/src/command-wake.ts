@@ -16,16 +16,16 @@
  * drifts. So the watcher does not drain anything. It wakes a COMMAND TICK: the
  * tick with its producers left out, which re-reads the market and the book and
  * then drains under the same `commandInFlight` guard, the same unlink claim and
- * the same deadline checks as every other tick. See index.ts `commandOnly`.
+ * the same deadline checks as every other tick. See tickPlan below.
  *
  * ONCE PER ORDER. A tick can finish without draining — an unarmed worker
  * returns before it gets there — and the file then sits in the queue until its
  * window closes. Waking for it again would be a tick every two seconds against
- * a rate-limited chain for as long as that lasts. So an id is woken for once;
- * after that it waits for the regular cadence, exactly as every order used to.
- * And an id is only spent on a wake that actually happened: a watcher that
- * "used up" an order while it could not act would leave that order to the
- * four-minute wait this exists to remove.
+ * a rate-limited chain for as long as that lasts. So each id is owed one wake,
+ * taken one at a time; after that it waits for the regular cadence, exactly as
+ * every order used to. And an id is only spent on a wake that actually
+ * happened: a watcher that "used up" an order while it could not act would
+ * leave that order to the four-minute wait this exists to remove.
  */
 
 /** How close the regular tick may be before the watcher leaves the order to it. */
@@ -64,30 +64,164 @@ export function commandTickReady(s: {
 /**
  * The watcher. `poll` is called on a short interval and returns whether it
  * woke a tick this time.
+ *
+ * ONE WAKE OWED PER ORDER, NOT PER LOOK. A command tick drains one live
+ * command, so two ids that arrive in the same look — a probe beside an order,
+ * or two rows one ferry pass delivered — are two wakes, taken one at a time as
+ * `ready` allows. It used to mark every new id woken and wake once, which
+ * spent the second on a tick that could never reach it and left it to the
+ * regular cadence with the worker idle.
+ *
+ * Owed wakes never outnumber the files still listed: an order some other tick
+ * already drained leaves nothing for a command tick to do, and a wake for it
+ * would be a full read of the chain for nothing.
  */
 export function createCommandWake(deps: {
   /** What is queued right now — a listing (command-files.ts `queuedCommandIds`). */
   pending: () => readonly string[];
   /** Whether a command tick may start now. See commandTickReady. */
   ready: () => boolean;
-  /** Start the command tick. */
-  wake: () => void;
+  /** Start the command tick. False when the clock turned it down, which spends nothing. */
+  wake: () => boolean;
 }): { poll(): boolean } {
-  const woken = new Set<string>();
+  // Every id already counted, so a file still sitting there is never owed a
+  // second wake (the unarmed worker — see the header).
+  const counted = new Set<string>();
+  let owed = 0;
   return {
     poll() {
       const ids = deps.pending();
       // An id that left the queue was claimed or dropped; forgetting it keeps
       // this set as small as the queue, for the life of the process.
       const listed = new Set(ids);
-      for (const id of woken) if (!listed.has(id)) woken.delete(id);
-      const fresh = ids.filter((id) => !woken.has(id));
-      if (fresh.length === 0) return false;
+      for (const id of counted) if (!listed.has(id)) counted.delete(id);
+      for (const id of ids) {
+        if (counted.has(id)) continue;
+        counted.add(id);
+        owed += 1;
+      }
+      owed = Math.min(owed, listed.size);
+      if (owed === 0) return false;
       if (!deps.ready()) return false;
-      for (const id of fresh) woken.add(id);
-      deps.wake();
+      if (!deps.wake()) return false;
+      owed -= 1;
       return true;
     },
+  };
+}
+
+/** The two kinds of tick the clock runs. */
+export type TickKind = "regular" | "command";
+
+/**
+ * WHAT A TICK DOES, decided once at its top and read wherever it forks.
+ *
+ * It used to be a boolean tested inline in three places inside main(), where
+ * no test can reach; dropping any one of them typechecked and passed. Every
+ * decision a command tick makes differently lives here now, where it runs.
+ *
+ *   ratchets   — observe this tick's equity into what only ever goes up, and
+ *                record it: the fee and high-water-mark accrual, the
+ *                risk-period peak, the paper peak, the equity row. Off on a
+ *                command tick. The fee above the mark follows the running
+ *                maximum of SAMPLED equity, and that maximum only rises as
+ *                samples are added — so an owner's order that added a sample
+ *                could charge a fee on a transient peak the regular cadence
+ *                would have missed, and move the breaker's reference point at
+ *                the moment it judges that very order. The command tick still
+ *                composes equity and the drawdown the order is judged against;
+ *                it just does not write them down.
+ *   brain      — ask the Brain anything. An owner's order arriving is not a
+ *                reason to, and the Brain keeps its own clock.
+ *   awaitDrain — wait for the command it drains before the tick ends. A command
+ *                tick exists for its order, and ending before the order lands
+ *                hands the clock back to a regular tick that would read the
+ *                book mid-trade (see createTickClock's `inFlight`). A regular
+ *                tick drains beside the strategy, as it always has: its own
+ *                intents queue behind the order on the intent chain.
+ *   producers  — everything after the drain: stranded resolve, discovery, the
+ *                strategy, the class route. Never on a command tick, or every
+ *                owner order would also buy the basket a second time.
+ */
+export interface TickPlan {
+  kind: TickKind;
+  ratchets: boolean;
+  brain: boolean;
+  awaitDrain: boolean;
+  producers: boolean;
+}
+
+export function tickPlan(kind: TickKind): TickPlan {
+  if (kind === "command") return { kind, ratchets: false, brain: false, awaitDrain: true, producers: false };
+  return { kind, ratchets: true, brain: true, awaitDrain: false, producers: true };
+}
+
+/**
+ * The tick's drain, run the way its plan says. Resolves to whether the tick
+ * goes on to its producers.
+ *
+ * NEVER THROWS, on either kind: a drain that failed has written its own
+ * receipt or left the file for the next tick, and it is no reason for the
+ * tick to stop reading.
+ */
+export async function drainOnTick(plan: TickPlan, drain: () => Promise<unknown>): Promise<boolean> {
+  let run: Promise<unknown>;
+  try {
+    run = drain();
+  } catch (e) {
+    run = Promise.reject(e);
+  }
+  const landed = run.then(
+    () => {},
+    () => {},
+  );
+  if (plan.awaitDrain) await landed;
+  return plan.producers;
+}
+
+/**
+ * ONE OWNER COMMAND IN FLIGHT, and a way to wait for it.
+ *
+ * This was a bare `commandInFlight` boolean in main(): the one-at-a-time rule
+ * for dashboard commands, readable by nothing that could wait on it. The clock
+ * now has to wait on it — a regular tick must not read the book while an order
+ * is between inclusion and its row — so the flag became a slot that also says
+ * when it frees.
+ *
+ *   run(body)  — runs `body` as THE command in flight and resolves true, or
+ *                resolves false WITHOUT calling it when one already is.
+ *                Refused, not queued: a queued second drain is the two
+ *                in-flight commands the rule exists to forbid. The check and
+ *                the claim are synchronous, so two callers in one turn of the
+ *                event loop cannot both get in.
+ *   busy()     — whether one is in flight.
+ *   settled()  — resolves when the one in flight has finished, however it
+ *                finished; null when none is. Null again the moment it frees,
+ *                so a waiter that re-asks never spins on a resolved promise.
+ */
+export interface OrderInFlight {
+  run(body: () => Promise<void>): Promise<boolean>;
+  busy(): boolean;
+  settled(): Promise<void> | null;
+}
+
+export function createOrderInFlight(): OrderInFlight {
+  let current: Promise<void> | null = null;
+  return {
+    async run(body) {
+      if (current) return false;
+      let free!: () => void;
+      current = new Promise<void>((r) => (free = r));
+      try {
+        await body();
+      } finally {
+        current = null;
+        free();
+      }
+      return true;
+    },
+    busy: () => current !== null,
+    settled: () => current,
   };
 }
 
@@ -106,6 +240,19 @@ export function createCommandWake(deps: {
  * has is to stop: a rejected regular tick goes back on the clock after
  * `fallbackMs`, and a rejected command tick still hands the regular tick back.
  * index.ts catches its own failures first; this is the floor under that.
+ *
+ * A REGULAR TICK NEVER STARTS UNDER A LIVE ORDER. An owner's order debits the
+ * account on chain some seconds before its trade row is written, and the flow
+ * reconciler reads any cash change no row explains as money the owner moved:
+ * "withdrawn X USDG (no trade explains this)", the high-water mark moved with
+ * it, and a performance fee possible on the owner's own principal in the same
+ * tick — never reversed. So a regular tick that comes due while a command is
+ * still in flight (`inFlight` returns its settle) holds the clock and waits
+ * for it, then reads a book the order has finished changing. It holds the
+ * clock while it waits, so no command tick starts in the gap either. This is
+ * not only the command tick's order: a regular tick drains beside its
+ * strategy, and that order can still be waiting on a receipt when the next
+ * regular tick comes due.
  */
 export interface TickClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -122,6 +269,8 @@ export function createTickClock(deps: {
   clearTimer: (handle: unknown) => void;
   /** The wait after a regular tick that rejected instead of saying how long. */
   fallbackMs: number;
+  /** The settle of a command still in flight, or null when none is (OrderInFlight.settled). */
+  inFlight: () => Promise<unknown> | null;
   /** One regular tick, and everything after it; resolves to the wait before the next one. */
   regular: () => Promise<number>;
   /** One command tick. */
@@ -138,16 +287,27 @@ export function createTickClock(deps: {
     timer = deps.setTimer(runRegular, wait);
   };
 
+  // Started at once when nothing is in flight — the common case stays
+  // synchronous — and otherwise once the command lands, asking again then.
+  const startRegular = (): Promise<number> => {
+    let waiting: Promise<unknown> | null;
+    try {
+      waiting = deps.inFlight();
+    } catch {
+      waiting = null;
+    }
+    if (waiting) return waiting.then(startRegular, startRegular);
+    try {
+      return deps.regular();
+    } catch {
+      return Promise.resolve(deps.fallbackMs);
+    }
+  };
+
   const runRegular = () => {
     timer = null;
     running = true;
-    let run: Promise<number>;
-    try {
-      run = deps.regular();
-    } catch {
-      run = Promise.resolve(deps.fallbackMs);
-    }
-    void run
+    void startRegular()
       .catch(() => deps.fallbackMs)
       .then((next) => {
         running = false;
@@ -184,5 +344,62 @@ export function createTickClock(deps: {
         });
       return true;
     },
+  };
+}
+
+/**
+ * THE CLOCK, THE WATCHER AND THE ONE-AT-A-TIME SLOT, WIRED TOGETHER ONCE.
+ *
+ * The three only keep their promises together: the clock holds a regular tick
+ * while the slot has a command in flight, and the watcher wakes a command tick
+ * only when the clock is idle, the slot is free and the regular tick is not
+ * about to run anyway. That wiring used to be three lambdas in main(), where
+ * passing the clock something other than the slot's own settle — or nothing —
+ * typechecked, passed every test, and let a regular tick read the book while
+ * an order was between inclusion and its row. It lives here now, where the
+ * tests that hold those promises run exactly this.
+ *
+ * `orders` is the slot runQueuedCommand drains under, passed in rather than
+ * made here because main() declares the drain long before it builds the clock.
+ */
+export interface CommandClock {
+  /** Put the first regular tick on the clock, `delayMs` from now. */
+  start(delayMs: number): void;
+  /** One look at the queue; true when it woke a command tick. */
+  poll(): boolean;
+  /** The clock's own state, for logs and tests. */
+  state(): { ticked: boolean; tickRunning: boolean; regularDueInMs: number | null };
+}
+
+export function createCommandClock(deps: {
+  now: () => number;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+  fallbackMs: number;
+  /** The one-at-a-time slot every drain runs under. */
+  orders: OrderInFlight;
+  /** What is queued right now — a listing (command-files.ts `queuedCommandIds`). */
+  pending: () => readonly string[];
+  regular: () => Promise<number>;
+  command: () => Promise<void>;
+}): CommandClock {
+  const clock = createTickClock({
+    now: deps.now,
+    setTimer: deps.setTimer,
+    clearTimer: deps.clearTimer,
+    fallbackMs: deps.fallbackMs,
+    inFlight: () => deps.orders.settled(),
+    regular: deps.regular,
+    command: deps.command,
+  });
+  const watcher = createCommandWake({
+    pending: deps.pending,
+    ready: () => commandTickReady({ ...clock.state(), commandInFlight: deps.orders.busy() }),
+    wake: () => clock.wakeCommand(),
+  });
+  return {
+    start: (delayMs) => clock.start(delayMs),
+    poll: () => watcher.poll(),
+    state: () => clock.state(),
   };
 }

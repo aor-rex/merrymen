@@ -34,7 +34,7 @@ import { after, describe, it } from "node:test";
 
 import { ORDER_IN_FLIGHT_MS as SWEEP_IN_FLIGHT_MS, markRunning, writeCommand, writeCommandResult } from "./command-files";
 import { wrapSqlite } from "./db";
-import { ferryForChild } from "./orchestrator";
+import { COMMAND_RECEIPT_DDL, ferryForChild } from "./orchestrator";
 import { ORDER_IN_FLIGHT_MS, ORDER_STALE_GRACE_MS, placeHostedOrder } from "../../web/src/lib/order-state";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -49,11 +49,13 @@ after(() => {
   for (const h of homes) rmSync(h, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-function setup() {
+/** The table as production had it before receipts; `withReceipt` adds the column the orchestrator grows. */
+function setup(withReceipt = false) {
   const raw = new DatabaseSync(":memory:");
   raw.exec(`CREATE TABLE agent_commands (
     id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, args TEXT,
     created_at INTEGER NOT NULL, claimed_at INTEGER, done_at INTEGER, result TEXT)`);
+  if (withReceipt) raw.exec(COMMAND_RECEIPT_DDL);
   const home = mkdtempSync(path.join(tmpdir(), "merry-window-"));
   homes.push(home);
   return { raw, db: wrapSqlite(raw), home };
@@ -221,6 +223,92 @@ describe("AN ORDER THE CHILD HAS TAKEN IS NEVER CALLED 'NEVER RAN'", () => {
   it("the in-flight bound is ONE figure, read by the sweep and the route's slot alike", () => {
     assert.equal(SWEEP_IN_FLIGHT_MS, ORDER_IN_FLIGHT_MS);
     assert.equal(GRACE_MS, ORDER_STALE_GRACE_MS);
+  });
+});
+
+/**
+ * "NEVER RAN" IS C3's `expired`, WHICHEVER PROCESS NOTICED IT.
+ *
+ * An order that expires in the child's queue is answered with an `expired`
+ * receipt (runTickCommand's hook). The same fact noticed by this sweep first —
+ * a row never delivered, or a file still queued past its deadline — was closed
+ * with the sentence alone, so the chat rendered one fact two ways depending on
+ * which process got there first.
+ */
+describe("the sweep's 'never ran' carries the same receipt the child writes", () => {
+  const receiptOf = (raw: DatabaseSync, id: string) => {
+    const r = raw.prepare("SELECT receipt FROM agent_commands WHERE id = ?").get(id) as { receipt: string | null };
+    return r.receipt === null ? null : JSON.parse(r.receipt);
+  };
+  /** Nothing was built or sent: every ledger field is null, and side and symbol are the order's own. */
+  const EXPIRED = { status: "expired", side: "buy", symbol: "TSLA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+
+  it("A FILE STILL QUEUED PAST ITS DEADLINE AND GRACE IS CLOSED WITH AN `expired` RECEIPT", async () => {
+    const { raw, db, home } = setup(true);
+    stillQueued(raw, home, "dead-order", WINDOW_MS + 2 * MIN + 30_000);
+    await pass(db, home);
+    assert.match(state(raw, "dead-order").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "dead-order"), EXPIRED);
+  });
+
+  it("AN ORDER NEVER DELIVERED IS CLOSED WITH ONE TOO", async () => {
+    const { raw, db, home } = setup(true);
+    const created = Date.now() - 7 * MIN - 30_000;
+    raw
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
+      .run("undelivered", ACCOUNT, JSON.stringify({ ...ORDER, symbol: "nvda" }), created);
+    for (let i = 0; i < 5; i += 1) {
+      raw
+        .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'selftest', NULL, ?)")
+        .run(`probe-${i}`, ACCOUNT, created - 1_000 - i);
+    }
+    await pass(db, home);
+    assert.match(state(raw, "undelivered").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "undelivered"), { ...EXPIRED, symbol: "NVDA" });
+  });
+
+  it("an order whose arguments name no valid side or symbol gets an `expired` receipt that prints neither", async () => {
+    const { raw, db, home } = setup(true);
+    const created = delivered(raw, "odd", WINDOW_MS + 2 * MIN + 30_000, { side: "yolo", symbol: "../x", usdgAmount: 5, expiresAt: Date.now() - 3 * MIN });
+    writeCommand(home, { id: "odd", kind: "trade", at: created, args: { side: "yolo", symbol: "../x" }, expiresAt: Date.now() - 3 * MIN });
+    await pass(db, home);
+    assert.deepEqual(receiptOf(raw, "odd"), { ...EXPIRED, side: null, symbol: null });
+  });
+
+  it("BUT 'MAY HAVE FILLED' CARRIES NO RECEIPT — nothing is known, so nothing is templated", async () => {
+    const { raw, db, home } = setup(true);
+    takenAndRunning(raw, home, "marker-late", WINDOW_MS + GRACE_MS + ORDER_IN_FLIGHT_MS + 30_000);
+    await pass(db, home);
+    assert.match(state(raw, "marker-late").result ?? "", /may have/);
+    assert.equal(receiptOf(raw, "marker-late"), null);
+  });
+
+  it("A TABLE THAT HAS NOT GROWN THE COLUMN YET STILL HAS THE ROW CLOSED — the receipt waits, the answer does not", async () => {
+    const { raw, db, home } = setup(false);
+    stillQueued(raw, home, "dead-order", WINDOW_MS + 2 * MIN + 30_000);
+    await pass(db, home);
+    const s = state(raw, "dead-order");
+    assert.ok(s.done_at);
+    assert.match(s.result ?? "", /never ran/);
+  });
+
+  it("THE FALLBACK KEEPS THE ROW'S OWN GUARD — a real answer that landed in between is never talked over", async () => {
+    // Two writes where there used to be one, so there is a gap between them.
+    // The up-leg can land the worker's real answer in it; the second write
+    // must hold the same `done_at IS NULL` the first one did.
+    const { raw, db, home } = setup(false);
+    stillQueued(raw, home, "raced", WINDOW_MS + 2 * MIN + 30_000);
+    const racing = {
+      ...db,
+      prepare: (sql: string) => {
+        if (/^UPDATE/.test(sql) && /receipt = \?/.test(sql)) {
+          raw.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(Date.now(), "bought 25.00 USDG of TSLA", "raced");
+        }
+        return db.prepare(sql);
+      },
+    };
+    await pass(racing, home);
+    assert.equal(state(raw, "raced").result, "bought 25.00 USDG of TSLA");
   });
 });
 

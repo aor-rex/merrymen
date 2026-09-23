@@ -13,6 +13,11 @@
  * be imported without booting a worker, an RPC and a grant. What is being pinned
  * is the ORDER OF THE CHECKS and the fact that each exists at all, which is
  * exactly what words on the page can carry.
+ *
+ * THE GATES THEMSELVES ARE RUN NOW, not read. The reads, the pause, the
+ * arguments and the owner's ceiling moved out of main() into order-gate.ts, and
+ * order-gate.test.ts runs every one of them against a submitter that records
+ * being called — so the source-reads of them that lived here are gone.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -28,8 +33,6 @@ const codeOf = (src: string) =>
     .join("\n");
 
 const CODE = codeOf(SRC);
-/** The order dispatch alone. */
-const ORDER = CODE.slice(CODE.indexOf("async function runOrderCommand"), CODE.indexOf("async function runSelftestProbe"));
 const RUN = CODE.slice(CODE.indexOf("async function runCommand"), CODE.indexOf("async function runOrderCommand"));
 
 describe("an order that waited too long is not the order that was placed", () => {
@@ -54,40 +57,11 @@ describe("pause is the owner's stop button and an order honours it", () => {
     // The drain deliberately runs ABOVE the tick's own isPaused() return — you
     // want to be able to probe a paused agent. An order is the opposite: a
     // trade that executes through a pause is the worst surprise this app could
-    // produce. Moving the call site would break the probe; the gate belongs
-    // here.
-    assert.match(ORDER, /if \(isPaused\(\)\)/);
-    assert.match(ORDER, /you have me paused/);
-    // And the probe is NOT gated, so the two really are separate decisions.
+    // produce. The order's refusal is run in order-gate.test.ts; what is pinned
+    // here is that the probe is NOT gated, so the two really are separate
+    // decisions.
     const probe = CODE.slice(CODE.indexOf("async function runSelftestProbe"), CODE.indexOf("async function runSelftestProbe") + 2000);
     assert.ok(!/isPaused\(\)/.test(probe));
-  });
-});
-
-describe("what an argument is allowed to be, proved a second time", () => {
-  it("A SIDE IS BUY OR SELL", () => {
-    assert.match(ORDER, /a\.side === "buy" \|\| a\.side === "sell" \? a\.side : null/);
-    assert.match(ORDER, /is not a buy or a sell/);
-  });
-
-  it("A SIZE IS FINITE AND POSITIVE — NaN and Infinity die before usdg()", () => {
-    // `usdg()` on a NaN is a BigInt throw, which makes the refusal a stack
-    // trace instead of a sentence. And a negative size passes every cap in the
-    // wall, because every cap is an upper bound.
-    assert.match(ORDER, /if \(!Number\.isFinite\(size\) \|\| size <= 0\)/);
-    const check = ORDER.indexOf("Number.isFinite(size)");
-    const submit = ORDER.indexOf("submitChatTrade(");
-    assert.ok(check > 0 && check < submit, "checked before anything is sized");
-  });
-
-  it("A SYMBOL IS A TICKER, not a sentence or a path", () => {
-    assert.match(ORDER, /\/\^\[A-Z0-9\]\{1,12\}\$\/\.test\(symbol\)/);
-  });
-
-  it("AND THE OWNER'S CEILING IS APPLIED HERE TOO, not only in the route", () => {
-    assert.match(ORDER, /cfg\.telegramMaxActionUsdg/);
-    const ceiling = ORDER.indexOf("telegramMaxActionUsdg");
-    assert.ok(ceiling < ORDER.indexOf("submitChatTrade("), "the ceiling is checked before the order is placed");
   });
 });
 
@@ -205,20 +179,9 @@ describe("an unreadable market answers the order instead of starving it", () => 
     assert.ok(at > 0);
     const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
     assert.match(branch, /runQueuedCommand\(active\.agentId, true\)/);
-    // And it is still ahead of the normal drain, which stays where it was.
-    assert.ok(CODE.indexOf("runQueuedCommand(active.agentId, true)") < CODE.indexOf("void runQueuedCommand(active.agentId)"));
-  });
-
-  it("AND A TRADE IS REFUSED BY NAME, never filled on stale data", () => {
-    // The equity snapshot behind the drawdown breaker is precisely what could
-    // not be read, and checkPolicy SKIPS the breaker when equity is unknown —
-    // so filling here would place a trade with that guard silently off.
-    assert.match(ORDER, /if \(marketUnreadable\) \{/);
-    assert.match(ORDER, /I could not read the market this tick, so I did not place it/);
-    // Checked before anything is sized, and before the pause gate.
-    const unread = ORDER.indexOf("if (marketUnreadable)");
-    assert.ok(unread > 0 && unread < ORDER.indexOf("isPaused()"), "the earliest gate in the order path");
-    assert.ok(unread < ORDER.indexOf("submitChatTrade("));
+    // The refusal that flag produces — by name, before the pause and before
+    // anything is sized, with nothing reaching a submitter — is run in
+    // order-gate.test.ts.
   });
 
   it("but the PROBE still runs, because it needs no market data at all", () => {
