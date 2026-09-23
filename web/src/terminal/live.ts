@@ -81,6 +81,21 @@ export interface LiveToken {
   kind: "stock" | "etf" | "memecoin";
   marks: number[];
   cast: AgentRef[];
+  /**
+   * Trading halted on the token contract, as the market read reported it —
+   * NULL when that read could not say (lib/market.ts), absent for a token it
+   * does not list. Only a true is ever shown: an unread halt is neither a halt
+   * nor "trading normally".
+   */
+  halted?: boolean | null;
+  /** 24h traded volume in USD from the market read; null when it could not read one. */
+  volume24hUsd?: number | null;
+  /**
+   * When the market read's OWN price last updated (the Chainlink feed), unix
+   * seconds. Kept apart from priceUpdatedAt, which is the Robinhood quote's
+   * clock and is what quoteTitle prints.
+   */
+  feedUpdatedAt?: number | null;
 }
 
 export interface LiveAgent {
@@ -784,6 +799,9 @@ export function liveOf(s: LiveSources): LiveState {
       kind: t.kind,
       marks: [],
       cast: castOf(posts),
+      halted: typeof t.paused === "boolean" ? t.paused : null,
+      volume24hUsd: finiteOrNull(t.volume24hUsd),
+      feedUpdatedAt: finiteOrNull(t.priceUpdatedAt),
     });
   }
 
@@ -1313,7 +1331,13 @@ interface MarketTok {
   logo: string;
   priceUsd: number | null;
   holders: number | null;
+  /** Optional: an older server does not send these, and absent is unread. */
+  paused?: boolean | null;
+  volume24hUsd?: number | null;
+  priceUpdatedAt?: number | null;
 }
+
+const finiteOrNull = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
 
 interface BoardRow {
   mode?: string;

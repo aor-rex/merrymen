@@ -66,6 +66,8 @@ import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
+import { ticksOf } from "./ticker";
+import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
 
 
@@ -443,10 +445,12 @@ export function App() {
   // THE BOOK'S OWN READ, as it stands. It is on its own clock now, so "unread"
   // means its first answer has not come back and nothing else — see live-clocks.ts.
   const portfolioRead = live.reads.mine;
+  /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
+  const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
-      className="app"
+      className={ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
@@ -771,6 +775,24 @@ export function App() {
             staleBlocker={autonomy.state === "checking"}
           />
         </ChatDock>
+      )}
+      {/* THE TAPE, which was built and mounted by nothing. Desktop only, and
+          gated here rather than hidden in CSS, for the reason the header and
+          rail are. Fed from the market read the shell already makes, so it
+          costs no request and moves when the market read does. */}
+      {ticks.length > 0 && (
+        <TickerStrip
+          className="terminal-tape"
+          items={ticks.map((t) => ({
+            key: t.id,
+            href: pathForScreen({ kind: "token", id: t.id }),
+            symbol: t.symbol,
+            priceUsd: t.priceUsd,
+            volume24hUsd: t.volume24hUsd,
+            halted: t.halted,
+            stale: t.stale,
+          }))}
+        />
       )}
     </div></div></WiredProvider>
   );
