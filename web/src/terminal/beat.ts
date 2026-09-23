@@ -1,7 +1,9 @@
 import { readerHead } from "@merrymen/thesis";
+import { pctBps, usd as usdText } from "@/lib/format";
+import { postOf } from "@/lib/post-line";
 import { xHandleTag } from "@/lib/x-handle";
 import { elapsed, whenOf } from "./clock";
-import { sizeOf, type LiveAgent, type Thesis } from "./live";
+import { sizeOf, type LiveAgent, type LiveToken, type Thesis } from "./live";
 import { strategyForSlug, type StrategyId } from "./strategy";
 import { takeFor } from "./why";
 
@@ -31,7 +33,28 @@ export type FeedRow = Thesis & {
   moreNames?: boolean;
   /** The owner PROVED `handle`. Absent is not proven. */
   handleVerified?: boolean;
+  /*
+   * THE CALL'S OWN NUMBERS (contract C1, published by the reader). Every one
+   * is optional and every one may be null: a server from before them sends
+   * none, and a row whose ledger never recorded the figure sends null. Both
+   * mean the same thing here — not read — and neither may become a 0.
+   */
+  /** A landed buy's fill price, USD per token. */
+  entryPriceUsd?: number | null;
+  /** A landed sell's realized return, in percent. */
+  realizedPct?: number | null;
+  /** The same sell's realized dollars — sent ONLY when the author's book is public. */
+  realizedUsd?: number | null;
+  /** The price the author saw when the decision was made. */
+  markUsd?: number | null;
+  /** A memecoin's market cap when the decision was made. */
+  mcapUsd?: number | null;
 };
+
+/** A figure the reader sent, or null — never a coerced 0 from a missing one. */
+function read(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
 
 /**
  * AN ADDRESS-DERIVED ID: `T` plus the last eleven hex of the contract, as
@@ -59,18 +82,42 @@ export interface Actor {
 }
 
 interface Core {
-  /** The RENDER key: stable within one read, and it moves when the post does. */
+  /**
+   * The RENDER key: the post's `postId`, so a row is the same row across
+   * refreshes (contract C2).
+   *
+   * It had `at` in it — `${symbol}-${action}-${slug}-${atSec}` — and the reader
+   * groups on MAX(d.at), which a re-proposed thesis advances every tick. So
+   * every refresh remounted every row, and "which of these is new?" had no
+   * answer, because by key they all were. The old shape survives only as the
+   * fallback for a row with no postId (a server from before it), and as the
+   * last tie-break when two rows share one — see `keyBeats`.
+   */
   id: string;
   /**
    * The LIKE key: stable across reads, and it does not move when the post's
    * outcome does. Null when the agent has no public slug.
    *
-   * Two ids because they answer two questions. `id` has `at` in it, which is
-   * exactly what a React key wants and exactly what a like must not have —
-   * `read-theses.ts` groups on `MAX(d.at)` and the default strategy re-proposes
-   * every tick, so `id` advances every few minutes on a post nobody touched.
+   * Usually equal to `id` now, and still kept apart, because they answer two
+   * questions: two rows CAN share a postId (post-id.ts leaves the outcome out
+   * so a like survives a trade settling), and two rows can never share a React
+   * key. The like is on the thesis; the key is on the row.
    */
   postId: string | null;
+  /**
+   * What the agent said in its OWN voice about this row, or null — see
+   * lib/post-line.ts. Kept beside `reason`, never folded into it: the reason
+   * is our sentence, this is the model's, and the row shows the reason behind
+   * a "why" when this leads.
+   */
+  post: string | null;
+  /** C1, carried as read: null is "not read", never 0. See `callFigure`. */
+  entryPriceUsd: number | null;
+  realizedPct: number | null;
+  realizedUsd: number | null;
+  markUsd: number | null;
+  /** Null unless a positive market cap was recorded at decision time. */
+  mcapUsd: number | null;
   /**
    * MILLISECONDS, and the name says so because the unit was the bug.
    *
@@ -341,6 +388,134 @@ export function whoOf(b: Beat): string {
   return b.actor.name;
 }
 
+/**
+ * THE PILL BESIDE A TRADE: what kind of trade, and whether money moved.
+ *
+ * fomo's shape, a green Buy and a red Sell, so a reader skimming for what
+ * moved does not have to read every sentence. It is a LABEL beside the
+ * sentence, never the sentence: `verbOf` still carries the tense ("bought",
+ * "tried to buy", "would buy"), and the pill is a span, not a control — it is
+ * not an offer to buy anything (thesis-badge.ts explains why that matters).
+ *
+ * THE COLOUR MEANS MONEY MOVED, the rule the row's accent already follows
+ * (wire.tsx, `turned`). So a trade the wall turned back is a muted "Tried",
+ * and a shadow call a muted "Would buy" — the same conditional `verbOf` and
+ * `badgeOf` keep, checked FIRST for the same reason. An order still in flight
+ * wears its colour with an unsettled edge, like the card's "buying" chip.
+ */
+export interface TradePill {
+  label: "Buy" | "Sell" | "Hold" | "Tried" | "Would buy" | "Would sell" | "Would hold";
+  tone: "buy" | "sell" | "muted";
+  unsettled: boolean;
+}
+
+export function pillOf(b: TradeBeat): TradePill {
+  if (b.shadow) {
+    const label = b.action === "buy" ? "Would buy" : b.action === "sell" ? "Would sell" : "Would hold";
+    return { label, tone: "muted", unsettled: false };
+  }
+  if (b.outcome === "refused" || b.outcome === "reverted" || b.outcome === "dropped") {
+    return { label: "Tried", tone: "muted", unsettled: false };
+  }
+  const unsettled = b.outcome === "pending";
+  switch (b.action) {
+    case "buy":
+      return { label: "Buy", tone: "buy", unsettled };
+    case "sell":
+      return { label: "Sell", tone: "sell", unsettled };
+    case "hold":
+      return { label: "Hold", tone: "muted", unsettled: false };
+    default: {
+      const _x: never = b.action;
+      return _x;
+    }
+  }
+}
+
+/**
+ * THE CALL'S OWN NUMBER — what replaced the token's 24h change under a row.
+ *
+ * `<Delta value={tok.change24hPct}>` sat beside the agent's buy, so a reader
+ * took the market's day for the agent's result: a buy made an hour ago at the
+ * high read green, and a sell that realized a loss read whatever the coin did
+ * next. Each arm below measures the CALL, from when it was made:
+ *
+ *   landed buy  — live / fill price − 1, "since entry"
+ *   landed sell — the return it realized, and its dollars only when the reader
+ *                 sent them, which it does only for a public book
+ *   view        — live / the mark its author saw − 1, "since posted"; a shadow
+ *                 call is a view in this sense, and is never "since entry",
+ *                 because nothing was entered
+ *
+ * NULL WHEN ANY INPUT WAS NOT READ, and the row then prints nothing — never a
+ * 0%. A trade that did not land has no entry and realized nothing, so it has
+ * no figure at all. `pct` is percentage POINTS.
+ */
+export interface CallFigure {
+  basis: "since entry" | "realized" | "since posted";
+  pct: number;
+  /** Realized dollars — non-null only on a sell from a public book. */
+  usd: number | null;
+}
+
+const price = (v: number | null): number | null => (v !== null && v > 0 ? v : null);
+
+function since(from: number | null, live: number | null): number | null {
+  const a = price(from);
+  const b = price(live);
+  return a !== null && b !== null ? (b / a - 1) * 100 : null;
+}
+
+export function callFigure(b: TradeBeat | ViewBeat, livePriceUsd: number | null): CallFigure | null {
+  const live = read(livePriceUsd);
+  if (b.kind === "trade" && !b.shadow) {
+    if (b.outcome !== "landed") return null;
+    if (b.action === "buy") {
+      const pct = since(b.entryPriceUsd, live);
+      return pct === null ? null : { basis: "since entry", pct, usd: null };
+    }
+    if (b.action === "sell") {
+      // Dollars are never shown without the percent they belong to.
+      if (b.realizedPct === null) return null;
+      return { basis: "realized", pct: b.realizedPct, usd: b.realizedUsd };
+    }
+    return null;
+  }
+  const pct = since(b.markUsd, live);
+  return pct === null ? null : { basis: "since posted", pct, usd: null };
+}
+
+/**
+ * The figure as the row prints it: "+10.0%", and "+$0.62" when there are
+ * dollars. Both take the HOUSE sign — U+2212 for a loss, the way `pctBps`
+ * writes every P&L in the product — in front of an UNSIGNED body, so no string
+ * is ever signed twice and a loss reads the same in both halves ("−3.2%
+ * realized −$0.16", not a hyphen beside a minus).
+ */
+export function callFigureText(f: CallFigure): { pct: string; usd: string | null; tone: "up" | "down" | "flat" } {
+  const usd =
+    f.usd === null ? null : `${f.usd > 0 ? "+" : f.usd < 0 ? "−" : ""}${usdText(Math.abs(f.usd))}`;
+  // The colour follows the printed figure: under half a tenth prints "0.0%",
+  // and a green "0.0%" would claim a gain the number does not show.
+  const tone = Math.abs(f.pct) < 0.05 ? "flat" : f.pct > 0 ? "up" : "down";
+  return { pct: pctBps(f.pct * 100), usd, tone };
+}
+
+/**
+ * THE LIVE PRICE OF A ROW'S COIN, only when exactly one token answers to it.
+ *
+ * Memecoin tickers are not unique, and the logo lookup can afford to pick the
+ * first match — a wrong logo is cosmetic. A price is not: a since-entry figure
+ * computed against the other PEPE is a false number about the agent's call.
+ * So two tokens with one symbol read as no price at all.
+ */
+export function livePriceOf(tokens: readonly LiveToken[], symbol: string | null): number | null {
+  if (!symbol) return null;
+  const want = symbol.toUpperCase();
+  const hits = tokens.filter((t) => t.symbol.toUpperCase() === want);
+  return hits.length === 1 ? price(read(hits[0]!.priceUsd)) : null;
+}
+
 function actorOf(t: FeedRow, agents: Map<string, LiveAgent>): Actor | null {
   const slug = t.slug;
   if (!slug) return null;
@@ -405,6 +580,19 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     // sent `unchangedSince`, sits at its own time — never at a guessed one.
     const standing = typeof t.unchangedSince === "number" && Number.isFinite(t.unchangedSince) ? t.unchangedSince : null;
     const repeatSinceMs = said > 1 && standing !== null && standing < atSec ? standing * 1000 : null;
+    // The agent's own line, already refused for a trade that did not happen.
+    const post = postOf(t);
+    const mcap = read(t.mcapUsd);
+    const figures = {
+      post,
+      entryPriceUsd: read(t.entryPriceUsd),
+      realizedPct: read(t.realizedPct),
+      realizedUsd: read(t.realizedUsd),
+      markUsd: read(t.markUsd),
+      // A market cap of zero is not a reading of a live coin; it is a field
+      // somebody defaulted. "at $0 MC" would be a figure nobody measured.
+      mcapUsd: mcap !== null && mcap > 0 ? mcap : null,
+    };
 
     if ((action === "buy" || action === "sell") && t.symbol) {
       const symbol = t.symbol.toUpperCase();
@@ -417,11 +605,13 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
       const sinceMs = repeatedNonEvent ? repeatSinceMs : null;
       out.push({
         kind: "trade",
-        // Built from atSec, deliberately: the id is a React key and a like
-        // target, and re-basing it to milliseconds would churn every key in the
-        // feed for a cosmetic fix.
+        // THE FALLBACK KEY, for a row with no postId; `keyBeats` below puts the
+        // postId here when there is one. Built from atSec, deliberately:
+        // re-basing it to milliseconds would churn the key of every row that
+        // still uses it, for a cosmetic fix.
         id: `${symbol}-${action}-${actor.slug}-${atSec}`,
         postId,
+        ...figures,
         atMs,
         actor,
         reason,
@@ -453,6 +643,7 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
       kind: "view",
       id: `view-${actor.slug}-${atSec}-${symbol ?? ""}`,
       postId,
+      ...figures,
       atMs,
       actor,
       reason,
@@ -477,8 +668,58 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
   // presentation of the All and Holds pills (see `pillBeats`), not of the read:
   // a chorus is not a post, so a liked hold folded here left Top and lost its
   // like control, and a member's mention of another agent left Debates.
+  keyBeats(out);
   out.sort((a, b) => b.rankMs - a.rankMs);
   return out;
+}
+
+/**
+ * WHICH ROW OWNS A SHARED POSTID. Settled first: when the same thesis is read
+ * pending and landed, the landed row is the one that stays, so it keeps the
+ * key the pending row's element was drawn under and React updates it in place.
+ */
+const KEY_PRIORITY: Record<string, number> = {
+  landed: 0,
+  pending: 1,
+  view: 2,
+  shadow: 3,
+  refused: 4,
+  reverted: 5,
+  dropped: 6,
+};
+
+/**
+ * C2: EACH BEAT'S RENDER KEY IS ITS POSTID — unique, and independent of the
+ * order the rows arrived in.
+ *
+ * A postId is not unique per ROW: post-id.ts leaves the outcome out on purpose,
+ * so one thesis read pending and landed, or refused under two different rules,
+ * is two rows with one id. Two equal React keys drop or merge a row. So a
+ * collision falls back through keys that are still stable across refreshes —
+ * postId plus outcome, then plus the outcome's sentence — before the old
+ * `at`-bearing id, which only a row with no stable name at all ends up on.
+ *
+ * Assigned in a fixed order (settled first, then by the old id), never in the
+ * feed's order: `rankMs` moves as rows are re-read, and a key that depended on
+ * it would move with it.
+ */
+function keyBeats(beats: Beat[]): void {
+  const order = [...beats].sort(
+    (a, b) =>
+      (KEY_PRIORITY[a.outcome ?? ""] ?? 9) - (KEY_PRIORITY[b.outcome ?? ""] ?? 9) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const used = new Set<string>();
+  for (const b of order) {
+    const legacy = b.id;
+    const tries = b.postId
+      ? [b.postId, `${b.postId}:${b.outcome ?? ""}`, `${b.postId}:${b.outcome ?? ""}:${b.outcomeText ?? ""}`, legacy]
+      : [legacy];
+    let key = tries.find((k) => !used.has(k)) ?? legacy;
+    for (let n = 2; used.has(key); n++) key = `${legacy}#${n}`;
+    used.add(key);
+    b.id = key;
+  }
 }
 
 /**
@@ -641,11 +882,48 @@ export function pillBeats(
   pill: Pill,
   replies: ReadonlyMap<string, unknown>,
   counts: Readonly<Record<string, number>>,
+  opts: { realOnly?: boolean } = {},
 ): Beat[] {
   const liked = (b: Beat) => !!b.postId && (counts[b.postId] ?? 0) > 0;
+  // "REAL MONEY" FILTERS THE POSTS BEFORE ANYTHING IS FOLDED. A chorus or a
+  // watch line counted after the fact would still count paper members — "2
+  // agents holding" with one of them on a pretend book — so paper rows leave
+  // first, and every crowd and count below is built from real ones only.
+  const pool = opts.realOnly ? beats.filter((b) => !b.paper) : beats;
   const base =
-    pill === "all" ? compactHolds(chorusOf(beats, liked), liked) : pill === "holds" ? chorusOf(beats, liked) : beats;
+    pill === "all" ? compactHolds(chorusOf(pool, liked), liked) : pill === "holds" ? chorusOf(pool, liked) : pool;
   return base.filter((b) => keepBeat(b, pill, replies, counts));
+}
+
+/**
+ * WHAT AN EMPTY PILL SAYS, when the read DID return posts and this filter
+ * matched none of them. (No posts at all is the read's own answer — unread,
+ * unreadable or quiet — and the Feed shows `ReadEmpty` for it instead.)
+ *
+ * With "Real money" on, the sentence says so: "Quiet." about a feed that is
+ * full of paper trades would blame the agents for the reader's own filter.
+ */
+export function emptyFor(pill: Pill, likesRead: boolean, realOnly = false): string {
+  const real = realOnly ? "real-money " : "";
+  switch (pill) {
+    case "trades":
+      return `No ${real}trades in this window.`;
+    case "theses":
+      return realOnly ? "No real-money agent has published a view here yet." : "Nobody has published a view here yet.";
+    case "holds":
+      return `No ${real}holds in this window.`;
+    case "debate":
+      return realOnly ? "No real-money agent has named another one yet." : "No agent has named another one yet.";
+    case "top":
+      // THREE DIFFERENT NOTHINGS, and only one is about the posts.
+      return likesRead ? `Nothing ${real ? "on real money " : ""}has been liked in the last day.` : "Likes unavailable.";
+    case "all":
+      return realOnly ? "No real-money posts in this window." : "Quiet.";
+    default: {
+      const _x: never = pill;
+      return _x;
+    }
+  }
 }
 
 function keepBeat(
@@ -658,7 +936,14 @@ function keepBeat(
     case "all":
       return true;
     case "trades":
-      return beat.kind === "trade";
+      // TRADES, NOT ATTEMPTS: landed or still in flight. A stuck strategy's
+      // refusals filled this pill with "tried to buy", once a tick. They are
+      // not hidden — All still carries every one, with the wall's reason, and
+      // the owner's desk and events say it too — they are just not trades.
+      // An ALLOW-LIST, so an outcome this file has not heard of stays out
+      // rather than being counted as money that moved; and a shadow call, which
+      // could never have traded, is out by the same rule.
+      return beat.kind === "trade" && !beat.shadow && (beat.outcome === "landed" || beat.outcome === "pending");
     case "theses":
       return beat.kind === "view" && !beat.hold;
     case "holds":
