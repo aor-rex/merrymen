@@ -29,8 +29,7 @@ import { Coin, Face, Empty, MovingFigure } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { holdersFigure, holdersList } from "../token-holders";
 import { useWatchlist } from "../watchlist";
-import { seatsOf } from "../token-seats";
-import { useTokenPageRead } from "../token-page-read";
+import { useTokenPage } from "../token-page-read";
 import { shortDateTime } from "@/lib/format";
 
 const WINDOWS: WindowId[] = ["1H", "4H", "1D", "5D", "1M", "ALL"];
@@ -64,10 +63,10 @@ export function Token({
   /** Bumped by Try again, which re-runs the holders read — a failure was final until the page remounted. */
   const [holdersAttempt,setHoldersAttempt]=useState(0);
   // KEYED ON THE TOKEN ALONE — see token-page-read.ts. The feed is read every
-  // ten seconds, and the posts are joined to the holders below instead of
-  // inside the read, so a feed read changes a thesis and re-reads nothing.
-  const { holders: holderRows, holdersRead, holderError, coverage: holderCoverage, symbolClash, activity } = useTokenPageRead(token.id, token.symbol, holdersAttempt);
-  const seats = useMemo<Seat[]>(() => seatsOf(holderRows, theses, token.symbol, symbolClash), [holderRows, theses, token.symbol, symbolClash]);
+  // ten seconds, and the posts are joined to the holders after the read, with
+  // the clash gate the read itself reported, so a feed read changes a thesis
+  // and re-reads nothing.
+  const { holdersRead, holderError, coverage: holderCoverage, symbolClash, activity, seats } = useTokenPage(token.id, token.symbol, theses, holdersAttempt);
   const orderedSeats = useMemo(
     () =>
       [...seats].sort(

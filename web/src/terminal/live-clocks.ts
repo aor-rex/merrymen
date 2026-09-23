@@ -23,7 +23,9 @@ import {
   type LiveSources,
   type LiveToken,
   type RawRead,
+  type ReadState,
 } from "./live";
+import { tokenPageUnreadable } from "./account-read";
 import type { TokenQuote } from "./quotes";
 import {
   ACCOUNT_EVERY_MS,
@@ -32,7 +34,10 @@ import {
   MARKET_EVERY_MS,
   THESES_EVERY_MS,
   THESES_HIDDEN_EVERY_MS,
+  bannerOf,
+  type Banner,
   type ClockSpec,
+  type ClockView,
 } from "./refresh-loop";
 
 export interface LiveClockDeps {
@@ -47,7 +52,17 @@ export interface LiveClockDeps {
   readAccount(): Promise<void>;
   /** Is the tab hidden right now? */
   hidden(): boolean;
+  /** The wall clock, in ms. The session-change schedule is measured on it. */
+  now?(): number;
 }
+
+/**
+ * HOW OFTEN THE SESSION CHANGES ARE ASKED FOR: every five minutes, whatever the
+ * last answer was. A success is cached that long anyway (quotes.ts), and a
+ * failure is 25 chart requests at a venue that is failing, which the market's
+ * thirty-second clock asked for twice as often as the old minute did.
+ */
+export const CHANGES_EVERY_MS = 5 * 60_000;
 
 /**
  * Whether a public read's answer counts as read — and, when nothing answered
@@ -63,7 +78,42 @@ function verdict(raw: RawRead): boolean {
 export const LIVE_CLOCK_KEYS = ["theses", "market", "board", "discoveries", "account", "feed"] as const;
 export type LiveClockKey = (typeof LIVE_CLOCK_KEYS)[number];
 
+/**
+ * THE OWNER'S OWN READS — session and grants, and the book — which everything
+ * that changes the owner's position asks for again at once: an order that
+ * answered, a sign-in, a new agent (App.tsx refreshAccount). A pass already in
+ * flight when they ask is followed by one more (refresh-loop.ts retryNow).
+ */
+export const ACCOUNT_READS = ["account", "feed"] as const satisfies readonly LiveClockKey[];
+
 export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey })[] {
+  const now = () => (d.now ? d.now() : Date.now());
+  /**
+   * THE SESSION CHANGES, BESIDE THE MARKET READ AND NOT INSIDE IT.
+   *
+   * The market pass awaited them. They are one chart request per stock, four at
+   * a time, each with a ten-second timeout, so a hanging venue held the market
+   * and its quotes back for over a minute (about seven rounds), and a failing
+   * one was asked for every stock on every market read. Now they are started
+   * and not awaited, applied through `update` when they land, one read at a
+   * time, and not asked again for CHANGES_EVERY_MS after the last one ended.
+   */
+  let changesInFlight = false;
+  let changesDueAt = -Infinity;
+  const readChanges = (tokens: LiveToken[]) => {
+    if (changesInFlight || now() < changesDueAt) return;
+    changesInFlight = true;
+    void d
+      .loadChanges(tokens)
+      .then(
+        (changes) => d.update((prev) => withChanges(prev, changes)),
+        () => {},
+      )
+      .finally(() => {
+        changesInFlight = false;
+        changesDueAt = now() + CHANGES_EVERY_MS;
+      });
+  };
   /** A public read: its answer applied, and kept past a later failure — see withRead. */
   const publicRead = (key: LiveReadKey) => async () => {
     const raw = await d.fetchRead(key);
@@ -83,8 +133,9 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
     {
       // THE MARKET AND THE QUOTES TOGETHER, ONCE. The quotes were read twice a
       // pass — once on their own and again inside the Promise.all — and both
-      // answers were applied. The market's own prices land first; the session
-      // change, which needs the stock list and nothing else, follows.
+      // answers were applied. The session change, which needs the stock list
+      // and nothing else, is started beside it and never waited for
+      // (readChanges, above).
       key: "market",
       half: "market",
       everyMs: MARKET_EVERY_MS,
@@ -92,8 +143,7 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
       pass: async () => {
         const [raw, quotes] = await Promise.all([d.fetchRead("market"), d.loadQuotes()]);
         d.update((prev) => withQuotes(withRead(prev, "market", raw, true), quotes));
-        const changes = await d.loadChanges(marketTokensOf(raw));
-        d.update((prev) => withChanges(prev, changes));
+        readChanges(marketTokensOf(raw));
         return verdict(raw);
       },
     },
@@ -136,4 +186,100 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
       },
     },
   ];
+}
+
+/**
+ * THE READS THAT LIST TOKENS: every stock is on the market read and every coin
+ * on the launchpad sweep. Only these can make a token address come up empty
+ * for a reason other than the address.
+ */
+export const TOKEN_LIST_READS = ["market", "discoveries"] as const satisfies readonly LiveClockKey[];
+
+/**
+ * WHAT THE SHELL DRAWS FROM THE CLOCKS, and nothing else.
+ *
+ * App kept every clock's view in its state, and every clock's start and end
+ * replaced that array, so the whole tree re-rendered about twice per pass per
+ * clock: some twenty-three times a minute with nothing changed. The feed's
+ * ten-second read alone did it twelve times. No screen is memoised, so each one
+ * redrew, which undid what withRead's same-bytes no-op was written for. These
+ * three facts are all App reads from the clocks; watchShellClocks publishes
+ * them only when one of them changes.
+ */
+export interface ShellClocks {
+  /** The one outage line — see bannerOf. Null while every read on it is healthy. */
+  banner: Banner | null;
+  /** The account or the owner's book is being read right now: a retry's "Retrying…". */
+  accountBusy: boolean;
+  /** A read that lists tokens is failing now — see tokenMissingOf. */
+  tokenListFailing: boolean;
+}
+
+export const QUIET_SHELL: ShellClocks = { banner: null, accountBusy: false, tokenListFailing: false };
+
+const among = (keys: readonly string[], key: string) => keys.includes(key);
+
+export function shellClocksOf(views: readonly ClockView[]): ShellClocks {
+  return {
+    banner: bannerOf(views),
+    accountBusy: views.some((v) => among(ACCOUNT_READS, v.key) && v.inFlight),
+    tokenListFailing: views.some((v) => among(TOKEN_LIST_READS, v.key) && (v.state?.failuresInARow ?? 0) > 0),
+  };
+}
+
+function sameBanner(a: Banner | null, b: Banner | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.nextAt === b.nextAt &&
+    a.lastOkAt === b.lastOkAt &&
+    a.inFlight === b.inFlight &&
+    a.failed.account === b.failed.account &&
+    a.failed.market === b.failed.market &&
+    a.unreachable === b.unreachable
+  );
+}
+
+export function sameShellClocks(a: ShellClocks, b: ShellClocks): boolean {
+  return sameBanner(a.banner, b.banner) && a.accountBusy === b.accountBusy && a.tokenListFailing === b.tokenListFailing;
+}
+
+/**
+ * An `onChange` for startClocks that tells the shell only when what it draws
+ * has changed. A healthy clock starting and ending changes none of it.
+ */
+export function watchShellClocks(publish: (shell: ShellClocks) => void): (views: ClockView[]) => void {
+  let last = QUIET_SHELL;
+  return (views) => {
+    const next = shellClocksOf(views);
+    if (sameShellClocks(last, next)) return;
+    last = next;
+    publish(next);
+  };
+}
+
+/**
+ * THE TOKEN PAGE'S "UNAVAILABLE", and the reads its Try again asks for — from
+ * the same list, so the button can always clear what the page is saying.
+ *
+ * "Token unavailable" was decided by every clock on the outage line (the feed,
+ * the board and the account as well), while the button retried only the market
+ * and the sweep. With the feed failing, pressing it re-ran two healthy reads,
+ * the banner stayed, and the page kept saying it could not load the token. A
+ * feed or an account read failing lists no token and hides none; only the two
+ * reads that list tokens decide it now.
+ */
+export function tokenMissingOf(
+  shell: ShellClocks,
+  reads: { market: ReadState; discoveries: ReadState },
+  liveLoaded: boolean,
+): { unreadable: boolean; retry: readonly LiveClockKey[] } {
+  return {
+    unreadable: tokenPageUnreadable({
+      failing: shell.tokenListFailing,
+      market: reads.market,
+      discoveries: reads.discoveries,
+      liveLoaded,
+    }),
+    retry: TOKEN_LIST_READS,
+  };
 }

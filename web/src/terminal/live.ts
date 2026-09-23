@@ -242,6 +242,20 @@ export interface Thesis {
    * wallet-minter can inflate.
    */
   postId?: string | null;
+  /**
+   * THE OWNER'S OWN TAPE ONLY (mineOf, from lib/desk-trades.ts) — absent on
+   * every public post. Null where the ledger said nothing: an older ledger, a
+   * refusal that filled nothing, a sell whose basis was unknown.
+   *
+   * `displayName` is the coin's own name from the decision, for display only.
+   * `txHash` is the fill's transaction, which is how a receipt the chat heard
+   * about is matched to the row that shows it filled. `realizedPnlUsdg` is
+   * what the executor booked on a sell, in whole USDG; a loss is negative and
+   * zero is a result, never a stand-in for unknown.
+   */
+  displayName?: string | null;
+  txHash?: string | null;
+  realizedPnlUsdg?: number | null;
 }
 
 export interface ChainHolder {
@@ -1053,6 +1067,20 @@ function recordedSymbol(raw: unknown): string | null {
   return typeof raw === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(raw) && !/^0x/i.test(raw) ? raw : null;
 }
 
+/**
+ * A figure as the ledger handed it back — a number, or the text of one, which
+ * is how a database driver returns a NUMERIC — else null. `Number("")` is 0,
+ * and an empty cell is not a zero.
+ */
+function ledgerNumber(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string" && raw.trim()) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 /** Exported for its test; loadLive is the only caller. */
 export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
@@ -1174,6 +1202,13 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // matches on phrases in `outcomeText` ("per-trade", "spending",
         // "drawdown") which could never match a slug.
         outcomeText:rejectRuleLabel(t.reject_rule) ?? t.reject_rule ?? null,
+        // WHAT THE TAPE ALREADY READ, carried rather than dropped (D3): the
+        // desk prints the coin's name and the sell's result, and the chat
+        // matches a receipt to its fill by hash. Null where the ledger said
+        // nothing — never a guessed name, never a zero for an unknown P&L.
+        displayName:typeof t.display_name==="string" && t.display_name.trim() ? t.display_name.trim() : null,
+        txHash:typeof t.tx_hash==="string" && t.tx_hash ? t.tx_hash : null,
+        realizedPnlUsdg:ledgerNumber(t.realized_pnl_usdg),
       };
     }),
     glance: {
@@ -1431,7 +1466,10 @@ interface Feed {
     /** The side the decision asked for, which is how a refusal has one. */
     action?: string | null;
     reason?: string | null;
-    realized_pnl_usdg?: number | null;
+    /** Whole USDG, booked on a sell. A driver may hand a NUMERIC back as text. */
+    realized_pnl_usdg?: number | string | null;
+    /** The fill's transaction; null for a refusal and for a paper fill. */
+    tx_hash?: string | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
   positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];

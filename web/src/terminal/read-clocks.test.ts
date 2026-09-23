@@ -148,6 +148,71 @@ describe("a read's own schedule", () => {
     loop.stop();
   });
 
+  it("A RETRY ASKED FOR DURING A PASS RUNS ONE MORE PASS AFTER IT — the answer in flight predates what changed", async () => {
+    // An order that answered, a sign-in or a new agent asks for the account and
+    // the book again. The pass already in flight started before that change and
+    // returns the old state, so dropping the ask left the change unseen until
+    // the next minute's pass.
+    const clock = fakeClock();
+    const release: Array<(ok: boolean) => void> = [];
+    const loop = startRefreshLoop({
+      pass: () => new Promise<boolean>((r) => void release.push(r)),
+      report: () => {},
+      everyMs: 60_000,
+      timers: clock.timers,
+    });
+    await settle();
+    assert.equal(release.length, 1);
+    loop.retryNow();
+    loop.retryNow();
+    loop.retryNow();
+    await settle();
+    assert.equal(release.length, 1, "still one pass at a time");
+    release[0]!(true);
+    await settle();
+    assert.equal(release.length, 2, "exactly one more pass, however many times it was asked");
+    release[1]!(true);
+    await settle();
+    assert.equal(release.length, 2, "and then nothing until its own cadence");
+    await clock.advance(60_000);
+    assert.equal(release.length, 3);
+    release[2]!(true);
+    loop.stop();
+  });
+
+  it("a tab coming back mid-pass queues nothing — a glance is not a person asking", async () => {
+    const clock = fakeClock();
+    const release: Array<(ok: boolean) => void> = [];
+    const loop = startRefreshLoop({
+      pass: () => new Promise<boolean>((r) => void release.push(r)),
+      report: () => {},
+      everyMs: 10_000,
+      timers: clock.timers,
+    });
+    await settle();
+    loop.wake();
+    release[0]!(true);
+    await settle();
+    assert.equal(release.length, 1);
+    loop.stop();
+  });
+
+  it("a retry queued behind a pass dies with the loop", async () => {
+    const clock = fakeClock();
+    const release: Array<(ok: boolean) => void> = [];
+    const loop = startRefreshLoop({
+      pass: () => new Promise<boolean>((r) => void release.push(r)),
+      report: () => {},
+      timers: clock.timers,
+    });
+    await settle();
+    loop.retryNow();
+    loop.stop();
+    release[0]!(true);
+    await settle();
+    assert.equal(release.length, 1, "a stopped loop asks for nothing more");
+  });
+
   it("says whether a failure was nothing answering, or merrymen answering badly", async () => {
     const reports: LoopState[] = [];
     const results: Array<() => Promise<boolean>> = [
@@ -234,6 +299,28 @@ describe("several clocks", () => {
     clocks.retryNow("account");
     await settle();
     assert.equal(calls.account, 2, "and a named clock can be asked directly");
+    clocks.stop();
+  });
+
+  it("a named clock asked mid-pass reads again once the pass in flight ends", async () => {
+    const clock = fakeClock();
+    const release: Array<(ok: boolean) => void> = [];
+    let theses = 0;
+    const clocks = startClocks(
+      [
+        { key: "account", half: "account", everyMs: 60_000, pass: () => new Promise<boolean>((r) => void release.push(r)) },
+        { key: "theses", half: "market", everyMs: 10_000, pass: async () => (theses++, true) },
+      ],
+      () => {},
+      clock.timers,
+    );
+    await settle();
+    clocks.retryNow("account");
+    release[0]!(true);
+    await settle();
+    assert.equal(release.length, 2, "the account is read again, not left a minute stale");
+    assert.equal(theses, 1, "and nothing else was asked");
+    release[1]!(true);
     clocks.stop();
   });
 });
