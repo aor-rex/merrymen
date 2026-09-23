@@ -27,7 +27,7 @@
  * flow at the restart, and a pre-redeploy mark set against a post-redeploy flow
  * reads as a phantom trading loss of the whole balance.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getAddress } from "viem";
 
@@ -100,6 +100,12 @@ export interface TradeHistory {
   writtenAt: number;
   /** Unix seconds the file reaches back to. */
   since: number;
+  /**
+   * How far back the carried "recent" decisions reach: the oldest of them when
+   * the cap cut the list, else `since`. Older carried decisions are only the
+   * ones a carried trade links to, so "my decisions start here" is this.
+   */
+  decisionsFrom: number;
   trades: HistoryTrade[];
   decisions: HistoryDecision[];
 }
@@ -108,33 +114,61 @@ export function historyFilePath(home: string): string {
   return path.join(home, HISTORY_FILE);
 }
 
-/** Write a child's history. Orchestrator only. Temp-then-rename, mode 0600, as research-files.ts. */
-export function writeHistoryFile(home: string, file: TradeHistory): void {
-  mkdirSync(home, { recursive: true });
+/**
+ * Write a child's history. Orchestrator only. Temp-then-rename, mode 0600, as
+ * research-files.ts.
+ *
+ * NEVER CREATES THE HOME. The read behind this can be slow, and a tenant
+ * removed meanwhile has had its home deleted; writing would bring the
+ * directory back holding its trades. Returns false when the home is gone.
+ */
+export function writeHistoryFile(home: string, file: TradeHistory): boolean {
+  if (!existsSync(home)) return false;
   const tmp = path.join(home, "." + HISTORY_FILE + ".tmp");
   writeFileSync(tmp, JSON.stringify(file), { encoding: "utf8", mode: 0o600 });
   renameSync(tmp, historyFilePath(home));
+  return true;
 }
+
+/** Past this the file is not ours: the loader's caps keep a real one well under 1 MB. */
+const FILE_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * Read a child's history for `agentId`. NEVER THROWS: absent, unreadable,
  * malformed or somebody else's all mean "no history", which is what a
  * self-hosted agent (whose ledger is never wiped) always sees.
  *
- * Every row is re-validated — the file sits in a tenant-writable home.
+ * Every row is re-validated, and the file is held to the loader's own bounds —
+ * size, row counts, no row from after it was written — because it sits in a
+ * tenant-writable home and is read on every chat lookup, in the process that
+ * trades.
  */
 export function readHistory(home: string, agentId: string): TradeHistory | null {
   try {
-    const raw = JSON.parse(readFileSync(historyFilePath(home), "utf8")) as Partial<TradeHistory> | null;
+    const file = historyFilePath(home);
+    if (statSync(file).size > FILE_MAX_BYTES) return null;
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<TradeHistory> | null;
     if (!raw || typeof raw !== "object" || raw.schema !== SCHEMA) return null;
     if (typeof raw.agentId !== "string" || raw.agentId.toLowerCase() !== agentId.toLowerCase()) return null;
+    const writtenAt = num(raw.writtenAt) ?? 0;
+    const since = num(raw.since) ?? 0;
+    // A row stamped after the file was written would sort as the newest trade for ever.
+    const latest = writtenAt + 3600;
+    const list = (v: unknown, max: number) => (Array.isArray(v) ? v.slice(0, max) : []);
     return {
       schema: SCHEMA,
       agentId: raw.agentId,
-      writtenAt: num(raw.writtenAt) ?? 0,
-      since: num(raw.since) ?? 0,
-      trades: (Array.isArray(raw.trades) ? raw.trades : []).map(asTrade).filter((t): t is HistoryTrade => t !== null),
-      decisions: (Array.isArray(raw.decisions) ? raw.decisions : []).map(asDecision).filter((d): d is HistoryDecision => d !== null),
+      writtenAt,
+      since,
+      // Absent, claim nothing: the file's own time, never its 30-day reach —
+      // a cut list would otherwise say "decisions start a month ago".
+      decisionsFrom: num(raw.decisionsFrom) ?? writtenAt,
+      trades: list(raw.trades, HISTORY_OPS_MAX + HISTORY_REFUSALS_MAX)
+        .map(asTrade)
+        .filter((t): t is HistoryTrade => t !== null && t.created_at > 0 && t.created_at <= latest),
+      decisions: list(raw.decisions, HISTORY_OPS_MAX + HISTORY_REFUSALS_MAX + HISTORY_DECISIONS_MAX)
+        .map(asDecision)
+        .filter((d): d is HistoryDecision => d !== null && d.at > 0 && d.at <= latest),
     };
   } catch {
     return null;
@@ -250,9 +284,12 @@ export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec:
     const d = asDecision(r);
     if (d && !decisions.has(d.id)) decisions.set(d.id, d);
   }
+  // Cut by the cap, the recent list reaches back only as far as its oldest row.
+  const decisionsFrom = recent.length >= HISTORY_DECISIONS_MAX ? Math.min(...recent.map((r) => num(r.at) ?? nowSec)) : since;
   return {
     schema: SCHEMA,
     agentId,
+    decisionsFrom,
     writtenAt: nowSec,
     since,
     trades,

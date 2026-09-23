@@ -122,8 +122,10 @@ describe("planHistoryMerge", () => {
   const copy = (p: Partial<HistoryTrade> & Pick<HistoryTrade, "created_at">) =>
     row({ target: A, sell_token: null, buy_token: null, fill_side: null, ...p });
 
+  const op = (real: boolean, status: string | null = "landed", tx: string | null = null) => ({ real, status, tx });
+
   it("the ledger's own row wins; a carried original replaces only a restart copy", () => {
-    const local = { ops: new Map([["0x1", true], ["0x2", false], ["0x3", false]]), firstAt: NOW - 3600 };
+    const local = { ops: new Map([["0x1", op(true)], ["0x2", op(false)], ["0x3", op(false)]]), firstAt: NOW - 3600 };
     const plan = planHistoryMerge(
       [
         row({ user_op_hash: "0x1", created_at: NOW - DAY }), // ledger has the executor's row
@@ -137,6 +139,22 @@ describe("planHistoryMerge", () => {
     );
     assert.deepEqual(plan.trades.map((t) => t.user_op_hash), ["0X2", "0x4"]);
     assert.deepEqual(plan.supersede, ["0x2"]);
+  });
+
+  it("a carried 'submitted' never overrides how the ledger says the op ended", () => {
+    // Sent just before a redeploy: the shared copy never learned the outcome,
+    // the new run's restart copy exists because the chain says it landed.
+    const plan = planHistoryMerge(
+      [row({ user_op_hash: "0x9", status: "submitted", tx_hash: null, decision_id: "d", created_at: NOW - 60 })],
+      A,
+      { ops: new Map([["0x9", op(false, "landed", "0xtx9")]]), firstAt: NOW - 30 },
+    );
+    assert.equal(plan.trades[0]!.status, "landed");
+    assert.equal(plan.trades[0]!.tx_hash, "0xtx9");
+    assert.equal(plan.trades[0]!.decision_id, "d", "the carried row's evidence is still what replaces the copy");
+    assert.deepEqual(plan.supersede, ["0x9"]);
+    const alone = planHistoryMerge([row({ user_op_hash: "0x8", status: "submitted", created_at: NOW - 60 })], A, { ops: new Map(), firstAt: NOW - 30 });
+    assert.equal(alone.trades[0]!.status, "unconfirmed", "no record of how it ended — not 'waiting to confirm' for ever");
   });
 
   it("a row with no hash is carried only when it is older than everything on the ledger", () => {
