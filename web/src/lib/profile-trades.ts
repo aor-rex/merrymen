@@ -1,7 +1,7 @@
 import type { Db } from "../../../worker/src/db";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { distinctTrades } from "./distinct-trades";
-import type { HoldFill } from "./hold-time";
+import { openingOf, PAPER_DUST_RAW, type HoldFill } from "./hold-time";
 
 export interface ProfileTrade {
   id: string;
@@ -72,21 +72,46 @@ function profileTradeOf(row: Record<string, unknown>, publicBook: boolean): Prof
  * Sizes follow the same owner opt-in as the public book. Transfers are excluded.
  * One row per operation: a redeploy's re-recorded copy of a fill collapses into
  * the fill (see distinct-trades.ts) instead of heading the list as "Swapped token".
+ *
+ * A sell's return shows only on an evidenced cost — the rule readTopTrades
+ * ranks by (vouchedSells), so the row and the ranking cannot disagree about
+ * the same sell. A sell whose cost could not be vouched for is still listed,
+ * with no return rather than an estimated one.
  */
 export async function readProfileTrades(db: Db, account: string, epoch: number, publicBook: boolean) {
+  let rows: Record<string, unknown>[];
   try {
-    const rows = await db.prepare(`
-      SELECT ${TRADE_COLUMNS}
+    rows = await db.prepare(`
+      SELECT ${TRADE_COLUMNS}, ${OP_KEY} AS op_key, LOWER(t.sell_token) AS coin_token
       FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
       ${DECISION_JOIN}
       WHERE t.status IN ('landed', 'paper') AND t.kind IN ('swap', 'curve-trade')
       ORDER BY t.created_at DESC, t.id DESC LIMIT 100
     `).all(publicBook ? 1 : 0, account, epoch) as Record<string, unknown>[];
-    return { trades: rows.map(row => profileTradeOf(row, publicBook)), read: true };
   } catch (error) {
     console.error("[profile-trades] ledger read failed", error instanceof Error ? error.name : "unknown");
     return { trades: [] as ProfileTrade[], read: false };
   }
+  const trades = rows.map((row) => profileTradeOf(row, publicBook));
+  // Each book's sells against that book's own fills.
+  const vouched = new Set<string>();
+  for (const book of ["landed", "paper"] as const) {
+    const tokens = rows
+      .filter((r, i) => r.status === book && trades[i]!.realizedPnlBps !== null && typeof r.coin_token === "string" && r.coin_token !== "")
+      .map((r) => r.coin_token as string);
+    try {
+      for (const op of await readVouchedSells(db, account, book, tokens)) vouched.add(op);
+    } catch (error) {
+      // Unreplayable is unvouched: the rows stay, their returns do not.
+      console.error("[profile-trades] cost replay failed", error instanceof Error ? error.name : "unknown");
+    }
+  }
+  return {
+    trades: trades.map((t, i) =>
+      t.realizedPnlBps === null || vouched.has(String(rows[i]!.op_key)) ? t : { ...t, realizedPnlBps: null, realizedPnlUsdg: null },
+    ),
+    read: true,
+  };
 }
 
 /** How many TOP TRADES a profile shows. */
@@ -138,11 +163,13 @@ export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolea
     const s = state.get(f.token) ?? { held: 0n, estimated: false, exact: true };
     state.set(f.token, s);
     const qty = f.qty !== null && /^\d+$/.test(f.qty.trim()) ? BigInt(f.qty.trim()) : null;
+    // A sell is judged by the basis it sold against: everything before it.
+    if (f.side === "sell" && !s.estimated) vouched.add(f.op);
     if (f.side === null || qty === null) {
-      // It moved the coin by an amount nobody recorded, and may have booked a
-      // cost of its own.
+      // It moved the coin by an amount nobody recorded; one that was not a sell
+      // may have booked a cost of its own.
       s.exact = false;
-      if (!EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
+      if (f.side !== "sell" && !EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
       continue;
     }
     if (f.side === "buy") {
@@ -150,7 +177,6 @@ export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolea
       if (!EVIDENCED_SOURCES.has(f.source ?? "")) s.estimated = true;
       continue;
     }
-    if (!s.estimated) vouched.add(f.op);
     s.held -= qty < s.held ? qty : s.held;
     // Flat, and known to be: the worker deleted this coin's basis, so nothing
     // booked before here is in the cost of what comes next.
@@ -297,18 +323,57 @@ export async function readTopTrades(
  */
 export const ROUND_TRIP_READ_LIMIT = 5_000;
 
+/** Rows the read of the fills BEFORE the period takes; past it, what was carried in is unknown. */
+export const OPENING_READ_LIMIT = 5_000;
+
+/** One fill as FIFO needs it, keyed by the token it moved. */
+function holdFillOf(row: Record<string, unknown>): HoldFill {
+  const { side } = resolveFill(row);
+  // THE COIN IS THE TOKEN THE FILL MOVED: bought on a buy, sold on a sell. An
+  // address, not a symbol: the fills of two periods have to meet, and an old
+  // fill with no decision linked has no symbol to meet on — the executor has
+  // written both token legs on every row it ever recorded.
+  const leg = side === "buy" ? row.buy_token : side === "sell" ? row.sell_token : null;
+  const coin = typeof leg === "string" && leg.trim() ? leg.trim().toLowerCase() : null;
+  // TEXT on both backends, written from a bigint; an integer is accepted in
+  // case a driver hands one back, and anything else is unread.
+  const raw = row.fill_qty_raw;
+  const q = typeof raw === "string" && /^\d+$/.test(raw.trim()) ? BigInt(raw.trim())
+    : typeof raw === "bigint" ? raw
+    : typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? BigInt(raw)
+    : null;
+  return {
+    side: side === "swap" ? null : side,
+    coin,
+    qty: q,
+    at: Number(row.created_at),
+    source: typeof row.basis_source === "string" ? row.basis_source : null,
+  };
+}
+
+/** The columns a round-trip read takes, for this period's fills and the ones before it. */
+const ROUND_TRIP_COLUMNS = `t.id, t.fill_side, d.action, COALESCE(t.fill_symbol, d.symbol) AS symbol, t.buy_token, t.sell_token,
+             t.fill_qty_raw, t.basis_source, t.created_at`;
+
 /**
- * Every fill of one book in this period, oldest first, as FIFO needs them.
+ * Every fill of one book in this period, oldest first, as FIFO needs them —
+ * and what the book was already holding when the period began.
  *
  * Null when the ledger could not be read — never an empty tape, which would be
  * a claim that the agent had traded nothing. A fill whose side, coin or
  * quantity is missing is CARRIED with a null, not dropped: averageHoldSec
  * refuses on it, because skipping one fill re-pairs every later one.
  *
- * The coin key is the symbol the basis ledger itself keys positions on: the
- * registry's for a stock token, else the one the fill recorded. Never an
- * address fallback — a buy keyed by symbol and its sell keyed by address would
- * never meet, and the pair would silently vanish rather than refuse.
+ * ONE ROW PER OPERATION ACROSS EVERY PERIOD, then split by period: a
+ * redeploy's copy stamped in this period of an operation from the last one is
+ * that operation, not a fill of this one.
+ *
+ * WHAT WAS CARRIED IN (`opening`) is replayed from the book's fills before the
+ * period (hold-time.ts openingOf): a new period carries positions over, and a
+ * sell closes those units before any of the period's own buys. Null when it
+ * could not be read — never "nothing was carried". The paper book needs one
+ * more fact, because a paper RESET clears it without a single fill
+ * (resetPaperLedger): see paperOpening.
  */
 export async function readRoundTrips(
   db: Db,
@@ -316,31 +381,92 @@ export async function readRoundTrips(
   epoch: number,
   book: TradeBook,
   limit = ROUND_TRIP_READ_LIMIT,
-): Promise<{ fills: HoldFill[]; truncated: boolean } | null> {
+): Promise<{ fills: HoldFill[]; truncated: boolean; opening: Map<string, bigint | null> | null; dust: bigint } | null> {
+  const dust = book === "paper" ? PAPER_DUST_RAW : 0n;
+  let fills: HoldFill[];
+  let truncated: boolean;
   try {
     const rows = await db.prepare(`
-      SELECT t.id, t.fill_side, d.action, COALESCE(t.fill_symbol, d.symbol) AS symbol, t.buy_token, t.sell_token,
-             t.fill_qty_raw, t.created_at
-      FROM ${distinctTrades("t.agent_id = ? AND t.epoch = ?")}
+      SELECT ${ROUND_TRIP_COLUMNS}
+      FROM ${distinctTrades("t.agent_id = ?")}
       ${DECISION_JOIN}
-      WHERE t.status = ? AND t.kind IN ('swap', 'curve-trade')
+      WHERE t.status = ? AND t.kind IN ('swap', 'curve-trade') AND t.epoch = ?
       ORDER BY t.created_at ASC, t.id ASC LIMIT ?
-    `).all(account, epoch, book, limit + 1) as Record<string, unknown>[];
-    const truncated = rows.length > limit;
-    const fills = rows.slice(0, limit).map((row): HoldFill => {
-      const { side, symbol } = resolveFill(row);
-      // TEXT on both backends, written from a bigint; an integer is accepted in
-      // case a driver hands one back, and anything else is unread.
-      const raw = row.fill_qty_raw;
-      const q = typeof raw === "string" && /^\d+$/.test(raw.trim()) ? BigInt(raw.trim())
-        : typeof raw === "bigint" ? raw
-        : typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? BigInt(raw)
-        : null;
-      return { side: side === "swap" ? null : side, coin: symbol, qty: q, at: Number(row.created_at) };
-    });
-    return { fills, truncated };
+    `).all(account, book, epoch, limit + 1) as Record<string, unknown>[];
+    truncated = rows.length > limit;
+    fills = rows.slice(0, limit).map(holdFillOf);
   } catch (error) {
     console.error("[profile-trades] round-trip read failed", error instanceof Error ? error.name : "unknown");
     return null;
   }
+  let opening: Map<string, bigint | null> | null = null;
+  try {
+    // Newest first under the cap, then turned round: a cut read loses the
+    // OLDEST fills, and says so, rather than silently missing the newest.
+    const prior = (await db.prepare(`
+      SELECT ${ROUND_TRIP_COLUMNS}
+      FROM ${distinctTrades("t.agent_id = ?")}
+      ${DECISION_JOIN}
+      WHERE t.status = ? AND t.kind IN ('swap', 'curve-trade') AND t.epoch < ?
+      ORDER BY t.created_at DESC, t.id DESC LIMIT ?
+    `).all(account, book, epoch, OPENING_READ_LIMIT + 1)) as Record<string, unknown>[];
+    const complete = prior.length <= OPENING_READ_LIMIT;
+    const priorFills: HoldFill[] = [];
+    for (const row of prior.slice(0, OPENING_READ_LIMIT).reverse()) {
+      const f = holdFillOf(row);
+      if (f.side !== null) {
+        priorFills.push(f);
+        continue;
+      }
+      // No side: it moved one of its two tokens by an amount nobody recorded,
+      // so from here both are unknown — not "a coin nobody knows", which would
+      // make every coin unknown.
+      for (const leg of [row.buy_token, row.sell_token]) {
+        if (typeof leg === "string" && leg.trim()) priorFills.push({ ...f, coin: leg.trim().toLowerCase() });
+      }
+    }
+    opening = openingOf(priorFills, { complete, dust });
+    if (opening && book === "paper" && [...opening.values()].some((q) => q !== 0n)) {
+      opening = await paperOpening(db, account, epoch, opening, fills[0]?.at ?? null);
+    }
+  } catch (error) {
+    console.error("[profile-trades] opening read failed", error instanceof Error ? error.name : "unknown");
+    opening = null;
+  }
+  return { fills, truncated, opening, dust };
+}
+
+/**
+ * A PAPER CARRY, CHECKED AGAINST THE PERIOD'S FIRST PAPER VALUATION.
+ *
+ * A paper reset clears the book without a single fill and then opens the next
+ * period, so the fills before a paper period cannot tell a reset from a carry.
+ * The valuation can, when it was taken before the period's first fill: zero in
+ * positions means nothing was carried, whatever the fills say (a reset, or a
+ * book already flat); more than zero means the book came over whole — a paper
+ * book is only ever cleared all at once — so what the fills say stands. With no
+ * such valuation, every coin the fills say was held becomes unknown.
+ *
+ * Only the paper book: a funded book is never cleared that way, and its
+ * valuation leaves out holdings it cannot price, so a zero there proves nothing.
+ */
+async function paperOpening(
+  db: Db,
+  account: string,
+  epoch: number,
+  replayed: Map<string, bigint | null>,
+  firstFillAt: number | null,
+): Promise<Map<string, bigint | null>> {
+  const unknown = new Map([...replayed].map(([coin, q]) => [coin, q === 0n ? 0n : null] as const));
+  const mark = (await db
+    .prepare(
+      `SELECT positions_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'paper'
+        ORDER BY at ASC, id ASC LIMIT 1`,
+    )
+    .get(account, epoch)) as { positions_usdg: number | null; at: number } | undefined;
+  if (!mark || mark.positions_usdg === null || mark.positions_usdg === undefined) return unknown;
+  const valued = Number(mark.positions_usdg);
+  if (!Number.isFinite(valued) || (firstFillAt !== null && Number(mark.at) > firstFillAt)) return unknown;
+  if (valued === 0) return new Map();
+  return valued > 0 ? replayed : unknown;
 }

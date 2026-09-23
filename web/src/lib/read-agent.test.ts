@@ -139,9 +139,11 @@ test("a paper agent's stats are its paper book's, and a live agent's are not its
     await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 61, pnl: 1, cash: 11 });
     await db.prepare(
       `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
-       VALUES (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '2', 5, NULL, 'paper'), (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'sell', 'TSLA', '2', 6, 1, 'paper'),
-              (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '3', 5, NULL, 'paper')`,
+       VALUES (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '2000000000000000000', 5, NULL, 'paper'), (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'sell', 'TSLA', '2000000000000000000', 6, 1, 'paper'),
+              (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '3000000000000000000', 5, NULL, 'paper')`,
     ).run(ACCOUNT, USDG, tokenOf("TSLA"), T0 + 100, ACCOUNT, tokenOf("TSLA"), USDG, T0 + 400, ACCOUNT, USDG, tokenOf("TSLA"), T0 + 500);
+    // Paper fills are booked at 1e18 raw units a share (paper.ts), the scale its
+    // rounding is measured in.
     const live = (await profileOf(db, identity, false))!;
     assert.deepEqual([live.tradeCount, live.avgHoldSec, live.topTrades.map((t) => t.symbol)], [2, 60, ["CASH"]]);
     await db.prepare("UPDATE agents SET mode = 'paper'").run();
@@ -200,5 +202,24 @@ test("the owner's own read carries the sizes and dollars a private profile withh
     assert.equal(own.topTradesRead, true);
     assert.deepEqual(own.topTrades.map((t) => [t.symbol, t.realizedPnlBps, t.realizedPnlUsdg]), [["CASH", 3_000, 3]]);
     assert.equal(await ownBookOf(db, { slug: "x", accounts: ["0x00000000000000000000000000000000000000ff"] }), null, "no agent, no book");
+  } finally { raw.close(); }
+});
+
+test("avg hold does not pair a trim of a carried position with the buy beside it", async () => {
+  // PF2, on the worker's own schema. openNextEpoch carries positions over; the
+  // reviewer's probe held 1,000 CASH into the period, bought 10 and trimmed 10
+  // a minute later, and the profile printed "avg hold 1m" for units held weeks.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1000", at: T0 - 20 * 86_400, epoch: 1 });
+    await fill(db, { side: "buy", coin: "CASH", qty: "10", at: T0 + 100 });
+    await fill(db, { side: "sell", coin: "CASH", qty: "10", at: T0 + 160, pnl: 0.1, cash: 5.1 });
+    const p = (await profileOf(db, identity, false))!;
+    assert.equal(p.tradeCount, 2, "this period's fills only");
+    assert.equal(p.avgHoldSec, null, "the trim sold carried units: no round trip this period");
+    // Sold out last period, the same two fills are a round trip of a minute.
+    await fill(db, { side: "sell", coin: "CASH", qty: "1000", at: T0 - 10 * 86_400, epoch: 1 });
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60);
   } finally { raw.close(); }
 });

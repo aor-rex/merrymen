@@ -686,9 +686,11 @@ export async function profileOf(
     topTradesRead: top.read,
     // A capped read's count is a floor and says so; its hold is not computed,
     // because FIFO needs the earliest buys and a capped tape may not have them.
+    // What the book carried into the period is sold first and pairs with
+    // nothing (hold-time.ts); unread, it refuses the hold of any coin sold.
     tradeCount: trips ? trips.fills.length : null,
     tradeCountFloor: trips?.truncated === true,
-    avgHoldSec: trips && !trips.truncated ? averageHoldSec(trips.fills) : null,
+    avgHoldSec: trips && !trips.truncated ? averageHoldSec(trips.fills, trips.opening, trips.dust) : null,
     joinedAt: joinedAtOf(identity.createdAt),
     // AND CONSISTENT WITH THE GAS THIS PAGE CHARGES. A sponsored op writes no
     // owner gas at all (index.ts), so any priced or unpriced cost beside the

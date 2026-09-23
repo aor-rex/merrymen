@@ -58,11 +58,12 @@ before(async () => {
        VALUES (?, 'Shogun', '0x1', '0x2', 4663, '{}', 0, 0, 'live', 1)`,
     ).run(ACCOUNT);
     const fill = db.prepare(
-      `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
-       VALUES (?, 'swap', 'x', ?, ?, 'landed', ?, 1, ?, 'CASH', '1', ?, ?, 'receipt')`,
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, ?, ?, 'landed', ?, 1, ?, 'CASH', '1', ?, ?, 'receipt')`,
     );
-    await fill.run(ACCOUNT, 10, "0xop1", 1_000, "buy", 10, null);
-    await fill.run(ACCOUNT, 13, "0xop2", 2_000, "sell", 13, 3);
+    // The executor writes both token legs on every fill.
+    await fill.run(ACCOUNT, "0xusdg", "0xcash", 10, "0xop1", 1_000, "buy", 10, null);
+    await fill.run(ACCOUNT, "0xcash", "0xusdg", 13, "0xop2", 2_000, "sell", 13, 3);
   } finally {
     raw.close();
   }
