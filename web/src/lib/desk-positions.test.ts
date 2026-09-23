@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { costFromQuote, readDeskPositions, type BasisFill } from "./desk-positions";
+import { PROVENANCE_ROWS, costFromQuote, readDeskPositions, type BasisFill } from "./desk-positions";
 import { mineOf } from "../terminal/live";
 import { chatPositionsOf, positionsOf } from "../terminal/account";
 
@@ -46,7 +46,15 @@ describe("replaying the fills behind a holding", () => {
 
   it("a truncated read clears nothing it cannot see the start of", () => {
     assert.equal(costFromQuote([buy(10, "quote"), sell(10), buy(7)], false), true);
-    assert.equal(costFromQuote([buy(7)], false), false, "and a quote it never read is not invented");
+  });
+
+  it("and vouches for nothing it did not read: no quote in a truncated read is not no quote", () => {
+    // This said `false` — "a quote it never read is not invented" — and that
+    // was the bug. The quote-booked fill can sit in exactly the rows the read
+    // cut off, and false is the one answer the desk prints a % on.
+    assert.equal(costFromQuote([buy(7)], false), null);
+    assert.equal(costFromQuote([], false), null);
+    assert.equal(costFromQuote([buy(10), sell(10), buy(7)], false), null, "a sell that looks flat cannot be told flat without the start");
   });
 });
 
@@ -130,6 +138,42 @@ describe("the owner's positions, as /api/feed reads them", () => {
       assert.equal(chat.get("CHUMP")!.unrealisedPct, 40);
       assert.equal(chat.get("CHUMP")!.costConfirmed, true);
       assert.equal(chat.get("NOBASIS")!.costConfirmed, null);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("a fill history too long to replay is not vouched for, and the desk and chat say so", async () => {
+    // The oldest fill was booked from the quote and the holding never went
+    // flat after it; then PROVENANCE_ROWS receipt round trips pushed it out of
+    // the read. The read sees only receipts. It used to answer "no quote" and
+    // the desk printed +20% on a cost that is an estimate.
+    const { raw, db } = await ledger();
+    try {
+      const ins = raw.prepare(
+        `INSERT INTO trades (agent_id, kind, status, buy_token, sell_token, user_op_hash, fill_side, fill_qty_raw, basis_source, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      );
+      raw.exec(`INSERT INTO positions VALUES ('0xA','TSLA','0xtsla','1000','1',1.2,0,'pool',1200,0);
+        INSERT INTO cost_basis VALUES ('0xA','live','TSLA','1000','1000000000',0);`);
+      raw.exec("BEGIN");
+      ins.run("0xA", "swap", "landed", "0xtsla", "0xusdg", "0xq0", "buy", "1000", "quote", 1);
+      for (let i = 0; i < PROVENANCE_ROWS; i++) {
+        const side = i % 2 === 0 ? "buy" : "sell";
+        ins.run("0xA", "swap", "landed", side === "buy" ? "0xtsla" : "0xusdg", side === "buy" ? "0xusdg" : "0xtsla", `0xr${i}`, side, "1", "receipt", 1000 + i);
+      }
+      raw.exec("COMMIT");
+      const positions = await readDeskPositions(db, "0xA", "live");
+      const tsla = positions.find((p) => p.symbol === "TSLA")!;
+      assert.equal(tsla.cost_usdg, 1000);
+      assert.equal(tsla.cost_from_quote, null, "the quote fill is in the rows the read cut off");
+      const mine = mineOf({ agent: { name: "Shogun", strategy: "steady-basket", slug: null }, positions }, [])!;
+      const desk = positionsOf(mine as never).find((p) => p.symbol === "TSLA")!;
+      assert.equal(desk.pnl, null, "no % on a cost nobody could vouch for");
+      assert.equal(desk.detail, "$1,200.00 · cost unconfirmed");
+      const chat = chatPositionsOf(mine as never).find((p) => p.symbol === "TSLA")!;
+      assert.equal(chat.unrealisedPct, null);
+      assert.equal(chat.costConfirmed, false);
     } finally {
       raw.close();
     }
