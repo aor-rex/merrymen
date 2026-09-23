@@ -473,6 +473,14 @@ const ASKS_AMOUNT = /\bhow much\b|\bwhat size\b|\bhow big\b|\bwhich amount\b|\bh
 const STEPS = [5, 10, 25, 50, 100, 250];
 
 /**
+ * Does this line of the agent's ask the owner for an amount — the one answer
+ * that draws amount chips? The controller reads the ceiling again for exactly
+ * these (chat-controller.ts readCeiling), so the chips are drawn against the
+ * ceiling as it stands when the question is asked.
+ */
+export const asksAmount = (line: string | null): boolean => !!line && ASKS_AMOUNT.test(line);
+
+/**
  * TWO TO FOUR THINGS WORTH ASKING NEXT, from what this agent is doing.
  *
  * They used to show only on an empty chat and were the same three for
@@ -494,7 +502,7 @@ export function chatChips(c: {
 }): ChatChip[] {
   const chips: ChatChip[] = [];
   const clamp = amountCeiling(c.perTrade, c.ceiling);
-  if (c.lastAgent && ASKS_AMOUNT.test(c.lastAgent) && clamp !== null) {
+  if (asksAmount(c.lastAgent) && clamp !== null) {
     for (const v of STEPS.filter((s) => s < clamp).slice(0, 2)) chips.push({ label: usd(v), message: usd(v) });
     chips.push({ label: `${usd(clamp)} (max)`, message: usd(clamp) });
   }

@@ -37,6 +37,7 @@ import { chatStateOf, type ChatSettings } from "./chat-payload";
 import { clearThread as forgetThread, loadThread, saveThread, type KeptThread } from "./chat-store";
 import {
   absorbFill,
+  asksAmount,
   capThread,
   failureLine,
   historyBeforeRetry,
@@ -156,7 +157,7 @@ export interface ChatDeps {
 /** How long a whole reply may take, streamed or not, before it is given up on. */
 export const CHAT_TIMEOUT_MS = 60_000;
 
-/** Settings older than this are re-read in the background after a reply; a ceiling, as a message goes out. */
+/** Settings older than this are re-read in the background after a reply. */
 const SETTINGS_FRESH_MS = 30_000;
 
 export type Asked =
@@ -315,8 +316,8 @@ export function useChatController(o: {
   // what keying it was meant to prevent.
   const lastKey = useRef<string | null>(null);
   const settingsCache = useRef<{ key: string | null; value: ChatSettings; at: number } | null>(null);
-  /** When the ceiling was last read, on this clock — see readCeiling. */
-  const ceilingAt = useRef<number | null>(null);
+  /** The newest read of the ceiling — only it may set what the chips offer (readCeiling). */
+  const ceilingRead = useRef(0);
   useEffect(() => {
     const previous = lastKey.current;
     if (previous && previous !== o.chatKey) forgetThread(previous);
@@ -331,7 +332,6 @@ export function useChatController(o: {
     setUnread(false);
     settingsCache.current = null;
     setSettings(null);
-    ceilingAt.current = null;
     setCeiling(null);
   }, [o.chatKey]);
 
@@ -388,14 +388,24 @@ export function useChatController(o: {
   // the settings; a read that fails leaves the last good one, and one never
   // read is null, which offers no amount at all.
   //
-  // AND AGAIN WHEN A MESSAGE GOES OUT ONCE IT IS STALE. On desktop the dock
-  // stays open while the owner uses the Settings screen, so "when the chat
-  // opens" never comes round again; the chips kept a ceiling the owner had
-  // since lowered and offered a "(max)" POST now refused. Read as the message
-  // is sent rather than after its reply, so the chips that come with the
-  // reply are drawn against the fresh one.
+  // AND AGAIN EVERY TIME THE AGENT ASKS HOW MUCH. On desktop the dock stays
+  // open while the owner uses the Settings screen, so "when the chat opens"
+  // never comes round again; and a re-read only once the last one was thirty
+  // seconds old still missed the natural flow — see an unwanted "(max)", lower
+  // the ceiling, come straight back and ask again — offering a "(max)" POST
+  // now refused. Amount chips are drawn only under a reply that asks for an
+  // amount (chat-thread.ts asksAmount), so that reply is when it is read: the
+  // chips stand against the ceiling as it is when the question is asked,
+  // whatever changed it and wherever.
+  //
+  // WITHDRAWN WHILE IT IS READ. The old figure is not offered while the new
+  // read is out, nor after one that failed: no amount is offered against a
+  // limit that is being, or could not be, read again. And only the NEWEST read
+  // may set it — an older one landing late would put back what it read.
   const readCeiling = useCallback(async () => {
     const key = keyRef.current;
+    const read = ++ceilingRead.current;
+    if (mounted.current) setCeiling(null);
     let value: number | null = null;
     try {
       const r = await fetch("/api/orders/ceiling", { signal: AbortSignal.timeout(5_000) });
@@ -406,11 +416,8 @@ export function useChatController(o: {
     } catch {
       /* unread — no amount is offered against a limit nobody read */
     }
-    if (value !== null && keyRef.current === key && mounted.current) {
-      ceilingAt.current = clock();
-      setCeiling(value);
-    }
-  }, [clock]);
+    if (value !== null && keyRef.current === key && mounted.current && ceilingRead.current === read) setCeiling(value);
+  }, []);
   useEffect(() => {
     if (!o.open || !o.chatKey) return;
     void readSettings();
@@ -444,9 +451,6 @@ export function useChatController(o: {
       // THE DRAFT CLEARS AT ONCE — unless the owner has already started typing
       // something else, which is theirs.
       setDraft((d) => (d.trim() === q ? "" : d));
-      // A ceiling not read lately is read beside the question, not after the
-      // answer: the chips come with the reply (see readCeiling).
-      if (ceilingAt.current === null || clock() - ceilingAt.current > SETTINGS_FRESH_MS) void readCeiling();
       try {
         const cached = settingsCache.current;
         const settingsNow = cached && cached.key === key ? cached.value : await readSettings();
@@ -464,6 +468,9 @@ export function useChatController(o: {
         if (keyRef.current !== key || !mounted.current) return false;
         if (out.ok) {
           update(key, (t) => ({ ...t, messages: [...t.messages, { id: lineId("agent", clock()), role: "agent" as const, at: clock(), text: out.reply }] }));
+          // How much? Then the chips it draws are drawn against the ceiling as
+          // it stands now — withdrawn in this same render, offered once read.
+          if (asksAmount(out.reply)) void readCeiling();
           // VALIDATED AGAIN HERE. The route checks the id against the registry,
           // and so does this — nothing is held that the card could not describe.
           setProposal(out.command && commandFor(out.command.id) ? out.command : null);

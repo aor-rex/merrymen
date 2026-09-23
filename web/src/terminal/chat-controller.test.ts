@@ -454,12 +454,70 @@ describe("chips", () => {
     await settle(5);
     const chips = () => Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent);
     assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
-    // And a ceiling just read is not read again for every message.
+    // WITHIN THIRTY SECONDS OF THAT READ — the natural flow after seeing an
+    // unwanted max: lower it, come straight back, ask again. The ceiling was
+    // re-read only once it was 30 s old, so these chips still offered 10.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 7 });
+    clockAhead += 20_000;
     await typeAndSend("buy some more");
     await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
     await settle(5);
-    assert.equal(count("GET", "/api/orders/ceiling"), 2, "once when the chat opened, once when it had gone stale");
-    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
+    assert.deepEqual(chips(), ["$5.00", "$7.00 (max)"], "the ceiling the owner just set");
+    assert.equal(count("GET", "/api/orders/ceiling"), 3, "once when the chat opened, and once for each question of how much");
+  });
+
+  it("A MESSAGE THAT ASKS NOTHING OF HOW MUCH DOES NOT READ THE CEILING", async () => {
+    routes["POST /api/chat"] = () => json({ reply: "All quiet today." });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("anything new?");
+    await until(() => /All quiet today\./.test(text()), "reply");
+    await settle(5);
+    assert.equal(count("GET", "/api/orders/ceiling"), 1, "only when the chat opened");
+  });
+
+  it("NO AMOUNT IS OFFERED UNTIL THE CEILING IS READ FOR THAT QUESTION — and none on a read that failed", async () => {
+    // Chips drawn with the reply against the last ceiling read would offer it
+    // for as long as the new read took; a read that failed would leave it.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 25 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    const held = deferred<Response>();
+    routes["GET /api/orders/ceiling"] = () => held.promise;
+    await typeAndSend("buy some");
+    await until(() => /How much should I put in\?/.test(text()), "reply");
+    await settle(5);
+    const amounts = () =>
+      Array.from(ui.container.querySelectorAll(".desk-prompts button"))
+        .map((b) => b.textContent ?? "")
+        .filter((t) => t.startsWith("$"));
+    assert.deepEqual(amounts(), [], "not the 25 read when the chat opened, while the new read is out");
+    held.resolve(json({ ceilingUsdg: 10 }));
+    await until(() => amounts().length > 0, "the chips, once it is read");
+    assert.deepEqual(amounts(), ["$5.00", "$10.00 (max)"]);
+    routes["GET /api/orders/ceiling"] = () => json({ error: "the ledger could not be read" }, 503);
+    await typeAndSend("buy again");
+    await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
+    await settle(5);
+    assert.deepEqual(amounts(), [], "a limit that could not be read now offers no amount, not the last one");
+  });
+
+  it("AN OLDER READ OF THE CEILING LANDING LATE DOES NOT PUT BACK THE CEILING IT READ", async () => {
+    const opened = deferred<Response>();
+    routes["GET /api/orders/ceiling"] = () => opened.promise;
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    await typeAndSend("buy some");
+    await until(() => buttons("$10.00 (max)").length === 1, "the chips against the question's read");
+    // The read the chat started when it opened answers only now, with what
+    // the ceiling was before the owner lowered it.
+    opened.resolve(json({ ceilingUsdg: 25 }));
+    await settle(10);
+    assert.equal(buttons("$10.00 (max)").length, 1);
+    assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
   });
 
   it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
