@@ -223,7 +223,9 @@ export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec:
   trades.sort((a, b) => b.created_at - a.created_at);
 
   // Every decision a carried trade links to (its reason is the answer to "why
-  // did you buy X"), then the newest others, one row per id.
+  // did you buy X"), then the newest others, one row per id. A hold the gate
+  // forced is not carried among the others: while a book cannot size, every
+  // tick writes one, and 300 of them would be the whole list.
   const decisions = new Map<string, HistoryDecision>();
   const linked = [...new Set(trades.map((t) => t.decision_id).filter((d): d is string => !!d))];
   for (let i = 0; i < linked.length; i += 100) {
@@ -240,6 +242,7 @@ export async function loadHistoryFromShared(shared: Db, agentId: string, nowSec:
     .prepare(
       `SELECT ${DECISION_COLS} FROM decisions
         WHERE agent_id IN (?, ?, ?) AND at >= ? AND source <> 'market-review-private'
+          AND (hold_kind IS NULL OR hold_kind <> 'GATE_FORCED_HOLD')
         ORDER BY at DESC LIMIT ?`,
     )
     .all(...who, since, HISTORY_DECISIONS_MAX)) as unknown as Record<string, unknown>[];

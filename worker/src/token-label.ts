@@ -230,8 +230,9 @@ export function tokenLabelSync(db: LabelDb | null, agentId: string | null, input
     const hSym = usable(h?.symbol);
     if (hSym) return untrusted(hSym, null, "position");
     // 9. The symbol() the shared ledger read off a fill's receipt. Only rows
-    //    carried over from before a redeploy have it (history-files.ts), and
-    //    it is the coin's own word, exactly as a chain read would be.
+    //    the chat carries over from before a redeploy have it — the child
+    //    never writes the column — and it is the coin's own word, exactly as
+    //    a chain read would be.
     const f = agentId
       ? row<{ fill_symbol: string | null }>(
           db,

@@ -60,6 +60,7 @@ describe("loadHistoryFromShared", () => {
     raw.prepare("INSERT INTO decisions (id, agent_id, source, action, at) VALUES ('d2', ?, 'market-review-private', 'hold', ?)").run(A, NOW - 10);
     raw.prepare("INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES ('d3', ?, 'brain', 'hold', ?, ?)").run(A, "x".repeat(5000), NOW - 20);
     raw.prepare("INSERT INTO decisions (id, agent_id, source, action, at) VALUES ('d4', ?, 'brain', 'buy', ?)").run(OTHER, NOW - 5);
+    raw.prepare("INSERT INTO decisions (id, agent_id, source, action, hold_kind, at) VALUES ('d5', ?, 'brain', 'hold', 'GATE_FORCED_HOLD', ?)").run(A, NOW - 30);
 
     const h = await loadHistoryFromShared(db, getAddress(A), NOW);
     const ops = h.trades.filter((r) => r.user_op_hash?.toLowerCase() === H1.toLowerCase());
@@ -77,7 +78,7 @@ describe("loadHistoryFromShared", () => {
       "newest first",
     );
     const ids = h.decisions.map((d) => d.id).sort();
-    assert.deepEqual(ids, ["d1", "d3"], "the linked decision even when old, the recent one, never the private review or another tenant's");
+    assert.deepEqual(ids, ["d1", "d3"], "the linked decision even when old, the recent one — never the private review, a forced hold, or another tenant's");
     assert.equal(h.decisions.find((d) => d.id === "d3")!.reason!.length, 600, "a reason is bounded");
     assert.equal(typeof h.trades[0]!.created_at, "number");
     raw.close();

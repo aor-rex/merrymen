@@ -692,6 +692,8 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
   try {
     const who = resolveAgent(db, agentId);
     if (!who) return nothingYet();
+    // A redeploy empties the ledger; "I haven't made a trade yet" is then false.
+    overlayHistory(db, who);
     const t = db
       .prepare(
         "SELECT kind, amount_usdg, status, reject_rule, tx_hash, created_at, decision_id FROM trades WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
