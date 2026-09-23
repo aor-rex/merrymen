@@ -10,7 +10,7 @@ import {
   ArrowDownWideNarrow,
   ChevronDown,
 } from "lucide-react";
-import { Coin, Face, LogoMark, TabIcon, NameBlock } from "./ui";
+import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
 import {
   money,
   coinPrice,
@@ -236,7 +236,7 @@ export function DesktopSidebar({
                 <small>{t.name}</small>
               </span>
               <span>
-                <strong title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</strong>
+                <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
                 <small className={deltaClass(t.change24hPct)}>
                   {pctPts(t.change24hPct)}
                 </small>
