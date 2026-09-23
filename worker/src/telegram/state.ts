@@ -84,7 +84,7 @@ export interface TelegramState {
    * The parent reads this and promotes it into the tenant's stored settings,
    * guarded on `at` so one change is applied once.
    */
-  chatSettings: { at: number; patch: Record<string, unknown> } | null;
+  chatSettings: { at: number; patch: Record<string, unknown>; keyAt?: Record<string, number> } | null;
   /** Owner messages handled — feeds the relationship stage. */
   messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
@@ -157,7 +157,15 @@ export function loadTelegramState(): TelegramState {
         s.chatSettings && typeof s.chatSettings === "object" &&
         typeof s.chatSettings.at === "number" &&
         s.chatSettings.patch && typeof s.chatSettings.patch === "object"
-          ? { at: s.chatSettings.at, patch: s.chatSettings.patch as Record<string, unknown> }
+          ? {
+              at: s.chatSettings.at,
+              patch: s.chatSettings.patch as Record<string, unknown>,
+              // Dropping this on load would make every key look as old as the
+              // record, and the next promotion would re-apply them all.
+              ...(s.chatSettings.keyAt && typeof s.chatSettings.keyAt === "object"
+                ? { keyAt: s.chatSettings.keyAt as Record<string, number> }
+                : {}),
+            }
           : null,
       linkCode: typeof s.linkCode === "string" ? s.linkCode : "",
       linkRound: typeof s.linkRound === "number" ? s.linkRound : 0,
@@ -280,8 +288,21 @@ export function rememberChatSetting(
   at: number,
 ): void {
   const st = ref.get();
+  const prev = st.chatSettings;
+  // STRICTLY LATER THAN THE LAST STAMP. `at` is whole seconds and the parent's
+  // guard is `<=` its stored marker, so a second change inside the same second
+  // as a promoted first one would compare equal and never be applied.
+  const stamp = Math.max(at, (prev?.at ?? 0) + 1);
+  // Every key written now carries this stamp; keys from earlier changes keep
+  // theirs, so the parent re-applies only what is newer than its last
+  // promotion (chat-settings.ts `keyAt`). A key recorded by an older build has
+  // no entry and is given the old record's `at`, which is exactly when it was
+  // last written.
+  const keyAt: Record<string, number> = {};
+  for (const k of Object.keys(prev?.patch ?? {})) keyAt[k] = prev?.keyAt?.[k] ?? prev!.at;
+  for (const k of Object.keys(patch)) keyAt[k] = stamp;
   ref.set({
     ...st,
-    chatSettings: { at, patch: { ...(st.chatSettings?.patch ?? {}), ...patch } },
+    chatSettings: { at: stamp, patch: { ...(prev?.patch ?? {}), ...patch }, keyAt },
   });
 }
