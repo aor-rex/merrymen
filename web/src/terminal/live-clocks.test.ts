@@ -11,7 +11,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { liveOf, seedSources, type LiveReadKey, type LiveSources, type RawRead } from "./live";
-import { ACCOUNT_READS, liveClocks } from "./live-clocks";
+import {
+  ACCOUNT_READS,
+  liveClocks,
+  QUIET_SHELL,
+  tokenMissingOf,
+  watchShellClocks,
+  type ShellClocks,
+} from "./live-clocks";
 import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 
 function fakeClock() {
@@ -168,6 +175,139 @@ describe("asking for the owner's reads again", () => {
     for (const release of pending) release();
     await settle();
     assert.deepEqual([accountReads, bookReads], [2, 2], "but straight after them, not a minute later");
+    s.clocks.stop();
+  });
+});
+
+describe("what the shell draws from the clocks", () => {
+  /** A shell whose App-level state is only what watchShellClocks publishes. */
+  function drawn(opts: Parameters<typeof shell>[0] = {}) {
+    const clock = fakeClock();
+    let sources: LiveSources = seedSources();
+    const published: ShellClocks[] = [];
+    const specs = liveClocks({
+      fetchRead: async (key) => (opts.answer ? opts.answer(key) : ok(BODIES[key])),
+      loadQuotes: async () => new Map(),
+      loadChanges: async () => new Map(),
+      update: (change) => {
+        sources = change(sources);
+      },
+      readAccount: opts.account ?? (async () => {}),
+      hidden: opts.hidden ?? (() => false),
+    });
+    const clocks = startClocks(specs, watchShellClocks((s) => published.push(s)), clock.timers);
+    return { clock, clocks, published, live: () => liveOf(sources), now: () => published.at(-1) ?? QUIET_SHELL };
+  }
+
+  it("A HEALTHY FEED READ EVERY TEN SECONDS DOES NOT REDRAW THE SHELL", async () => {
+    // Every clock's start and end replaced the views array in App's state, so
+    // the whole tree re-rendered about twice per pass per clock — some
+    // twenty-three times a minute with nothing changed, which undid what
+    // withRead's same-bytes no-op was for.
+    const s = drawn();
+    await settle();
+    await s.clock.advance(61_000);
+    const settled = s.published.length;
+    await s.clock.advance(10_000);
+    await s.clock.advance(10_000);
+    assert.equal(s.published.length, settled, "two feed reads, one market read: nothing the shell draws changed");
+    assert.ok(
+      s.published.every((p) => p.banner === null && !p.tokenListFailing),
+      "and in the minute before, only the account and the book starting and ending",
+    );
+    assert.ok(settled <= 8, `two account passes and two book passes, each a start and an end at most (${settled})`);
+    s.clocks.stop();
+  });
+
+  it("nor does it during an outage somewhere else — a healthy read's pass changes nothing on the line", async () => {
+    let fail = false;
+    const s = drawn({ answer: (key) => (key === "board" && fail ? { text: null, answered: true } : ok(BODIES[key])) });
+    await settle();
+    fail = true;
+    await s.clock.advance(60_000);
+    await s.clock.advance(5_000 + 15_000);
+    assert.ok(s.now().banner, "the board is failing, settled on its minute");
+    const settled = s.published.length;
+    await s.clock.advance(10_000);
+    await s.clock.advance(10_000);
+    assert.equal(s.published.length, settled, "two feed reads beside it moved nothing on the line");
+    s.clocks.stop();
+  });
+
+  it("says when the account or the book is being read, and when it is not", async () => {
+    const release: Array<() => void> = [];
+    let reads = 0;
+    const s = drawn({ account: () => (++reads === 2 ? new Promise<void>((r) => void release.push(r)) : Promise.resolve()) });
+    await settle();
+    assert.equal(s.now().accountBusy, false);
+    s.clocks.retryNow("account");
+    await settle();
+    assert.equal(s.now().accountBusy, true, "a retry the owner pressed is running");
+    release[0]!();
+    await settle();
+    assert.equal(s.now().accountBusy, false);
+    s.clocks.stop();
+  });
+
+  it("a read that lists tokens recovering is published even when the line reads the same", () => {
+    // The board still failing holds the line's countdown and its date; the
+    // market recovering changes neither, but it does change whether a token
+    // page may say "unavailable".
+    const views = (marketFailing: boolean): ClockView[] => [
+      { key: "board", half: "market", inFlight: false, state: { failuresInARow: 3, nextAt: 5, lastOkAt: 1, silent: false } },
+      {
+        key: "market",
+        half: "market",
+        inFlight: false,
+        state: marketFailing ? { failuresInARow: 1, nextAt: 9, lastOkAt: 2, silent: false } : { failuresInARow: 0, nextAt: 30, lastOkAt: 8, silent: false },
+      },
+    ];
+    const published: ShellClocks[] = [];
+    const watch = watchShellClocks((next) => published.push(next));
+    watch(views(true));
+    watch(views(false));
+    assert.equal(published.length, 2);
+    assert.equal(published[0]!.tokenListFailing, true);
+    assert.equal(published[1]!.tokenListFailing, false);
+  });
+
+  it("an outage is still published as it moves — the countdown and the retry in flight", async () => {
+    let fail = false;
+    const s = drawn({ answer: (key) => (key === "board" && fail ? { text: null, answered: true } : ok(BODIES[key])) });
+    await settle();
+    assert.equal(s.now().banner, null);
+    fail = true;
+    await s.clock.advance(60_000);
+    const first = s.now().banner!;
+    assert.deepEqual(first.failed, { account: false, market: true });
+    await s.clock.advance(5_000);
+    assert.notEqual(s.now().banner!.nextAt, first.nextAt, "the next retry's countdown reached the line");
+    fail = false;
+    await s.clock.advance(15_000);
+    assert.equal(s.now().banner, null, "and the recovery took it down");
+    s.clocks.stop();
+  });
+
+  it("THE TOKEN PAGE SAYS 'UNAVAILABLE' ONLY FOR A READ THAT LISTS TOKENS — and its Try again retries exactly those", async () => {
+    // "Token unavailable" was decided by every clock on the outage line, while
+    // its button retried only the market and the sweep. With the feed or the
+    // board failing, Try again re-ran two healthy reads and the page kept
+    // saying it could not load the token, with nothing the reader could do.
+    let failing: string | null = "theses";
+    const s = drawn({ answer: (key) => (key === failing ? { text: null, answered: true } : ok(BODIES[key])) });
+    await settle();
+    const page = () => tokenMissingOf(s.now(), s.live().reads, true);
+    assert.ok(s.now().banner, "the feed's failure is on the outage line");
+    assert.equal(page().unreadable, false, "but it lists no token: the address is simply not on the list");
+
+    failing = "market";
+    await s.clock.advance(30_000);
+    assert.equal(page().unreadable, true, "a failing market read is a reason the token may be missing");
+    failing = null;
+    for (const key of page().retry) s.clocks.retryNow(key);
+    await settle();
+    assert.equal(page().unreadable, false, "and Try again, retrying what it names, clears it");
+    assert.deepEqual([...page().retry].sort(), ["discoveries", "market"]);
     s.clocks.stop();
   });
 });

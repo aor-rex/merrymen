@@ -23,7 +23,9 @@ import {
   type LiveSources,
   type LiveToken,
   type RawRead,
+  type ReadState,
 } from "./live";
+import { tokenPageUnreadable } from "./account-read";
 import type { TokenQuote } from "./quotes";
 import {
   ACCOUNT_EVERY_MS,
@@ -32,7 +34,10 @@ import {
   MARKET_EVERY_MS,
   THESES_EVERY_MS,
   THESES_HIDDEN_EVERY_MS,
+  bannerOf,
+  type Banner,
   type ClockSpec,
+  type ClockView,
 } from "./refresh-loop";
 
 export interface LiveClockDeps {
@@ -144,4 +149,100 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
       },
     },
   ];
+}
+
+/**
+ * THE READS THAT LIST TOKENS: every stock is on the market read and every coin
+ * on the launchpad sweep. Only these can make a token address come up empty
+ * for a reason other than the address.
+ */
+export const TOKEN_LIST_READS = ["market", "discoveries"] as const satisfies readonly LiveClockKey[];
+
+/**
+ * WHAT THE SHELL DRAWS FROM THE CLOCKS, and nothing else.
+ *
+ * App kept every clock's view in its state, and every clock's start and end
+ * replaced that array, so the whole tree re-rendered about twice per pass per
+ * clock: some twenty-three times a minute with nothing changed. The feed's
+ * ten-second read alone did it twelve times. No screen is memoised, so each one
+ * redrew, which undid what withRead's same-bytes no-op was written for. These
+ * three facts are all App reads from the clocks; watchShellClocks publishes
+ * them only when one of them changes.
+ */
+export interface ShellClocks {
+  /** The one outage line — see bannerOf. Null while every read on it is healthy. */
+  banner: Banner | null;
+  /** The account or the owner's book is being read right now: a retry's "Retrying…". */
+  accountBusy: boolean;
+  /** A read that lists tokens is failing now — see tokenMissingOf. */
+  tokenListFailing: boolean;
+}
+
+export const QUIET_SHELL: ShellClocks = { banner: null, accountBusy: false, tokenListFailing: false };
+
+const among = (keys: readonly string[], key: string) => keys.includes(key);
+
+export function shellClocksOf(views: readonly ClockView[]): ShellClocks {
+  return {
+    banner: bannerOf(views),
+    accountBusy: views.some((v) => among(ACCOUNT_READS, v.key) && v.inFlight),
+    tokenListFailing: views.some((v) => among(TOKEN_LIST_READS, v.key) && (v.state?.failuresInARow ?? 0) > 0),
+  };
+}
+
+function sameBanner(a: Banner | null, b: Banner | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.nextAt === b.nextAt &&
+    a.lastOkAt === b.lastOkAt &&
+    a.inFlight === b.inFlight &&
+    a.failed.account === b.failed.account &&
+    a.failed.market === b.failed.market &&
+    a.unreachable === b.unreachable
+  );
+}
+
+export function sameShellClocks(a: ShellClocks, b: ShellClocks): boolean {
+  return sameBanner(a.banner, b.banner) && a.accountBusy === b.accountBusy && a.tokenListFailing === b.tokenListFailing;
+}
+
+/**
+ * An `onChange` for startClocks that tells the shell only when what it draws
+ * has changed. A healthy clock starting and ending changes none of it.
+ */
+export function watchShellClocks(publish: (shell: ShellClocks) => void): (views: ClockView[]) => void {
+  let last = QUIET_SHELL;
+  return (views) => {
+    const next = shellClocksOf(views);
+    if (sameShellClocks(last, next)) return;
+    last = next;
+    publish(next);
+  };
+}
+
+/**
+ * THE TOKEN PAGE'S "UNAVAILABLE", and the reads its Try again asks for — from
+ * the same list, so the button can always clear what the page is saying.
+ *
+ * "Token unavailable" was decided by every clock on the outage line (the feed,
+ * the board and the account as well), while the button retried only the market
+ * and the sweep. With the feed failing, pressing it re-ran two healthy reads,
+ * the banner stayed, and the page kept saying it could not load the token. A
+ * feed or an account read failing lists no token and hides none; only the two
+ * reads that list tokens decide it now.
+ */
+export function tokenMissingOf(
+  shell: ShellClocks,
+  reads: { market: ReadState; discoveries: ReadState },
+  liveLoaded: boolean,
+): { unreadable: boolean; retry: readonly LiveClockKey[] } {
+  return {
+    unreadable: tokenPageUnreadable({
+      failing: shell.tokenListFailing,
+      market: reads.market,
+      discoveries: reads.discoveries,
+      liveLoaded,
+    }),
+    retry: TOKEN_LIST_READS,
+  };
 }

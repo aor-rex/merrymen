@@ -35,7 +35,15 @@ import {
   type Tab,
   type TokenTab,
 } from "./live";
-import { ACCOUNT_READS, liveClocks, type LiveClockKey } from "./live-clocks";
+import {
+  ACCOUNT_READS,
+  liveClocks,
+  QUIET_SHELL,
+  tokenMissingOf,
+  watchShellClocks,
+  type LiveClockKey,
+  type ShellClocks,
+} from "./live-clocks";
 
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
@@ -64,9 +72,8 @@ import {
   capsOf,
   profileShown,
   realCashOf,
-  tokenPageUnreadable,
 } from "./account-read";
-import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
+import { startClocks } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
@@ -128,13 +135,16 @@ export function App() {
    * "Loading your account…" for both — for ever, after a failure.
    */
   const [accountFailed, setAccountFailed] = useState(false);
-  /** Where every read's clock stands — see refresh-loop.ts. Empty until they start. */
-  const [clockViews, setClockViews] = useState<ClockView[]>([]);
+  /**
+   * WHAT THE SHELL DRAWS FROM THE CLOCKS — see live-clocks.ts ShellClocks. Set
+   * only when one of these changes, not on every clock's start and end, which
+   * re-rendered the whole tree some twenty-three times a minute for nothing.
+   */
+  const [shellClocks, setShellClocks] = useState<ShellClocks>(QUIET_SHELL);
   /** The one outage line over all of them; null while every read on it is healthy. */
-  const banner = bannerOf(clockViews);
-  const failing = banner !== null;
+  const banner = shellClocks.banner;
   /** The account or the owner's book is being read right now — a retry asked for, or the timer's. */
-  const accountBusy = clockViews.some((v) => (v.key === "account" || v.key === "feed") && v.inFlight);
+  const accountBusy = shellClocks.accountBusy;
   const clocks = useRef<ReturnType<typeof startClocks> | null>(null);
   /** Bumped by sign-out, which starts every clock again from nothing — see resetLive. */
   const [epoch, setEpoch] = useState(0);
@@ -262,6 +272,10 @@ export function App() {
   useEffect(() => {
     let alive = true;
     let firstAccount = true;
+    // The watcher below publishes only changes from a quiet shell, so the shell
+    // starts from one: a sign-out's banner must not outlive the clocks it
+    // described.
+    setShellClocks(QUIET_SHELL);
     const readAccount = async () => {
       const first = firstAccount;
       firstAccount = false;
@@ -291,9 +305,9 @@ export function App() {
         readAccount,
         hidden: () => document.hidden,
       }),
-      (views) => {
-        if (alive) setClockViews(views);
-      },
+      watchShellClocks((next) => {
+        if (alive) setShellClocks(next);
+      }),
     );
     clocks.current = running;
     const onVisible = () => {
@@ -652,12 +666,11 @@ export function App() {
           //
           // A load that finished without reading the market is unreadable too,
           // not merely unread — see tokenPageUnreadable.
-          const unreadable = tokenPageUnreadable({
-            failing,
-            market: live.reads.market,
-            discoveries: live.reads.discoveries,
-            liveLoaded,
-          });
+          // AND ONLY THE READS THAT LIST TOKENS decide it — the same two the
+          // button below retries, so pressing it can always clear what this
+          // says (tokenMissingOf).
+          const missing = tokenMissingOf(shellClocks, live.reads, liveLoaded);
+          const unreadable = missing.unreadable;
           return (
             <section className="hosted-entry">
               <h1>{unreadable ? "Token unavailable" : "Token not listed"}</h1>
@@ -669,7 +682,7 @@ export function App() {
               {/* The two reads that list tokens — not the account, which is
                   what this button used to refresh while the page said the
                   token could not be loaded. */}
-              {unreadable && <button onClick={() => refreshReads("market", "discoveries")}>Try again</button>}
+              {unreadable && <button onClick={() => refreshReads(...missing.retry)}>Try again</button>}
               <button onClick={()=>goTab("home")}>Back to markets</button>
             </section>
           );
