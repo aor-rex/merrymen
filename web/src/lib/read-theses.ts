@@ -82,13 +82,6 @@ const VIEW_PAIRS = 60;
  * nothing, rather than letting one chatty name cost the whole read.
  */
 const VIEW_DEPTH = 3;
-/**
- * The most names one agent may fill of the public view lane. The lane is also
- * dealt out in turns — every agent's newest name before anybody's second — so
- * a Trencher rotating sixty coins cannot hold a quieter agent's changed view
- * off the page. An agent's own profile is not shared, and gets the whole lane.
- */
-const PER_AGENT_VIEWS = 10;
 /** Per lane — a busy view lane cannot take a slot a trade needed. */
 const SHOW = 40;
 
@@ -292,8 +285,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const placed = (named: boolean, lane: string) =>
       `SELECT g.*,
               ROW_NUMBER() OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS in_pair,
-              LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at,
-              MAX(g.last_at) OVER (PARTITION BY g.agent_id, g.sym) AS pair_at
+              LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at
          FROM (${grouped(named, lane)}) g`;
 
     const actionPage = (named: boolean, offset: number) =>
@@ -307,30 +299,48 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
 
     // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
     // re-said every tick always had the freshest time, so any agent with forty
-    // names took all forty slots. Here each agent's names are numbered newest
-    // first (`agent_turn`), and the lane is filled turn by turn: every agent's
-    // newest name, then every agent's second, up to a cap per agent. Each pair
-    // brings its newest VIEW_DEPTH groups, so the gate — not the SQL — picks
-    // the word that is published. `agent_names` is the account's whole count
-    // of names, read before any cap, so a count cut by the cap can say so.
-    const perAgent = opts.agentSlug ? limit : Math.min(limit, PER_AGENT_VIEWS);
+    // names took all forty slots. Here each agent's names are numbered
+    // (`agent_turn`), and the lane is filled turn by turn: every agent's first
+    // name, then every agent's second. The turns ARE the fairness — a busy
+    // agent only ever gets slots nobody else's turn wanted — so there is no
+    // cap per agent on top of them. There was one, of ten, and all it did was
+    // leave a lane with room in it while hiding the agent's eleventh name.
+    //
+    // NUMBERED BY WHEN THE NAME LAST CHANGED, not when it was last said. A
+    // name re-said every thirty seconds has not changed in an hour, and ranked
+    // by its newest copy it came before the one view the agent had actually
+    // changed, which then fell off the end. The change time is the first copy
+    // of the newest word — or, when that word was also said before the one
+    // behind it (A, then B, then A), the last time the other word was said,
+    // since the return to A came after that. Never later than the truth: a
+    // view is never ranked as fresher than it is.
+    //
+    // Each pair brings its newest VIEW_DEPTH groups, so the gate — not the SQL
+    // — picks the word that is published. `agent_names` is the account's whole
+    // count of names, read before the lane is cut, so a count cut by the lane
+    // can say so.
     const viewRead = (named: boolean) =>
       db
         .prepare(
           `SELECT s.* FROM (
              SELECT q.*,
                     MAX(q.agent_turn) OVER (PARTITION BY q.agent_id) AS agent_names,
-                    DENSE_RANK() OVER (ORDER BY q.agent_turn, q.pair_at DESC, q.agent_id, q.sym) AS turn
+                    DENSE_RANK() OVER (ORDER BY q.agent_turn, q.changed_at DESC, q.agent_id, q.sym) AS turn
                FROM (
-                 SELECT r.*, DENSE_RANK() OVER (PARTITION BY r.agent_id ORDER BY r.pair_at DESC, r.sym) AS agent_turn
-                   FROM (${placed(named, IS_VIEW)}) r
-                  WHERE r.in_pair <= ?
+                 SELECT c.*, DENSE_RANK() OVER (PARTITION BY c.agent_id ORDER BY c.changed_at DESC, c.sym) AS agent_turn
+                   FROM (
+                     SELECT r.*,
+                            MAX(CASE WHEN r.in_pair = 1 AND r.next_at > r.first_at THEN r.next_at
+                                     WHEN r.in_pair = 1 THEN r.first_at END) OVER (PARTITION BY r.agent_id, r.sym) AS changed_at
+                       FROM (${placed(named, IS_VIEW)}) r
+                      WHERE r.in_pair <= ?
+                   ) c
                ) q
            ) s
-           WHERE s.agent_turn <= ? AND s.turn <= ?
+           WHERE s.turn <= ?
            ORDER BY s.turn, s.in_pair`,
         )
-        .all(...args, VIEW_DEPTH, perAgent, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
+        .all(...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
 
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.

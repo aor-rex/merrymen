@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { translateQuery, wrapSqlite } from "../../../worker/src/db";
+import { beatsOf, pillBeats, watchCount } from "../terminal/beat";
 import { alertsOf, alertsRead, emptyAlerts } from "./rail-alerts";
 import { readTheses } from "./read-theses";
 
@@ -106,6 +107,32 @@ function holds(n: number, agent = "0xabc", symbols = 10): Row[] {
     reason: `Flow is two-sided but thin on review ${i}; nothing worth taking yet.`,
     at: NOW - i * 30,
   }));
+}
+
+/**
+ * A strategy re-saying the SAME hold on each of `names` coins, `copies` times,
+ * every `every` seconds: views that only repeated, and never changed.
+ */
+function standing(names: number, agent = "0xabc", copies = 120, every = 30): Row[] {
+  return Array.from({ length: names }, (_, k) => {
+    const symbol = `T${k.toString(16).toUpperCase().padStart(11, "0")}`;
+    return Array.from({ length: copies }, (_, i): Row => ({
+      id: `s-${agent}-${k}-${i}`,
+      agent,
+      action: "hold",
+      symbol,
+      reason: `Flow on ${symbol} is two-sided; nothing to take.`,
+      at: NOW - i * every - k,
+    }));
+  }).flat();
+}
+
+/** A view the agent CHANGED half an hour ago: thin two hours back, then recovered. */
+function changedAapl(agent = "0xabc", changedAgo = 1800): Row[] {
+  return [
+    { id: `aapl-old-${agent}`, agent, action: "hold", symbol: "AAPL", reason: "Depth is thin; waiting.", at: NOW - 7200 },
+    { id: `aapl-new-${agent}`, agent, action: "hold", symbol: "AAPL", reason: "Depth recovered and the bid is stacking; watching for the breakout.", at: NOW - changedAgo },
+  ];
 }
 
 describe("actions and views have separate budgets", () => {
@@ -276,7 +303,9 @@ describe("a view is the latest word per agent and name", () => {
     const quietView = r.theses.find((t) => t.slug === OTHER && t.symbol === "AAPL");
     assert.ok(quietView, "the quieter agent's view reaches the client");
     const busy = r.theses.filter((t) => t.slug === SLUG);
-    assert.ok(busy.length > 0 && busy.length <= 10, `one agent is capped, not the whole lane (${busy.length})`);
+    // The rest of the lane is the busy agent's. A fixed cap below that took no
+    // slot from anybody — the turns already had — and only hid its own names.
+    assert.equal(busy.length, 39, `one agent fills what the others leave, not the whole lane (${busy.length})`);
     // AND ITS COUNT IS NOT A TOTAL. Sixty names were reviewed; fewer were read.
     assert.ok(busy.every((t) => t.moreNames === true), "a truncated agent's views say there are more");
     assert.equal(quietView.moreNames, false, "an agent read in full is not flagged");
@@ -345,6 +374,76 @@ describe("a view is the latest word per agent and name", () => {
     const [view] = r.theses;
     assert.equal(view!.reason, thin);
     assert.equal(view!.unchangedSince, null, "something else was said in between, so there is no 'since'");
+  });
+});
+
+describe("a changed view is not held off the lane by names that only repeated", () => {
+  it("THE REVIEWER'S PROBE: twelve names re-said every 30s and one view changed half an hour ago — the change is on the global feed", async () => {
+    // Ranked by when each name was last SAID, and capped at ten per agent, the
+    // twelve repeats took every slot, All folded them into "at least 10
+    // tokens", and the only view this agent had actually changed was nowhere —
+    // with thirty lane slots empty. The profile showed it; the feed did not.
+    const r = await read([...standing(12), ...changedAapl()]);
+    const changed = r.theses.find((t) => t.symbol === "AAPL");
+    assert.ok(changed, "the changed view reaches the global feed");
+    assert.match(changed.reason!, /^Depth recovered/, "as it stands now");
+    const views = r.theses.filter((t) => t.action === "hold");
+    assert.equal(views.length, 13, "a lane with room holds every name");
+    assert.ok(views.every((v) => v.moreNames === false), "so a count of them is a total, not a floor");
+
+    // And on the page the Feed draws: the repeats are one line, the change is its own row.
+    const all = pillBeats(beatsOf(r.theses, []), "all", new Map(), {});
+    assert.ok(all.some((b) => b.kind === "view" && b.symbol === "AAPL"), "All shows the changed view as a row");
+    const watch = all.find((b) => b.kind === "watch");
+    assert.ok(watch && watch.kind === "watch");
+    assert.equal(watchCount(watch), "12 tokens");
+  });
+
+  it("MORE NAMES THAN THE LANE HOLDS: the one that changed comes before fifty that only repeated", async () => {
+    // Past the lane's size something is left out, and it must be a repeat: a
+    // name re-said a minute ago has not changed in an hour, and the view that
+    // changed thirty minutes ago is the news.
+    const r = await read([...standing(50, "0xabc", 12, 300), ...changedAapl()]);
+    assert.ok(r.theses.some((t) => t.symbol === "AAPL" && t.reason?.startsWith("Depth recovered")), "the changed view is in the lane");
+    const views = r.theses.filter((t) => t.action === "hold");
+    assert.equal(views.length, 40, "the lane is full");
+    assert.ok(views.every((v) => v.moreNames === true), "and says the agent had more names than it carries");
+  });
+
+  it("THE LANE HAS ROOM, SO NOTHING IS CUT: twelve fresher changes do not push a thirteenth off", async () => {
+    // Every one of these names changed within the last six minutes — a Trencher
+    // words every review afresh — and the AAPL change is the agent's thirteenth
+    // newest. A fixed per-agent cap dropped it from a lane two-thirds empty.
+    const r = await read([...holds(144, "0xabc", 12), ...changedAapl()]);
+    assert.ok(r.theses.some((t) => t.symbol === "AAPL" && t.reason?.startsWith("Depth recovered")));
+    assert.equal(r.theses.filter((t) => t.action === "hold").length, 13);
+  });
+
+  it("A QUIETER AGENT'S CHANGED VIEW IS STILL NOT CROWDED OUT — sixty names changing every 30s beside it", async () => {
+    // The guarantee the cap was bought for, kept by the turns: every agent's
+    // newest change comes before anybody's second, however much fresher the
+    // busy agent's are.
+    const r = await read([...holds(2880, "0xabc", 60), ...changedAapl("0xdef", 3600)]);
+    const quiet = r.theses.find((t) => t.slug === OTHER && t.symbol === "AAPL");
+    assert.ok(quiet, "the quieter agent's changed view is in the lane");
+    assert.match(quiet.reason!, /^Depth recovered/);
+    assert.ok(r.theses.filter((t) => t.slug === SLUG).length < 60, "the busy agent does not take the whole lane");
+  });
+
+  it("A CHANGE BACK IS A CHANGE: A, then B, then A again ranks from the return, not from the first A", async () => {
+    // The newest word's first copy is two hours old, but the agent left it for
+    // B and came back within the half hour — that return is the change.
+    const thin = "Depth is thin; waiting.";
+    const aba: Row[] = [
+      { id: "aba-a0", action: "hold", symbol: "AAPL", reason: thin, at: NOW - 7200 },
+      { id: "aba-b", action: "hold", symbol: "AAPL", reason: "Depth recovered; watching for an entry.", at: NOW - 1800 },
+      ...[900, 600, 300, 60].map((ago, i): Row => ({ id: `aba-a${i + 1}`, action: "hold", symbol: "AAPL", reason: thin, at: NOW - ago })),
+    ];
+    const r = await read([...standing(50, "0xabc", 12, 300), ...aba]);
+    const back = r.theses.find((t) => t.symbol === "AAPL");
+    assert.ok(back, "the view the agent returned to is in the lane");
+    assert.equal(back.reason, thin);
+    assert.equal(back.unchangedSince, null, "and it does not claim to have stood since the first A");
   });
 });
 
