@@ -32,7 +32,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { ORDER_IN_FLIGHT_MS } from "./command-files";
-import type { FlowStanding } from "./flow-witness";
 
 /** How close the regular tick may be before the watcher leaves the order to it. */
 export const COMMAND_WAKE_MIN_LEAD_MS = 5_000;
@@ -230,34 +229,14 @@ export function tickPlan(kind: TickKind): TickPlan {
  * The reads stay unconditional. A command tick still needs the peak its order
  * is judged against — it is asked with `null`, which reads without observing
  * (risk-period.ts) — and the paper and live marks it already has.
- *
- * AND HOW THE TICK'S FLOW RECONCILE ENDED (flow-witness.ts FlowStanding), for
- * the live peaks and the fee, which are the writes a capital flow moves:
- *
- *   held    — an op was out, or the reconcile aborted, so part of this equity
- *             may be a deposit not yet booked. No fee, the live mark is kept,
- *             and the risk peak is read without observing: a peak raised on an
- *             unbooked deposit would be raised a second time when it is booked,
- *             and read as a drawdown the size of the deposit.
- *   waived  — a held window closed without the figures to separate it, and was
- *             absorbed. The peaks rise as usual, at no fee, so a deposit in it
- *             is carried by the peak and never charged.
- *   settled — as before.
  */
 export interface TickRatchets {
   /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
   paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
   /** The risk-period peak, read with this tick's equity as an observation only when this tick may. */
-  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>, flows: FlowStanding): Promise<P>;
-  /** The fee rate this tick accrues at: none while contributions are unknown, or while a flow is held or was waived. */
-  feeBps(bps: number, contributionsKnown: boolean, flows: FlowStanding): number;
+  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
   /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
-  accrue(
-    accrual: { profitUsdg: bigint; newHwmUsdg: bigint },
-    peakUsdg: bigint,
-    persist: () => Promise<unknown>,
-    flows: FlowStanding,
-  ): Promise<bigint>;
+  accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
   /** The equity row: written on a regular tick whose book could be totalled. */
   equityRow(write: () => Promise<unknown>): Promise<void>;
 }
@@ -272,10 +251,9 @@ export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveM
       }
       return b.hwmUsdg;
     },
-    riskPeak: (equityUsdg, read, flows) => read(peaks && flows !== "held" ? equityUsdg : null),
-    feeBps: (bps, contributionsKnown, flows) => (contributionsKnown && flows === "settled" ? bps : 0),
-    async accrue(accrual, peakUsdg, persist, flows) {
-      if (!peaks || flows === "held") return peakUsdg;
+    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : null),
+    async accrue(accrual, peakUsdg, persist) {
+      if (!peaks) return peakUsdg;
       if (accrual.profitUsdg > 0n) await persist();
       return accrual.newHwmUsdg;
     },

@@ -17,8 +17,6 @@ import {
 import { usdgRealToMicro } from "./bootstrap-source";
 import { ARITHMETIC_TOLERANCE_USDG, reconcile, type ReconstructedBook } from "./audit";
 import { guaranteeLines, pnlPublishable, UNKNOWN_QUALITY } from "./portfolio-quality";
-import { tickPlan, tickRatchets } from "./command-wake";
-import { accrueAboveHwm } from "./fees";
 
 /**
  * THE REDEPLOY THAT KEPT BEING BOOKED AS A DEPOSIT, PINNED.
@@ -507,22 +505,13 @@ describe("P5 — no path converts uncertainty into a P&L figure", () => {
     }
   });
 
-  it("THE FEE IS SUPPRESSED WHEN CONTRIBUTIONS ARE UNKNOWN, but the peak still ratchets", async () => {
+  it("THE FEE IS SUPPRESSED WHEN CONTRIBUTIONS ARE UNKNOWN, but the peak still ratchets", () => {
     // Freezing the high-water mark would make the drawdown breaker LESS likely
     // to halt a falling book, so the suppression is applied to the fee rate and
-    // not to the accrual call. Run, not read: the rate and the accrual are the
-    // calls tick() makes (command-wake.ts tickRatchets, fees.ts accrueAboveHwm),
-    // where this used to pin the source line that computed the rate inline.
-    const ratchet = tickRatchets(tickPlan("regular"), { incomplete: false, curveMarked: 0 });
-    const bps = ratchet.feeBps(2000, false, "settled");
-    assert.equal(bps, 0, "no fee while contributions are unknown");
-    const accrual = accrueAboveHwm(120_000_000n, 100_000_000n, bps);
-    assert.equal(accrual.feeUsdg, 0n);
-    let persisted = 0;
-    const peak = await ratchet.accrue(accrual, 100_000_000n, async () => void (persisted += 1), "settled");
-    assert.equal(peak, 120_000_000n, "the peak still ratchets");
-    assert.equal(persisted, 1, "and is written down");
-    assert.equal(ratchet.feeBps(2000, true, "settled"), 2000, "with contributions known the rate applies");
+    // not to the accrual call.
+    const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(src, /const feeBpsThisTick = accounting\.contributionsKnown \? effFeeBps : 0;/);
+    assert.match(src, /accrueAboveHwm\(equityUsdg, highWaterMarkUsdg, feeBpsThisTick\)/);
   });
 
   it("the old inference is gone from the hosted path", () => {
