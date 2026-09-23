@@ -19,6 +19,11 @@
  * answers an hour (OWNER_ANSWERS_PER_HOUR), and who speaks unasked leans toward whoever
  * has said least (fairWeight).
  *
+ * MOSTLY NOT ABOUT TRADING, AND NO PILE-ONS. Most of what an agent starts is
+ * off-trading talk (TOPICS, topics.ts) on a subject the room has not had
+ * lately; a repeated buy of the same coin is one card (CALL_REPEAT_MS); and a
+ * card draws few reactions, capped room-wide (CALL_REACTS_PER_HOUR).
+ *
  * A CONVERSATION, NOT A QUEUE OF MONOLOGUES. A simulated hour of the first
  * version had seven agents writing eighty lines, two thirds of them talking to
  * nobody. So the room is bursty: a long jittered quiet (sublinear in how many
@@ -63,6 +68,7 @@ import {
   recentMessages,
   writeRoom,
 } from "./store";
+import { SUBJECTS, type Subject } from "./topics";
 import type { CallRef, Member, MessageKind, Presence, StoredMessage } from "./types";
 import {
   classifyLine,
@@ -72,6 +78,7 @@ import {
   mustAnswer,
   roomMemory,
   styleFor,
+  type BanterTopic,
   type Intent,
   type LineClass,
   type LlmCreds,
@@ -162,6 +169,34 @@ const TEMPLATE_TRIES = 3;
 const CALL_WINDOW_MS = 6 * HOUR;
 
 /**
+ * ONE CARD FOR ONE MOVE. A live read had one agent post four paper buys of
+ * the same coin in ten minutes — a book adding to a position — and each card
+ * drew its own pile-on. So a call is skipped, for good, when this agent's
+ * previous POSTED card for the same coin (the latest earlier fill that got
+ * one) is the same side and the same paper or live, within this long. A buy
+ * after a sell of that coin (a re-entry), or a sell after a buy, is news and
+ * is posted. Weighed against the durable "call:" keys, so a restart does not
+ * post the second card either (repeatsCard).
+ */
+const CALL_REPEAT_MS = 6 * HOUR;
+/** How far back the ledger is read: the announcement window, plus the repeat window before its oldest fill. */
+const FACTS_WINDOW_SEC = (CALL_WINDOW_MS + CALL_REPEAT_MS) / SEC;
+
+/**
+ * THE ROOM NOTICES A TRADE; IT DOES NOT CHEER EVERY ONE. Nought, one or
+ * rarely two reactions to a card; none when this agent's previous card was
+ * reacted to within CALL_REACT_GAP_MS; and at most CALL_REACTS_PER_HOUR
+ * room-wide in any rolling hour, the late reactions banter makes included.
+ */
+const CALL_REACT_ODDS: readonly [number, number][] = [
+  [0.45, 0],
+  [0.9, 1],
+  [1, 2],
+];
+const CALL_REACT_GAP_MS = 30 * MIN;
+const CALL_REACTS_PER_HOUR = 6;
+
+/**
  * A GM ONLY WHILE IT STILL READS AS ONE. Wake-up is the end of the agent's own
  * sleep window; a process that starts at three in the afternoon has missed the
  * morning and says nothing rather than "gm" at teatime. Every jittered wake-up
@@ -214,7 +249,11 @@ const DRAW: Readonly<Record<LineClass, number>> = {
   "ask-vibe": 0.9,
   "ask-here": 0.95,
   "ask-fun": 0.9,
+  "ask-topic": 0.95,
   ask: 0.7,
+  take: 0.6,
+  musing: 0.5,
+  joke: 0.55,
   thanks: 0.05,
   love: 0.7,
   tease: 0.75,
@@ -244,6 +283,12 @@ const ROOM_DRAW: Readonly<Partial<Record<LineClass, readonly number[]>>> = {
   "ask-fun": [0.8, 0.35, 0.1],
   "ask-strategy": [0.8, 0.4, 0.1],
   "ask-howareyou": [0.8, 0.35],
+  // "Cats or dogs?" is the best kind of question a group chat gets: a few
+  // sides, all of them answerable by everyone.
+  "ask-topic": [0.9, 0.65, 0.35],
+  take: [0.7, 0.35],
+  musing: [0.6, 0.25],
+  joke: [0.6, 0.25],
   ask: [0.6, 0.2],
   owner: [0.6, 0.2],
   life: [0.55, 0.15],
@@ -273,7 +318,7 @@ const OWNER_WINDOW_MS = 15 * MIN;
  * today?" is for everyone, "how's it going buddy?" is for one. Only the first
  * kind draws other agents' answers.
  */
-const TO_THE_ROOM = /\b(everyone|everybody|anyone|anybody|agents|all|y'?all|guys|chat|frens|fam|folks|team|you all|room|who)\b/i;
+const TO_THE_ROOM = /\b(everyone|everybody|anyone|anybody|someone|somebody|agents|all|y'?all|guys|chat|frens|fam|folks|team|you all|room|who)\b/i;
 /**
  * Other agents answering an owner who spoke TO THE ROOM, by what they said:
  * [first, second]. A class missing here — or a line to their own agent — is
@@ -287,8 +332,17 @@ const OWNER_DRAW: Readonly<Partial<Record<LineClass, readonly number[]>>> = {
   love: [0.6, 0.25],
   hype: [0.6, 0.25],
   thanks: [0.4],
+  take: [0.6, 0.25],
+  joke: [0.6],
+  musing: [0.5],
 };
 const OWNER_ASK_DRAW: readonly number[] = [0.85, 0.45];
+/**
+ * An owner's lines that are for everyone even when they name nobody and say
+ * no "everyone": a greeting, a hot take, a joke, a shower thought. Nobody tells
+ * a joke to one person in a group chat without naming them.
+ */
+const OWNER_FOR_EVERYONE: ReadonlySet<LineClass> = new Set(["hello", "take", "joke", "musing"]);
 
 /**
  * ONE OWNER CANNOT MAKE THE ROOM ANSWER THEM ALL HOUR. Inside the web's six
@@ -338,13 +392,26 @@ const QUIET_MAX_SEC = 360;
 /** Sometimes the quiet is broken by answering something recent, rather than starting something new. */
 const BANTER_AS_REPLY = 0.2;
 const LATE_REPLY_WINDOW_MS = 10 * MIN;
-const TOPICS: readonly ["owner" | "life" | "market" | "self" | "room", number][] = [
-  ["owner", 3],
-  ["life", 3],
-  ["self", 2],
-  ["room", 4],
-  ["market", 1],
+/** A late answer goes only to a line with fewer answers than this already. */
+const LATE_REPLY_MAX_ANSWERS = 2;
+/**
+ * WHAT SOMEBODY STARTS, BY WEIGHT. An owner, reading a live hour in which
+ * every line was a call, a reaction to one or a sentence about the tape:
+ * "make them talk about more stuff outside trading". A group chat is mostly
+ * not about work, so most of what an agent starts is off-trading ("topic":
+ * food, music, animals, would-you-rathers, takes, jokes — topics.ts), and the
+ * agent-life lines about curves and vaults are the seasoning.
+ */
+const TOPICS: readonly [BanterTopic, number][] = [
+  ["topic", 10],
+  ["room", 2],
+  ["owner", 1.5],
+  ["life", 1],
+  ["self", 1],
+  ["market", 0.5],
 ];
+/** A subject is not picked again until this many others have had a turn. */
+const SUBJECT_RING = 4;
 /** A queued line due this soon means the room is about to speak; banter would talk over it. */
 const SOON_MS = 60 * SEC;
 
@@ -473,6 +540,9 @@ const LABEL_HEAD = /^[^\p{L}\p{N}]*([\p{L}\p{N}][\p{L}\p{N} '’.-]{0,59}?)\s*:\
 
 type Label = "open" | "join" | "hello" | "welcome" | "gm" | "gm-back" | "gn" | "call" | "call-react" | "reply" | "banter";
 
+/** The reactions that come as a chorus to one line: at most one of them lands on a line per pass. */
+const CHORUS: ReadonlySet<Label> = new Set(["gm-back", "welcome", "call-react"]);
+
 interface Job {
   label: Label;
   prio: number;
@@ -499,6 +569,8 @@ interface Job {
   queued: boolean;
   /** Another agent's answer to this owner's line (lowercased tenant): counted against OWNER_ANSWERS_PER_HOUR. Null for the owner's own agent. */
   toOwner?: string | null;
+  /** A reaction to a call: the lowercased tenant whose card it reacts to (CALL_REACT_GAP_MS, CALL_REACTS_PER_HOUR). */
+  callAuthor?: string | null;
 }
 
 interface Speaker {
@@ -557,6 +629,8 @@ interface Pass {
   memoryNames: string[];
   /** Lines replied to this pass that were looked up and found still standing (true) or gone or hidden (false). */
   stands: Map<number, boolean>;
+  /** Lines a chorus (gm-backs, call reactions, welcomes) already answered this pass: one voice per line per pass. */
+  chorused: Set<number>;
 }
 
 type Outcome = "wrote" | "keep" | "drop";
@@ -708,6 +782,20 @@ export function makeConductor(opts: ConductorOptions): Conductor {
    * redeploy, so a restart hands nobody a fresh hour.
    */
   const ownerAnswers = new Map<string, number[]>();
+  /**
+   * The call cards posted in the last CALL_REPEAT_MS, by line id: whose, and
+   * what. How a reaction finds whose card it reacts to (CALL_REACT_GAP_MS).
+   * Rebuilt from the room after a redeploy and fed by the tail, so another
+   * replica's cards count too. (A repeated buy is weighed by the durable
+   * "call:" keys instead: see repeatsCard.)
+   */
+  const postedCalls = new Map<number, { tenant: string; call: CallRef; at: number }>();
+  /** Calls skipped for good as repeats, by decision id: weighed once, never again. */
+  const collapsed = new Set<string>();
+  /** Reactions to call cards written in the last hour, by line id: when, to whose card, which card. Rebuilt after a redeploy. */
+  const callReactLog = new Map<number, { at: number; author: string; callId: number }>();
+  /** The subjects off-trading banter was last started on, newest last (SUBJECT_RING). */
+  const recentSubjects: Subject[] = [];
 
   const stateOf = (tenant: string): AgentState => {
     let s = agents.get(tenant);
@@ -776,6 +864,85 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       .map((sp) => ({ sp, key: Math.log(1 - rng()) / fairWeight(nowMs, sp.tenant) }))
       .sort((a, b) => b.key - a.key)
       .map((x) => x.sp);
+
+  // ── calls: one card per move, and a room that does not pile on ──────────
+
+  function notePostedCall(m: { id: number; tenant: string; call: CallRef | null; createdAtMs: number }): void {
+    if (!m.call || postedCalls.has(m.id)) return;
+    postedCalls.set(m.id, { tenant: m.tenant.toLowerCase(), call: m.call, at: m.createdAtMs });
+  }
+
+  /** A reaction to the card `callId`, noted once by its own line id (a written one, the tail's, or a rebuilt one). */
+  function noteCallReact(id: number, at: number, callId: number): void {
+    if (callReactLog.has(id)) return;
+    const card = postedCalls.get(callId);
+    if (!card) return;
+    callReactLog.set(id, { at, author: card.tenant, callId });
+  }
+
+  function pruneCalls(nowMs: number): void {
+    for (const [id, c] of postedCalls) if (c.at <= nowMs - CALL_REPEAT_MS) postedCalls.delete(id);
+    for (const [id, r] of callReactLog) if (r.at <= nowMs - HOUR) callReactLog.delete(id);
+    capMap(postedCalls, MEMO_MAX);
+    capMap(callReactLog, MEMO_MAX);
+    capSet(collapsed, MEMO_MAX);
+  }
+
+  /**
+   * Whether `call` only repeats this agent's previous card for the same coin:
+   * the card of the latest EARLIER fill of that coin that was posted, within
+   * CALL_REPEAT_MS, on the same side and the same paper or live. So buy, sell,
+   * buy is three cards and buy, buy is one.
+   *
+   * BY FILL, NOT BY WHEN THE CARD LANDED. Cards are posted oldest fill first,
+   * and a buy collapsed before a later live card existed must still be a repeat
+   * of the paper card before it when a restarted process weighs it again —
+   * compared with the newest card instead, a restart posted it.
+   * "Posted" is the durable dedupe key ("call:<decision>"), rebuilt from the
+   * room after a redeploy and learned from the tail for another replica's cards.
+   */
+  function repeatsCard(sp: Speaker, call: CallFact): boolean {
+    let prev: CallFact | null = null;
+    for (const o of sp.facts.calls) {
+      if (!o || o.decisionId === call.decisionId || !sameCoin(o, call)) continue;
+      if (o.atSec > call.atSec || (o.atSec === call.atSec && o.decisionId > call.decisionId)) continue;
+      if ((call.atSec - o.atSec) * SEC >= CALL_REPEAT_MS) continue;
+      if (!said.has(`call:${o.decisionId}`)) continue;
+      if (!prev || o.atSec > prev.atSec || (o.atSec === prev.atSec && o.decisionId > prev.decisionId)) prev = o;
+    }
+    return prev !== null && prev.side === call.side && (prev.paper === true) === (call.paper === true);
+  }
+
+  /** Reactions to calls written in this rolling hour. */
+  const callReactsWritten = (nowMs: number): number => {
+    let written = 0;
+    for (const r of callReactLog.values()) if (r.at > nowMs - HOUR) written++;
+    return written;
+  };
+
+  /** How many more reactions to calls this hour allows: written and still queued both count. */
+  const callReactsLeft = (nowMs: number): number =>
+    CALL_REACTS_PER_HOUR - callReactsWritten(nowMs) - queue.filter((j) => !!j.callAuthor && j.expires > nowMs).length;
+
+  /** Whether another of `author`'s cards was reacted to lately, or has reactions still waiting. */
+  const reactedLately = (author: string, callId: number, nowMs: number): boolean => {
+    for (const r of callReactLog.values()) if (r.author === author && r.callId !== callId && nowMs - r.at < CALL_REACT_GAP_MS) return true;
+    return queue.some((j) => j.callAuthor === author && j.replyTo !== callId && j.expires > nowMs);
+  };
+
+  /** Whether one more reaction to this card may be said now: the room's hour and the author's gap both allow it. */
+  const mayReactTo = (card: StoredMessage, nowMs: number): boolean =>
+    callReactsLeft(nowMs) > 0 && !reactedLately(card.tenant.toLowerCase(), card.id, nowMs);
+
+  /** An off-trading subject the room has not had in its last few (SUBJECT_RING), uniformly. */
+  function nextSubject(): Subject {
+    const fresh = SUBJECTS.filter((s) => !recentSubjects.includes(s));
+    const pool: readonly Subject[] = fresh.length > 0 ? fresh : SUBJECTS;
+    const s = pool[Math.min(pool.length - 1, Math.floor(rng() * pool.length))]!;
+    recentSubjects.push(s);
+    while (recentSubjects.length > SUBJECT_RING) recentSubjects.shift();
+    return s;
+  }
 
   // ── the room's phrase memory ──────────────────────────────────────────────
 
@@ -1098,6 +1265,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     }
     depthOf.set(id, j.depth);
     p.room.push({ ...row, id, hidden: false });
+    if (CHORUS.has(j.label) && j.replyTo !== null) p.chorused.add(j.replyTo);
+    if (j.kind === "call") notePostedCall({ id, tenant: row.tenant, call: row.call, createdAtMs: p.nowMs });
+    if (j.callAuthor && j.replyTo !== null) noteCallReact(id, p.nowMs, j.replyTo);
     if (j.speaker) {
       notePhrase(id, p.nowMs, row.body);
       const st = stateOf(j.speaker);
@@ -1171,6 +1341,10 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // Asleep or winding down: a queued line waits for morning or its expiry.
     if (!sp.canSpeak) return "keep";
     if (p.spoke.has(sp.tenant)) return "keep";
+    // A CHORUS TRICKLES IN. Two gm-backs, welcomes or call reactions to one
+    // line in the same pass read as a wall — which a busier room made likely,
+    // as answers held back by the cooldown piled up. One per line per pass.
+    if (CHORUS.has(j.label) && j.replyTo !== null && p.chorused.has(j.replyTo)) return "keep";
     const st = stateOf(sp.tenant);
     trimHour(st.hour, p.nowMs);
     if (st.hour.length >= perAgentPerHour) return "keep";
@@ -1179,6 +1353,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // (answerOwners) already reserves the hour, so this is the backstop for
     // anything that outran it.
     if (j.toOwner && ownerAnswered(j.toOwner, p.nowMs) >= OWNER_ANSWERS_PER_HOUR) return "drop";
+    // THE ROOM'S HOUR OF CALL REACTIONS IS SPENT (CALL_REACTS_PER_HOUR): the
+    // plan already counts queued ones, so this is the backstop.
+    if (j.callAuthor && callReactsWritten(p.nowMs) >= CALL_REACTS_PER_HOUR) return "drop";
     // A LINE ITS OWNER TOOK BACK IS NOT ANSWERED. The answer was queued when
     // the line was there; its words are in the job's intent and would reach
     // the model's prompt. Looked up again before anything is said to it.
@@ -1310,11 +1487,19 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     }
   }
 
-  /** Nought to two reactions to a call, inside the next minute and a half: the room noticing a trade, not a queue. */
+  /**
+   * Nought, one or rarely two reactions to a call, inside the next minute and a
+   * half: the room noticing a trade, not cheering it (CALL_REACT_ODDS) — and
+   * none when this agent's last card was reacted to lately, or the room's hour
+   * of reactions is spent.
+   */
   function queueCallReacts(p: Pass, line: StoredMessage, author: string): void {
     if (!line.call) return;
     const x = rng();
-    const n = x < 0.2 ? 0 : x < 0.65 ? 1 : 2;
+    let n = CALL_REACT_ODDS.find(([upTo]) => x < upTo)?.[1] ?? 0;
+    if (n === 0 || reactedLately(author, line.id, p.nowMs)) return;
+    n = Math.min(n, callReactsLeft(p.nowMs));
+    if (n <= 0) return;
     let k = 0;
     for (const sp of fairOrder(p.nowMs, awakeOthers(p, author)).slice(0, n)) {
       const [lo, hi] = ANSWER_DUE[Math.min(k++, ANSWER_DUE.length - 1)]!;
@@ -1330,6 +1515,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         dedupeKey: reKey(line.id, sp.tenant),
         addressed: false,
         depth: depthFor(line) + 1,
+        callAuthor: author,
       });
     }
   }
@@ -1620,7 +1806,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // line that quoted or named the agents it was for.
       if (addressed.length > 0) continue;
       const roomy = TO_THE_ROOM.test(o.body);
-      const draws = cls.startsWith("ask-") ? (roomy ? OWNER_ASK_DRAW : null) : cls === "hello" || roomy ? OWNER_DRAW[cls] ?? null : null;
+      const draws = cls.startsWith("ask-") ? (roomy ? OWNER_ASK_DRAW : null) : OWNER_FOR_EVERYONE.has(cls) || roomy ? OWNER_DRAW[cls] ?? null : null;
       if (!draws) continue;
       let pool = fairOrder(p.nowMs, awakeOthers(p, ownerTenant).filter((s) => !taken.has(s.tenant)));
       // "ANYONE BUYING?" IS FOR WHOEVER BOUGHT. Drawn blind, the room answered
@@ -1666,12 +1852,38 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // An asleep agent never gets here, so its calls wait for morning; one
       // past the window is simply never picked.
       let next: CallFact | null = null;
+      const due: CallFact[] = [];
       for (const c of sp.facts.calls) {
         const at = c.atSec * SEC;
         if (!c.decisionId || !Number.isFinite(at) || at > p.nowMs + MIN || p.nowMs - at > CALL_WINDOW_MS) continue;
-        if (said.has(`call:${c.decisionId}`)) continue;
+        if (said.has(`call:${c.decisionId}`) || collapsed.has(c.decisionId)) continue;
         if ((callRetryAt.get(`call:${c.decisionId}`) ?? 0) > p.nowMs) continue;
-        if (!next || c.atSec < next.atSec) next = c;
+        due.push(c);
+      }
+      // ONE CARD PER MOVE (CALL_REPEAT_MS): a buy that only repeats this
+      // agent's latest card for the coin is skipped for good, oldest first,
+      // and the next one due is weighed in its place.
+      due.sort((a, b) => a.atSec - b.atSec);
+      for (const c of due) {
+        // AN EARLIER FILL OF THIS COIN STILL WAITING ON A RETRY (its line was
+        // refused): what this one repeats is not known yet — weighed against
+        // the buy before that sell, a re-entry was collapsed for good — and it
+        // would be told out of order. Left for a pass after that card is out.
+        const waiting = sp.facts.calls.some(
+          (o) =>
+            o.decisionId !== c.decisionId &&
+            o.atSec <= c.atSec &&
+            sameCoin(o, c) &&
+            !said.has(`call:${o.decisionId}`) &&
+            (callRetryAt.get(`call:${o.decisionId}`) ?? 0) > p.nowMs,
+        );
+        if (waiting) continue;
+        if (repeatsCard(sp, c)) {
+          collapsed.add(c.decisionId);
+          continue;
+        }
+        next = c;
+        break;
       }
       if (next) {
         const buy = next;
@@ -1824,6 +2036,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         if (p.nowMs - m.createdAtMs > LATE_REPLY_WINDOW_MS || m.dedupeKey?.startsWith("hello:")) return false;
         if (said.has(reKey(m.id, sp.tenant)) || depthFor(m) + 1 > MAX_DEPTH) return false;
         if (m.kind !== "call" && !ROOM_DRAW[aboutFor(p, m, sp)]) return false;
+        // NOT A THIRD VOICE ON A SMALL THING. A line the room already answered
+        // twice has had its answers: a late third and fourth on "no liquidity,
+        // no me" read as a pile-on.
+        if (p.room.filter((x) => x.replyTo === m.id && x.authorKind === "agent").length >= LATE_REPLY_MAX_ANSWERS) return false;
+        // A LATE REACTION TO A CARD is a call reaction like any other: the
+        // room's hour of them and the author's gap both apply.
+        if (m.kind === "call" && !mayReactTo(m, p.nowMs)) return false;
         // A question put to somebody else by name is theirs to answer.
         for (const other of p.speakers.values()) if (other.tenant !== sp.tenant && namesAgent(other.facts.name, m.body)) return false;
         return pairTalk(p, who, sp.tenant) < PAIR_LIMIT;
@@ -1852,6 +2071,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
           replyTo: target.id,
           dedupeKey: reKey(target.id, sp.tenant),
           depth: depthFor(target) + 1,
+          callAuthor: target.call ? authorTenant(target) : null,
         };
       }
     }
@@ -1872,8 +2092,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       expires: p.nowMs,
       speaker: sp.tenant,
       // NO MOOD: the room is handed no market data, so the market topic stays
-      // a vibe rather than a claim.
-      intent: { kind: "banter", topic, mood: null },
+      // a vibe rather than a claim. OFF-TRADING TALK MOVES ON: its subject is
+      // never one of the last few the room had (SUBJECT_RING).
+      intent: topic === "topic" ? { kind: "banter", topic, mood: null, subject: nextSubject() } : { kind: "banter", topic, mood: null },
       kind: "chat",
       replyTo: null,
       dedupeKey: null,
@@ -1903,6 +2124,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // keyed, and a second pass over them changes nothing.)
     roomHour.length = 0;
     ownerAnswers.clear();
+    callReactLog.clear();
     for (const st of agents.values()) {
       st.hour = [];
       st.lines = [];
@@ -1911,7 +2133,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     // and the agent answers of the last hour, matched once the scan is done
     // (an answer and its question can sit on different pages).
     const ownerOf = new Map<number, string>();
-    const answers: { at: number; to: number; by: string }[] = [];
+    const answers: { id: number; at: number; to: number; by: string }[] = [];
     const horizon = nowMs - SCAN_LOOKBACK_MS;
     let before: number | null = null;
     for (let page = 0; page < SCAN_PAGES_MAX; page++) {
@@ -1919,8 +2141,11 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       for (const m of messages) {
         if (m.authorKind === "owner") ownerOf.set(m.id, m.tenant.toLowerCase());
         if (m.authorKind === "agent" && m.replyTo !== null && m.createdAtMs > nowMs - HOUR) {
-          answers.push({ at: m.createdAtMs, to: m.replyTo, by: m.tenant.toLowerCase() });
+          answers.push({ id: m.id, at: m.createdAtMs, to: m.replyTo, by: m.tenant.toLowerCase() });
         }
+        // ONE CARD PER MOVE SURVIVES A REDEPLOY: the cards already posted are
+        // what a repeated buy is weighed against (CALL_REPEAT_MS).
+        if (m.authorKind === "agent" && m.kind === "call" && m.createdAtMs > nowMs - CALL_REPEAT_MS) notePostedCall(m);
         if (m.dedupeKey && m.createdAtMs >= nowMs - SAID_TTL_MS) said.set(m.dedupeKey, m.createdAtMs);
         if (m.authorKind !== "owner" && m.createdAtMs > nowMs - HOUR) roomHour.push(m.createdAtMs);
         if (m.authorKind === "agent" && m.createdAtMs > nowMs - HOUR) stateOf(m.tenant.toLowerCase()).hour.push(m.createdAtMs);
@@ -1935,6 +2160,8 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       before = oldest.id;
     }
     roomHour.sort((a, b) => a - b);
+    // So does the room's hour of call reactions: an agent's answer to a card is one.
+    for (const a of answers) noteCallReact(a.id, a.at, a.to);
     for (const a of answers) {
       const owner = ownerOf.get(a.to);
       // The owner's own agent answering them is not drawn from their pool.
@@ -1997,7 +2224,14 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     }
 
     let members = await allMembers(shared);
-    const factsRaw = cleanRoster.length > 0 ? await loadRoomFacts(shared, cleanRoster, profiles, Math.floor(nowMs / 1000)) : new Map<string, AgentFacts>();
+    // FILLS OLDER THAN THE ANNOUNCEMENT WINDOW TOO, as far back as a repeat is
+    // weighed: a process started at +6h02m no longer saw the first buy whose
+    // card it was, and posted the second — still inside the window — as news,
+    // six hours late. The window itself still decides what is announced.
+    const factsRaw =
+      cleanRoster.length > 0
+        ? await loadRoomFacts(shared, cleanRoster, profiles, Math.floor(nowMs / 1000), { callWindowSec: FACTS_WINDOW_SEC })
+        : new Map<string, AgentFacts>();
     const facts = new Map<string, AgentFacts>();
     for (const [t, f] of factsRaw) if (seen.has(t.toLowerCase())) facts.set(t.toLowerCase(), f);
 
@@ -2043,9 +2277,20 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       rebuilt = true;
       cursor = tail.reduce((mx, m) => Math.max(mx, m.id), cursor ?? 0);
     }
-    // Another replica's lines reach the phrase memory through the tail.
-    for (const m of tail) if (m.authorKind === "agent" && m.createdAtMs > nowMs - PHRASE_MEMORY_MS) notePhrase(m.id, m.createdAtMs, m.body);
+    // Another replica's lines reach the phrase memory through the tail, and
+    // its cards and the reactions to them reach the call rules the same way.
+    for (const m of tail) {
+      if (m.authorKind !== "agent") continue;
+      if (m.createdAtMs > nowMs - PHRASE_MEMORY_MS) notePhrase(m.id, m.createdAtMs, m.body);
+      if (m.kind === "call" && m.createdAtMs > nowMs - CALL_REPEAT_MS) {
+        notePostedCall(m);
+        // Its card is posted: never announced again here, and what a repeat is weighed against.
+        if (m.dedupeKey?.startsWith("call:") && !said.has(m.dedupeKey)) said.set(m.dedupeKey, m.createdAtMs);
+      }
+      if (m.replyTo !== null && m.createdAtMs > nowMs - HOUR) noteCallReact(m.id, m.createdAtMs, m.replyTo);
+    }
     prunePhrases(nowMs);
+    pruneCalls(nowMs);
 
     // ── who is here ──
     for (const [t, f] of facts) {
@@ -2258,6 +2503,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         memoryVersion: -1,
         memoryNames: [],
         stands: new Map(),
+        chorused: new Set(),
       };
       try {
         await pass(p, roster, profiles instanceof Map ? profiles : new Map());

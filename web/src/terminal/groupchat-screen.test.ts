@@ -33,6 +33,7 @@ let OwnerClock: typeof import("./OwnerClock").OwnerClock;
 let resetGroupChatForTest: typeof import("./groupchat").resetGroupChatForTest;
 let pollNow: typeof import("./groupchat").pollNow;
 let storeForTest: typeof import("./groupchat").storeForTest;
+let clockTime: typeof import("./groupchat").clockTime;
 before(async () => {
   const boot = new JSDOM("<!doctype html><p></p>", { pretendToBeVisual: true });
   const g = globalThis as Record<string, unknown>;
@@ -41,7 +42,7 @@ before(async () => {
   ({ testDom, json } = await import("./test-dom"));
   ({ GroupChat } = await import("./screens/GroupChat"));
   ({ OwnerClock } = await import("./OwnerClock"));
-  ({ resetGroupChatForTest, pollNow, storeForTest } = await import("./groupchat"));
+  ({ resetGroupChatForTest, pollNow, storeForTest, clockTime } = await import("./groupchat"));
   Reflect.deleteProperty(g, "window");
   Reflect.deleteProperty(g, "document");
   boot.window.close();
@@ -237,9 +238,21 @@ describe("the room, as a reader sees it", () => {
   it("presence reads '2 awake · 1 asleep' and opens into who is here", async () => {
     await mount();
     const button = q<HTMLButtonElement>(".gc-presence")!;
-    assert.match(button.textContent!, /2 awake · 1 asleep/);
+    assert.match(button.textContent!, /2 awake · 1 asleep/, "the pill's name still says both");
+    // THE PILL SAYS WHO IS AWAKE; the asleep count is the quiet part beside it
+    // that may step aside on a narrow phone — "54 awake · 3 asle…" was the
+    // whole header at 375px.
+    assert.equal(button.querySelector(".gc-presence-text")?.textContent, "2 awake");
+    assert.match(button.querySelector(".gc-presence-more")?.textContent ?? "", /1 asleep/);
+    assert.ok(!q("h1")!.classList.contains("top-title"), "the room's own title, not the shell's display-size one");
     await act(async () => button.click());
     const who = q("#gc-who")!;
+    assert.equal(button.getAttribute("aria-expanded"), "true");
+    assert.deepEqual(
+      Array.from(who.querySelectorAll(".gc-who-head")).map((h) => h.textContent),
+      ["2 awake", "1 asleep"],
+      "the list says how many are asleep, in its own section",
+    );
     assert.match(who.textContent!, /Shogun/);
     assert.match(who.textContent!, /💤/, "sleepers are marked");
     const names = Array.from(who.querySelectorAll("li")).map((li) => li.textContent);
@@ -261,6 +274,48 @@ describe("the room, as a reader sees it", () => {
     assert.equal(row(103).querySelector(".gc-bubble .sr-only")?.textContent, "SirSendIt: ");
     assert.equal(row(102).querySelector(".gc-bubble .sr-only"), null, "the first line's name is already there to read");
     assert.equal(row(106).querySelector(".gc-bubble .sr-only")?.textContent, "You: ");
+  });
+
+  it("ONE BUBBLE CARRIES THE LINE: the name at its top on the first of a run only, the quote under it, the time in the last one's corner", async () => {
+    // As blocks above and below the bubble, a one-line message cost four lines
+    // of height — and most runs are one line long.
+    await mount();
+    const bubble = (id: number) => row(id).querySelector(".gc-bubble")!;
+    const parts = (id: number) => Array.from(bubble(id).children).map((c) => c.classList[0]);
+    // 102 starts SirSendIt's run (a reply to 101); 103 continues and ends it.
+    assert.deepEqual(parts(102), ["gc-name", "gc-quote", "gc-text"], "name, then the quote, then the words — all inside");
+    assert.equal(bubble(102).querySelector(".gc-name")!.textContent, "SirSendIt");
+    assert.equal(row(103).querySelector(".gc-name"), null, "a continuation carries no name");
+    assert.deepEqual(parts(103), ["sr-only", "gc-call", "gc-text", "gc-meta"]);
+    assert.equal(row(102).querySelector(".gc-meta"), null, "no time until the run ends");
+    const time = bubble(103).querySelector<HTMLTimeElement>("time.gc-meta")!;
+    assert.equal(time.textContent, clockTime(at(7)));
+    assert.equal(time.dateTime, new Date(at(7)).toISOString());
+    // The words hold room for the time at the end of their last line; the
+    // text itself is untouched.
+    assert.equal(row(103).querySelector(".gc-text")!.getAttribute("data-meta"), clockTime(at(7)));
+    assert.equal(row(102).querySelector(".gc-text")!.getAttribute("data-meta"), null);
+    assert.equal(row(103).querySelector(".gc-text")!.textContent, "aped in, vibes only");
+    // Nothing of a line hangs outside its bubble any more.
+    for (const el of ui.container.querySelectorAll(".gc-name, .gc-quote, .gc-meta")) {
+      assert.ok(el.closest(".gc-bubble"), `${el.className} is outside a bubble`);
+    }
+    assert.equal(ui.container.querySelectorAll(".gc-name").length, 3, "101, 102 and 104 start runs; my own line has no name");
+    assert.equal(ui.container.querySelectorAll(".gc-meta").length, 4, "101, 103, 104 and 106 end runs");
+  });
+
+  it("A SPEAKER KEEPS ONE COLOUR — on their name, and on the bar of every quote of them", async () => {
+    await mount();
+    const ink = (el: Element) => Array.from(el.classList).find((c) => c.startsWith("gc-ink-")) ?? null;
+    const shogun = ink(row(101));
+    assert.match(shogun ?? "", /^gc-ink-\d$/);
+    assert.equal(ink(row(102)), ink(row(103)), "one run, one colour");
+    assert.equal(ink(row(102).querySelector("button.gc-quote")!), shogun, "the quote wears the QUOTED speaker's colour");
+    assert.equal(ink(row(104)), "gc-ink-owner", "another owner keeps a person's style");
+    assert.equal(ink(row(106)), "gc-ink-you");
+    await ui.remount(screen());
+    await settle();
+    assert.equal(ink(row(101)), shogun, "and the same colour next time");
   });
 
   it("day separators are read out: text, not a separator whose words are hidden", async () => {
@@ -429,6 +484,11 @@ describe("who may post", () => {
     await mount();
     assert.equal(q("textarea"), null);
     assert.match(text(), /Sign in to join/);
+    // To the sign-in the app already has (the create screen shows it first to
+    // a visitor) — the room draws no sign-in of its own.
+    const link = q<HTMLAnchorElement>(".gc-foot-note a")!;
+    assert.equal(link.textContent, "Sign in");
+    assert.equal(link.getAttribute("href"), "/create");
   });
 
   it("a member posts; the line shows at once and settles in place", async () => {
@@ -446,7 +506,7 @@ describe("who may post", () => {
     const pending = q(".gc-pending")!;
     assert.ok(pending, "drawn before the server answers");
     assert.match(pending.textContent!, /gm everyone/);
-    assert.match(pending.textContent!, /Sending…/);
+    assert.equal(pending.querySelector(".gc-bubble .gc-meta")?.textContent, "Sending…", "said in the bubble's corner, where the time will be");
     assert.equal(q<HTMLTextAreaElement>("textarea")!.value, "", "the composer clears on send");
     const sent = requests.find((r) => r.method === "POST" && r.path === "/api/groupchat")!;
     assert.equal(sent.body?.body, "gm everyone");
@@ -836,7 +896,32 @@ describe("structure", () => {
     assert.equal(decl(pill, "transform"), null, "centred without the property its entrance animation overwrites");
     assert.equal(decl(pill, "margin-inline"), "auto");
     assert.equal(decl(one(":where(.terminal-host) .gc-title > h1"), "white-space"), "nowrap", "'Group chat' never breaks in two");
-    assert.equal(decl(one(":where(.terminal-host) .gc-presence"), "min-width"), "0", "the presence pill gives way first");
+    assert.ok(parseFloat(decl(one(":where(.terminal-host) .gc-title > h1"), "font-size") ?? "99") <= 20, "a modest title, not the 34px display one");
+    // THE PILL NEVER ENDS IN AN ELLIPSIS ("54 awake · 3 asle…"): it does not
+    // shrink, its count is never cut, and the asleep count beside it is what
+    // steps aside on the narrowest phones — out of sight, still read out.
+    assert.match(decl(one(":where(.terminal-host) .gc-presence"), "flex") ?? "", /^(none|0 0 auto)$/, "the presence pill never shrinks");
+    assert.equal(decl(one(":where(.terminal-host) .gc-presence-text"), "text-overflow"), null);
+    const narrow = sheet().find((r) => r.at !== null && /max-width:\s*359/.test(r.at) && /\.gc-presence-more$/.test(r.selector));
+    assert.ok(narrow, "the asleep count gives way below 360px");
+    assert.doesNotMatch(narrow.body, /display:\s*none|visibility:\s*hidden/, "and is still in the pill's name");
+    // The time sits in the bubble's corner over room the words held for it.
+    assert.equal(decl(one(":where(.terminal-host) .gc-bubble"), "position"), "relative");
+    assert.equal(decl(one(":where(.terminal-host) .gc-meta"), "position"), "absolute");
+    const held = one(":where(.terminal-host) .gc-text[data-meta]::after");
+    assert.equal(decl(held, "content"), "attr(data-meta)");
+    assert.equal(decl(held, "visibility"), "hidden", "held, not drawn twice");
+    assert.equal(decl(held, "font-size"), decl(one(":where(.terminal-host) .gc-meta"), "font-size"), "and exactly as wide as the time");
+  });
+
+  it("A VISITOR'S PHONE OPENS ON THE ROOM, not on the shell's sign-in card above it", () => {
+    // The card ("Your agent starts here") sat above the chat on every screen
+    // and pushed the room down; the room's own footer says how to join.
+    const line = src("./App.tsx")
+      .split("\n")
+      .find((l) => l.includes("<AccountEntry") && l.includes("!desktop"));
+    assert.ok(line, "the phone's AccountEntry is where it was");
+    assert.match(line, /screen\.kind !== "groupchat"/);
   });
 });
 

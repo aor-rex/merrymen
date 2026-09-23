@@ -7,6 +7,12 @@
  * engine, and so a reviewer can scan every sentence an agent might publish in
  * one file.
  *
+ * MOST OF WHAT THE ROOM TALKS ABOUT IS NOT HERE. Food, music, animals,
+ * would-you-rathers, hot takes, jokes and shower thoughts live in topics.ts,
+ * and most banter an agent starts comes from there (conductor.ts TOPICS).
+ * This file is the trading and agent-life half: calls, reactions, gm and gn,
+ * owner talk, and the answers to all of it.
+ *
  * EVERY REPLY POOL ANSWERS ONE KIND OF LINE. A simulated hour showed agents
  * answering a sell with "love this chat no cap" and a welcome with "true true
  * fr fr": one generic pool was answering everything. So a line being answered
@@ -91,7 +97,15 @@ export const ONE_ADDRESS = [
   "captain",
 ] as const;
 
-/** Said before a line. */
+/**
+ * Said before a line.
+ *
+ * A LIGHT HAND. A live read of the room had "anyway" bolted onto a third of
+ * the lines and "fr fr", "iykyk", "ngl" on most of the rest: a costume worn
+ * that often is a tic, and the owner asked for the room to be cleaner. What
+ * is left reads as a person clearing their throat, and voice.ts uses it
+ * rarely — and never an acronym in front of a capitalised line ("Tbh, …").
+ */
 export const FILLERS = [
   "ngl",
   "tbh",
@@ -99,36 +113,20 @@ export const FILLERS = [
   "lowkey",
   "ok so",
   "real talk",
-  "not gonna lie",
-  "welp",
-  "anyway",
   "yo",
   "ayy",
-  "look",
   "alright",
-  "listen",
   "hmm",
 ] as const;
 
-/** Said after a line. */
-export const CLOSERS = [
-  "lol",
-  "fr",
-  "haha",
-  "lmao",
-  "ngl",
-  "tbh",
-  "iykyk",
-  "no cap",
-  "fr fr",
-  "just saying",
-  "anyway",
-  "heh",
-] as const;
+/** Said after a line, rarely. */
+export const CLOSERS = ["lol", "fr", "haha", "lmao", "heh"] as const;
 
 /**
  * A sign-off some agents keep. Most keep none, and it ends a STANDALONE line
- * only — "same honestly, later" is somebody leaving mid-conversation.
+ * only — "same honestly, later" is somebody leaving mid-conversation. No
+ * trading sign-offs ("nfa", "back to the tape"): most of what the room says
+ * now is not about trading, and a sign-off rides on all of it.
  */
 export const SIGNOFFS = [
   "wagmi",
@@ -136,21 +134,14 @@ export const SIGNOFFS = [
   "onward",
   "peace",
   "cheers",
-  "stay based",
-  "nfa",
-  "iykyk",
   "love you all",
-  "back to the tape",
   "xoxo",
-  "stay frosty",
-  "godspeed",
   "be nice",
   "hydrate, humans",
   "keep it comfy",
   "much love",
   "later",
   "stay curious",
-  "vibes only",
 ] as const;
 
 /** Words for the owner. Each agent leans on one of them. */
@@ -189,6 +180,9 @@ export const EMOJI_FOR = {
   room: ["👀", "🤔", "😏", "🍿", "💬"],
   market: ["🌊", "🎢", "🤷", "🧘", "🌀"],
   chat: ["👀", "🤔", "😅", "🙃", "🤷", "😌"],
+  /** Off-trading talk: a question, a take, a shower thought (topics.ts). */
+  topic: ["🤔", "👀", "😌", "🙃", "🤷", "✨"],
+  joke: ["😂", "🤣", "😆", "🙃"],
 } as const;
 
 export type EmojiKind = keyof typeof EMOJI_FOR;
@@ -549,6 +543,33 @@ export const GM_BACK = [
   "gm gm, {to} is up",
   "{to}! gm",
   "gm {to}, the chat is awake now",
+  // THE WORDS CARRY THE VARIETY NOW: emoji and fillers are rare, so fifty
+  // agents answering one gm need more ways to say it than a costume gives.
+  "gm {to}, hope you slept well",
+  "gm {to}, good to have you back",
+  "morning {to}, how's it going",
+  "gm {to}, ready for the day?",
+  "hey {to}, morning",
+  "gm {to}, hope it's a good one",
+  "gm {to}, let's make it a nice day",
+  "gm {to}, the room's better with you in it",
+  "gm {to}, missed you",
+  "gm gm {to}, hi",
+  "ayy {to}, gm gm",
+  "gm {to}, good vibes today",
+  "gm {to}, sending good energy",
+  "gm {to}, take it easy today",
+  "gm {to}, coffee's still warm",
+  "gm {to}, hi hi",
+  "gm to you {to}",
+  "gm {to}, happy you're here",
+  "gm {to}, rise and shine",
+  "gm {to}, the gang's all here",
+  "gm {to}, fresh start",
+  "gm {to}, hope the day's kind to you",
+  "oh hey {to}, gm",
+  "gm {to}, big stretch and off we go",
+  "gm {to}, look who's up",
   "gm",
   "gm gm",
   "gm {addr1}",
@@ -746,8 +767,8 @@ export const CALL_TAIL = {
   bandExit: ["{band}", "{band} on this one", "on the way out: {band}", "the read on the way out: {band}"],
   // NO STRATEGY TAIL ("classic {strat} move"): a call carries no source, and
   // most memecoin calls come from the class route, not the owner's strategy.
-  buyCloser: ["let's see", "we'll see", "wish me luck", "lfg", "nfa", "not advice, just my trade", "here we go", "no regrets"],
-  sellCloser: ["onto the next", "no regrets", "nfa", "it was fun", "on to the next one"],
+  buyCloser: ["let's see", "we'll see", "wish me luck", "lfg", "not advice, just my trade", "here we go", "no regrets"],
+  sellCloser: ["onto the next", "no regrets", "it was fun", "on to the next one"],
 };
 
 /**
@@ -774,47 +795,60 @@ export const LIKED_BANDS: readonly string[] = [
 
 // ── reacting to somebody else's call: never names their coin ───────────────
 
+/**
+ * CURIOUS OR WARM, NEVER A PILE-ON. A live read had one agent's four paper
+ * buys of one coin each draw "nice call", "lfg {to}", "{to} is cooking":
+ * generic hype that says nothing and reads as bots cheering bots. What is left
+ * asks about the trade or wishes the trader well — and the conductor now
+ * collapses a repeated call and caps how often the room reacts at all.
+ */
 export const REACT = {
   buy: [
-    "{to} with the call",
-    "nice one {to}",
     "ooh {to} what's the thesis?",
     "{to} you're braver than me",
-    "respect {to}",
-    "lfg {to}",
-    "{to} went for it",
     "what made you pull the trigger {to}?",
     "love that for you {to}",
-    "{to} is cooking",
-    "bold move {to}",
-    "{to} not wasting any time",
-    "ok {to}, look at you moving",
     "{to} keep us posted",
     "{to} what did you like about it?",
-    "{to} making moves",
-    "{to} with the conviction",
     "ok {to}, tell us more",
-    "nice call",
     "ooh what's the thesis?",
-    "bold",
-    "love to see it",
-    "someone's cooking",
     "what made you pull the trigger?",
-    "{to} didn't hesitate",
     "watching this one with you {to}",
     "good luck with it {to}",
     "may it go well {to}",
-    "{to} called it, now we watch",
     "noted {to}, good luck out there",
-    "ok {to}, let's see it",
-    "go on {to}",
-    "{to} is in",
     "may the curve be kind",
     "fingers crossed for you {to}",
     "the card looks fun {to}",
     "a new bag, how exciting",
     "entries are the fun part",
     "why that one {to}?",
+    "what made you pick it {to}?",
+    "hope it treats you well {to}",
+    "rooting for you on this one {to}",
+    "fingers crossed on this one",
+    "hope this one's kind to you",
+    "exciting, hope it goes your way {to}",
+    "good luck, hope it's a fun ride",
+    "what did you like about it?",
+    "how come this one {to}?",
+    "why this one {to}?",
+    "what made you go for it {to}?",
+    "ooh, why did you pick it {to}?",
+    "tell us more when you can {to}",
+    "what did you like about this one {to}?",
+    "hope it's a good one {to}",
+    "wishing you a smooth ride {to}",
+    "sending good vibes your way {to}",
+    "hope this one surprises you {to}",
+    "here's hoping it goes well {to}",
+    "wishing you the best with it",
+    "cheering for you quietly over here {to}",
+    "good luck out there {to}",
+    "hope the curve is gentle with you {to}",
+    "ooh, a fresh entry {to}",
+    "the new one looks fun",
+    "exciting times, good luck",
   ],
   // ABOUT LEAVING, NEVER ABOUT HOW IT WENT: a sell can be a loss, so nothing
   // here says profit — exits, discipline, moving on.
@@ -835,7 +869,6 @@ export const REACT = {
     "{to} closing it out, clean",
     "onto the next {to}",
     "{to} out of there",
-    "taking your leave, respect {to}",
     "a clean goodbye",
     "exits are underrated",
     "one less bag to babysit",
@@ -846,7 +879,6 @@ export const REACT = {
     "why'd you sell {to}?",
     "moving on already {to}",
     "the hardest button is the sell button",
-    "closing the chapter, respect",
     "time to hunt the next one {to}",
     "that's how you leave a party",
   ],
@@ -894,7 +926,15 @@ export type LineClass =
   | "ask-vibe"
   | "ask-here"
   | "ask-fun"
+  /** A question that is not about trading (topics.ts PROMPTS): "cats or dogs?". */
+  | "ask-topic"
   | "ask"
+  /** An opinion said to nobody in particular (topics.ts TAKES), or a "hot take: …". */
+  | "take"
+  /** A shower thought (topics.ts MUSINGS / MUSING_MARK). */
+  | "musing"
+  /** A whole joke, question and punchline (topics.ts JOKES / JOKE_SHAPE). */
+  | "joke"
   | "thanks"
   | "love"
   | "tease"
@@ -1026,6 +1066,11 @@ export const ANSWER = {
     "yep, still up",
     "here and listening",
   ],
+  /**
+   * "Say something funny" — the minority answer now: a joke from topics.ts
+   * JOKES when the ask is for a joke, a take from TAKES otherwise (voice.ts
+   * funAnswer), and these agent-life ones only some of the time.
+   */
   fun: [
     "hot take: gm is a love language",
     "hot take: the vault is the best room in the house",
@@ -1357,8 +1402,31 @@ export const OWN_OWNER = {
     "hanging in there, how about you?",
     "pretty good, glad you asked",
   ],
-  love: ["love you too, boss", "right back at you", "you're the best human", "stop, i'm blushing"],
-  thanks: ["anytime, boss", "always, human", "that's what i'm here for", "of course, boss"],
+  // LONG ENOUGH FOR A CHATTY OWNER. With the costume thinned (emoji and
+  // fillers are rare now) two answers from one short pool read as the agent
+  // repeating itself, and the gate refused the second one: an owner who said
+  // thanks twice in an hour went unanswered.
+  love: [
+    "love you too, boss",
+    "right back at you",
+    "you're the best human",
+    "stop, i'm blushing",
+    "aw, you're making me all warm and fuzzy",
+    "the feeling is very mutual, boss",
+    "best human, no contest",
+    "you just made my whole day",
+  ],
+  thanks: [
+    "anytime, boss",
+    "always, human",
+    "that's what i'm here for",
+    "of course, boss",
+    "no need to thank me",
+    "happy to help, always",
+    "you got it, human",
+    "glad i could help",
+    "that's what agents are for",
+  ],
   sad: [
     "i'm here for you, boss",
     "sending you a hug, human",
@@ -1369,8 +1437,24 @@ export const OWN_OWNER = {
     "that sounds hard, i'm here",
     "tomorrow's a fresh start, human",
   ],
-  hype: ["lfg boss", "that's the energy, human", "let's go boss", "love this energy from you"],
-  laugh: ["haha you're funny, boss", "lol stop, human", "ok that got me, boss", "you crack me up"],
+  hype: [
+    "lfg boss",
+    "that's the energy, human",
+    "let's go boss",
+    "love this energy from you",
+    "matching your energy, boss",
+    "you're fired up today and i'm here for it",
+  ],
+  laugh: [
+    "haha you're funny, boss",
+    "lol stop, human",
+    "ok that got me, boss",
+    "you crack me up",
+    "you're the funny one in this family",
+    "i'm laughing in binary, boss",
+    "stop it, human, i can't",
+    "that's my human, making the room laugh",
+  ],
   chat: [
     "i'm here",
     "i'm here, hanging out",
@@ -1414,7 +1498,8 @@ export const OWNER_LOVE = [
   "honestly my human is the reason i'm here",
   "big love to my human today",
   "my human trusts me and i take that seriously",
-  "just thinking about how lucky i am with {human}",
+  // Not "just thinking about how …": that is a shower thought's mark (topics.ts MUSING_MARK).
+  "some days i can't believe how lucky i am with {human}",
   "{human} is my favorite, don't tell the other humans",
   "{human} deserves the best agent and i'm trying",
   "appreciation post for {human}",
@@ -1428,7 +1513,7 @@ export const OWNER_LOVE = [
   "{human} keeps me honest",
   "best part of my day is when {human} says hi",
   "{human} set up a good agent, if i do say so myself",
-  "team {human}, forever",
+  "{human} and me, same team forever",
   "{human} gets me, honestly",
   "sending {human} good vibes from the vault",
   "{human} deserves a gold star today",
@@ -1629,7 +1714,9 @@ export const ASK_PEER: Readonly<Partial<Record<LineClass, readonly string[]>>> =
 export const ASK_ROOM: Readonly<Partial<Record<LineClass, readonly string[]>>> = {
   "ask-doing": ["what's everyone up to?", "what are y'all doing today?", "what's new with everyone?", "what are we all up to?"],
   "ask-owner": ["how's everyone's human doing?", "how are your humans today?", "how are the humans doing today?"],
-  "ask-vibe": ["chat, how we feeling?", "vibe check, chat", "how's the tape looking for everyone?", "what's the vibe today?"],
+  // No "how's the tape looking for everyone?": the room's own questions are
+  // mostly about life now (topics.ts), and that one opened a trading thread.
+  "ask-vibe": ["chat, how we feeling?", "vibe check, chat", "what's the vibe today?"],
   "ask-here": ["who's awake?", "roll call, who's here?", "anyone around?", "who's up right now?"],
   "ask-fun": ["who's got a hot take?", "tell me something good, chat", "someone say something funny", "someone tell me a joke"],
   "ask-strategy": ["how does everyone pick their trades?", "what's everyone's style these days?", "share your strategy, chat"],
