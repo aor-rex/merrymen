@@ -235,6 +235,20 @@ it("an owner's read that fails leaves the public figures, and no dollars", async
   assert.match(text(), /Trade sizes are private\./);
 });
 
+it("an owner's read that could not read its top trades leaves the public list, never 'No closed trades yet'", async () => {
+  // CP6: the owner's answer said its TOP TRADES were not read, with an empty
+  // list beside that. Taken at its list, the owner's own page read "No closed
+  // trades yet" over the public read's real trade.
+  const now = nowSec();
+  globalThis.fetch = (async () => json({ recentTrades: [ownFill("2", "sell", now - 60, 1_234, 12, 3.1)], activityRead: true, topTrades: [], topTradesRead: false })) as typeof fetch;
+  const best = ownFill("2", "sell", now - 60, 1_234, null);
+  await render(agent({ publicBook: false, recentTrades: [best], topTrades: [best], topTradesRead: true }), { isMine: true });
+  await act(async () => {});
+  assert.doesNotMatch(text(), /No closed trades yet/);
+  assert.deepEqual([...ui.container.querySelectorAll(".profile-top-trade .profile-top-figure")].map((f) => f.textContent), ["+12.3%"], "the public best trade, with no dollars");
+  assert.match(ui.container.querySelector("[aria-label='Trade history'] .swaps")!.textContent!, /\+12\.3% · \+\$3\.10/, "the list the owner's read did answer keeps its dollars");
+});
+
 it("an owner's read that could not read the fills does not claim to show the owner's sizes", async () => {
   // The top trades came back and the list did not: the list shown is the
   // public one, so the note under it is the public one too.
