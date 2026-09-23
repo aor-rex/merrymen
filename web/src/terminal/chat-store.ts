@@ -83,7 +83,7 @@ function storeOf(explicit?: Store): Store | null {
 }
 
 const ROLES = new Set(["owner", "agent", "event"]);
-const FAILURES = new Set<ChatFailure>(["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off"]);
+const FAILURES = new Set<ChatFailure>(["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server"]);
 /** The shape of an id the orders route issues: a hash, and so a safe URL segment. */
 const ORDER_ID = /^[0-9a-f]{16,64}$/i;
 

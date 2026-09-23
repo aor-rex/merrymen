@@ -14,6 +14,7 @@
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { usd } from "@/lib/format";
 import type { OrderReceipt } from "@/lib/order-state";
+import type { LlmFailureKind } from "../../../worker/src/llm-failure";
 import type { ChatFailure, ChatMessage, ChatTurn } from "./account";
 import type { Thesis } from "./live";
 
@@ -377,32 +378,119 @@ export function chatChips(c: {
 // ── failures ──────────────────────────────────────────────────────────────
 
 /**
+ * WHAT THE CHAT ROUTE SAID ABOUT A MODEL CALL THAT FAILED — classified on the
+ * server, which had the error and its status (lib/agent-chat.ts), by the same
+ * classifier the Telegram surface uses (worker/src/llm-failure.ts). The kind
+ * and a provider's name; never the provider's own words.
+ */
+export interface LlmFailureSaid {
+  kind: LlmFailureKind;
+  /** "Groq", "Anthropic" — null when the route named nobody. */
+  provider: string | null;
+}
+
+/** What else is known about a failure, for the sentence that says it. */
+export interface FailureFacts {
+  /** The HTTP status a "server" failure came back with. */
+  status?: number | null;
+  /** The route's classification of an "llm-error". */
+  llm?: LlmFailureSaid | null;
+}
+
+const LLM_KINDS: ReadonlySet<LlmFailureKind> = new Set<LlmFailureKind>([
+  "key-rejected",
+  "rate-limited",
+  "provider-down",
+  "unreachable",
+  "model-missing",
+  "other",
+]);
+
+/**
+ * The route's classification, as read off the wire. A kind this browser does
+ * not know is "other" — said as a reason it does not recognise, which is true —
+ * and a provider name that is not a short plain name is not repeated.
+ */
+export function llmFailureOf(kind: unknown, provider: unknown): LlmFailureSaid {
+  return {
+    kind: typeof kind === "string" && LLM_KINDS.has(kind as LlmFailureKind) ? (kind as LlmFailureKind) : "other",
+    provider: typeof provider === "string" && /^[A-Za-z0-9][\w .-]{0,39}$/.test(provider) ? provider : null,
+  };
+}
+
+/** The model failures that pass on their own, so asking again is worth offering. */
+const PASSING: ReadonlySet<LlmFailureKind> = new Set<LlmFailureKind>(["rate-limited", "provider-down", "unreachable"]);
+
+/**
+ * IS ASKING AGAIN WORTH A RETRY CHIP?
+ *
+ * Yes for everything that passes — a network, a timeout, a stream cut short,
+ * a server that did not answer. NOT for a model failure that will fail the
+ * same way every time until somebody changes something: a rejected key, a
+ * model that does not exist, or a refusal nobody recognised. A chip there is
+ * a button that cannot work, beside a sentence telling the owner it might.
+ */
+export function retryHelps(kind: ChatFailure, facts: FailureFacts = {}): boolean {
+  if (kind !== "llm-error") return true;
+  return !!facts.llm && PASSING.has(facts.llm.kind);
+}
+
+/** A model failure in the agent's words, by its kind — never the provider's. */
+function llmLine({ kind, provider }: LlmFailureSaid): string {
+  const whose = provider ?? "its provider";
+  const aside = provider ? `, ${provider},` : "";
+  switch (kind) {
+    case "key-rejected":
+      return `My brain couldn't answer: ${whose} refused the API key it's set up with. Asking again won't help until that key is replaced.`;
+    case "model-missing":
+      return `My brain couldn't answer: ${whose} says the model it's set to use isn't available. Asking again won't help until the model is changed.`;
+    case "rate-limited":
+      return `My brain is being rate-limited by ${whose} right now. Give it a moment and try again.`;
+    case "provider-down":
+      return `My brain's provider${aside} is having trouble on its side. Try again in a few minutes.`;
+    case "unreachable":
+      return `I couldn't reach my brain's provider${aside} just now. Try again in a minute.`;
+    case "other":
+    default:
+      return "My brain couldn't answer that time, for a reason I don't recognise. If asking again gets the same, its setup needs a look.";
+  }
+}
+
+/**
  * A REPLY THAT DID NOT ARRIVE, SAID AS THE AGENT WOULD SAY IT.
  *
  * The screen used to print the raw DOMException ("signal timed out") or "Your
  * agent could not reply" — a system error inside a conversation. Each of these
  * says what happened in plain words and what to do, and none claims more than
- * is known: a timeout is not "the provider is down", and a network drop is not
- * "your message was lost". The provider's own words ride along when the route
- * had some, because they are the only clue whoever runs the deployment gets.
+ * is known: a timeout is not "the provider is down", a network drop is not
+ * "your message was lost", and a gateway's error page is not an answer that
+ * "arrived garbled" — nobody answered it.
+ *
+ * NEVER THE PROVIDER'S OWN WORDS. They used to ride along — "(it said: groq
+ * 401 — invalid_api_key: …)", Anthropic's JSON included — inside the agent's
+ * sentence, persisted, and followed by "give it a moment" whatever they said.
+ * A model failure is said by its kind (llmLine), and "try again" only where
+ * trying again can work (retryHelps).
  */
-export function failureLine(kind: ChatFailure, detail?: string): string {
+export function failureLine(kind: ChatFailure, facts: FailureFacts = {}): string {
   switch (kind) {
     case "signed-out":
       return "I can't hear you — your sign-in has lapsed. Sign in again and ask me once more.";
     case "no-llm":
       return "I've no brain connected yet, so I can't answer in my own words. Connect an AI provider in Settings, then ask me again.";
     case "llm-error":
-      return `My brain didn't answer that time${detail ? ` (it said: ${detail})` : ""}. Give it a moment and try again.`;
+      return llmLine(facts.llm ?? { kind: "other", provider: null });
     case "timeout":
       return "I took too long to answer and gave up waiting. Try again.";
     case "cut-off":
       return "My answer was cut off before I finished, so I haven't kept half of it. Try again.";
     case "network":
       return "I couldn't reach you just now — the connection dropped before my answer arrived. Try again.";
+    case "server":
+      return `I couldn't get an answer through just now${facts.status ? ` (the server said ${facts.status})` : ""}. Try again.`;
     case "unreadable":
     default:
-      return "I answered, but it arrived garbled and I can't show it. Try again.";
+      return "I got an answer back that I can't read, so I haven't shown it. Try again.";
   }
 }
 

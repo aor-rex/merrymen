@@ -1,10 +1,13 @@
 /** Shared narration for the dashboard and consented partner integrations. */
+import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
-import { conceptsFor, renderConcepts } from "../../../packages/core/src/index";
+import { conceptsFor, llmProviderById, renderConcepts } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
 import { sseEvent, streamSafe } from "./chat-stream";
 import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
+import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
+import { redactSecrets } from "../../../worker/src/telegram/agent";
 
 /**
  * THIS PROMPT ONCE TOLD THE MODEL THERE WAS NO PAPER/LIVE SWITCH.
@@ -111,7 +114,16 @@ export interface AgentChatBody { message?: unknown; state?: unknown; history?: u
 export interface AgentReply {
   reply: string | null;
   command?: NonNullable<ReturnType<typeof splitCommand>["command"]>;
-  why?: "empty" | "no-llm" | "llm-error";
+  why?: "empty" | "no-llm" | "llm-error" | "cut-off";
+  /**
+   * WHICH KIND OF MODEL FAILURE, decided here — where the error object is,
+   * with its status — so the browser can say it in the agent's own words.
+   * worker/src/llm-failure.ts is the one classifier; Telegram uses it too.
+   */
+  kind?: LlmFailureKind;
+  /** The brain's provider, as the owner would name it. Absent when it has no name worth saying. */
+  provider?: string;
+  /** The provider's words, redacted and in one shape — for whoever debugs it. Never rendered. */
   detail?: string;
 }
 export interface AgentChatOptions {
@@ -217,19 +229,72 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     const raw = (await (options.complete ?? llmText)(prepared.creds, prepared.request)).trim();
     return finishReply(raw);
   } catch (e) {
-    return failedReply(e, options);
+    return failedReply(e, options, prepared.creds);
   }
 }
 
-function failedReply(e: unknown, options: AgentChatOptions): AgentReply {
-  // LLM unreachable/rate-limited — degrade to the client's deterministic path,
-  // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that
-  // cover a dead model, a rejected key, a rate limit and an over-long prompt:
-  // four problems with four different fixes, indistinguishable to the one
-  // person who can fix any of them. On the hosted app they cannot read the
-  // logs either, so this is their only channel. Already redacted upstream.
-  const detail = e instanceof Error ? e.message : "";
-  return { reply: null, why: "llm-error", ...(options.surface === "partner" ? {} : { detail: detail.slice(0, 300) || undefined }) };
+/**
+ * The brain's provider as an owner would name it: "Groq", "Anthropic" — the
+ * catalogue label without its gloss. Nothing for an id the catalogue does not
+ * know, or for "custom", whose label describes a protocol, not a company.
+ */
+function providerName(id: string): string | undefined {
+  if (id === "custom") return undefined;
+  const label = llmProviderById(id)?.label;
+  return label ? label.replace(/\s*\(.*\)\s*$/, "") : undefined;
+}
+
+/**
+ * A failed call's message in providerError's shape — "<provider> <status> —
+ * <code>: <message>" — which is what describeLlmFailure reads.
+ *
+ * THE ANTHROPIC SDK THROWS ITS OWN ERROR, never passed through providerError:
+ * its message is the status followed by the WHOLE JSON body, request id and
+ * all. Read for what it is — its status and the provider's own type and
+ * message — or a rejected key classifies as "a reason I don't recognise" and
+ * the JSON is what the owner reads.
+ */
+function providerLineOf(e: unknown, creds: LlmCreds): string {
+  if (e instanceof Anthropic.APIError && typeof e.status === "number") {
+    const inner = (e.error as { error?: { type?: unknown; message?: unknown } } | undefined)?.error;
+    const said = [inner?.type, inner?.message].filter((x): x is string => typeof x === "string" && x.length > 0).join(": ");
+    const safe = redactSecrets(said, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
+    return `${creds.provider} ${e.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+  }
+  return e instanceof Error ? e.message : "";
+}
+
+/**
+ * WHAT BECAME OF A MODEL CALL THAT FAILED, as the owner's chat is told it.
+ *
+ * "llm-error" alone is four characters that cover a dead model, a rejected
+ * key, a rate limit and an over-long prompt: four problems with four fixes,
+ * and a retry fixes only some of them. So the KIND is decided here and sent,
+ * and the browser says it in the agent's voice — never the provider's own
+ * text, which the chat used to paste into the agent's sentence (Anthropic's
+ * JSON included) and then tell the owner to "give it a moment" whatever it
+ * said. `detail` still rides along, redacted and in one shape, for whoever
+ * debugs it; nothing renders it.
+ *
+ * A PROVIDER STREAM THAT STOPPED SHORT IS A CUT-OFF, the same failure the
+ * browser reports for its own stream: half an answer, which asking again can
+ * fix. The partner surface keeps its bare answer, and never a detail.
+ */
+function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds): AgentReply {
+  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+  const line = providerLineOf(e, creds);
+  if (/stream ended before the reply was finished/.test(line)) return { reply: null, why: "cut-off" };
+  // No status at all: the SDK never got an answer. describeLlmFailure knows
+  // undici's "fetch failed"; the SDK says "Connection error." instead.
+  const kind = e instanceof Anthropic.APIConnectionError ? "unreachable" : describeLlmFailure(line).kind;
+  const provider = providerName(creds.provider);
+  return {
+    reply: null,
+    why: "llm-error",
+    kind,
+    ...(provider ? { provider } : {}),
+    ...(line ? { detail: line.slice(0, 300) } : {}),
+  };
 }
 
 const json = (body: unknown, status: number) =>
@@ -295,8 +360,8 @@ export async function agentReplyResponse(
         });
         send(sseEvent("done", finishReply(full.trim())));
       } catch (e) {
-        const failed = failedReply(e, options);
-        send(sseEvent("error", { why: failed.why, ...(failed.detail ? { detail: failed.detail } : {}) }));
+        const { reply: _none, ...failed } = failedReply(e, options, creds);
+        send(sseEvent("error", failed));
       } finally {
         try {
           controller.close();

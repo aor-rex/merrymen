@@ -23,7 +23,9 @@ import {
   newestAt,
   receiptParts,
   receiptText,
+  llmFailureOf,
   refocusAfterSend,
+  retryHelps,
   tradeKeyOf,
   turnsToMessages,
 } from "./chat-thread";
@@ -300,7 +302,7 @@ describe("chips", () => {
 
 describe("failures, in the agent's voice", () => {
   it("NEVER THE RAW ERROR TEXT, and each says what to do", () => {
-    for (const kind of ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off"] as const) {
+    for (const kind of ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server"] as const) {
       const line = failureLine(kind);
       assert.match(line, /^(I|My)\b/, `${kind} is said as the agent, in the first person`);
       assert.doesNotMatch(line, /DOMException|TypeError|Failed to fetch|undefined/);
@@ -309,8 +311,63 @@ describe("failures, in the agent's voice", () => {
     assert.match(failureLine("signed-out"), /[Ss]ign in/);
   });
 
-  it("the provider's own words ride along when there are some", () => {
-    assert.match(failureLine("llm-error", "groq 429 — rate limited"), /groq 429 — rate limited/);
+  it("A MODEL FAILURE IS SAID BY ITS KIND, never in the provider's words", () => {
+    // It used to paste them: "(it said: groq 401 — invalid_api_key: Invalid
+    // API Key). Give it a moment and try again." — a transcript, and advice no
+    // moment could make true.
+    const facts = (kind: "key-rejected" | "model-missing" | "other" | "rate-limited" | "provider-down" | "unreachable") => ({
+      llm: { kind, provider: "Groq" },
+    });
+    for (const kind of ["key-rejected", "model-missing", "other", "rate-limited", "provider-down", "unreachable"] as const) {
+      const line = failureLine("llm-error", facts(kind));
+      assert.match(line, /^(I|My)\b/, kind);
+      assert.doesNotMatch(line, /[{}]|invalid_api_key|\b[45]\d\d\b/, kind);
+    }
+    assert.match(failureLine("llm-error", facts("key-rejected")), /Groq refused the API key/);
+    assert.match(failureLine("llm-error", facts("rate-limited")), /rate-limited by Groq/);
+    // With no provider to name, it is still a sentence.
+    assert.match(failureLine("llm-error", { llm: { kind: "key-rejected", provider: null } }), /its provider refused the API key/);
+  });
+
+  it("RETRY ONLY WHERE ASKING AGAIN CAN HELP — and no line promises it where it cannot", () => {
+    const helps = (kind: "key-rejected" | "model-missing" | "other" | "rate-limited" | "provider-down" | "unreachable") =>
+      retryHelps("llm-error", { llm: { kind, provider: "Groq" } });
+    for (const kind of ["rate-limited", "provider-down", "unreachable"] as const) {
+      assert.equal(helps(kind), true, kind);
+      assert.match(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /[Tt]ry again/, kind);
+    }
+    for (const kind of ["key-rejected", "model-missing", "other"] as const) {
+      assert.equal(helps(kind), false, kind);
+      assert.doesNotMatch(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /moment|try again/i, kind);
+    }
+    // A model failure the server did not classify is not guessed to be passing.
+    assert.equal(retryHelps("llm-error"), false);
+    for (const kind of ["signed-out", "no-llm", "unreadable", "network", "timeout", "cut-off", "server"] as const) {
+      assert.equal(retryHelps(kind), true, kind);
+    }
+  });
+
+  it("WHAT THE ROUTE CLASSIFIED IS CHECKED, not trusted", () => {
+    // A kind this browser has never heard of is not guessed at: it is a
+    // reason it does not recognise, and no Retry is promised for it.
+    const unknown = llmFailureOf("brand-new-kind", "Groq");
+    assert.deepEqual(unknown, { kind: "other", provider: "Groq" });
+    assert.equal(retryHelps("llm-error", { llm: unknown }), false);
+    assert.deepEqual(llmFailureOf("rate-limited", "Groq"), { kind: "rate-limited", provider: "Groq" });
+    // A provider "name" that is not a short plain name is not repeated.
+    for (const provider of ["<b>Groq</b>", "x".repeat(41), "", 42, null, "groq 401 — {\"error\":1}"]) {
+      assert.equal(llmFailureOf("rate-limited", provider).provider, null, String(provider));
+    }
+  });
+
+  it("A SERVER THAT DID NOT ANSWER IS NOT 'I ANSWERED'", () => {
+    // A 502 gateway page was said as "I answered, but it arrived garbled" —
+    // a sentence about an answer that never existed.
+    const line = failureLine("server", { status: 502 });
+    assert.match(line, /the server said 502/);
+    assert.doesNotMatch(line, /I answered|garbled/);
+    assert.doesNotMatch(failureLine("server"), /said/, "no status is invented");
+    assert.doesNotMatch(failureLine("unreadable"), /I answered/, "and an unreadable body claims no answer either");
   });
 });
 

@@ -35,7 +35,18 @@ import { receiptOf } from "@/lib/order-state";
 import type { ChatFailure, ChatMessage } from "./account";
 import { chatStateOf, type ChatSettings } from "./chat-payload";
 import { clearThread as forgetThread, loadThread, saveThread, type KeptThread } from "./chat-store";
-import { absorbFill, capThread, failureLine, historyBeforeRetry, historyFor, mergeFills, newestAt } from "./chat-thread";
+import {
+  absorbFill,
+  capThread,
+  failureLine,
+  historyBeforeRetry,
+  historyFor,
+  llmFailureOf,
+  mergeFills,
+  newestAt,
+  retryHelps,
+  type FailureFacts,
+} from "./chat-thread";
 import type { LiveMine, Thesis } from "./live";
 import { fetchOrderPoll, followDeadline, followOrderUntil } from "./order-follow";
 
@@ -105,7 +116,7 @@ const SETTINGS_FRESH_MS = 30_000;
 
 export type Asked =
   | { ok: true; reply: string; command?: Proposal }
-  | { ok: false; failure: ChatFailure; detail?: string };
+  | { ok: false; failure: ChatFailure; facts?: FailureFacts };
 
 /**
  * ONE MESSAGE TO /api/chat AND WHAT BECAME OF IT.
@@ -116,6 +127,11 @@ export type Asked =
  * that ends without its `done` was cut off, and is a failure — never the half
  * that arrived. `onText` is told what may be shown so far (chat-stream.ts has
  * already held back anything from a `<<` on).
+ *
+ * AN ERROR STATUS IS NOBODY'S ANSWER. A 502 from a gateway, or a 500 or 429
+ * the route sent as JSON, used to be said as "I answered, but it arrived
+ * garbled" — false: nothing answered. It is "server", with its status.
+ * "unreadable" is kept for a 2xx body that could not be read.
  */
 export async function askAgent(
   payload: { message: string; state: string; history: { role: "user" | "assistant"; content: string }[] },
@@ -141,9 +157,10 @@ export async function askAgent(
       return { ok: false, failure: timedOut ? "timeout" : "network" };
     }
     if (res.status === 401) return { ok: false, failure: "signed-out" };
+    if (!res.ok) return { ok: false, failure: "server", facts: { status: res.status } };
     const type = res.headers.get("content-type") ?? "";
     let out: StreamedReply;
-    if (res.ok && res.body && /text\/event-stream/i.test(type)) {
+    if (res.body && /text\/event-stream/i.test(type)) {
       try {
         out = await readReplyStream(res.body, onText);
       } catch {
@@ -165,9 +182,7 @@ export async function askAgent(
     }
     if (out.why === "no-llm") return { ok: false, failure: "no-llm" };
     if (out.why === "cut-off") return { ok: false, failure: timedOut ? "timeout" : "cut-off" };
-    if (out.why === "llm-error") {
-      return { ok: false, failure: "llm-error", ...(typeof out.detail === "string" && out.detail ? { detail: out.detail } : {}) };
-    }
+    if (out.why === "llm-error") return { ok: false, failure: "llm-error", facts: { llm: llmFailureOf(out.kind, out.provider) } };
     return { ok: false, failure: "unreadable" };
   } finally {
     clearTimeout(timer);
@@ -357,7 +372,16 @@ export function useChatController(o: {
             ...t,
             messages: [
               ...t.messages,
-              { id: lineId("agent", clock()), role: "agent" as const, at: clock(), text: failureLine(out.failure, out.detail), failed: out.failure, retry: q },
+              {
+                id: lineId("agent", clock()),
+                role: "agent" as const,
+                at: clock(),
+                text: failureLine(out.failure, out.facts),
+                failed: out.failure,
+                // A Retry only where asking again can work: never beside "that
+                // key has to be replaced first".
+                ...(retryHelps(out.failure, out.facts) ? { retry: q } : {}),
+              },
             ],
           }));
           // And the words come back, so nothing they typed is lost to a network.

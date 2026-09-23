@@ -113,9 +113,12 @@ describe("reading the stream in the browser", () => {
     for (const s of shown) assert.ok(!s.includes("<"), JSON.stringify(s));
   });
 
-  it("AN ERROR EVENT IS AN ERROR, with the provider's own words", async () => {
-    const out = await readReplyStream(body([sseEvent("text", { t: "Hal" }), sseEvent("error", { why: "llm-error", detail: "groq 429 — rate limited" })]), () => {});
-    assert.deepEqual(out, { reply: null, why: "llm-error", detail: "groq 429 — rate limited" });
+  it("AN ERROR EVENT IS AN ERROR, carrying what the server classified", async () => {
+    const out = await readReplyStream(
+      body([sseEvent("text", { t: "Hal" }), sseEvent("error", { why: "llm-error", kind: "rate-limited", provider: "Groq", detail: "groq 429 — rate limited" })]),
+      () => {},
+    );
+    assert.deepEqual(out, { reply: null, why: "llm-error", kind: "rate-limited", provider: "Groq", detail: "groq 429 — rate limited" });
   });
 
   it("A STREAM THAT ENDS WITHOUT `done` WAS CUT OFF, and is not a reply", async () => {

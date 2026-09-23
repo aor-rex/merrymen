@@ -127,6 +127,16 @@ describe("round trip", () => {
     assert.equal(back[0]!.tradeKey, "t:1:buy:TSLA:5:l", "only its key");
     assert.equal(back[1]!.failed, "network", "a failure stays a failure, so the model is never told it said it");
   });
+
+  it("EVERY KIND OF FAILURE STAYS ONE after a reload — none is read back as the agent's words", () => {
+    // A failure that lost its mark on the way back in would be handed to the
+    // model as something it said ("I couldn't get an answer through…").
+    const s = memStore();
+    const key = "merrymen.chat.self";
+    const kinds = ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server"] as const;
+    saveThread(key, thread(kinds.map((failed, i) => ({ ...line(i, "agent"), failed }))), s);
+    assert.deepEqual(loadThread(key, s).messages.map((m) => m.failed), [...kinds]);
+  });
 });
 
 describe("a conversation kept before messages", () => {

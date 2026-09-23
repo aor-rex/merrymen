@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import React, { act, createElement } from "react";
 import { autonomyOf } from "@merrymen/core";
+import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
@@ -244,7 +245,9 @@ describe("sending feels instant", () => {
 });
 
 describe("when the reply does not come", () => {
-  it("A PAGE THAT IS NOT JSON IS SAID AS THE AGENT, WITH A RETRY, and the words come back", async () => {
+  it("A GATEWAY PAGE IS SAID AS THE SERVER'S, NOT AS A GARBLED ANSWER — with a Retry, and the words come back", async () => {
+    // The agent did not answer a 502. "I answered, but it arrived garbled"
+    // was a false sentence to the owner, and a test used to insist on it.
     let n = 0;
     routes["POST /api/chat"] = () =>
       ++n === 1
@@ -253,12 +256,13 @@ describe("when the reply does not come", () => {
     await ui.render(h());
     await settle();
     await typeAndSend("Are you there?");
-    await until(() => /arrived garbled/.test(text()), "the failure, in the agent's voice");
-    assert.doesNotMatch(text(), /Unexpected token|SyntaxError|DOMException/, "never the raw error");
+    await until(() => /the server said 502/.test(text()), "the failure, in the agent's voice");
+    assert.doesNotMatch(text(), /I answered|garbled/);
+    assert.doesNotMatch(text(), /Unexpected token|SyntaxError|DOMException|Bad Gateway/, "never the raw error");
     assert.equal(textarea().value, "Are you there?", "the draft is restored");
     await ui.click("Retry");
     await until(() => /Back with you\./.test(text()), "the retry's answer");
-    assert.doesNotMatch(text(), /arrived garbled/, "the failure gives way to the answer");
+    assert.doesNotMatch(text(), /the server said/, "the failure gives way to the answer");
     const asked = Array.from(ui.container.querySelectorAll(".desk-question")).filter((q) => q.textContent === "Are you there?");
     assert.equal(asked.length, 1, "one question, asked twice, is one line");
     assert.equal(textarea().value, "", "and the restored draft is spent");
@@ -272,8 +276,44 @@ describe("when the reply does not come", () => {
     await ui.render(h());
     await settle();
     await typeAndSend("hello");
-    await until(() => /arrived garbled/.test(text()), "the failure");
+    await until(() => /an answer back that I can't read/.test(text()), "the failure");
     assert.doesNotMatch(text(), /Send everything/);
+  });
+
+  it("AN ERROR THE ROUTE SENT AS JSON IS STILL THE SERVER'S, not a garbled answer", async () => {
+    for (const status of [500, 429]) {
+      routes["POST /api/chat"] = () => json({ error: "boom" }, status);
+      await ui.render(h());
+      await settle();
+      await typeAndSend(`status ${status}?`);
+      await until(() => new RegExp(`the server said ${status}`).test(text()), String(status));
+      assert.doesNotMatch(text(), /boom|garbled|I answered/);
+    }
+  });
+
+  it("A REJECTED KEY IS SAID AS ONE — no transcript, no Retry it cannot answer", async () => {
+    // Driven through the real route with a provider that refuses the key, and
+    // read by the real browser reader: the reviewer's case, end to end.
+    const refuse = (e: Error): Handler => (_url, init) =>
+      agentReplyResponse(JSON.parse(String(init!.body)) as AgentChatBody, { stream: true }, {
+        credentials: () => ({ provider: "groq", transport: "openai", baseUrl: "https://example.com/v1", model: "m", apiKey: "k", vision: false }),
+        stream: async () => {
+          throw e;
+        },
+      });
+    routes["POST /api/chat"] = refuse(new Error("groq 401 — invalid_api_key: Invalid API Key"));
+    await ui.render(h());
+    await settle();
+    await typeAndSend("hello?");
+    await until(() => /Groq refused the API key/.test(text()), "the refusal, named");
+    assert.doesNotMatch(text(), /invalid_api_key|401|it said|moment/);
+    assert.equal(buttons("Retry").length, 0, "asking again cannot fix a key");
+    assert.equal(textarea().value, "hello?", "the words still come back");
+    // A rate limit is the other kind: it passes, so it is offered.
+    routes["POST /api/chat"] = refuse(new Error("groq 429 — rate_limit_exceeded: slow down"));
+    await typeAndSend("hello again?");
+    await until(() => /rate-limited by Groq/.test(text()), "the rate limit");
+    assert.equal(buttons("Retry").length, 1);
   });
 
   it("A RETRY PUTS THE QUESTION ONCE — the model does not hear it twice", async () => {
@@ -281,7 +321,11 @@ describe("when the reply does not come", () => {
     // that line in the history, the model read it as asked twice in a row.
     let n = 0;
     routes["POST /api/chat"] = () =>
-      ++n === 1 ? json({ reply: "Hello." }) : n === 2 ? json({ reply: null, why: "llm-error" }) : json({ reply: "Here." });
+      ++n === 1
+        ? json({ reply: "Hello." })
+        : n === 2
+          ? json({ reply: null, why: "llm-error", kind: "provider-down", provider: "Groq" })
+          : json({ reply: "Here." });
     await ui.render(h());
     await settle();
     await typeAndSend("hi");
@@ -309,7 +353,7 @@ describe("when the reply does not come", () => {
     const cases: [Handler, RegExp][] = [
       [() => json({ reply: null, why: "not signed in" }, 401), /sign-in has lapsed/],
       [() => json({ reply: null, why: "no-llm" }), /Connect an AI provider in Settings/],
-      [() => json({ reply: null, why: "llm-error", detail: "groq 429 — rate limited" }), /groq 429 — rate limited/],
+      [() => json({ reply: null, why: "llm-error", kind: "rate-limited", provider: "Groq", detail: "groq 429 — rate limited" }), /rate-limited by Groq/],
       [() => { throw new TypeError("Failed to fetch"); }, /connection dropped/],
     ];
     await ui.render(h());
@@ -318,7 +362,7 @@ describe("when the reply does not come", () => {
       routes["POST /api/chat"] = handler;
       await typeAndSend("hello?");
       await until(() => said.test(text()), String(said));
-      assert.doesNotMatch(text(), /Failed to fetch|TypeError/);
+      assert.doesNotMatch(text(), /Failed to fetch|TypeError|groq 429/);
       if (String(said).includes("AI provider")) {
         assert.ok(ui.container.querySelector('a[href="/settings"]'), "no brain points at the screen that fixes it");
       }

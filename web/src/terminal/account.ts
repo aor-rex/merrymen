@@ -16,8 +16,14 @@ export interface ChatTurn {
   trade?: Thesis;
 }
 
-/** Why a reply did not arrive, as the agent says it (chat-thread.ts failureLine). */
-export type ChatFailure = "signed-out" | "no-llm" | "llm-error" | "unreadable" | "network" | "timeout" | "cut-off";
+/**
+ * Why a reply did not arrive, as the agent says it (chat-thread.ts failureLine).
+ *
+ * "server" is the route, or whatever stands in front of it, answering with an
+ * error status: nobody answered, so it is never "unreadable", which is a 2xx
+ * body that could not be read.
+ */
+export type ChatFailure = "signed-out" | "no-llm" | "llm-error" | "unreadable" | "network" | "timeout" | "cut-off" | "server";
 
 /**
  * ONE LINE OF THE CONVERSATION.
