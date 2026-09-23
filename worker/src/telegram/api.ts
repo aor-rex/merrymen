@@ -242,6 +242,8 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "pause", description: "hold trading" },
   { command: "resume", description: "resume trading" },
   { command: "strategy", description: "switch strategy" },
+  { command: "settings", description: "see your settings (change them by text)" },
+  { command: "set", description: "change a setting — I ask you to confirm" },
   { command: "cap", description: "set the per-action chat ceiling (USDG)" },
   { command: "buy", description: "buy SYMBOL for USDG (passes the wall)" },
   { command: "sell", description: "sell SYMBOL for USDG" },

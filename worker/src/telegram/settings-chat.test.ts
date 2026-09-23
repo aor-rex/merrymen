@@ -1,0 +1,158 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { describe, it } from "node:test";
+
+import { confirmKeyboard, mintNonce, parseConfirmData } from "./buttons";
+import { appliedText, proposeSettingChange, resolveSettingName, settingsListText, type ProposalContext } from "./settings-chat";
+
+const ctx: ProposalContext = {
+  current: { buyPerTickUsdg: 25, strategistStopLossBps: 0, telegramNotifyEnabled: true, strategy: "trencher", assetMode: "all", basketSymbols: ["QQQ"] },
+  allowedSymbols: ["QQQ", "NVDA"],
+  strategies: ["steady-basket", "trencher", "llm-strategist"],
+  hosted: true,
+  signedPerTradeUsdg: 10,
+  agentName: "Shogun",
+};
+
+describe("proposeSettingChange — a question, never a change", () => {
+  it("asks before changing, in plain words, with before and after", () => {
+    const p = proposeSettingChange("buyPerTickUsdg", "$20", ctx);
+    assert.equal(p.kind, "ask");
+    if (p.kind !== "ask") return;
+    assert.equal(p.key, "buyPerTickUsdg");
+    assert.equal(p.value, 20);
+    assert.match(p.text, /amount per buy/);
+    assert.match(p.text, /\$25\.00/);
+    assert.match(p.text, /\$20\.00/);
+  });
+
+  it("says when the signed per-trade limit will still hold a bigger size back", () => {
+    const p = proposeSettingChange("buyPerTickUsdg", "50", ctx);
+    assert.equal(p.kind, "ask");
+    assert.match((p as { text: string }).text, /signed per-trade limit is \$10\.00/);
+  });
+
+  it("a sealed limit gets the Sign button, never a patch", () => {
+    for (const k of ["perTradeCap", "dailyCap", "expiry", "drawdownBreaker", "tokens"]) {
+      const p = proposeSettingChange(k, "50", ctx);
+      assert.equal(p.kind, "reply", k);
+      assert.equal((p as { button?: string }).button, "sign", k);
+    }
+  });
+
+  it("the step to real money is dashboard-only, with a Settings button", () => {
+    const p = proposeSettingChange("liveTrading", "on", ctx);
+    assert.equal(p.kind, "reply");
+    assert.equal((p as { button?: string }).button, "dashboard");
+    assert.match((p as { text: string }).text, /dashboard/);
+  });
+
+  it("an out-of-range value is refused with the reason, and nothing is parked", () => {
+    const p = proposeSettingChange("strategistStopLossBps", "250%", ctx);
+    assert.equal(p.kind, "reply");
+    assert.match((p as { text: string }).text, /can't go above/);
+  });
+
+  it("no change when it already has that value", () => {
+    const p = proposeSettingChange("buyPerTickUsdg", "25", ctx);
+    assert.equal(p.kind, "reply");
+    assert.match((p as { text: string }).text, /already/);
+  });
+
+  it("hosted, only a strategy that exists", () => {
+    assert.equal(proposeSettingChange("strategy", "moonshot", ctx).kind, "reply");
+    assert.equal(proposeSettingChange("strategy", "steady basket", ctx).kind, "ask");
+  });
+
+  it("an unknown setting gets the list of what CAN change, not a guess", () => {
+    const p = proposeSettingChange("unknown", "5", ctx);
+    assert.equal(p.kind, "reply");
+    assert.match((p as { text: string }).text, /amount per buy/);
+  });
+
+  it("with no value, it says what it is now and asks", () => {
+    const p = proposeSettingChange("strategistStopLossBps", "", ctx);
+    assert.equal(p.kind, "reply");
+    assert.match((p as { text: string }).text, /off \(0%\) right now/);
+  });
+
+  it("escapes the owner's words — they go back out as HTML", () => {
+    const p = proposeSettingChange("strategy", "<b>", ctx);
+    assert.doesNotMatch((p as { text: string }).text, /<b>(?!.*<\/b>)/);
+  });
+});
+
+describe("resolveSettingName — /set takes words, not keys", () => {
+  it("matches keys, labels and the words owners use", () => {
+    assert.equal(resolveSettingName("stop loss"), "strategistStopLossBps");
+    assert.equal(resolveSettingName("Amount per buy"), "buyPerTickUsdg");
+    assert.equal(resolveSettingName("notifications"), "telegramNotifyEnabled");
+    assert.equal(resolveSettingName("liveTrading"), "liveTrading");
+    assert.equal(resolveSettingName("colour of the sky"), null);
+  });
+
+  it("/set stop loss 8% reaches the same question the classifier would", () => {
+    const p = proposeSettingChange("stop loss", "8%", ctx);
+    assert.equal(p.kind, "ask");
+    assert.equal((p as { value: unknown }).value, 800);
+  });
+});
+
+describe("the list and the done message", () => {
+  it("/settings shows every changeable setting with its value", () => {
+    const t = settingsListText(ctx.current);
+    assert.match(t, /amount per buy: <b>\$25\.00<\/b>/);
+    assert.match(t, /trade messages: <b>on<\/b>/);
+  });
+
+  it("says when it takes effect", () => {
+    assert.match(appliedText("buyPerTickUsdg", 20, true), /\$20\.00.*within a minute/);
+  });
+});
+
+describe("confirm buttons carry a nonce, never the action", () => {
+  it("round-trips its own data and nothing else", () => {
+    const n = mintNonce();
+    assert.match(n, /^[a-z2-7]{10}$/);
+    const [[yes, no]] = confirmKeyboard(n) as [[{ callbackData: string }, { callbackData: string }]];
+    assert.deepEqual(parseConfirmData(yes.callbackData), { yes: true, nonce: n });
+    assert.deepEqual(parseConfirmData(no.callbackData), { yes: false, nonce: n });
+    assert.ok(Buffer.byteLength(yes.callbackData) <= 64, "Telegram's limit");
+    for (const forged of ["mm:y:", "mm:x:abcdefghij", "mm:y:ABCDEFGHIJ", "transfer:0xabc", "mm:y:abcdefghij;kill"]) {
+      assert.equal(parseConfirmData(forged), null, forged);
+    }
+  });
+
+  it("two nonces differ", () => {
+    assert.notEqual(mintNonce(), mintNonce());
+  });
+});
+
+describe("INVARIANT: a press answers only the question parked for the presser", () => {
+  const src = readFileSync(new URL("./service.ts", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("const handleCallback = async"), src.indexOf("const pollOnce = async"));
+
+  it("keys the lookup by the PRESSER, and checks nonce and action identity before confirming", () => {
+    assert.match(body, /const key = `\$\{cb\.chatId\}:\$\{cb\.fromId\}`/);
+    assert.match(body, /meta\.nonce !== parsed\.nonce/);
+    assert.match(body, /parked !== meta\.action/);
+    assert.ok(body.indexOf("parked !== meta.action") < body.indexOf("executeCommand("), "checked before anything runs");
+  });
+
+  it("applies the allowlist and the group rule to presses", () => {
+    assert.match(body, /telegramAllowlist\.includes\(cb\.chatId\) \|\| cfg\.telegramAllowlist\.includes\(cb\.fromId\)/);
+    assert.match(body, /cb\.chatId !== cb\.fromId && !cfg\.telegramAllowlist\.includes\(cb\.fromId\)/);
+  });
+
+  it("answers every press, so no button spins for ever", () => {
+    const returns = body.split("return;").length - 1;
+    const answers = body.split("answerCallbackQuery(").length - 1;
+    assert.ok(answers >= returns + 1, `${answers} answers for ${returns} early returns plus the normal path`);
+  });
+
+  it("typed yes/no only ever confirms a SETTINGS question", () => {
+    const i = src.indexOf('"YES" ANSWERS A SETTINGS QUESTION');
+    const shortcut = src.slice(i, i + 1200);
+    assert.match(shortcut, /parked\?\.kind === "setting"/);
+  });
+});

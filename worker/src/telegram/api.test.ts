@@ -338,6 +338,7 @@ const HIDDEN_ALIASES = new Set([
   "digest", // report
   "send", "withdraw", // transfer
   "yes", "no", // confirm/cancel
+  "config", // settings
   "rename", // name
   "whoareyou", // soul
   "screenshot", "screen", // shot

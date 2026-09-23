@@ -22,14 +22,32 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
-import { PC_CAPABILITIES } from "../../../packages/core/src/index";
+import { PC_CAPABILITIES, isHostedMode } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths } from "../home";
 import { loadGrantFile } from "../grant";
-import { esc, getFileUrl, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type TgMessage } from "./api";
+import {
+  answerCallbackQuery,
+  editMessageText,
+  esc,
+  getFileUrl,
+  getMe,
+  getUpdates,
+  sendMessage,
+  setMyCommands,
+  publicBotCommands,
+  type InlineKeyboard,
+  type TgCallback,
+  type TgMessage,
+} from "./api";
 import { runAgentTask } from "./agent";
-import { executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { SETTING_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type PendingAction } from "./executor";
+import { appliedText, proposeSettingChange, settingsListText } from "./settings-chat";
+import { specFor, stockSymbols, validStoredSetting } from "./setting-spec";
+import { signKeyboard, signUrl } from "./sign-prompt";
+import { confirmKeyboard, mintNonce, parseConfirmData } from "./buttons";
+import { BUILTIN_STRATEGIES } from "../strategies/registry";
 import { resolveLlm } from "../llm";
 import { CONTROL_KINDS, PC_KINDS, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
 import { makePcActions, resolveInRoot } from "./pc";
@@ -46,6 +64,7 @@ import {
   readTrades,
   readWallet,
   readWhyEvidence,
+  dashboardBase,
   type StatusContext,
 } from "./reads";
 import { ensureLinkCode, rotateLinkCode, type StateRef } from "./state";
@@ -68,6 +87,11 @@ import {
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+
+/** Buttons a command asked to have under its reply. */
+interface ReplyExtras {
+  keyboard?: InlineKeyboard;
+}
 
 export interface TelegramServiceDeps {
   /** Live config (reassigned each tick by refreshConfig — pass a getter). */
@@ -150,6 +174,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // Keyed by `${chatId}:${fromId}` — a parked action is bound to the USER who
   // parked it, so in a group one member can't /confirm another's transfer/shell.
   const pending = new Map<string, PendingAction>(); // awaiting /confirm
+  /**
+   * The buttons under each parked question: which nonce they carry and WHICH
+   * parked action they answer. A press is honoured only when both still match
+   * — so an old button cannot confirm whatever was parked after it (the slot
+   * holds one action, and /confirm runs whatever is in it).
+   */
+  const pendingMeta = new Map<string, { nonce: string; action: PendingAction; messageId?: number }>();
   const linkFails = new Map<number, { fails: number; until: number }>();
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
@@ -232,156 +263,19 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     await appendChatTurn(chatId, { role, content: trimmed, memoryIds }); // write-through
   };
 
-  const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
-    const token = cfg.telegramBotToken!;
-    const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
-
-    // Voice note → text: only for allowlisted chats with the "voice" capability.
-    // Transcribed text then flows through the SAME path as a typed message.
-    if (msg.voiceFileId && !msg.text) {
-      if (!allowed) {
-        await sendMessage({ token }, msg.chatId, "🚫 not authorized.");
-        return;
-      }
-      if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
-        await sendMessage({ token }, msg.chatId, "🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
-        return;
-      }
-      if (!cfg.telegramTranscribeKey) {
-        await sendMessage({ token }, msg.chatId, "🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
-        return;
-      }
-      const { url } = await getFileUrl({ token }, msg.voiceFileId);
-      const t = url
-        ? await transcribeVoice(url, { key: cfg.telegramTranscribeKey, base: cfg.telegramTranscribeBase })
-        : { text: null as string | null, reason: "couldn't fetch the voice file" };
-      if (!t.text) {
-        await sendMessage({ token }, msg.chatId, `🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
-        return;
-      }
-      msg = { ...msg, text: t.text };
-      await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
-    }
-
-    const slash = parseSlash(msg.text);
-
-    // /link is the only command an unlisted chat may use — and it's rate-limited.
-    if (!allowed && !(slash?.kind === "link")) {
-      await sendMessage({ token }, msg.chatId, "🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.");
-      return;
-    }
-
-    // Launch a detached agent task (from /agent OR natural language). Streams its
-    // own progress; returns immediately so the poll (and /agent stop) keep flowing.
-    // Every gate is checked here, so both entry points are equally locked down.
-    const startAgent = async (task: string): Promise<void> => {
-      if (!task.trim()) {
-        await sendMessage({ token }, msg.chatId, "what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
-        return;
-      }
-      if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
-        await sendMessage({ token }, msg.chatId, "🤖 that's a multi-step task — turn on “remote control” + “agent mode” in the dashboard (settings) and I'll do it hands-on. For now I can answer questions and run single commands.");
-        return;
-      }
-      const llm = resolveLlm(cfg);
-      if (!llm) {
-        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
-        return;
-      }
-      if (agentRuns.has(msg.chatId)) {
-        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
-        return;
-      }
-      const st = stateRef.get();
-      const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
-      // Live secret VALUES to strip from every tool output and block from
-      // send_file — however the agent reads them, they never reach chat.
-      const grant = loadGrantFile();
-      const secrets = [
-        cfg.telegramBotToken,
-        cfg.anthropicApiKey,
-        cfg.groqApiKey,
-        cfg.llmApiKey,
-        cfg.bundlerApiKey,
-        cfg.rialtoApiKey,
-        cfg.telegramTranscribeKey,
-        cfg.virtualsApiKey,
-        // The signed wallet grant custodies funds. Its 0x owner/session keys already
-        // match the shape-redactor, but the base64 `serialized` session-account blob
-        // does NOT — list all three explicitly so no tool output can exfiltrate them.
-        grant?.serialized,
-        grant?.demoOwnerPrivateKey,
-        grant?.demoSessionPrivateKey,
-      ].filter((s): s is string => typeof s === "string" && s.length >= 8);
-      const stopFlag = { stopped: false };
-      agentRuns.set(msg.chatId, stopFlag);
-      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. Say “stop” to halt me.");
-      void runAgentTask(task, {
-        creds: llm,
-        cfg: {
-          capabilities: new Set(cfg.telegramCapabilities),
-          filesRoot: cfg.telegramFilesRoot,
-          shellAllowlist: cfg.telegramShellAllowlist,
-          appAllowlist: cfg.telegramAppAllowlist,
-          autoShell: cfg.telegramAgentAutoShell,
-          maxSteps: cfg.telegramAgentMaxSteps,
-          anthropicApiKey: cfg.anthropicApiKey,
-          llmModel: cfg.llmModel,
-          secrets,
-        },
-        opts: { token },
-        chatId: msg.chatId,
-        // Model text is HTML-escaped here — it must never inject parse-mode markup.
-        send: async (text) => {
-          await sendMessage({ token }, msg.chatId, esc(text));
-        },
-        note: deps.note,
-        remember: (n) => rememberNote(n, now()),
-        soulBlock,
-        stopFlag,
-      }).finally(() => agentRuns.delete(msg.chatId));
-    };
-
-    // ── /agent — explicit slash entry (also handles /agent stop) ─────────────
-    // Handled before the interpreter: the loop streams its own messages and must
-    // not block the poll (or a stop could never land). Natural-language agent
-    // tasks route through the SAME startAgent below, after interpretation.
-    const agentMatch = msg.text?.match(/^\/agent(?:@\w+)?(?:\s+([\s\S]+))?$/i);
-    if (agentMatch) {
-      // Same sender-level rule as other state-changing commands: in a group,
-      // only individually-allowlisted users may drive the PC.
-      if (msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
-        await sendMessage({ token }, msg.chatId, "🚫 in a group, only individually-allowlisted users can run /agent.");
-        return;
-      }
-      const arg = (agentMatch[1] ?? "").trim();
-      if (/^stop$/i.test(arg)) {
-        const running = agentRuns.get(msg.chatId);
-        if (running) {
-          running.stopped = true;
-          await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
-        } else {
-          await sendMessage({ token }, msg.chatId, "nothing running.");
-        }
-        return;
-      }
-      if (!arg) {
-        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
-        return;
-      }
-      await startAgent(arg);
-      return;
-    }
-
-    // "stop" / "halt" while a task is running → stop it (natural-language stop).
-    if (agentRuns.has(msg.chatId) && /^\s*(stop|halt|cancel|abort)\b/i.test(msg.text ?? "")) {
-      if (msg.chatId === msg.fromId || cfg.telegramAllowlist.includes(msg.fromId)) {
-        agentRuns.get(msg.chatId)!.stopped = true;
-        await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
-        return;
-      }
-    }
-
+  /**
+   * The capabilities one chat message may use, bound to WHO sent it.
+   *
+   * A factory rather than an object built inside `handle`, because a button
+   * press needs exactly the same capabilities — bound to the presser — and a
+   * second copy of this object would drift from the first on the next change.
+   */
+  const makeCmdDeps = (
+    msg: Pick<TgMessage, "chatId" | "fromId" | "fromUsername">,
+    cfg: ResolvedConfig,
+    token: string,
+    extras: ReplyExtras,
+  ): CommandDeps => {
     const linkDep = (code: string): { ok: boolean; reason?: string } => {
       const lock = linkFails.get(msg.chatId);
       if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
@@ -455,6 +349,45 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           if (!ev.hasTrade || !llm) return ev.text;
           return narrateWhy(ev.text.replace(/<[^>]+>/g, ""), llm);
         },
+        settings: () => settingsListText(cfg as unknown as Record<string, unknown>),
+      },
+      // ── settings by text: ask first, change on confirm ────────────────────
+      proposeSetting: (setting, value) => {
+        const p = proposeSettingChange(setting, value, {
+          current: cfg as unknown as Record<string, unknown>,
+          allowedSymbols: [...stockSymbols(), ...cfg.customTokens.map((t) => t.symbol.toUpperCase())],
+          strategies: [...BUILTIN_STRATEGIES],
+          hosted: isHostedMode(),
+          signedPerTradeUsdg: deps.grantPerTradeUsdg(),
+          agentName: getName(),
+        });
+        if (p.kind === "reply") {
+          if (p.button === "sign") extras.keyboard = signKeyboard(signUrl(dashboardBase(), "expiring"));
+          if (p.button === "dashboard") extras.keyboard = [[{ text: "⚙️ Open Settings", url: `${dashboardBase()}/settings` }]];
+          return p.text;
+        }
+        pending.set(`${msg.chatId}:${msg.fromId}`, {
+          kind: "setting",
+          key: p.key,
+          value: p.value,
+          expiresAt: now() + SETTING_CONFIRM_TTL_SEC,
+        });
+        return p.text;
+      },
+      applySetting: (key, value) => {
+        // Checked again here, not only when asked: the value sat in memory for
+        // up to ten minutes and the rules for it are one table away.
+        const spec = specFor(key);
+        if (!spec || !validStoredSetting(key, value)) return "that change is no longer valid — nothing changed. Ask me again.";
+        if (key === "strategy") {
+          const r = deps.setStrategy(value as string);
+          if (!r.ok) return `can't switch strategy: ${esc(r.reason ?? "unknown")} — nothing changed.`;
+        }
+        // BOTH FILES, for the reason /strategy and /cap explain below.
+        patchSettingsFile({ [key]: value } as never);
+        rememberChatSetting(stateRef, { [key]: value }, now());
+        deps.note("ok", `Telegram: ${key} → ${JSON.stringify(value)} (confirmed in chat ${msg.chatId})`);
+        return appliedText(key, value, isHostedMode());
       },
       /**
        * BOTH FILES, FOR THE REASON /link ALREADY LEARNED.
@@ -654,6 +587,164 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       help: () => HELP_TEXT,
       now,
     };
+    return cmdDeps;
+  };
+
+  const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
+
+    // Voice note → text: only for allowlisted chats with the "voice" capability.
+    // Transcribed text then flows through the SAME path as a typed message.
+    if (msg.voiceFileId && !msg.text) {
+      if (!allowed) {
+        await sendMessage({ token }, msg.chatId, "🚫 not authorized.");
+        return;
+      }
+      if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
+        await sendMessage({ token }, msg.chatId, "🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
+        return;
+      }
+      if (!cfg.telegramTranscribeKey) {
+        await sendMessage({ token }, msg.chatId, "🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
+        return;
+      }
+      const { url } = await getFileUrl({ token }, msg.voiceFileId);
+      const t = url
+        ? await transcribeVoice(url, { key: cfg.telegramTranscribeKey, base: cfg.telegramTranscribeBase })
+        : { text: null as string | null, reason: "couldn't fetch the voice file" };
+      if (!t.text) {
+        await sendMessage({ token }, msg.chatId, `🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
+        return;
+      }
+      msg = { ...msg, text: t.text };
+      await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
+    }
+
+    const slash = parseSlash(msg.text);
+
+    // /link is the only command an unlisted chat may use — and it's rate-limited.
+    if (!allowed && !(slash?.kind === "link")) {
+      await sendMessage({ token }, msg.chatId, "🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.");
+      return;
+    }
+
+    // Launch a detached agent task (from /agent OR natural language). Streams its
+    // own progress; returns immediately so the poll (and /agent stop) keep flowing.
+    // Every gate is checked here, so both entry points are equally locked down.
+    const startAgent = async (task: string): Promise<void> => {
+      if (!task.trim()) {
+        await sendMessage({ token }, msg.chatId, "what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
+        return;
+      }
+      if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
+        await sendMessage({ token }, msg.chatId, "🤖 that's a multi-step task — turn on “remote control” + “agent mode” in the dashboard (settings) and I'll do it hands-on. For now I can answer questions and run single commands.");
+        return;
+      }
+      const llm = resolveLlm(cfg);
+      if (!llm) {
+        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
+        return;
+      }
+      if (agentRuns.has(msg.chatId)) {
+        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
+        return;
+      }
+      const st = stateRef.get();
+      const soulBlock = soulPromptBlock(st.linkedAt, st.messageCount, now());
+      // Live secret VALUES to strip from every tool output and block from
+      // send_file — however the agent reads them, they never reach chat.
+      const grant = loadGrantFile();
+      const secrets = [
+        cfg.telegramBotToken,
+        cfg.anthropicApiKey,
+        cfg.groqApiKey,
+        cfg.llmApiKey,
+        cfg.bundlerApiKey,
+        cfg.rialtoApiKey,
+        cfg.telegramTranscribeKey,
+        cfg.virtualsApiKey,
+        // The signed wallet grant custodies funds. Its 0x owner/session keys already
+        // match the shape-redactor, but the base64 `serialized` session-account blob
+        // does NOT — list all three explicitly so no tool output can exfiltrate them.
+        grant?.serialized,
+        grant?.demoOwnerPrivateKey,
+        grant?.demoSessionPrivateKey,
+      ].filter((s): s is string => typeof s === "string" && s.length >= 8);
+      const stopFlag = { stopped: false };
+      agentRuns.set(msg.chatId, stopFlag);
+      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. Say “stop” to halt me.");
+      void runAgentTask(task, {
+        creds: llm,
+        cfg: {
+          capabilities: new Set(cfg.telegramCapabilities),
+          filesRoot: cfg.telegramFilesRoot,
+          shellAllowlist: cfg.telegramShellAllowlist,
+          appAllowlist: cfg.telegramAppAllowlist,
+          autoShell: cfg.telegramAgentAutoShell,
+          maxSteps: cfg.telegramAgentMaxSteps,
+          anthropicApiKey: cfg.anthropicApiKey,
+          llmModel: cfg.llmModel,
+          secrets,
+        },
+        opts: { token },
+        chatId: msg.chatId,
+        // Model text is HTML-escaped here — it must never inject parse-mode markup.
+        send: async (text) => {
+          await sendMessage({ token }, msg.chatId, esc(text));
+        },
+        note: deps.note,
+        remember: (n) => rememberNote(n, now()),
+        soulBlock,
+        stopFlag,
+      }).finally(() => agentRuns.delete(msg.chatId));
+    };
+
+    // ── /agent — explicit slash entry (also handles /agent stop) ─────────────
+    // Handled before the interpreter: the loop streams its own messages and must
+    // not block the poll (or a stop could never land). Natural-language agent
+    // tasks route through the SAME startAgent below, after interpretation.
+    const agentMatch = msg.text?.match(/^\/agent(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+    if (agentMatch) {
+      // Same sender-level rule as other state-changing commands: in a group,
+      // only individually-allowlisted users may drive the PC.
+      if (msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
+        await sendMessage({ token }, msg.chatId, "🚫 in a group, only individually-allowlisted users can run /agent.");
+        return;
+      }
+      const arg = (agentMatch[1] ?? "").trim();
+      if (/^stop$/i.test(arg)) {
+        const running = agentRuns.get(msg.chatId);
+        if (running) {
+          running.stopped = true;
+          await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        } else {
+          await sendMessage({ token }, msg.chatId, "nothing running.");
+        }
+        return;
+      }
+      if (!arg) {
+        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
+        return;
+      }
+      await startAgent(arg);
+      return;
+    }
+
+    // "stop" / "halt" while a task is running → stop it (natural-language stop).
+    if (agentRuns.has(msg.chatId) && /^\s*(stop|halt|cancel|abort)\b/i.test(msg.text ?? "")) {
+      if (msg.chatId === msg.fromId || cfg.telegramAllowlist.includes(msg.fromId)) {
+        agentRuns.get(msg.chatId)!.stopped = true;
+        await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        return;
+      }
+    }
+
+    const statusCtx = () => deps.buildStatusContext();
+    // Filled by a command that wants buttons under its reply (a "Sign now" link,
+    // a Settings link). Confirm buttons for a parked action are added below.
+    const extras: ReplyExtras = {};
+    const cmdDeps = makeCmdDeps(msg, cfg, token, extras);
 
     // Only the OWNER shapes the soul — both relationship growth AND persistent
     // memory. In a GROUP, `allowed` is true for every member, so without this gate
@@ -685,6 +776,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         if (Number.isFinite(n) && n > 0) {
           cmd = { kind: "chat", reply: `to trade, tell me a ticker and a USDG amount, e.g. 'buy 10 of QQQ' — you sent just "${msg.text.trim()}"` };
         }
+      }
+    }
+    if (!cmd) {
+      // "YES" ANSWERS A SETTINGS QUESTION — AND ONLY A SETTINGS QUESTION.
+      //
+      // Typing the answer is natural after "Change X to Y?", and the model is
+      // deliberately unable to emit confirm (it could read one out of any
+      // sentence). So it is matched here, exactly, and only when the thing
+      // parked for this sender is a settings change: a transfer, a kill or a
+      // shell command still needs /confirm or its button.
+      const parked = pending.get(`${msg.chatId}:${msg.fromId}`);
+      if (parked?.kind === "setting") {
+        const t = msg.text.trim();
+        if (/^(yes|y|yep|yeah|ok|okay|sure|do it|confirm|go ahead|please do)[.!\s]*$/i.test(t)) cmd = { kind: "confirm" };
+        else if (/^(no|n|nope|cancel|never ?mind|don'?t|leave it)[.!\s]*$/i.test(t)) cmd = { kind: "cancel" };
       }
     }
     if (!cmd) {
@@ -788,6 +894,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
 
     // A failed command must still answer — silence reads as a dead bot.
+    const pendingKey = `${msg.chatId}:${msg.fromId}`;
+    const pendingBefore = pending.get(pendingKey);
     let reply: string;
     try {
       reply = await executeCommand(cmd, cmdDeps);
@@ -810,12 +918,81 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // which is the one case the strip exists for. A model that answered only in
     // its reasoning channel has not answered; say that.
     const strippedReply = stripThinkingBlock(reply);
-    await sendMessage(
+    // A NEW PARKED ACTION GETS BUTTONS. Whatever this command parked — a
+    // settings change, a transfer, the kill switch, a shell command — the
+    // question now carries ✅/✖ as well as the /confirm it always accepted.
+    // The press is checked against this exact action (handleCallback).
+    const parkedNow = pending.get(pendingKey);
+    let keyboard = extras.keyboard;
+    let meta: { nonce: string; action: PendingAction; messageId?: number } | null = null;
+    if (parkedNow && parkedNow !== pendingBefore) {
+      meta = { nonce: mintNonce(), action: parkedNow };
+      keyboard = confirmKeyboard(meta.nonce);
+      pendingMeta.set(pendingKey, meta);
+    } else if (!parkedNow) {
+      pendingMeta.delete(pendingKey);
+    }
+    const sent = await sendMessage(
       { token },
       msg.chatId,
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
+      keyboard ? { keyboard } : {},
     );
+    if (meta && sent.messageId !== undefined) meta.messageId = sent.messageId;
+  };
+
+  /**
+   * A BUTTON PRESS — the answer to one parked question, from the person it was
+   * asked of.
+   *
+   * Every check a typed /confirm gets, plus one: the press must carry the
+   * nonce of the action parked for THIS sender, and that action must still be
+   * the one in the slot. Anything else is answered and ignored. Every press is
+   * answered, including refused ones, or the button spins for ever.
+   */
+  const handleCallback = async (cb: TgCallback, cfg: ResolvedConfig): Promise<void> => {
+    const opts = { token: cfg.telegramBotToken! };
+    const parsed = parseConfirmData(cb.data);
+    if (!parsed) {
+      await answerCallbackQuery(opts, cb.id, "That button has expired.");
+      return;
+    }
+    const allowed = cfg.telegramAllowlist.includes(cb.chatId) || cfg.telegramAllowlist.includes(cb.fromId);
+    if (!allowed) {
+      await answerCallbackQuery(opts, cb.id, "Not authorized.");
+      return;
+    }
+    // The group rule, as for typed state-changing commands.
+    if (cb.chatId !== cb.fromId && !cfg.telegramAllowlist.includes(cb.fromId)) {
+      await answerCallbackQuery(opts, cb.id, "Only allowlisted users can confirm in a group.");
+      return;
+    }
+    const key = `${cb.chatId}:${cb.fromId}`;
+    const meta = pendingMeta.get(key);
+    const parked = pending.get(key);
+    if (!meta) {
+      // Not this person's question (or nothing is waiting). Say so; leave the
+      // message alone — it may be someone else's live question.
+      await answerCallbackQuery(opts, cb.id, "There's nothing waiting for you to confirm.");
+      return;
+    }
+    if (meta.nonce !== parsed.nonce || !parked || parked !== meta.action || (meta.messageId !== undefined && meta.messageId !== cb.messageId)) {
+      await answerCallbackQuery(opts, cb.id, "That question has expired — ask me again.");
+      if (meta.nonce !== parsed.nonce) await editMessageText(opts, cb.chatId, cb.messageId, "⌛ This question was replaced by a newer one.");
+      return;
+    }
+    pendingMeta.delete(key);
+    let result: string;
+    try {
+      result = await executeCommand({ kind: parsed.yes ? "confirm" : "cancel" }, makeCmdDeps(cb, cfg, opts.token, {}));
+    } catch (e) {
+      result = `🚫 that failed: ${esc((e instanceof Error ? e.message : String(e)).slice(0, 200))}`;
+    }
+    await answerCallbackQuery(opts, cb.id, parsed.yes ? "Done" : "Cancelled");
+    // The question becomes its answer, so it cannot be pressed twice.
+    await editMessageText(opts, cb.chatId, cb.messageId, result);
+    await pushHistory(cb.chatId, "assistant", stripThinkingBlock(result.replace(/<[^>]+>/g, "")));
   };
 
   const pollOnce = async (): Promise<void> => {
@@ -852,7 +1029,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
     }
 
-    const { messages, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
+    const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
       if (!warnedUnreachable) {
         deps.note("warn", `Telegram: getUpdates — ${reason}`);
@@ -861,9 +1038,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     warnedUnreachable = false;
-    for (const msg of messages) {
+    // In the order they happened: a press and a typed message in the same
+    // batch must not overtake each other.
+    const updates = [
+      ...messages.map((m) => ({ at: m.updateId, run: () => handle(m, cfg) })),
+      ...callbacks.map((c) => ({ at: c.updateId, run: () => handleCallback(c, cfg) })),
+    ].sort((a, b) => a.at - b.at);
+    for (const u of updates) {
       try {
-        await handle(msg, cfg);
+        await u.run();
       } catch (e) {
         deps.note("warn", `Telegram: error handling message — ${e instanceof Error ? e.message : String(e)}`);
       }
