@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { readProfileTrades, readRoundTrips, readTopTrades } from "./profile-trades";
+import { OPENING_READ_LIMIT, readProfileTrades, readRoundTrips, readTopTrades, vouchedSells } from "./profile-trades";
 import { averageHoldSec } from "./hold-time";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
@@ -50,13 +50,13 @@ test("paper and live sales publish evidenced P&L without exposing private amount
     await db.exec(`CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT);
       CREATE TABLE trades(id INTEGER, decision_id TEXT, agent_id TEXT, epoch INTEGER, kind TEXT, fill_side TEXT, status TEXT, created_at INTEGER, amount_usdg REAL, buy_token TEXT, sell_token TEXT, realized_pnl_usdg REAL, fill_cash_usdg REAL, basis_source TEXT);
       INSERT INTO trades VALUES
-        (1,NULL,'a',1,'swap','sell','paper',1,12,NULL,NULL,2,12,'paper'),
-        (2,NULL,'a',1,'swap','sell','landed',2,8,NULL,NULL,-2,8,'receipt'),
-        (3,NULL,'a',1,'swap','sell','paper',3,10,NULL,NULL,0,10,'paper'),
-        (4,NULL,'a',1,'swap','sell','paper',4,10,NULL,NULL,NULL,10,'paper'),
-        (5,NULL,'a',1,'swap','sell','landed',5,10,NULL,NULL,2,12,'quote'),
-        (6,NULL,'a',1,'swap','buy','paper',6,10,NULL,NULL,2,12,'paper');`);
-    await db.exec("ALTER TABLE trades ADD COLUMN fill_symbol TEXT; ALTER TABLE trades ADD COLUMN user_op_hash TEXT");
+        (1,NULL,'a',1,'swap','sell','paper',1,12,'0xusdg','0xc1',2,12,'paper'),
+        (2,NULL,'a',1,'swap','sell','landed',2,8,'0xusdg','0xc2',-2,8,'receipt'),
+        (3,NULL,'a',1,'swap','sell','paper',3,10,'0xusdg','0xc3',0,10,'paper'),
+        (4,NULL,'a',1,'swap','sell','paper',4,10,'0xusdg','0xc4',NULL,10,'paper'),
+        (5,NULL,'a',1,'swap','sell','landed',5,10,'0xusdg','0xc5',2,12,'quote'),
+        (6,NULL,'a',1,'swap','buy','paper',6,10,'0xc6','0xusdg',2,12,'paper');`);
+    await db.exec("ALTER TABLE trades ADD COLUMN fill_symbol TEXT; ALTER TABLE trades ADD COLUMN user_op_hash TEXT; ALTER TABLE trades ADD COLUMN fill_qty_raw TEXT");
     const privateRows = (await readProfileTrades(db, 'a', 1, false)).trades;
     assert.deepEqual(privateRows.map(t => t.realizedPnlBps), [null, null, null, 0, -2000, 2000]);
     assert.ok(privateRows.every(t => t.realizedPnlUsdg === null && t.sizeUsdg === null));
@@ -120,7 +120,7 @@ async function sellsLedger() {
 }
 const sellRow = (id: number, pnl: number | null, cash: number | null, over: Record<string, unknown> = {}) => ({
   id, decision_id: null, agent_id: "a", epoch: 1, kind: "swap", fill_side: "sell", status: "landed", created_at: id,
-  amount_usdg: 5, user_op_hash: `0xop${id}`, fill_symbol: `C${id}`, buy_token: null, sell_token: null,
+  amount_usdg: 5, user_op_hash: `0xop${id}`, fill_symbol: `C${id}`, buy_token: "0xusdg", sell_token: `0xtok${id}`,
   realized_pnl_usdg: pnl, fill_cash_usdg: cash, basis_source: "receipt", fill_qty_raw: "1", ...over,
 });
 async function insert(db: ReturnType<typeof wrapSqlite>, rows: Record<string, unknown>[]) {
@@ -204,14 +204,15 @@ test("no closed trades is an empty list that was READ; a broken ledger is not", 
   finally { bare.close(); }
 });
 
-test("round trips read every fill of the book, oldest first, keyed by coin", async () => {
+test("round trips read every fill of the book, oldest first, keyed by the token each one moved", async () => {
   const { raw, db } = await sellsLedger();
   try {
     await insert(db, [
-      sellRow(1, null, null, { fill_side: "buy", fill_symbol: "CASH", fill_qty_raw: "10", created_at: 100 }),
-      sellRow(2, 1, 6, { fill_symbol: "CASH", fill_qty_raw: "10", created_at: 400 }),
+      // The buy's token and the sell's meet whatever case each was written in.
+      sellRow(1, null, null, { fill_side: "buy", fill_symbol: "CASH", buy_token: "0xCASH", sell_token: "0xusdg", fill_qty_raw: "10", created_at: 100 }),
+      sellRow(2, 1, 6, { fill_symbol: "CASH", sell_token: "0xcash", fill_qty_raw: "10", created_at: 400 }),
       // A stock fill that predates fill_side and fill_symbol: the executed pair names it.
-      sellRow(3, null, null, { fill_side: null, fill_symbol: null, buy_token: STOCK_TOKENS[0].address, fill_qty_raw: "2", created_at: 500 }),
+      sellRow(3, null, null, { fill_side: null, fill_symbol: null, buy_token: STOCK_TOKENS[0].address, sell_token: "0xusdg", fill_qty_raw: "2", created_at: 500 }),
       sellRow(4, null, null, { status: "paper", basis_source: "paper", created_at: 50 }), // the other book
       sellRow(5, null, null, { status: "rejected", created_at: 60 }), // filled nothing
       // A redeploy's copy of op 2: collapses into it rather than reading as a fill with no quantity.
@@ -221,11 +222,12 @@ test("round trips read every fill of the book, oldest first, keyed by coin", asy
     assert.ok(r);
     assert.equal(r.truncated, false);
     assert.deepEqual(r.fills.map((f) => [f.side, f.coin, f.qty, f.at]), [
-      ["buy", "CASH", 10n, 100],
-      ["sell", "CASH", 10n, 400],
-      ["buy", STOCK_TOKENS[0].symbol, 2n, 500],
+      ["buy", "0xcash", 10n, 100],
+      ["sell", "0xcash", 10n, 400],
+      ["buy", STOCK_TOKENS[0].address.toLowerCase(), 2n, 500],
     ]);
-    assert.equal(averageHoldSec(r.fills), 300);
+    assert.deepEqual(r.opening, new Map(), "nothing before the period, so nothing carried");
+    assert.equal(averageHoldSec(r.fills, r.opening, r.dust), 300);
     // A cap the read reaches says so: the count becomes a floor, and the hold —
     // which needs the earliest buys — is not computed from a partial tape.
     const capped = await readRoundTrips(db, "a", 1, "landed", 2);
@@ -241,14 +243,277 @@ test("a fill whose quantity or coin was not recorded is carried as unread", asyn
   const { raw, db } = await sellsLedger();
   try {
     await insert(db, [
-      sellRow(1, null, null, { fill_side: "buy", fill_symbol: "CASH", fill_qty_raw: "10", created_at: 100 }),
-      sellRow(2, 1, 6, { fill_symbol: "CASH", fill_qty_raw: null, created_at: 400 }),
-      sellRow(3, null, null, { fill_side: "buy", fill_symbol: null, fill_qty_raw: "3", created_at: 500 }),
+      sellRow(1, null, null, { fill_side: "buy", buy_token: "0xcash", sell_token: "0xusdg", fill_qty_raw: "10", created_at: 100 }),
+      sellRow(2, 1, 6, { sell_token: "0xcash", fill_qty_raw: null, created_at: 400 }),
+      sellRow(3, null, null, { fill_side: "buy", buy_token: null, fill_qty_raw: "3", created_at: 500 }),
       // Neither the fill, its decision nor the executed pair says which way it went.
-      sellRow(4, null, null, { fill_side: null, fill_symbol: "CASH", fill_qty_raw: "4", created_at: 600 }),
+      sellRow(4, null, null, { fill_side: null, fill_symbol: "CASH", buy_token: "0xcash", fill_qty_raw: "4", created_at: 600 }),
     ]);
     const r = await readRoundTrips(db, "a", 1, "landed");
-    assert.deepEqual(r?.fills.map((f) => [f.side, f.coin, f.qty]), [["buy", "CASH", 10n], ["sell", "CASH", null], ["buy", null, 3n], [null, "CASH", 4n]]);
-    assert.equal(averageHoldSec(r!.fills), null);
+    assert.deepEqual(r?.fills.map((f) => [f.side, f.coin, f.qty]), [["buy", "0xcash", 10n], ["sell", "0xcash", null], ["buy", null, 3n], [null, null, 4n]]);
+    assert.equal(averageHoldSec(r!.fills, r!.opening, r!.dust), null);
+  } finally { raw.close(); }
+});
+
+// ── PF2: what the book carried into the period is sold first ─────────────────
+const heldBuy = (id: number, token: string, qty: string, at: number, over: Record<string, unknown> = {}) =>
+  sellRow(id, null, null, { fill_side: "buy", buy_token: token, sell_token: "0xusdg", fill_qty_raw: qty, created_at: at, ...over });
+const heldSell = (id: number, token: string, qty: string, at: number, over: Record<string, unknown> = {}) =>
+  sellRow(id, null, null, { sell_token: token, fill_qty_raw: qty, created_at: at, ...over });
+
+test("a trim of a position carried into the period is no round trip of the period", async () => {
+  // The reviewer's case: 1,000 TSLA held from the last period, 10 bought and
+  // 10 trimmed a minute apart. Under FIFO the trim sold carried units.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      heldBuy(1, "0xtsla", "1000", 10, { epoch: 0 }),
+      heldBuy(2, "0xtsla", "10", 100),
+      heldSell(3, "0xtsla", "10", 160),
+    ]);
+    const r = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.deepEqual(r.opening, new Map([["0xtsla", 1_000n]]));
+    assert.equal(r.fills.length, 2, "the count is this period's fills only");
+    assert.equal(averageHoldSec(r.fills, r.opening, r.dust), null);
+  } finally { raw.close(); }
+});
+
+test("a position sold out before the period carries nothing, and an estimated one is unknown", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      heldBuy(1, "0xtsla", "1000", 10, { epoch: 0 }),
+      heldSell(2, "0xtsla", "1000", 20, { epoch: 0 }),
+      heldBuy(3, "0xtsla", "10", 100),
+      heldSell(4, "0xtsla", "10", 160),
+    ]);
+    const flat = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.equal(averageHoldSec(flat.fills, flat.opening, flat.dust), 60);
+    // Bought last period from the quote: what arrived was never read.
+    await insert(db, [heldBuy(5, "0xcat", "1000", 30, { epoch: 0, basis_source: "quote" }), heldBuy(6, "0xcat", "10", 200), heldSell(7, "0xcat", "10", 260)]);
+    const estimated = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.equal(estimated.opening?.get("0xcat"), null);
+    assert.equal(averageHoldSec(estimated.fills, estimated.opening, estimated.dust), null);
+  } finally { raw.close(); }
+});
+
+test("a paper carry stands only on the period's first valuation, because a reset clears the book without a fill", async () => {
+  const ONE = "1000000000000000000";
+  const paper = { status: "paper", basis_source: "paper", user_op_hash: null };
+  const { raw, db } = await sellsLedger();
+  try {
+    await db.exec("CREATE TABLE equity(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, epoch INTEGER, mode TEXT, positions_usdg REAL, at INTEGER)");
+    await insert(db, [
+      heldBuy(1, "0xtsla", ONE, 10, { ...paper, epoch: 0 }),
+      heldBuy(2, "0xtsla", ONE, 100, paper),
+      heldSell(3, "0xtsla", ONE, 160, paper),
+      heldSell(4, "0xtsla", ONE, 220, paper),
+    ]);
+    // Carried: the sell at 160 closes the carried share and the one at 220 the
+    // share bought at 100 (120s). Reset: the sell at 160 closes that share (60s).
+    const hold = async () => { const r = (await readRoundTrips(db, "a", 1, "paper"))!; return averageHoldSec(r.fills, r.opening, r.dust); };
+    assert.equal(await hold(), null, "no valuation: a reset and a carry look the same");
+    const mark = db.prepare("INSERT INTO equity (agent_id, epoch, mode, positions_usdg, at) VALUES ('a', 1, 'paper', ?, ?)");
+    await mark.run(0, 50);
+    assert.equal(await hold(), 60, "nothing held when the period opened: the book was reset");
+    await db.exec("DELETE FROM equity");
+    await mark.run(25, 50);
+    assert.equal(await hold(), 120, "positions held when it opened: the first sell sold the carried share");
+    await db.exec("DELETE FROM equity");
+    await mark.run(0, 200);
+    assert.equal(await hold(), null, "a valuation taken after the first fill says nothing about the opening");
+    // The funded book is never reset, and its valuation proves nothing.
+    await db.exec("DELETE FROM equity");
+    await mark.run(0, 50);
+    await insert(db, [heldBuy(4, "0xnvda", "5", 10, { epoch: 0 }), heldBuy(5, "0xnvda", "5", 100), heldSell(6, "0xnvda", "5", 160)]);
+    const live = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.equal(averageHoldSec(live.fills, live.opening, live.dust), null);
+  } finally { raw.close(); }
+});
+
+// ── PF4: a top trade's return rests on an evidenced cost ─────────────────────
+const buyRow = (id: number, token: string, qty: string, over: Record<string, unknown> = {}) =>
+  sellRow(id, null, null, { fill_side: "buy", buy_token: token, sell_token: "0xusdg", fill_qty_raw: qty, ...over });
+
+test("a sell whose cost a QUOTED buy built is not a top trade, however good it looks", async () => {
+  // realized_pnl_usdg is proceeds minus the running cost basis, and a buy whose
+  // receipt could not be read books that basis from the quote — an estimate.
+  // Checking only the sell's own basis_source let such a sell rank first.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }), // +900% on an estimated cost
+      sellRow(3, 1, 11), // +10%, on no estimate at all
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["3"]);
+  } finally { raw.close(); }
+});
+
+test("an estimate stops counting once the position it built was sold out", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }), // closes the estimated lot: not vouched
+      buyRow(3, "0xmeme", "5"), // a fresh position, from a receipt
+      sellRow(4, 2, 6, { sell_token: "0xmeme", fill_qty_raw: "5" }), // +50%, on that receipt alone
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["4"]);
+    // A PARTIAL sell leaves the estimate in what is still held.
+    await insert(db, [buyRow(5, "0xcat", "10", { basis_source: "quote" }), sellRow(6, 1, 2, { sell_token: "0xcat", fill_qty_raw: "4" }), sellRow(7, 1, 2, { sell_token: "0xcat", fill_qty_raw: "6" })]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["4"]);
+  } finally { raw.close(); }
+});
+
+test("a cost carried in from an earlier period is still that cost", async () => {
+  // cost_basis is not epoch-scoped: a position bought last period is sold
+  // against the basis that period booked.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote", epoch: 0 }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }),
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades, []);
+  } finally { raw.close(); }
+});
+
+test("a movement the ledger cannot size keeps an estimate in, because flat can no longer be told", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      // The reconciler booked a cost for an op it recovered, and wrote no side.
+      sellRow(2, null, null, { fill_side: null, buy_token: "0xmeme", sell_token: "0xusdg", fill_qty_raw: null, basis_source: "receipt" }),
+      sellRow(3, 1, 2, { sell_token: "0xmeme", fill_qty_raw: "10" }),
+      buyRow(4, "0xmeme", "5"),
+      sellRow(5, 1, 2, { sell_token: "0xmeme", fill_qty_raw: "5" }),
+    ]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades, []);
+  } finally { raw.close(); }
+});
+
+test("estimates ranked above a real trade cannot push it out of the list, past the first page too", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 1; i <= 30; i++) {
+      rows.push(buyRow(100 + i, `0xq${i}`, "1", { basis_source: "quote", created_at: i }));
+      rows.push(sellRow(200 + i, 9, 10, { sell_token: `0xq${i}`, created_at: 1_000 + i }));
+    }
+    rows.push(sellRow(300, 1, 11, { created_at: 2_000 }));
+    await insert(db, rows);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["300"]);
+  } finally { raw.close(); }
+});
+
+test("the replay that vouches for a cost vouches for nothing it could not read whole", () => {
+  const fills = [
+    { op: "b", side: "buy" as const, token: "0xm", qty: "10", source: "receipt" },
+    { op: "s", side: "sell" as const, token: "0xm", qty: "10", source: "receipt" },
+  ];
+  assert.deepEqual([...vouchedSells(fills, true)], ["s"]);
+  assert.deepEqual([...vouchedSells(fills, false)], [], "a truncated read cannot know what came before its first row");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: null }, fills[1]!], true)], [], "a cost of unknown provenance is not evidence");
+  assert.deepEqual([...vouchedSells([{ ...fills[0]!, source: "paper" }, { ...fills[1]!, source: "paper" }], true)], ["s"], "a paper fill is exact");
+  // A row with no side that booked a cost from a quote put that estimate in.
+  assert.deepEqual([...vouchedSells([{ op: "r", side: null, token: "0xm", qty: null, source: "quote" }, fills[1]!], true)], []);
+  // A sell is judged by what it sold against, whatever its own quantity; and a
+  // sell adds no cost, so its own quoted proceeds put no estimate in the basis.
+  assert.deepEqual(
+    [...vouchedSells([fills[0]!, { op: "s1", side: "sell", token: "0xm", qty: null, source: "quote" }, { ...fills[1]!, op: "s2", qty: "5" }], true)],
+    ["s1", "s2"],
+  );
+});
+
+test("a fill with no side before the period makes only its own tokens unknown", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      // The reconciler's bare row for some other coin, last period.
+      sellRow(1, null, null, { epoch: 0, fill_side: null, buy_token: "0xother", sell_token: "0xusdg", fill_qty_raw: null, created_at: 5 }),
+      heldBuy(2, "0xtsla", "10", 100),
+      heldSell(3, "0xtsla", "10", 160),
+    ]);
+    const r = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.equal(r.opening?.get("0xother"), null);
+    assert.equal(averageHoldSec(r.fills, r.opening, r.dust), 60, "TSLA was not touched by it");
+  } finally { raw.close(); }
+});
+
+test("the paper book's rounding is read as rounding, the funded book's units as exact", async () => {
+  const ONE = 10n ** 18n;
+  const drift = 5n * 10n ** 11n;
+  const rows = (status: string) => {
+    const o = { status, basis_source: status === "paper" ? "paper" : "receipt", user_op_hash: null };
+    return [
+      heldBuy(1, "0xtsla", String(ONE), 100, o),
+      heldSell(2, "0xtsla", String(ONE - drift), 160, o),
+      heldBuy(3, "0xtsla", String(ONE), 200, o),
+      heldSell(4, "0xtsla", String(ONE), 300, o),
+    ];
+  };
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, rows("paper"));
+    const paper = (await readRoundTrips(db, "a", 1, "paper"))!;
+    // 60 and 100: the half-millionth of a share left at 160 is the paper book's
+    // rounding, not a lot the sell at 300 held for 200 seconds.
+    assert.equal(averageHoldSec(paper.fills, paper.opening, paper.dust), 80);
+  } finally { raw.close(); }
+  const live = await sellsLedger();
+  try {
+    await insert(live.db, rows("landed"));
+    const r = (await readRoundTrips(live.db, "a", 1, "landed"))!;
+    assert.equal(averageHoldSec(r.fills, r.opening, r.dust), (60 + 200 + 100) / 3, "a receipt's leftover is a real leftover");
+  } finally { live.raw.close(); }
+});
+
+test("a read of the fills before the period that was cut short says nothing about what was carried", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    raw.exec("BEGIN");
+    const ins = raw.prepare("INSERT INTO trades (id, agent_id, epoch, kind, fill_side, status, created_at, amount_usdg, buy_token, sell_token, basis_source, fill_qty_raw) VALUES (?, 'a', 0, 'swap', ?, 'landed', ?, 5, ?, ?, 'receipt', '1')");
+    for (let i = 0; i < OPENING_READ_LIMIT + 1; i++) {
+      const buy = i % 2 === 0;
+      ins.run(10_000 + i, buy ? "buy" : "sell", i, buy ? "0xold" : "0xusdg", buy ? "0xusdg" : "0xold");
+    }
+    raw.exec("COMMIT");
+    await insert(db, [heldBuy(1, "0xtsla", "10", 20_000), heldSell(2, "0xtsla", "10", 20_060)]);
+    const r = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.equal(r.opening, null, "its first row is not the book's first");
+    assert.equal(averageHoldSec(r.fills, r.opening, r.dust), null);
+  } finally { raw.close(); }
+});
+
+test("a redeploy's copy, stamped this period, of an operation from the last one is that operation", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      heldBuy(1, "0xtsla", "10", 10, { epoch: 0, user_op_hash: "0xabc" }),
+      // Re-recorded at the restart, in the new period, with nothing on it.
+      sellRow(2, null, null, { epoch: 1, user_op_hash: "0xABC", fill_side: null, fill_qty_raw: null, basis_source: null, created_at: 500 }),
+    ]);
+    const r = (await readRoundTrips(db, "a", 1, "landed"))!;
+    assert.deepEqual(r.fills, [], "not a fill of this period, and not an unread one");
+    assert.deepEqual(r.opening, new Map([["0xtsla", 10n]]));
+  } finally { raw.close(); }
+});
+
+test("Buys & sells shows no return on a sell whose cost a quoted buy built, the rule TOP TRADES keeps", async () => {
+  // The same page lists the same sell twice: ranked in TOP TRADES and as a row
+  // with a P&L chip. One rule for both, or the chip prints the +900% the
+  // ranking refused.
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      buyRow(1, "0xmeme", "10", { basis_source: "quote" }),
+      sellRow(2, 9, 10, { sell_token: "0xmeme", fill_qty_raw: "10" }),
+      sellRow(3, 1, 11),
+      sellRow(4, 1, 2, { status: "paper", basis_source: "paper", user_op_hash: null }),
+    ]);
+    const pub = (await readProfileTrades(db, "a", 1, true)).trades;
+    assert.deepEqual(pub.map((t) => [t.id, t.realizedPnlBps, t.realizedPnlUsdg]), [["4", 10_000, 1], ["3", 1_000, 1], ["2", null, null], ["1", null, null]]);
   } finally { raw.close(); }
 });

@@ -45,6 +45,16 @@ export interface DeskTradeRow {
 }
 
 /**
+ * How many operations the owner's tape holds at most.
+ *
+ * Exported because the desk reads it: a tape that came back this full may have
+ * been cut at its old end, so a count reaching back to that end is a FLOOR and
+ * the desk says "12+" (terminal/swaps.ts). The desk used to keep its own copy of
+ * this number, one edit away from disagreeing with the read it describes.
+ */
+export const DESK_TAPE_LIMIT = 30;
+
+/**
  * The newest `limit` operations since `sinceSec`, for one account and, when the
  * ledger has the column, one run.
  *
@@ -58,7 +68,7 @@ export async function readDeskTrades(
   account: string,
   epoch: number | null,
   sinceSec: number,
-  limit = 30,
+  limit = DESK_TAPE_LIMIT,
 ): Promise<DeskTradeRow[]> {
   const run = epoch === null ? "" : " AND t.epoch = ?";
   const runArg = epoch === null ? [] : [epoch];

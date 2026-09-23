@@ -265,6 +265,98 @@ export const readAgent = cache(async function readAgent(
   return withReadDb(async (db): Promise<AgentProfile | null> => (db ? profileOf(db, found, publicBook) : null));
 });
 
+type AgentRow = {
+  smart_account: string;
+  name: string;
+  x_handle: string | null;
+  x_verified: number | null;
+  mode: string;
+  epoch: number;
+  beat_at: number | null;
+};
+
+/**
+ * The agent's newest account and its current run, or null when none of the
+ * identity's accounts is on this ledger (or the ledger could not be read).
+ *
+ * Every account this tenant has held: a re-grant must not split an agent's
+ * history into two strangers.
+ */
+async function agentRowOf(db: Db, identity: ProfileIdentity): Promise<AgentRow | null> {
+  const accounts = identity.accounts.map((a) => a.toLowerCase());
+  if (accounts.length === 0) return null;
+  const inList = accounts.map(() => "?").join(", ");
+  try {
+    const row = (await db
+      .prepare(
+        `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
+                COALESCE(mode, 'idle') AS mode,
+                COALESCE(epoch, 1) AS epoch, beat_at
+           FROM agents WHERE LOWER(smart_account) IN (${inList})
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(...accounts)) as AgentRow | undefined;
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE OWNER'S OWN TRADES, WITH THEIR SIZES AND DOLLARS.
+ *
+ * The spec's rule for a profile's money is "the book is public OR it is the
+ * owner's own view", and the public read below takes no session — so on a
+ * private book it withheld the owner's own sizes from the owner too. This is
+ * the owner's view: the same lists the profile shows, read with the money in.
+ *
+ * NEVER REACHABLE WITHOUT THE OWNER'S SESSION. Its only caller is readOwnBook,
+ * which the session-checked /api/agents/[slug]/own serves; the public route and
+ * the public page never call it. Holdings are not here: the profile draws them
+ * only for a published book, and the owner's desk already shows its positions.
+ */
+export interface OwnBook {
+  recentTrades: ProfileTrade[];
+  activityRead: boolean;
+  topTrades: ProfileTrade[];
+  topTradesRead: boolean;
+}
+
+export async function ownBookOf(db: Db, identity: ProfileIdentity): Promise<OwnBook | null> {
+  const row = await agentRowOf(db, identity);
+  if (!row) return null;
+  const epoch = Number(row.epoch ?? 1);
+  const book: TradeBook = row.mode === "paper" ? "paper" : "landed";
+  // `true` is the money switch these reads take — here because the viewer is
+  // the owner, not because the book was published.
+  const activity = await readProfileTrades(db, row.smart_account, epoch, true);
+  const top = await readTopTrades(db, row.smart_account, epoch, true, book);
+  return { recentTrades: activity.trades, activityRead: activity.read, topTrades: top.trades, topTradesRead: top.read };
+}
+
+/**
+ * The owner's view of `slug`, for the session's `tenant` — or why not.
+ *
+ * THE TENANT IS THE SESSION'S, and ownership is the identity store's record
+ * that this slug belongs to it. Nothing in the request can name an owner.
+ */
+export async function readOwnBook(
+  slug: string,
+  tenant: string,
+): Promise<{ status: 200; book: OwnBook } | { status: 403 | 404 | 503; error: string }> {
+  let identity;
+  try {
+    identity = await getIdentityStore().bySlug(slug);
+  } catch {
+    return { status: 503, error: "This agent could not be looked up right now." };
+  }
+  if (!identity) return { status: 404, error: "Agent not found" };
+  if (identity.tenant.toLowerCase() !== tenant.toLowerCase()) return { status: 403, error: "This is not your agent." };
+  const found = identity;
+  const book = await withReadDb(async (db) => (db ? ownBookOf(db, found) : null));
+  return book ? { status: 200, book } : { status: 404, error: "No trades on record for this agent." };
+}
+
 /**
  * The page itself, from one ledger. Out of `readAgent` so a test can drive it
  * against the worker's own schema: the identity and the book setting come from
@@ -276,36 +368,7 @@ export async function profileOf(
   identity: ProfileIdentity,
   publicBook: boolean,
 ): Promise<AgentProfile | null> {
-  // Every account this tenant has held: a re-grant must not split an agent's
-  // history into two strangers.
-  const accounts = identity.accounts.map((a) => a.toLowerCase());
-  if (accounts.length === 0) return null;
-  const inList = accounts.map(() => "?").join(", ");
-
-  let row:
-    | {
-        smart_account: string;
-        name: string;
-        x_handle: string | null;
-        x_verified: number | null;
-        mode: string;
-        epoch: number;
-        beat_at: number | null;
-      }
-    | undefined;
-  try {
-    row = (await db
-      .prepare(
-        `SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
-                COALESCE(mode, 'idle') AS mode,
-                COALESCE(epoch, 1) AS epoch, beat_at
-           FROM agents WHERE LOWER(smart_account) IN (${inList})
-          ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(...accounts)) as typeof row;
-  } catch {
-    return null;
-  }
+  const row = await agentRowOf(db, identity);
   if (!row) return null;
 
   const account = row.smart_account;
@@ -623,9 +686,11 @@ export async function profileOf(
     topTradesRead: top.read,
     // A capped read's count is a floor and says so; its hold is not computed,
     // because FIFO needs the earliest buys and a capped tape may not have them.
+    // What the book carried into the period is sold first and pairs with
+    // nothing (hold-time.ts); unread, it refuses the hold of any coin sold.
     tradeCount: trips ? trips.fills.length : null,
     tradeCountFloor: trips?.truncated === true,
-    avgHoldSec: trips && !trips.truncated ? averageHoldSec(trips.fills) : null,
+    avgHoldSec: trips && !trips.truncated ? averageHoldSec(trips.fills, trips.opening, trips.dust) : null,
     joinedAt: joinedAtOf(identity.createdAt),
     // AND CONSISTENT WITH THE GAS THIS PAGE CHARGES. A sponsored op writes no
     // owner gas at all (index.ts), so any priced or unpriced cost beside the

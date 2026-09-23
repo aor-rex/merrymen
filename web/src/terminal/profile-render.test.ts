@@ -17,6 +17,8 @@ const g = globalThis as { ResizeObserver?: unknown; self?: unknown };
 const real = { observer: g.ResizeObserver, self: g.self };
 beforeEach(() => {
   ui = testDom();
+  // No network: a case that needs an answer sets its own.
+  globalThis.fetch = (async () => json({}, 404)) as typeof fetch;
   // The chart observes its own size; jsdom has no layout, so nothing to observe.
   g.ResizeObserver = class { observe() {} disconnect() {} };
   // A stranger's view mounts the wire button, whose link prefetch schedules
@@ -66,6 +68,11 @@ it("TOP TRADES rank by return, show dollars only when sent, and say when there a
   assert.doesNotMatch(text(), /\$/, "a private book prints no dollar anywhere in the list");
   await render(agent({ topTrades: [trade("1", "CASHCAT", 4_210, 3.1)], topTradesRead: true, publicBook: true }));
   assert.match(ui.container.querySelector(".profile-top-trade")!.textContent!, /\+42\.1% \(\+\$3\.10\)/);
+  // A private book handed a dollar anyway: the page refuses it, as the swaps
+  // table below it does, rather than trusting the one server line that nulls it.
+  await render(agent({ topTrades: [trade("1", "CASHCAT", 4_210, 3.1)], topTradesRead: true, publicBook: false }));
+  assert.equal(ui.container.querySelector(".profile-top-figure")!.textContent, "+42.1%");
+  assert.doesNotMatch(ui.container.querySelector(".profile-top-trades")!.textContent!, /\$/);
   await render(agent({ topTrades: [], topTradesRead: true }));
   assert.match(text(), /No closed trades yet/);
   await render(agent({ topTrades: [], topTradesRead: false }));
@@ -94,10 +101,31 @@ it("the owner's switch is shown only on their own page, and only once the settin
   assert.equal(sw.getAttribute("aria-checked"), "false", "off by default");
 });
 
+it("the switch names everything turning it on publishes: sizes, dollar P&L, holdings, and the token pages", async () => {
+  // It said only "trade sizes and dollar P&L", and "percentages are public
+  // either way". The same flag also publishes what the agent holds and how
+  // much, and lists it by name as a holder on every token page it holds —
+  // this is the consent, so it has to say so.
+  for (const on of [false, true]) {
+    await render(agent({ publicBook: on }), { isMine: true, key: String(on) });
+    const words = ui.container.querySelector(".profile-book small")!.textContent!;
+    const label = ui.container.querySelector(".profile-book [role=switch]")!.getAttribute("aria-label")!;
+    for (const said of [words, label]) {
+      assert.match(said, /trade sizes/, said);
+      assert.match(said, /dollar P&L/, said);
+      assert.match(said, /holds/, said);
+      assert.match(said, /token pages?/, said);
+    }
+    assert.doesNotMatch(words, /Percentages are public either way/, "holdings are not public either way");
+    assert.doesNotMatch(words, /Only percentages are public/);
+  }
+});
+
 it("turning the book on saves a boolean, re-reads the profile, and a failure is said", async () => {
   const sent: unknown[] = [];
   let refreshed = 0;
-  globalThis.fetch = (async (_url: string, init?: RequestInit) => { sent.push(JSON.parse(String(init?.body))); return json({ ok: true }); }) as typeof fetch;
+  // The saves only: the owner's page also reads its own view (the PF6 cases below).
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => { if (init?.method === "PUT") sent.push(JSON.parse(String(init.body))); return json({ ok: true }); }) as typeof fetch;
   await render(agent({ publicBook: false }), { isMine: true, onBookChanged: () => { refreshed += 1; } });
   await act(async () => { (ui.container.querySelector(".profile-book [role=switch]") as HTMLElement).click(); });
   assert.deepEqual(sent, [{ publicBook: true }]);
@@ -137,4 +165,67 @@ it("Buys & sells is the swaps table: pills, a P&L chip on sells only, and no dol
   // The tabs filter the same rows.
   await act(async () => { (Array.from(table().querySelectorAll(".swaps-tabs button")).find((b) => b.textContent === "Buys") as HTMLElement).click(); });
   assert.deepEqual([...table().querySelectorAll(".swap-pill")].map((p) => p.textContent), ["Buy"]);
+});
+
+// ── PF6: the owner's own view of a private book ─────────────────────────────
+const ownFill = (id: string, action: "buy" | "sell", at: number, bps: number | null, size: number | null, usd: number | null = null) =>
+  ({ id, action, symbol: "CASHCAT", displayName: null, at, paper: false, sizeUsdg: size, realizedPnlUsdg: usd, realizedPnlBps: bps });
+
+it("the owner's own private profile shows their own sizes and dollars, from their session-checked read", async () => {
+  // "$ only when the book is public OR it is the owner's own view": the public
+  // read withholds a private book's money from everyone, its owner included, so
+  // the owner's own figures come from /api/agents/<slug>/own, which checks the
+  // session. Visitors still see percentages only.
+  const now = nowSec();
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    calls.push(String(url));
+    return json({
+      recentTrades: [ownFill("2", "sell", now - 60, 1_234, 12, 3.1), ownFill("1", "buy", now - 3 * H, null, 9)],
+      activityRead: true,
+      topTrades: [ownFill("2", "sell", now - 60, 1_234, 12, 3.1)],
+      topTradesRead: true,
+    });
+  }) as typeof fetch;
+  const publicView = [ownFill("2", "sell", now - 60, 1_234, null), ownFill("1", "buy", now - 3 * H, null, null)];
+  await render(agent({ publicBook: false, recentTrades: publicView, topTrades: [publicView[0]!], topTradesRead: true }), { isMine: true });
+  await act(async () => {});
+  assert.deepEqual(calls, ["/api/agents/shogun/own"]);
+  const table = ui.container.querySelector("[aria-label='Trade history'] .swaps")!;
+  assert.match(table.textContent!, /\$12\.00/, "the owner's own size");
+  assert.match(table.textContent!, /\+12\.3% · \+\$3\.10/, "and their own dollar P&L");
+  assert.match(ui.container.querySelector(".profile-top-trade")!.textContent!, /\+12\.3% \(\+\$3\.10\)/);
+  assert.match(text(), /Only you can see the sizes and dollar figures here/);
+  assert.doesNotMatch(text(), /Trade sizes are private\./);
+});
+
+it("a stranger never asks for the owner's view, and a published book needs none", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: string) => { calls.push(String(url)); return json({}, 404); }) as typeof fetch;
+  await render(agent({ publicBook: false, recentTrades: [ownFill("1", "sell", nowSec() - 60, 1_234, null)] }), { isMine: false });
+  await act(async () => {});
+  await render(agent({ publicBook: true, recentTrades: [ownFill("1", "sell", nowSec() - 60, 1_234, 12, 3.1)] }), { isMine: true, key: "public" });
+  await act(async () => {});
+  assert.deepEqual(calls.filter((c) => c.includes("/own")), []);
+});
+
+it("an owner's read that fails leaves the public figures, and no dollars", async () => {
+  globalThis.fetch = (async () => json({ error: "Sign in to see your own agent's figures." }, 401)) as typeof fetch;
+  const trades = [ownFill("2", "sell", nowSec() - 60, 1_234, null)];
+  await render(agent({ publicBook: false, recentTrades: trades }), { isMine: true });
+  await act(async () => {});
+  const table = ui.container.querySelector("[aria-label='Trade history'] .swaps")!;
+  assert.deepEqual([...table.querySelectorAll(".swap-pnl")].map((p) => p.textContent), ["+12.3%"]);
+  assert.doesNotMatch(table.textContent!, /\$/);
+  assert.match(text(), /Trade sizes are private\./);
+});
+
+it("an owner's read that could not read the fills does not claim to show the owner's sizes", async () => {
+  // The top trades came back and the list did not: the list shown is the
+  // public one, so the note under it is the public one too.
+  globalThis.fetch = (async () => json({ recentTrades: [], activityRead: false, topTrades: [], topTradesRead: true })) as typeof fetch;
+  await render(agent({ publicBook: false, recentTrades: [ownFill("2", "sell", nowSec() - 60, 1_234, null)] }), { isMine: true });
+  await act(async () => {});
+  assert.match(text(), /Trade sizes are private\./);
+  assert.doesNotMatch(text(), /Only you can see/);
 });

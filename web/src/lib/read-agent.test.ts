@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
-import { profileOf } from "./read-agent";
+import { ownBookOf, profileOf } from "./read-agent";
 
 /**
  * ONE AGENT'S PUBLIC PAGE, read from a ledger built by the worker's own schema.
@@ -31,13 +31,18 @@ async function mark(db: Db, at: number, equity: number) {
   await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 0, 0, ?, ?, 2, 'live')`).run(ACCOUNT, equity, at);
 }
 let op = 0;
-async function fill(db: Db, over: { side: "buy" | "sell"; coin: string; qty: string; at: number; pnl?: number; cash?: number; sponsored?: boolean }) {
+/** The cash leg, and a coin's address: the ledger keys a fill's coin by the token it moved. */
+const USDG = "0x00000000000000000000000000000000000000c0";
+const tokenOf = (coin: string) => `0x${Buffer.from(coin.toLowerCase()).toString("hex").padStart(40, "0")}`;
+async function fill(db: Db, over: { side: "buy" | "sell"; coin: string; qty: string; at: number; pnl?: number; cash?: number; sponsored?: boolean; epoch?: number; source?: string | null; status?: string }) {
   op += 1;
+  const coin = tokenOf(over.coin);
   await db.prepare(
-    `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw,
+    `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw,
                          fill_cash_usdg, realized_pnl_usdg, basis_source, gas_wei, gas_usdg, sponsored_gas_wei)
-     VALUES (?, 'swap', 'x', 5, ?, 'landed', ?, 2, ?, ?, ?, ?, ?, 'receipt', ?, ?, ?)`,
-  ).run(ACCOUNT, `0xop${op}`, over.at, over.side, over.coin, over.qty, over.cash ?? 5, over.pnl ?? null,
+     VALUES (?, 'swap', 'x', ?, ?, 5, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(ACCOUNT, over.side === "buy" ? USDG : coin, over.side === "buy" ? coin : USDG, `0xop${op}`, over.status ?? "landed", over.at, over.epoch ?? 2,
+    over.side, over.coin, over.qty, over.cash ?? 5, over.pnl ?? null, over.source === undefined ? "receipt" : over.source,
     over.sponsored ? null : "1000", over.sponsored ? null : 0.01, over.sponsored ? "1000" : null);
 }
 const identity = { slug: "shogun", accounts: [ACCOUNT], createdAt: T0 - 86_400 };
@@ -133,10 +138,12 @@ test("a paper agent's stats are its paper book's, and a live agent's are not its
     await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 1 });
     await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 61, pnl: 1, cash: 11 });
     await db.prepare(
-      `INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
-       VALUES (?, 'swap', 'x', 5, 'paper', ?, 2, 'buy', 'TSLA', '2', 5, NULL, 'paper'), (?, 'swap', 'x', 5, 'paper', ?, 2, 'sell', 'TSLA', '2', 6, 1, 'paper'),
-              (?, 'swap', 'x', 5, 'paper', ?, 2, 'buy', 'TSLA', '3', 5, NULL, 'paper')`,
-    ).run(ACCOUNT, T0 + 100, ACCOUNT, T0 + 400, ACCOUNT, T0 + 500);
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '2000000000000000000', 5, NULL, 'paper'), (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'sell', 'TSLA', '2000000000000000000', 6, 1, 'paper'),
+              (?, 'swap', 'x', ?, ?, 5, 'paper', ?, 2, 'buy', 'TSLA', '3000000000000000000', 5, NULL, 'paper')`,
+    ).run(ACCOUNT, USDG, tokenOf("TSLA"), T0 + 100, ACCOUNT, tokenOf("TSLA"), USDG, T0 + 400, ACCOUNT, USDG, tokenOf("TSLA"), T0 + 500);
+    // Paper fills are booked at 1e18 raw units a share (paper.ts), the scale its
+    // rounding is measured in.
     const live = (await profileOf(db, identity, false))!;
     assert.deepEqual([live.tradeCount, live.avgHoldSec, live.topTrades.map((t) => t.symbol)], [2, 60, ["CASH"]]);
     await db.prepare("UPDATE agents SET mode = 'paper'").run();
@@ -151,10 +158,13 @@ test("a trade count from a capped read is a floor, and no hold is computed from 
     await mark(db, T0, 100);
     raw.exec("BEGIN");
     const ins = raw.prepare(
-      `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, basis_source)
-       VALUES (?, 'swap', 'x', 5, ?, 'landed', ?, 2, ?, 'CASH', '1', 'receipt')`,
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, basis_source)
+       VALUES (?, 'swap', 'x', ?, ?, 5, ?, 'landed', ?, 2, ?, 'CASH', '1', 'receipt')`,
     );
-    for (let i = 0; i < 5_001; i++) ins.run(ACCOUNT, `0xbulk${i}`, T0 + i, i % 2 === 0 ? "buy" : "sell");
+    for (let i = 0; i < 5_001; i++) {
+      const buy = i % 2 === 0;
+      ins.run(ACCOUNT, buy ? USDG : tokenOf("CASH"), buy ? tokenOf("CASH") : USDG, `0xbulk${i}`, T0 + i, buy ? "buy" : "sell");
+    }
     raw.exec("COMMIT");
     const p = (await profileOf(db, identity, false))!;
     assert.equal(p.tradeCount, 5_000);
@@ -171,5 +181,45 @@ test("a public book shows the best trade's dollars; a private one does not", asy
     await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 2, pnl: 3, cash: 13 });
     assert.equal((await profileOf(db, identity, false))!.topTrades[0]!.realizedPnlUsdg, null);
     assert.equal((await profileOf(db, identity, true))!.topTrades[0]!.realizedPnlUsdg, 3);
+  } finally { raw.close(); }
+});
+
+test("the owner's own read carries the sizes and dollars a private profile withholds", async () => {
+  // PF6: the spec's rule is "$ only when the book is public OR it is the
+  // owner's own view". The public read takes no session, so it withholds a
+  // private book's money from everyone, its owner included; ownBookOf is the
+  // read the owner's session-checked route serves.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 1 });
+    await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + 2, pnl: 3, cash: 13 });
+    const pub = (await profileOf(db, identity, false))!;
+    assert.ok(pub.recentTrades.every((t) => t.sizeUsdg === null && t.realizedPnlUsdg === null), "the public read stays private");
+    const own = (await ownBookOf(db, identity))!;
+    assert.equal(own.activityRead, true);
+    assert.deepEqual(own.recentTrades.map((t) => [t.action, t.sizeUsdg, t.realizedPnlUsdg]), [["sell", 5, 3], ["buy", 5, null]]);
+    assert.equal(own.topTradesRead, true);
+    assert.deepEqual(own.topTrades.map((t) => [t.symbol, t.realizedPnlBps, t.realizedPnlUsdg]), [["CASH", 3_000, 3]]);
+    assert.equal(await ownBookOf(db, { slug: "x", accounts: ["0x00000000000000000000000000000000000000ff"] }), null, "no agent, no book");
+  } finally { raw.close(); }
+});
+
+test("avg hold does not pair a trim of a carried position with the buy beside it", async () => {
+  // PF2, on the worker's own schema. openNextEpoch carries positions over; the
+  // reviewer's probe held 1,000 CASH into the period, bought 10 and trimmed 10
+  // a minute later, and the profile printed "avg hold 1m" for units held weeks.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1000", at: T0 - 20 * 86_400, epoch: 1 });
+    await fill(db, { side: "buy", coin: "CASH", qty: "10", at: T0 + 100 });
+    await fill(db, { side: "sell", coin: "CASH", qty: "10", at: T0 + 160, pnl: 0.1, cash: 5.1 });
+    const p = (await profileOf(db, identity, false))!;
+    assert.equal(p.tradeCount, 2, "this period's fills only");
+    assert.equal(p.avgHoldSec, null, "the trim sold carried units: no round trip this period");
+    // Sold out last period, the same two fills are a round trip of a minute.
+    await fill(db, { side: "sell", coin: "CASH", qty: "1000", at: T0 - 10 * 86_400, epoch: 1 });
+    assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60);
   } finally { raw.close(); }
 });

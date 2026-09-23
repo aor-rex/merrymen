@@ -187,14 +187,56 @@ export function statsParts(s: {
   return out;
 }
 
-/** A top trade's figures: its return always, its dollars only when sent. */
-export function topTradeFigures(t: ProfileTrade): { pct: string; usd: string | null; tone: "up" | "down" } {
+/**
+ * A top trade's figures: its return always, its dollars only when the server
+ * sent them AND this viewer may see dollars — a published book, or the owner's
+ * own view. The server already withholds a private book's dollars; this refuses
+ * one it was handed anyway, the rule the swaps table on the same page applies
+ * (swaps.ts), so the page does not rest a private P&L on one server line.
+ */
+export function topTradeFigures(t: ProfileTrade, showMoney: boolean): { pct: string; usd: string | null; tone: "up" | "down" } {
   const bps = t.realizedPnlBps ?? 0;
+  const dollars = showMoney && t.realizedPnlUsdg != null && Number.isFinite(t.realizedPnlUsdg) ? t.realizedPnlUsdg : null;
   return {
     pct: pctBps(t.realizedPnlBps),
-    usd: t.realizedPnlUsdg == null ? null : `${t.realizedPnlUsdg >= 0 ? "+" : "−"}${usd(Math.abs(t.realizedPnlUsdg))}`,
+    usd: dollars === null ? null : `${dollars >= 0 ? "+" : "−"}${usd(Math.abs(dollars))}`,
     tone: bps < 0 ? "down" : "up",
   };
+}
+
+// ── the owner's own view ──────────────────────────────────────────────────────
+
+/** The owner's own trades with their money in — see read-agent.ts ownBookOf. */
+export interface OwnBookView {
+  recentTrades: ProfileTrade[] | null;
+  topTrades: ProfileTrade[] | null;
+}
+
+/**
+ * THE OWNER'S OWN FIGURES, from the session-checked /api/agents/<slug>/own.
+ *
+ * The spec's rule for a profile's money is "the book is public OR it is the
+ * owner's own view", and the public read withholds a private book's sizes from
+ * everyone — the owner included. The page asks for this only on the owner's
+ * own page of a private book; the SERVER decides whether the session owns the
+ * slug, so a page that wrongly thought it was the owner's gets a refusal.
+ *
+ * Null on any failure — signed out, not theirs, unreachable, a malformed
+ * answer — and the page then shows the public figures, which carry no money.
+ * A list the server could not read comes back null rather than empty.
+ */
+export async function fetchOwnBook(slug: string): Promise<OwnBookView | null> {
+  try {
+    const r = await requestJson<{ recentTrades?: unknown; activityRead?: unknown; topTrades?: unknown; topTradesRead?: unknown }>(
+      `/api/agents/${encodeURIComponent(slug)}/own`,
+    );
+    return {
+      recentTrades: r.activityRead === true && Array.isArray(r.recentTrades) ? (r.recentTrades as ProfileTrade[]) : null,
+      topTrades: r.topTradesRead === true && Array.isArray(r.topTrades) ? (r.topTrades as ProfileTrade[]) : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ── the owner's switch ────────────────────────────────────────────────────────

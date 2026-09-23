@@ -22,11 +22,13 @@ import { useNow } from "../clock";
 import {
   chartWindows,
   defaultWindow,
+  fetchOwnBook,
   growthWindow,
   saveBook,
   statsParts,
   topTradeFigures,
   type ChartWindow,
+  type OwnBookView,
   type ProfileAgent,
 } from "../profile-view";
 import { SwapsTable } from "../SwapsTable";
@@ -102,6 +104,24 @@ export function Profile({
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
   ];
+  /**
+   * THE OWNER'S OWN FIGURES, on the owner's own page of a private book.
+   *
+   * The public read withholds a private book's money from everyone, so the
+   * owner's own sizes and dollars come from their session-checked read
+   * (profile-view.ts fetchOwnBook). Asked for only here, and the server decides
+   * whether this session owns the slug. Re-read whenever the public read is.
+   */
+  const own = useOwnBook(isMine && agent.publicBook === false ? agent.slug : null, agent.recentTrades);
+  const recentTrades = own?.recentTrades ?? agent.recentTrades;
+  const topTrades = own?.topTrades ?? agent.topTrades;
+  /**
+   * DOLLARS ON THIS PAGE: a published book, or the owner's own view — the
+   * spec's rule. One rule for every figure on it, TOP TRADES and Buys & sells
+   * alike, so neither leans on the server alone. On the owner's view the money
+   * comes only from the owner's read; the public lists carry none.
+   */
+  const showMoney = agent.publicBook === true || own !== null;
   const stats = statsParts({
     tradeCount: agent.tradeCount,
     tradeCountFloor: agent.tradeCountFloor,
@@ -233,18 +253,18 @@ export function Profile({
       {/* TOP TRADES, by return and never by dollars — a dollar ranking ranks
           position size and would leak the sizes a private book hides. Absent
           entirely on the leaderboard fallback, which never read them. */}
-      {agent.topTrades !== undefined && (
+      {topTrades !== undefined && (
         <section className="public-section" aria-label="Top trades">
           <div className="public-section-heading"><h2>Top trades</h2><span>{agent.mode === "paper" ? "Paper sells, by return" : "Closed sells, by return"}</span></div>
-          {agent.topTradesRead === false ? (
+          {!own?.topTrades && agent.topTradesRead === false ? (
             <p role="status" className="public-empty">Top trades could not be loaded. Retrying shortly.</p>
-          ) : agent.topTrades.length === 0 ? (
+          ) : topTrades.length === 0 ? (
             <Empty compact title="No closed trades yet" />
           ) : (
             <ol className="profile-top-trades">
-              {agent.topTrades.map((t, i) => {
+              {topTrades.map((t, i) => {
                 const token = t.symbol ? tokens.find((k) => k.symbol.toUpperCase() === t.symbol!.toUpperCase()) : undefined;
-                const f = topTradeFigures(t);
+                const f = topTradeFigures(t, showMoney);
                 return (
                   <li key={t.id} className="profile-top-trade">
                     <span className="profile-top-rank">#{i + 1}</span>
@@ -269,19 +289,22 @@ export function Profile({
         {/* THE SAME TABLE THE OWNER'S DESK USES (SwapsTable.tsx, rules in
             swaps.ts). It replaced a four-line article per fill that printed a
             full date, "Not realized on a buy" under every buy and no coin.
-            Dollars only on a published book: the server withholds a private
-            book's sizes, and the table refuses to print one it was handed. */}
-        {agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : agent.recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : <>
+            Dollars only on a published book or the owner's own view: the
+            server withholds a private book's sizes, and the table refuses to
+            print one it was handed. */}
+        {!own?.recentTrades && agent.activityRead === false ? <p role="status" className="public-empty">Trade history could not be loaded. Retrying shortly.</p> : recentTrades === undefined ? <p className="public-empty">Loading trade history…</p> : <>
           <SwapsTable
-            rows={swapRowsOfProfile(agent.recentTrades)}
+            rows={swapRowsOfProfile(recentTrades)}
             tokens={tokens}
-            showMoney={agent.publicBook === true}
+            showMoney={showMoney}
             emptyTitle="No completed buys or sells recorded in this trading period."
             onToken={onToken}
           />
-          {agent.recentTrades.length > 0 && agent.publicBook === false && <p className="public-empty">Trade sizes are private.</p>}
-          {agent.recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}
-          {agent.recentTrades.length > 0 && <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas.</p>}
+          {recentTrades.length > 0 && agent.publicBook === false && (own?.recentTrades
+            ? <p className="public-empty">Only you can see the sizes and dollar figures here. Visitors see percentages.</p>
+            : <p className="public-empty">Trade sizes are private.</p>)}
+          {recentTrades.length > 0 && <p className="public-empty">This list shows swaps. The completed-operations total also includes other executed actions.</p>}
+          {recentTrades.length > 0 && <p className="public-empty">Sale P&L compares proceeds with the cost of the quantity sold, before gas.</p>}
         </>}
       </section>
       <section className="public-section">
@@ -475,7 +498,41 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
 }
 
 /**
- * THE OWNER'S SWITCH FOR THE PUBLIC BOOK — sizes and dollar P&L on this page.
+ * The owner's own view of their private book, or null.
+ *
+ * Asked for only while `slug` is set — the page sets it on the owner's own page
+ * of a private book — and again whenever `refreshKey` changes, which is the
+ * public read refreshing. Null on any failure: the page then shows the public
+ * figures, which carry no money. Never another slug's answer.
+ */
+function useOwnBook(slug: string | null, refreshKey: unknown): OwnBookView | null {
+  const [own, setOwn] = useState<{ slug: string; view: OwnBookView } | null>(null);
+  useEffect(() => {
+    if (!slug) {
+      setOwn(null);
+      return;
+    }
+    let alive = true;
+    void fetchOwnBook(slug).then((view) => {
+      if (alive) setOwn(view ? { slug, view } : null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [slug, refreshKey]);
+  return own && own.slug === slug ? own.view : null;
+}
+
+/**
+ * THE OWNER'S SWITCH FOR THE PUBLIC BOOK.
+ *
+ * THIS IS THE CONSENT, so it names everything the flag publishes — every
+ * reader of `publicBook`, not only this page's figures: trade sizes and dollar
+ * P&L (this page, and the feed), what the agent holds and how much (this page's
+ * Positions), and its name as a holder on the page of every token it holds
+ * (read-token.ts). It used to say only "trade sizes and dollar P&L" and that
+ * "percentages are public either way", which undersold the holdings on the one
+ * control that decides them.
  *
  * Off by default and off until the owner says otherwise. What it shows is what
  * the SERVER last read, moved only after a save the server confirmed; a save
@@ -505,12 +562,16 @@ function BookSwitch({ on, onChanged }: { on: boolean; onChanged?: () => void }) 
         <strong>Public book</strong>
         <small>
           {shown
-            ? "Anyone can see this agent's trade sizes and dollar P&L. Percentages are public either way."
-            : "Only percentages are public. Turn this on to show trade sizes and dollar P&L too."}
+            ? "Anyone can see this agent's trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds. Its return and the percentage on each trade are public either way."
+            : "Its return and the percentage on each trade are public. Turn this on to also publish its trade sizes and dollar P&L, what it holds and how much, and its name as a holder on the token pages of what it holds."}
         </small>
         {error && <small role="alert" className="profile-book-error">{error}</small>}
       </div>
-      <Switch on={shown} onChange={saving ? () => {} : (next) => void change(next)} label="Show this agent's trade sizes and dollar P&L publicly" />
+      <Switch
+        on={shown}
+        onChange={saving ? () => {} : (next) => void change(next)}
+        label="Publish this agent's book: its trade sizes and dollar P&L, what it holds and how much, and its name as a holder on token pages"
+      />
     </section>
   );
 }

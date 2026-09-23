@@ -35,6 +35,46 @@ describe("the owner's tape becomes table rows without inventing anything", () =>
     assert.deepEqual(rows.filter(isTrade).length, 3, "Trades · N counts fills and pending orders, not refusals");
   });
 
+  it("a move of cash keeps its own kind, and only a trade kind is a trade", () => {
+    const rows = swapRowsOfDesk([
+      move({ head: "swap" }),
+      move({ head: "curve-trade", action: "sell" }),
+      move({ head: "equity-order", outcome: "pending" }),
+      move({ head: "vault-deposit", action: null, symbol: null }),
+      move({ head: "vault-withdraw", action: null, symbol: null }),
+      move({ head: "transfer", action: null, symbol: null }),
+      move({ head: "something-new", action: null, symbol: null }),
+      move({ head: "vault-deposit", action: null, symbol: null, outcome: "refused", outcomeText: "vault paused" }),
+    ]);
+    assert.deepEqual(rows.map((r) => r.op), ["trade", "trade", "trade", "vault-in", "vault-out", "transfer", "other", "vault-in"]);
+    assert.deepEqual(rows.filter(isTrade).length, 3, "a vault move, a transfer or an unknown kind is not a trade");
+    // Every refusal still folds into a Tried line, whatever its kind.
+    const items = swapItems(rows, "all");
+    assert.ok(items.some((i) => i.kind === "tried" && i.reason === "vault paused"));
+    // Buys and Sells are trades only, even where a decision named a side.
+    const odd = swapRowsOfDesk([move({ head: "something-new", action: "buy", symbol: null })]);
+    assert.deepEqual(swapItems(odd, "buys"), []);
+    assert.equal(swapItems(odd, "all").length, 1, "still listed under All");
+  });
+
+  it("the tape's own name for a coin and its realized dollars travel (D3), never a guessed percentage", () => {
+    const [sell, buy] = swapRowsOfDesk([
+      { ...move({ action: "sell", symbol: "T3139F043B88" }), displayName: " JUGGERNAUT ", realizedPnlUsdg: 1.25, txHash: "0xabc" } as Thesis,
+      { ...move({ action: "buy" }), displayName: "CASHCAT", realizedPnlUsdg: 0 } as Thesis,
+    ]);
+    assert.equal(sell!.displayName, "JUGGERNAUT");
+    assert.equal(sell!.realizedUsd, 1.25);
+    assert.equal(sell!.realizedBps, null, "the tape carries no cost, so no % is invented from the order size");
+    assert.equal(buy!.displayName, null, "a name that only repeats the symbol adds nothing");
+    assert.equal(buy!.realizedUsd, null, "a buy realizes nothing");
+    assert.deepEqual(pnlChip(sell!, true), { text: "+$1.25", tone: "up" }, "the owner's desk shows its dollars without a %");
+    assert.equal(pnlChip(sell!, false), null, "and nothing where dollars may not be shown");
+    for (const bad of ["0x0123456789abcdef0123456789abcdef01234567", "a\u0007b", "x".repeat(65)]) {
+      assert.equal(swapRowsOfDesk([{ ...move({}), displayName: bad } as Thesis])[0]!.displayName, null, JSON.stringify(bad));
+    }
+    assert.equal(swapRowsOfDesk([{ ...move({ action: "sell" }), realizedPnlUsdg: Number.NaN } as Thesis])[0]!.realizedUsd, null);
+  });
+
   it("a public fill keeps exactly what the server sent", () => {
     const [r] = swapRowsOfProfile([{ id: "7", action: "swap", symbol: null, displayName: null, at: 5, paper: true, sizeUsdg: null, realizedPnlUsdg: null, realizedPnlBps: null }]);
     assert.deepEqual([r!.side, r!.status, r!.symbol, r!.sizeUsdg, r!.paper], [null, "filled", null, null, true]);
@@ -42,7 +82,7 @@ describe("the owner's tape becomes table rows without inventing anything", () =>
 });
 
 const row = (id: string, over: Partial<SwapRow>): SwapRow => ({
-  id, side: "buy", status: "filled", symbol: "X", displayName: null, at: S(NOON), paper: false, sizeUsdg: 5,
+  id, op: "trade", side: "buy", status: "filled", symbol: "X", displayName: null, at: S(NOON), paper: false, sizeUsdg: 5,
   realizedBps: null, realizedUsd: null, reason: null, why: null, ...over,
 });
 
