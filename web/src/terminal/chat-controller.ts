@@ -117,7 +117,7 @@ export interface ChatDeps {
 /** How long a whole reply may take, streamed or not, before it is given up on. */
 export const CHAT_TIMEOUT_MS = 60_000;
 
-/** Settings older than this are re-read in the background after a reply. */
+/** Settings older than this are re-read in the background after a reply; a ceiling, as a message goes out. */
 const SETTINGS_FRESH_MS = 30_000;
 
 export type Asked =
@@ -267,6 +267,8 @@ export function useChatController(o: {
   // what keying it was meant to prevent.
   const lastKey = useRef<string | null>(null);
   const settingsCache = useRef<{ key: string | null; value: ChatSettings; at: number } | null>(null);
+  /** When the ceiling was last read, on this clock — see readCeiling. */
+  const ceilingAt = useRef<number | null>(null);
   useEffect(() => {
     const previous = lastKey.current;
     if (previous && previous !== o.chatKey) forgetThread(previous);
@@ -277,6 +279,7 @@ export function useChatController(o: {
     setUnread(false);
     settingsCache.current = null;
     setSettings(null);
+    ceilingAt.current = null;
     setCeiling(null);
   }, [o.chatKey]);
 
@@ -332,6 +335,13 @@ export function useChatController(o: {
   // so a house ceiling below 25 offered a "(max)" chip it refused. Read with
   // the settings; a read that fails leaves the last good one, and one never
   // read is null, which offers no amount at all.
+  //
+  // AND AGAIN WHEN A MESSAGE GOES OUT ONCE IT IS STALE. On desktop the dock
+  // stays open while the owner uses the Settings screen, so "when the chat
+  // opens" never comes round again; the chips kept a ceiling the owner had
+  // since lowered and offered a "(max)" POST now refused. Read as the message
+  // is sent rather than after its reply, so the chips that come with the
+  // reply are drawn against the fresh one.
   const readCeiling = useCallback(async () => {
     const key = keyRef.current;
     let value: number | null = null;
@@ -344,8 +354,11 @@ export function useChatController(o: {
     } catch {
       /* unread — no amount is offered against a limit nobody read */
     }
-    if (value !== null && keyRef.current === key && mounted.current) setCeiling(value);
-  }, []);
+    if (value !== null && keyRef.current === key && mounted.current) {
+      ceilingAt.current = clock();
+      setCeiling(value);
+    }
+  }, [clock]);
   useEffect(() => {
     if (!o.open || !o.chatKey) return;
     void readSettings();
@@ -379,6 +392,9 @@ export function useChatController(o: {
       // THE DRAFT CLEARS AT ONCE — unless the owner has already started typing
       // something else, which is theirs.
       setDraft((d) => (d.trim() === q ? "" : d));
+      // A ceiling not read lately is read beside the question, not after the
+      // answer: the chips come with the reply (see readCeiling).
+      if (ceilingAt.current === null || clock() - ceilingAt.current > SETTINGS_FRESH_MS) void readCeiling();
       try {
         const cached = settingsCache.current;
         const settingsNow = cached && cached.key === key ? cached.value : await readSettings();
@@ -431,7 +447,7 @@ export function useChatController(o: {
         }
       }
     },
-    [arrived, clock, readSettings, update],
+    [arrived, clock, readSettings, readCeiling, update],
   );
 
   const retry = useCallback(

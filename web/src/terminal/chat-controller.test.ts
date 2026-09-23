@@ -436,6 +436,31 @@ describe("chips", () => {
     assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
   });
 
+  it("A CEILING LOWERED WHILE THE CHAT STAYS OPEN IS THE ONE THE NEXT CHIPS OFFER", async () => {
+    // On desktop the dock stays open while the owner uses the Settings screen,
+    // so "read when the chat opens" never runs again, and the background
+    // re-read after a reply read the settings but not the ceiling. The chips
+    // went on offering a "(max)" that POST /api/orders now refused.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 25 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    // The owner lowers it on the Settings screen; ten minutes pass; the dock stays open.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    clockAhead = 10 * 60_000;
+    await typeAndSend("buy some");
+    await until(() => /How much should I put in\?/.test(text()), "reply");
+    await settle(5);
+    const chips = () => Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent);
+    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
+    // And a ceiling just read is not read again for every message.
+    await typeAndSend("buy some more");
+    await until(() => (text().match(/How much should I put in\?/g) ?? []).length === 2, "second reply");
+    await settle(5);
+    assert.equal(count("GET", "/api/orders/ceiling"), 2, "once when the chat opened, once when it had gone stale");
+    assert.deepEqual(chips(), ["$5.00", "$10.00 (max)"]);
+  });
+
   it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
     routes["GET /api/orders/ceiling"] = () => json({ error: "the ledger could not be read" }, 503);
     routes["POST /api/chat"] = () => json({ reply: "How much?" });
