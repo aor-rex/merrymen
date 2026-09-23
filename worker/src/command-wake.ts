@@ -28,6 +28,9 @@
  * leave that order to the four-minute wait this exists to remove.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 import { ORDER_IN_FLIGHT_MS } from "./command-files";
 import type { FlowStanding } from "./flow-witness";
 
@@ -44,6 +47,40 @@ export const COMMAND_WAKE_EVERY_MS = 2_000;
  * trade out for six minutes is a dozen writes of one small file.
  */
 export const ALIVE_BEAT_EVERY_MS = 30_000;
+
+/** What one heartbeat says. */
+export interface Beat {
+  /** The published mode (exec-mode.ts publishedMode). */
+  mode: string;
+  /** Who pays gas, as this process resolved it. */
+  sponsorGas: boolean;
+  /** The chain height, when it was read. Omitted rather than zeroed: a zero is a claim about the chain. */
+  block?: bigint;
+}
+
+/**
+ * THE HEARTBEAT FILE, and the only writer of it: `{at, block?, mode, sponsorGas}`,
+ * `at` in unix seconds — what the orchestrator's watchdog (orchestrator.ts
+ * heartbeatAt) reads to decide a child is alive. Throws when it cannot write;
+ * every caller treats a beat as best-effort.
+ */
+export function writeHeartbeat(
+  file: string,
+  beat: Beat,
+  nowMs: number,
+  write: (file: string, body: string) => void = writeBeatFile,
+): void {
+  const at = Math.floor(nowMs / 1000);
+  write(
+    file,
+    JSON.stringify({ at, ...(beat.block === undefined ? {} : { block: beat.block.toString() }), mode: beat.mode, sponsorGas: beat.sponsorGas }),
+  );
+}
+
+function writeBeatFile(file: string, body: string): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, body, "utf8");
+}
 
 /**
  * May a command tick start now?
@@ -572,6 +609,13 @@ export function createTickClock(deps: {
  * past it nothing legitimate is still going, the beat stops, and the watchdog
  * judges the child as it always did. An idle worker gets no beat from here:
  * between ticks that is tick()'s job, and a stall there must still show.
+ *
+ * THE CLOCK WRITES THE FILE ITSELF. It used to call whatever `beat` main()
+ * handed it, so `beat: () => {}` in main() typechecked, passed every test, and
+ * put the hosted child back to being SIGKILLed mid-order on the 15-second
+ * preset. main() now hands it the file's path (`heartbeat`, required) and the
+ * two facts a beat states, and writeHeartbeat below is the one writer — tick()'s
+ * own beat goes through it too, so the two cannot drift into different shapes.
  */
 export interface CommandClock {
   /** Put the first regular tick on the clock, `delayMs` from now. */
@@ -595,15 +639,21 @@ export function createCommandClock(deps: {
   pending: () => readonly string[];
   regular: () => Promise<number>;
   command: () => Promise<void>;
-  /** Write the heartbeat file — what the orchestrator's watchdog reads. */
-  beat: () => void;
+  /**
+   * The heartbeat file the orchestrator's watchdog reads, and what a beat from
+   * the clock says in it: the mode heartbeat() would publish and who pays gas.
+   * No block — this is a claim about the process being alive, not about the
+   * chain. Always the real writer: a test reads the file it wrote.
+   */
+  heartbeat: { file: string; mode: () => string; sponsorGas: () => boolean };
 }): CommandClock {
   const live = () => deps.orders.busy() || deps.trades.busy();
   let beatAt = -Infinity;
   const beat = () => {
     beatAt = deps.now();
     try {
-      deps.beat();
+      const hb = deps.heartbeat;
+      writeHeartbeat(hb.file, { mode: hb.mode(), sponsorGas: hb.sponsorGas() }, beatAt);
     } catch {
       // A beat that failed to write is the watchdog's to judge, not a reason to stop the clock.
     }

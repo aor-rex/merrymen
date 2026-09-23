@@ -13,7 +13,7 @@
  *   - it spends its one wake while it could not act, and then never wakes.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
@@ -39,9 +39,10 @@ import {
   drainOnTick,
   tickPlan,
   tickRatchets,
+  writeHeartbeat,
   type TickKind,
 } from "./command-wake";
-import { staleThresholdSec } from "./orchestrator";
+import { heartbeatAtIn, staleThresholdSec } from "./orchestrator";
 
 /** A watcher over a queue the test controls, recording every wake. */
 function harness(ready = true) {
@@ -564,8 +565,10 @@ describe("one owner order in flight", () => {
  * A worker as main() wires it: the real clock, watcher, slot, live-trade count,
  * plan, drain and command files. The order's trade joins the intent chain the
  * way processIntentReporting does (`trades.run`), and every beat — the one
- * tick() writes first, and the ones the clock writes for it — is recorded with
- * its time.
+ * tick() writes first, and the ones the clock writes for it — goes to a real
+ * heartbeat file in the worker's home through the real writer. `beats` is
+ * every time that file's `at` moved, read the way the orchestrator's watchdog
+ * reads it (heartbeatAtIn).
  */
 function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
   const tickMs = opts.tickMs ?? 240_000;
@@ -579,6 +582,12 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
   const trades = createLiveTrades(() => now);
   const log: string[] = [];
   const beats: number[] = [];
+  const heartbeatFile = path.join(home, "heartbeat.json");
+  /** What the watchdog would read now; recorded whenever it moved. */
+  const seen = () => {
+    const at = heartbeatAtIn(home);
+    if (at !== null && beats[beats.length - 1] !== at * 1000) beats.push(at * 1000);
+  };
   /** Trades still out, each landed by the test: `label` is how land() finds one. */
   const landing: { label: string; fn: () => void }[] = [];
   /** A trade on the intent chain that stays out until the test lands it. */
@@ -619,8 +628,8 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
     );
   const live = () => orders.busy() || trades.busy();
   const tick = async (kind: TickKind) => {
-    // BEAT FIRST — tick()'s first statement.
-    beats.push(now);
+    // BEAT FIRST — tick()'s first statement, through the same writer (index.ts beatFile).
+    writeHeartbeat(heartbeatFile, { mode: "live", sponsorGas: false }, now);
     const plan = tickPlan(kind);
     log.push(`${kind} reads the book${live() ? " WITH A TRADE IN FLIGHT" : ""}`);
     if (!(await drainOnTick(plan, drain))) return;
@@ -642,7 +651,7 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
     pending: () => queuedCommandIds(home),
     regular: async () => (await tick("regular"), tickMs),
     command: () => tick("command"),
-    beat: () => void beats.push(now),
+    heartbeat: { file: heartbeatFile, mode: () => "live", sponsorGas: () => false },
   });
   const fireDue = async () => {
     const [id, t] = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0]!;
@@ -650,6 +659,7 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
     if (now < t.at) now = t.at;
     t.fn();
     await settle();
+    seen();
   };
   return {
     home,
@@ -674,6 +684,7 @@ function worker(opts: { tickMs?: number; strategyHolds?: number } = {}) {
         while ([...timers.values()].some((t) => t.at <= now)) await fireDue();
         clock.poll();
         await settle();
+        seen();
       }
     },
     /** Land the oldest trade still out, or the oldest whose label starts with `label`. */
@@ -823,6 +834,47 @@ describe("a command tick's order and the regular tick never overlap", () => {
  * the clock says so — for a bounded time, so a wedged one is still reaped.
  */
 describe("a child is alive while a trade it sent is out", () => {
+  it("THE CLOCK WRITES THE FILE THE WATCHDOG READS ITSELF — the mode, who pays gas, and no block", async () => {
+    // It used to call whatever `beat` main() handed it, and `beat: () => {}`
+    // passed everything. Now main() hands it a path.
+    const home = newHome();
+    const file = path.join(home, "nested", "heartbeat.json");
+    let now = 1_000_000;
+    const trades = createLiveTrades(() => now);
+    const clock = createCommandClock({
+      now: () => now,
+      setTimer: () => 0,
+      clearTimer: () => {},
+      fallbackMs: 15_000,
+      orders: createOrderInFlight(() => now),
+      trades,
+      pending: () => [],
+      regular: async () => 15_000,
+      command: async () => {},
+      heartbeat: { file, mode: () => "refuse", sponsorGas: () => true },
+    });
+    clock.poll();
+    assert.equal(heartbeatAtIn(path.dirname(file)), null, "an idle worker is not beaten for off the clock");
+    let land!: () => void;
+    const out = trades.run(() => new Promise<void>((r) => (land = r)));
+    now += 2_000;
+    clock.poll();
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { at: 1_002, mode: "refuse", sponsorGas: true });
+    assert.equal(heartbeatAtIn(path.dirname(file)), 1_002, "and the watchdog reads its time");
+    land();
+    await out;
+  });
+
+  it("writeHeartbeat is the one shape: `at` in seconds, and a block only when one was read", () => {
+    const writes: [string, string][] = [];
+    writeHeartbeat("hb.json", { mode: "live", sponsorGas: false }, 1_234_999, (f, b) => void writes.push([f, b]));
+    writeHeartbeat("hb.json", { mode: "paper", sponsorGas: true, block: 63_155_033n }, 2_000_000, (f, b) => void writes.push([f, b]));
+    assert.deepEqual(writes.map(([, b]) => JSON.parse(b)), [
+      { at: 1_234, mode: "live", sponsorGas: false },
+      { at: 2_000, block: "63155033", mode: "paper", sponsorGas: true },
+    ]);
+  });
+
   it("A COMMAND TICK'S ORDER HELD LONGER THAN THE 15-SECOND PRESET'S WATCHDOG KEEPS BEATING", async () => {
     const w = worker({ tickMs: 15_000 });
     const watchdogMs = staleThresholdSec(15) * 1000;

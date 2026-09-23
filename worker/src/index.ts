@@ -118,7 +118,7 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets, writeHeartbeat } from "./command-wake";
 import { createTickBook, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { createFlowWitness, opUsdgMoved, type FlowMark, type FlowStanding } from "./flow-witness";
 import { ownerRefusalNotice } from "./owner-refusal";
@@ -8763,17 +8763,13 @@ async function main() {
    * timestamp and a string, and it is the half a supervisor judges liveness by.
    */
   function beatFile(mode: string, sponsorGas: boolean, blockNumber?: bigint) {
-    const at = Math.floor(Date.now() / 1000);
     try {
       ensureHome();
-      writeFileSync(
-        homePaths.heartbeat(),
-        // `block` is omitted rather than zeroed when the chain was not read:
-        // a zero here would be a claim about chain height, and the dashboard
-        // would render it. Absent means absent.
-        JSON.stringify({ at, ...(blockNumber === undefined ? {} : { block: blockNumber.toString() }), mode, sponsorGas }),
-        "utf8",
-      );
+      // THE ONE WRITER, shared with the clock's beat (command-wake.ts). `block`
+      // is omitted rather than zeroed when the chain was not read: a zero here
+      // would be a claim about chain height, and the dashboard would render it.
+      // Absent means absent.
+      writeHeartbeat(homePaths.heartbeat(), { mode, sponsorGas, block: blockNumber }, Date.now());
     } catch {
       // heartbeat is best-effort telemetry — never let it kill the loop
     }
@@ -11977,7 +11973,10 @@ async function main() {
     pending: () => queuedCommandIds(merrymenHome()),
     regular: runLoop,
     command: runCommandTick,
-    beat: () => beatFile(publishedMode(execMode()), gasSponsored()),
+    // The file the watchdog reads, which the clock now writes itself — a test
+    // reads its `at` through a held order. Required, so a clock with no
+    // heartbeat does not compile.
+    heartbeat: { file: homePaths.heartbeat(), mode: () => publishedMode(execMode()), sponsorGas: gasSponsored },
   });
   // A directory listing every couple of seconds. Unref'd, so it never holds a
   // process open that would otherwise exit.

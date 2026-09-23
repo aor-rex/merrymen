@@ -455,8 +455,16 @@ async function releaseLease(tenant: string): Promise<void> {
 
 /** Read a child's heartbeat `at` (unix seconds), or null if it hasn't beaten yet. */
 function heartbeatAt(tenant: string): number | null {
+  return heartbeatAtIn(childHome(tenant));
+}
+
+/**
+ * The watchdog's read of the heartbeat file in one home — exported so a test
+ * can read what the child's clock wrote exactly the way the watchdog will.
+ */
+export function heartbeatAtIn(home: string): number | null {
   try {
-    const hb = JSON.parse(readFileSync(path.join(childHome(tenant), "heartbeat.json"), "utf8")) as { at?: number };
+    const hb = JSON.parse(readFileSync(path.join(home, "heartbeat.json"), "utf8")) as { at?: number };
     return typeof hb.at === "number" ? hb.at : null;
   } catch {
     return null;
