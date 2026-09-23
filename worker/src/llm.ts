@@ -558,12 +558,16 @@ export async function llmTextStream(
       { signal: opts.signal },
     );
     let raw = "";
+    let stopped = false;
     for await (const ev of stream) {
       if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && ev.delta.text) {
         raw += ev.delta.text;
         onText(ev.delta.text);
       }
+      if (ev.type === "message_stop" || (ev.type === "message_delta" && ev.delta.stop_reason)) stopped = true;
     }
+    // See the OpenAI branch below: a stream that never said it stopped was cut.
+    if (!stopped) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
     const text = raw.trim();
     // llmText answers "" here and leaves the caller to notice; a stream the
     // owner watched arrive empty is a failure, and is said as one.
@@ -666,6 +670,12 @@ export async function llmTextStream(
     } finally {
       reader.cancel().catch(() => {});
     }
+    // A STREAM THAT NEVER SAID IT FINISHED WAS CUT. A connection dropped
+    // mid-reply ends the body exactly like a finished one, and the half that
+    // had arrived was returned as the whole — which the chat then sent as its
+    // final reply. A finished completion always says so: a finish_reason on
+    // its last chunk, or [DONE].
+    if (!ended && !finish) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
   }
 
   const text = stripReasoningFromContent(raw).trim();

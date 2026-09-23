@@ -153,6 +153,29 @@ describe("an OpenAI-compatible provider", () => {
     await assert.rejects(collect(openai()), /overloaded/);
   });
 
+  it("A STREAM THAT STOPS SHORT IS NOT A REPLY — no finish, no [DONE], no answer", async () => {
+    // A connection that drops mid-reply ends the body like any other end. The
+    // half that arrived was returned as the whole, and the chat then sent it
+    // as `done`: half a sentence about somebody's money, presented as final.
+    handler = async (_b, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      await dribble(res, `data: ${JSON.stringify({ choices: [{ delta: { content: "Yes, I'd sell" }, finish_reason: null }] })}\n\n`);
+    };
+    await assert.rejects(collect(openai()), /ended before the reply was finished/);
+  });
+
+  it("a stream that says it finished is whole even without [DONE]", async () => {
+    handler = async (_b, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      await dribble(
+        res,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "All done." }, finish_reason: null }] })}\n\n` +
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+      );
+    };
+    assert.equal((await collect(openai())).text, "All done.");
+  });
+
   it("a provider that ignores `stream` and answers JSON is still read", async () => {
     handler = (_b, res) => {
       res.writeHead(200, { "content-type": "application/json" });
@@ -207,6 +230,17 @@ describe("the Anthropic transport", () => {
     assert.equal(text, "Hi from Sherwood.");
     assert.deepEqual(pieces, ["Hi", " from", " Sherwood."]);
     assert.equal(seen[0]!.stream, true);
+  });
+
+  it("AN ANTHROPIC STREAM THAT STOPS SHORT IS NOT A REPLY either", async () => {
+    handler = async (_b, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      // Everything up to the text, and then the connection goes: no stop.
+      const whole = anthropicEvents(["Yes, I'd", " sell"]);
+      await dribble(res, whole.slice(0, whole.indexOf("event: content_block_stop")), 11);
+    };
+    const creds: LlmCreds = { provider: "anthropic", transport: "anthropic", baseUrl: "", apiKey: "sk-ant-x", model: "claude-x", vision: true };
+    await assert.rejects(collect(creds), /ended before the reply was finished/);
   });
 
   it("an empty Anthropic reply is a failure too", async () => {
