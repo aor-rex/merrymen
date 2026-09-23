@@ -415,10 +415,20 @@ export interface ChatChip {
  * nobody checked against the wall is one the wall may refuse. A ceiling of 0
  * is "no chat ceiling" (the orders route reads it that way), so the sealed cap
  * alone clamps.
+ *
+ * ROUNDED DOWN TO THE CENT. A chip is printed and sent to the cent, and the
+ * orders route refuses `usdgAmount > ceiling` — while /api/settings takes any
+ * float, so a ceiling of 9.999 printed as "$10.00 (max)": an order the route
+ * refused. The cent is taken with a hair of slack, because 8.2 × 100 comes
+ * out a hair below 820 and 8.20 must not become 8.19, and then checked, so the
+ * result never exceeds the limit. Less than a cent is no amount to offer.
  */
 export function amountCeiling(perTrade: number | null, ceiling: number | null): number | null {
   if (perTrade === null || ceiling === null || !Number.isFinite(perTrade) || perTrade <= 0) return null;
-  return ceiling > 0 ? Math.min(perTrade, ceiling) : perTrade;
+  const limit = ceiling > 0 ? Math.min(perTrade, ceiling) : perTrade;
+  let cents = Math.floor(limit * 100 + 1e-6);
+  if (cents / 100 > limit) cents -= 1;
+  return cents > 0 ? cents / 100 : null;
 }
 
 const ASKS_AMOUNT = /\bhow much\b|\bwhat size\b|\bhow big\b|\bwhich amount\b|\bhow many dollars\b/i;

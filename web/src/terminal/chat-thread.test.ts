@@ -399,6 +399,30 @@ describe("chips", () => {
     assert.equal(c[0]!.label, "$3.00 (max)");
     assert.ok(c.length >= 2);
   });
+
+  it("A CEILING PAST THE CENT IS ROUNDED DOWN, never up past what the route enforces", () => {
+    // /api/settings takes any float in [1, 100000], and the orders route
+    // refuses `usdgAmount > ceiling`. A chip printed and sent to the cent
+    // rounded 9.999 up to "$10.00 (max)" — an order the route refused.
+    const amounts = (ceiling: number) =>
+      chatChips({ ...base, lastAgent: "How much?", perTrade: 100, ceiling }).filter((x) => x.label.startsWith("$"));
+    assert.deepEqual(amounts(9.999).map((x) => x.label), ["$5.00", "$9.99 (max)"]);
+    assert.equal(amounts(7.556).at(-1)!.label, "$7.55 (max)");
+    assert.equal(amounts(12.345).at(-1)!.label, "$12.34 (max)");
+    // A cent that binary floating point stores a hair low is still that cent.
+    assert.equal(amounts(8.2).at(-1)!.label, "$8.20 (max)");
+    assert.equal(amounts(19.99).at(-1)!.label, "$19.99 (max)");
+    assert.equal(amountCeiling(100, 9.999), 9.99);
+    assert.equal(amountCeiling(4.5678, 25), 4.56, "the sealed cap is rounded down the same way");
+    for (const ceiling of [9.999, 7.556, 12.345, 8.2, 19.99, 0.1 + 0.2, 1.005, 9.999999995, 25]) {
+      for (const chip of amounts(ceiling)) {
+        const sent = Math.round(Number(chip.message.replace(/[^0-9.]/g, "")) * 100) / 100;
+        assert.ok(sent <= ceiling, `${chip.label} is within ${ceiling}`);
+      }
+    }
+    // Less than a cent to offer is no amount at all, not "$0.00 (max)".
+    assert.equal(amountCeiling(0.004, 25), null);
+  });
 });
 
 describe("failures, in the agent's voice", () => {
