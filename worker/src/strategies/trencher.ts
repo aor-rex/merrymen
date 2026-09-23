@@ -357,6 +357,45 @@ export function priceMoveBps(entry8: bigint, now8: bigint): number {
   return Number(((now8 - entry8) * 10_000n) / entry8);
 }
 
+/** A remainder worth less than this (USDG, 6dp) is not left behind: $0.10. */
+export const DUST_REMAINDER_USDG = 100_000n;
+/** …nor one under this share of the position: 1%. */
+export const DUST_REMAINDER_BPS = 100n;
+
+/**
+ * HOW MUCH OF A POSITION ONE EXIT SELLS — and never a leftover.
+ *
+ * A Brain exit names a dollar size, and the old arithmetic sold exactly that
+ * share: `raw * notional / available`. The Brain sizes a sell a hair under the
+ * position's value as often as not, so Shogun sold 13,300.78 of 13,306.85
+ * musebook and left 6.06 behind — 0.05% of the position, worth $0.002. The
+ * next exit sold that for a fraction of a cent: a whole operation, a trade ping
+ * reading "0.00", and a P&L card of "-6.5% · 0.00 · 0.00 · 0.00".
+ *
+ * So a partial that would leave under 1% of the position, or under $0.10, is
+ * a whole exit instead. A deliberate trim — half, a third — still leaves what
+ * it meant to. A rule exit (`forced`) always sells everything, as before.
+ *
+ * Pure: `raw` is the quantity held, `available` its value and `notional` the
+ * value the exit asked for, both USDG 6dp. Returns what to sell and the value
+ * that stands for.
+ */
+export function exitSize(
+  raw: bigint,
+  available: bigint,
+  notional: bigint,
+  forced: boolean,
+): { amount: bigint; notional: bigint } {
+  if (forced) return { amount: raw, notional };
+  if (available <= 0n || raw <= 0n) return { amount: 0n, notional };
+  const asked = notional < available ? notional : available;
+  const left = available - asked;
+  if (left < DUST_REMAINDER_USDG || left * 10_000n < available * DUST_REMAINDER_BPS) {
+    return { amount: raw, notional: available };
+  }
+  return { amount: (raw * asked) / available, notional: asked };
+}
+
 export interface TrencherDeps {
   /** When required, no rule-based entry may bypass a fresh Brain approval. */
   brainRequired?: boolean;
@@ -429,8 +468,8 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         const raw = pos.custodyVault ? pos.qtyRaw : held?.rawBalance ?? pos.qtyRaw;
         const available = held && pos.custodyVault && held.rawBalance > 0n ? held.valueUsdg * raw / held.rawBalance : held?.valueUsdg ?? pos.costUsdg;
         const brainNotional = brain ? BigInt(Math.round(brain.usdgAmount * 1e6)) : available;
-        const notional = brainNotional < available ? brainNotional : available;
-        const amount = verdict.exit ? raw : available > 0n ? raw * notional / available : 0n;
+        // Never a leftover: a partial that would strand a sliver sells it all (exitSize).
+        const { amount, notional } = exitSize(raw, available, brainNotional < available ? brainNotional : available, verdict.exit);
         if (amount <= 0n) continue;
         deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.exit ? verdict.why : "Brain exit"}`);
         intents.push({
@@ -440,8 +479,9 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           ...(pos.custodyVault ? {custody:"trencher" as const} : {}),
           sellToken: pos.token,
           buyToken: deps.usdgToken,
-          // The whole position; partials leave a tail. From the ledger when
-          // there is no priced holding to read it from.
+          // The whole position, or a deliberate part of it — never a sliver
+          // (exitSize). From the ledger when there is no priced holding to
+          // read it from.
           sellAmountRaw: amount,
           // Cost is the honest stand-in for a position with no mark — the same
           // substitution quarantine makes when it carries an unvaluable
