@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { act, createElement } from "react";
 
 import { liveOf, seedSources, type LiveReadKey, type LiveSources, type RawRead } from "./live";
 import {
@@ -16,10 +17,14 @@ import {
   liveClocks,
   QUIET_SHELL,
   tokenMissingOf,
+  useShellClocks,
   watchShellClocks,
+  type LiveClockDeps,
   type ShellClocks,
+  type ShellClocksHandle,
 } from "./live-clocks";
 import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
+import { testDom } from "./test-dom";
 
 function fakeClock() {
   let now = 1_000_000;
@@ -352,6 +357,215 @@ describe("what the shell draws from the clocks", () => {
     assert.equal(page().unreadable, false, "and Try again, retrying what it names, clears it");
     assert.deepEqual([...page().retry].sort(), ["discoveries", "market"]);
     s.clocks.stop();
+  });
+});
+
+/**
+ * THE CLOCKS AS THE SHELL MOUNTS THEM — useShellClocks, the effect and state
+ * App ran inline, where a test could not reach them: App renders under
+ * next/navigation. Reverting App's side of LV6 and LV7 (every clock change in
+ * its state; the token page decided by any clock on the line) left every test
+ * green, because only the helpers were executed. Here the hook is mounted and
+ * the shell's renders and reads are counted.
+ */
+describe("the clocks, mounted as the shell mounts them", () => {
+  function mounted(opts: {
+    answer?: (key: LiveReadKey, epoch: number) => Promise<RawRead> | RawRead;
+    hidden?: () => boolean;
+  } = {}) {
+    const clock = fakeClock();
+    const t = testDom();
+    let sources: LiveSources = seedSources();
+    const asked: Array<{ key: string; epoch: number }> = [];
+    const alive: Array<() => boolean> = [];
+    let renders = 0;
+    let handle!: ShellClocksHandle;
+    const depsFor = (epoch: number) => (isAlive: () => boolean): LiveClockDeps => {
+      alive[epoch] = isAlive;
+      return {
+        fetchRead: async (key) => {
+          asked.push({ key, epoch });
+          return opts.answer ? opts.answer(key, epoch) : ok(BODIES[key]);
+        },
+        loadQuotes: async () => new Map(),
+        loadChanges: async () => new Map(),
+        update: (change) => {
+          sources = change(sources);
+        },
+        readAccount: async () => {
+          asked.push({ key: "account", epoch });
+        },
+        hidden: opts.hidden ?? (() => false),
+      };
+    };
+    function Shell({ epoch }: { epoch: number }) {
+      renders++;
+      handle = useShellClocks(epoch, depsFor(epoch), clock.timers);
+      return null;
+    }
+    return {
+      t,
+      render: (epoch = 0) => t.render(createElement(Shell, { epoch })),
+      advance: (ms: number) => act(async () => void (await clock.advance(ms))),
+      settle: () => act(async () => void (await settle())),
+      /** Something the shell does in response to a person: a button, a sign-in. */
+      press: (fn: (h: ShellClocksHandle) => void) =>
+        act(async () => {
+          fn(handle);
+          await settle();
+        }),
+      handle: () => handle,
+      renders: () => renders,
+      live: () => liveOf(sources),
+      alive: (epoch: number) => alive[epoch]!(),
+      count: (key: string, epoch?: number) => asked.filter((a) => a.key === key && (epoch === undefined || a.epoch === epoch)).length,
+    };
+  }
+
+  it("A HEALTHY FEED READ EVERY TEN SECONDS DOES NOT RE-RENDER THE SHELL", async () => {
+    const s = mounted();
+    try {
+      await s.render();
+      await s.settle();
+      await s.advance(61_000);
+      const settled = s.renders();
+      await s.advance(10_000);
+      await s.advance(10_000);
+      assert.equal(s.count("theses"), 9, "the feed was read, twice more in those twenty seconds");
+      assert.equal(s.renders(), settled, "and the shell drew nothing for it");
+    } finally {
+      await s.t.close();
+    }
+  });
+
+  it("the account and the owner's book, again, now — and nothing else", async () => {
+    const s = mounted();
+    try {
+      await s.render();
+      await s.settle();
+      const before = { account: s.count("account"), feed: s.count("feed"), theses: s.count("theses"), market: s.count("market") };
+      await s.press((h) => h.refreshAccount());
+      assert.equal(s.count("account"), before.account + 1);
+      assert.equal(s.count("feed"), before.feed + 1, "the book is the owner's position too");
+      assert.equal(s.count("theses"), before.theses, "the feed keeps its own clock");
+      assert.equal(s.count("market"), before.market);
+    } finally {
+      await s.t.close();
+    }
+  });
+
+  it("the outage line's Retry asks again for what is failing, and only that", async () => {
+    let failing = true;
+    const s = mounted({ answer: (key) => (key === "board" && failing ? { text: null, answered: true } : ok(BODIES[key])) });
+    try {
+      await s.render();
+      await s.settle();
+      assert.ok(s.handle().shell.banner, "the board is on the line");
+      const before = { board: s.count("board"), market: s.count("market"), theses: s.count("theses") };
+      failing = false;
+      await s.press((h) => h.retryFailing());
+      assert.equal(s.count("board"), before.board + 1);
+      assert.equal(s.count("market"), before.market, "a healthy read is left on its schedule");
+      assert.equal(s.count("theses"), before.theses);
+      assert.equal(s.handle().shell.banner, null, "and the line comes down");
+    } finally {
+      await s.t.close();
+    }
+  });
+
+  it("THE TOKEN PAGE SAYS 'UNAVAILABLE' ONLY FOR A READ THAT LISTS TOKENS — and its Try again clears it", async () => {
+    let failing: string | null = "theses";
+    let sweep: (() => void) | null = null;
+    const s = mounted({
+      answer: (key) => {
+        if (key === "discoveries" && s.count("discoveries") === 1) {
+          return new Promise<RawRead>((r) => (sweep = () => r(ok(BODIES.discoveries))));
+        }
+        return key === failing ? { text: null, answered: true } : ok(BODIES[key]);
+      },
+    });
+    try {
+      await s.render();
+      await s.settle();
+      const page = () => s.handle().tokenMissing(s.live().reads);
+      assert.equal(s.live().reads.market, "ok");
+      assert.deepEqual([page().loading, page().unreadable], [true, false], "the sweep still out is loading, not failing");
+      await act(async () => {
+        sweep!();
+        await settle();
+      });
+      assert.ok(s.handle().shell.banner, "the feed's failure is on the outage line");
+      assert.deepEqual([page().loading, page().unreadable], [false, false], "but it lists no token");
+
+      failing = "market";
+      await s.advance(30_000);
+      assert.equal(page().unreadable, true, "a failing market read is a reason the token may be missing");
+      failing = null;
+      const before = { market: s.count("market"), discoveries: s.count("discoveries"), board: s.count("board") };
+      await s.press(() => page().retry());
+      assert.equal(s.count("market"), before.market + 1);
+      assert.equal(s.count("discoveries"), before.discoveries + 1, "both reads that list tokens, not only the failing one");
+      assert.equal(s.count("board"), before.board, "and no read that lists none");
+      assert.equal(page().unreadable, false, "Try again cleared what the page said");
+    } finally {
+      await s.t.close();
+    }
+  });
+
+  it("A SIGN-OUT STARTS FROM NOTHING — the old clocks stop, their late answers are dropped, the old line comes down", async () => {
+    const late: Array<() => void> = [];
+    const s = mounted({
+      answer: (key, epoch) => {
+        if (key === "board" && epoch === 0) return { text: null, answered: true };
+        if (key === "theses" && epoch === 0 && s.count("theses", 0) === 2) {
+          return new Promise<RawRead>((r) => void late.push(() => r(ok({ source: "sqlite", theses: [] }))));
+        }
+        return ok(BODIES[key]);
+      },
+    });
+    try {
+      await s.render(0);
+      await s.settle();
+      await s.advance(10_000);
+      assert.ok(s.handle().shell.banner, "the leaving owner's session has a failing read on the line");
+      assert.equal(late.length, 1, "and a feed read still out");
+      const asked = s.count("theses", 0) + s.count("board", 0);
+      assert.equal(s.alive(0), true);
+
+      await s.render(1);
+      await s.settle();
+      assert.equal(s.alive(0), false, "the old session's reads know they are over");
+      assert.equal(s.alive(1), true);
+      assert.equal(s.handle().shell.banner, null, "its failure is not this session's");
+      late[0]!();
+      await s.settle();
+      assert.equal(s.live().theses.length, 1, "its late answer did not land over this session's");
+      await s.advance(5 * 60_000);
+      assert.equal(s.count("theses", 0) + s.count("board", 0), asked, "and its clocks asked for nothing more");
+    } finally {
+      await s.t.close();
+    }
+  });
+
+  it("a tab coming back into view reads what went stale while it was hidden", async () => {
+    let hidden = false;
+    const s = mounted({ hidden: () => hidden });
+    Object.defineProperty(s.t.dom.window.document, "hidden", { configurable: true, get: () => hidden });
+    try {
+      await s.render();
+      await s.settle();
+      hidden = true;
+      await s.advance(3 * 60_000);
+      const market = s.count("market");
+      hidden = false;
+      await act(async () => {
+        s.t.dom.window.document.dispatchEvent(new s.t.dom.window.Event("visibilitychange"));
+        await settle();
+      });
+      assert.equal(s.count("market"), market + 1);
+    } finally {
+      await s.t.close();
+    }
   });
 });
 

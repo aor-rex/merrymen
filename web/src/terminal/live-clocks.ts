@@ -10,8 +10,11 @@
  *
  * Out of App.tsx so it can be executed: App renders under next/navigation and
  * the test runner cannot mount it. Everything that touches the page — fetch,
- * the tab's visibility, React state — comes in through `deps`.
+ * the tab's visibility, React state — comes in through `deps`. The clocks'
+ * effect and the state the shell draws from them are a hook here too
+ * (useShellClocks, at the bottom), so a test mounts what App mounts.
  */
+import { useEffect, useRef, useState } from "react";
 import {
   LiveLoadError,
   marketTokensOf,
@@ -35,9 +38,11 @@ import {
   THESES_EVERY_MS,
   THESES_HIDDEN_EVERY_MS,
   bannerOf,
+  startClocks,
   type Banner,
   type ClockSpec,
   type ClockView,
+  type LoopTimers,
 } from "./refresh-loop";
 
 export interface LiveClockDeps {
@@ -281,5 +286,122 @@ export function tokenMissingOf(
       liveLoaded,
     }),
     retry: TOKEN_LIST_READS,
+  };
+}
+
+/** What the shell does with its clocks — see useShellClocks. */
+export interface ShellClocksHandle {
+  /** What the shell draws from the clocks, published only when it changes. */
+  shell: ShellClocks;
+  /** Ask these reads again now; every other clock stays on its own schedule. */
+  refreshReads(...keys: LiveClockKey[]): void;
+  /**
+   * THE ACCOUNT AND THE OWNER'S BOOK, AGAIN, NOW — for a retry the owner
+   * pressed, a sign-in, an agent just created, an order that answered, or
+   * anything that knows the owner's position just changed. It used to restart
+   * every read, the two-minute launchpad sweep included, to refresh one
+   * account. A pass already in flight began before the change, so it is
+   * followed by one more rather than taken as the answer (refresh-loop.ts).
+   */
+  refreshAccount(): void;
+  /** The outage line's Retry: every clock that is failing, and no other. */
+  retryFailing(): void;
+  /** The token page for an address no list carried — see tokenMissing below. */
+  tokenMissing(reads: { market: ReadState; discoveries: ReadState }): {
+    loading: boolean;
+    unreadable: boolean;
+    retry(): void;
+  };
+}
+
+/**
+ * EVERY READ ON ITS OWN CLOCK, AS THE SHELL RUNS THEM — the effect and the
+ * state that were inline in App.tsx, where no test could mount them.
+ *
+ * The clocks start on mount and again, from nothing, whenever `epoch` changes
+ * (a sign-out): the old ones are stopped, and `alive` — handed to `depsFor` —
+ * turns false for the reads they had in flight, so an answer that belonged to
+ * the owner leaving is dropped rather than landing after the reset. `update`
+ * is guarded here; anything else a dep does after an await checks `alive`.
+ *
+ * The shell's state is only what watchShellClocks publishes: a healthy clock
+ * starting and ending changes nothing it draws, so nothing re-renders for it.
+ *
+ * A TAB COMING BACK INTO VIEW runs what went stale while it was hidden, and
+ * nothing that ran seconds ago (wake), rather than every read at once.
+ */
+export function useShellClocks(
+  epoch: number,
+  depsFor: (alive: () => boolean) => LiveClockDeps,
+  timers?: LoopTimers,
+): ShellClocksHandle {
+  const [shell, setShell] = useState<ShellClocks>(QUIET_SHELL);
+  const clocks = useRef<ReturnType<typeof startClocks> | null>(null);
+  const latest = useRef({ depsFor, timers });
+  latest.current = { depsFor, timers };
+  useEffect(() => {
+    let alive = true;
+    // The watcher below publishes only changes from a quiet shell, so the shell
+    // starts from one: a sign-out's banner must not outlive the clocks it
+    // described.
+    setShell(QUIET_SHELL);
+    const deps = latest.current.depsFor(() => alive);
+    const running = startClocks(
+      liveClocks({
+        ...deps,
+        update: (change) => {
+          if (alive) deps.update(change);
+        },
+      }),
+      watchShellClocks((next) => {
+        if (alive) setShell(next);
+      }),
+      latest.current.timers,
+    );
+    clocks.current = running;
+    const onVisible = () => {
+      if (!document.hidden) running.wake();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      alive = false;
+      running.stop();
+      if (clocks.current === running) clocks.current = null;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [epoch]);
+  const refreshReads = (...keys: LiveClockKey[]) => {
+    for (const key of keys) clocks.current?.retryNow(key);
+  };
+  return {
+    shell,
+    refreshReads,
+    refreshAccount: () => refreshReads(...ACCOUNT_READS),
+    retryFailing: () => clocks.current?.retryNow(),
+    /**
+     * HAS THE MARKET LIST COME BACK YET? Without this the token page could not
+     * tell three facts apart, and it told the worst of them: the reads start
+     * empty, so every token screen said "We could not load this token" for the
+     * whole of the first fetch — a claim of failure about a request still in
+     * flight, while the sidebar beside it showed the token's price.
+     *
+     * Still loading, the load failed, and the load succeeded without this
+     * address: three remedies (wait, retry, check the address), and a page that
+     * renders one for all three is guessing. BOTH reads that list tokens count,
+     * now that they arrive apart: every stock is on the market read and every
+     * coin on the launchpad sweep, the slower by ten seconds, and "loaded" on
+     * the market alone would call a coin's link "Token not listed" while the
+     * read that lists it was still out. Only those two decide "unavailable",
+     * and Try again retries exactly those two (tokenMissingOf).
+     */
+    tokenMissing: (reads) => {
+      const liveLoaded = reads.market !== "unread" && reads.discoveries !== "unread";
+      const missing = tokenMissingOf(shell, reads, liveLoaded);
+      return {
+        loading: !liveLoaded,
+        unreadable: missing.unreadable,
+        retry: () => refreshReads(...missing.retry),
+      };
+    },
   };
 }

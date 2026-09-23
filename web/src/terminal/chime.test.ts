@@ -225,6 +225,212 @@ describe("a tone plays when the trade lands, or not at all", () => {
   });
 });
 
+/**
+ * A browser that starts audio only once the page has USER ACTIVATION, and
+ * honours `resume()` then and not before. Per the HTML spec's list of
+ * activation-triggering input events, a touch's pointerdown does NOT grant it
+ * — the pointerup, touchend or click after it do. A resume asked for without it
+ * is simply never honoured ("not allowed to start"); a later one, with it, is.
+ */
+function activationAudio() {
+  let activated = false;
+  let resumes = 0;
+  const made: Ctx[] = [];
+  class Ctx {
+    state: string = "suspended";
+    currentTime = 0;
+    destination = {};
+    oscillators = 0;
+    constructor() {
+      made.push(this);
+    }
+    resume() {
+      resumes++;
+      if (!activated) return new Promise<void>(() => {});
+      this.state = "running";
+      return Promise.resolve();
+    }
+    createOscillator() {
+      this.oscillators++;
+      const param = { setValueAtTime() {}, exponentialRampToValueAtTime() {} };
+      return { type: "", frequency: param, connect() {}, start() {}, stop() {} };
+    }
+    createGain() {
+      return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} };
+    }
+  }
+  const g = globalThis as { AudioContext?: unknown };
+  const before = g.AudioContext;
+  g.AudioContext = Ctx;
+  forgetAudioForTest();
+  return {
+    made,
+    resumes: () => resumes,
+    activate(on = true) {
+      activated = on;
+    },
+    restore() {
+      forgetAudioForTest();
+      if (before === undefined) delete g.AudioContext;
+      else g.AudioContext = before;
+    },
+  };
+}
+
+/** The page after a reload: `stored` is what this browser remembered. */
+async function reloaded(stored: "on" | null) {
+  const t = testDom();
+  const storage = memoryStorage();
+  if (stored) storage.setItem(SOUND_KEY, stored);
+  let toggle: () => void = () => {};
+  function Sound() {
+    const [, flip] = useSoundPref(() => storage);
+    toggle = flip;
+    return null;
+  }
+  await t.render(createElement(Sound));
+  return {
+    t,
+    toggle: () => act(async () => toggle()),
+    /** One gesture anywhere on the page, as the browser delivers it to the document. */
+    gesture: (type: string) =>
+      act(async () => {
+        t.dom.window.document.body.dispatchEvent(new t.dom.window.Event(type, { bubbles: true }));
+        await tick();
+      }),
+  };
+}
+
+describe("after a reload with the sound already on", () => {
+  // The toggle's own click starts the context when the reader turns sound ON.
+  // After a reload with it remembered on, nothing does but the page's next
+  // gesture — and a touch screen's pointerdown is not one the browser lets
+  // audio start from. Listening for it alone, once, left a phone silent for
+  // the whole session.
+  for (const lift of ["pointerup", "touchend", "click"]) {
+    it(`A TOUCH SCREEN'S TAP STARTS IT — the finger going down is not activation, its ${lift} is`, async () => {
+      const audio = activationAudio();
+      const page = await reloaded("on");
+      try {
+        await page.gesture("pointerdown");
+        assert.equal(audio.made.length, 1, "the context is made on the first touch");
+        assert.equal(audio.made[0]!.state, "suspended", "and the browser does not let it start yet");
+        assert.equal(playChime("buy"), false);
+        audio.activate();
+        await page.gesture(lift);
+        assert.equal(audio.made[0]!.state, "running", `the ${lift} that grants activation starts it`);
+        assert.equal(playChime("buy"), true, "and the next fill sounds");
+        assert.equal(audio.made.length, 1, "on the one context");
+      } finally {
+        await page.t.close();
+        audio.restore();
+      }
+    });
+  }
+
+  it("A GESTURE THAT FAILED TO START IT IS NOT THE LAST CHANCE — the next one tries again", async () => {
+    const audio = activationAudio();
+    const page = await reloaded("on");
+    try {
+      await page.gesture("pointerdown");
+      assert.equal(audio.made[0]!.state, "suspended");
+      audio.activate();
+      await page.gesture("pointerdown");
+      assert.equal(audio.made[0]!.state, "running", "a second tap of the same kind starts it");
+      assert.equal(playChime("sell"), true);
+    } finally {
+      await page.t.close();
+      audio.restore();
+    }
+  });
+
+  it("a tap on a control that keeps its click to itself still starts it", async () => {
+    const audio = activationAudio();
+    const page = await reloaded("on");
+    try {
+      const doc = page.t.dom.window.document;
+      const menu = doc.createElement("button");
+      menu.addEventListener("click", (e) => e.stopPropagation());
+      doc.body.append(menu);
+      audio.activate();
+      await act(async () => {
+        menu.dispatchEvent(new page.t.dom.window.Event("click", { bubbles: true }));
+        await tick();
+      });
+      assert.equal(audio.made[0]?.state, "running", "the page heard the gesture on its way down");
+    } finally {
+      await page.t.close();
+      audio.restore();
+    }
+  });
+
+  it("a key press starts it too", async () => {
+    const audio = activationAudio();
+    const page = await reloaded("on");
+    try {
+      audio.activate();
+      await page.gesture("keydown");
+      assert.equal(audio.made[0]?.state, "running");
+      assert.equal(playChime("buy"), true);
+    } finally {
+      await page.t.close();
+      audio.restore();
+    }
+  });
+
+  it("A CONTEXT THE BROWSER SUSPENDS LATER IS STARTED AGAIN — by the next gesture, and asked to by the next fill", async () => {
+    // iOS interrupts a running context when the page is backgrounded; an
+    // output device changing can suspend it. Unlocked once, it was never
+    // resumed again, and every fill after that was silent.
+    const audio = activationAudio();
+    const page = await reloaded("on");
+    try {
+      audio.activate();
+      await page.gesture("click");
+      const ctx = audio.made[0]!;
+      assert.equal(playChime("buy"), true);
+      assert.equal(ctx.oscillators, 1);
+
+      ctx.state = "interrupted";
+      await page.gesture("touchend");
+      assert.equal(ctx.state, "running", "the reader's next tap starts it again");
+
+      ctx.state = "suspended";
+      const asked = audio.resumes();
+      assert.equal(playChime("sell"), false, "a fill on a stopped context is not played late");
+      assert.equal(ctx.oscillators, 1, "nothing is scheduled on it");
+      assert.equal(audio.resumes(), asked + 1, "but it asks the context to start again");
+      await tick();
+      assert.equal(playChime("buy"), true, "so the fill after it sounds, without waiting on a tap");
+      assert.equal(ctx.oscillators, 2);
+    } finally {
+      await page.t.close();
+      audio.restore();
+    }
+  });
+
+  it("with the sound off, a gesture starts nothing — and turning it off stops listening", async () => {
+    const audio = activationAudio();
+    audio.activate();
+    const off = await reloaded(null);
+    try {
+      for (const type of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) await off.gesture(type);
+      assert.equal(audio.made.length, 0, "no context for a reader who never asked for sound");
+    } finally {
+      await off.t.close();
+    }
+    const on = await reloaded("on");
+    try {
+      await on.toggle();
+      for (const type of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) await on.gesture(type);
+      assert.equal(audio.made.length, 0, "nor once they turned it off");
+    } finally {
+      await on.t.close();
+      audio.restore();
+    }
+  });
+});
+
 describe("the blip", () => {
   it("is short, and ends in silence", () => {
     const { ctx, log } = fakeAudio();

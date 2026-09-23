@@ -35,15 +35,7 @@ import {
   type Tab,
   type TokenTab,
 } from "./live";
-import {
-  ACCOUNT_READS,
-  liveClocks,
-  QUIET_SHELL,
-  tokenMissingOf,
-  watchShellClocks,
-  type LiveClockKey,
-  type ShellClocks,
-} from "./live-clocks";
+import { useShellClocks } from "./live-clocks";
 
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
@@ -73,7 +65,6 @@ import {
   profileShown,
   realCashOf,
 } from "./account-read";
-import { startClocks } from "./refresh-loop";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
@@ -103,27 +94,6 @@ export function App() {
    */
   const [sources, setSources] = useState<LiveSources>(seedSources);
   const live = useMemo(() => liveOf(sources), [sources]);
-  /**
-   * HAS THE MARKET LIST COME BACK YET?
-   *
-   * Without this the shell cannot tell three different facts apart, and it told
-   * the worst of them: `live` starts as an empty seed, so every token screen
-   * rendered "We could not load this token" for the whole of the first fetch —
-   * a definitive claim of failure made about a request that was still in
-   * flight. The token page for TSLA said it while the sidebar beside it showed
-   * TSLA at $355.48.
-   *
-   * The three states are: still loading, the load failed, and the load
-   * succeeded and this address is not on the list. They have different remedies
-   * — wait, retry, and check the address — and a screen that renders one of them
-   * for all three is guessing on the user's behalf.
-   *
-   * BOTH READS THAT LIST TOKENS, now that they arrive apart. Every stock is on
-   * the market read and every coin on the launchpad sweep, which is the slower
-   * of the two by ten seconds; "loaded" on the market alone would tell a coin's
-   * link "Token not listed" while the read that lists it was still in flight.
-   */
-  const liveLoaded = live.reads.market !== "unread" && live.reads.discoveries !== "unread";
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
@@ -135,36 +105,13 @@ export function App() {
    * "Loading your account…" for both — for ever, after a failure.
    */
   const [accountFailed, setAccountFailed] = useState(false);
-  /**
-   * WHAT THE SHELL DRAWS FROM THE CLOCKS — see live-clocks.ts ShellClocks. Set
-   * only when one of these changes, not on every clock's start and end, which
-   * re-rendered the whole tree some twenty-three times a minute for nothing.
-   */
-  const [shellClocks, setShellClocks] = useState<ShellClocks>(QUIET_SHELL);
-  /** The one outage line over all of them; null while every read on it is healthy. */
-  const banner = shellClocks.banner;
-  /** The account or the owner's book is being read right now — a retry asked for, or the timer's. */
-  const accountBusy = shellClocks.accountBusy;
-  const clocks = useRef<ReturnType<typeof startClocks> | null>(null);
   /** Bumped by sign-out, which starts every clock again from nothing — see resetLive. */
   const [epoch, setEpoch] = useState(0);
-  /** Ask these reads again now; every other clock stays on its own schedule. */
-  const refreshReads = (...keys: LiveClockKey[]) => {
-    for (const key of keys) clocks.current?.retryNow(key);
-  };
-  /**
-   * THE ACCOUNT AND THE OWNER'S BOOK, AGAIN, NOW — for a retry the owner
-   * pressed, a sign-in, an agent just created, an order that answered, or
-   * anything that knows the owner's position just changed. It used to restart
-   * every read, the two-minute launchpad sweep included, to refresh one
-   * account. A pass already in flight began before the change, so it is
-   * followed by one more rather than taken as the answer (refresh-loop.ts).
-   */
-  const refreshAccount = () => refreshReads(...ACCOUNT_READS);
   /**
    * EVERYTHING, FROM NOTHING — for a sign-out. The reads in flight belong to
-   * the owner leaving, so restarting the clocks (the effect below is keyed on
-   * `epoch`) drops their answers rather than letting one land after the reset.
+   * the owner leaving, so restarting the clocks (useShellClocks, below, is
+   * keyed on `epoch`) drops their answers rather than letting one land after
+   * the reset.
    */
   const resetLive = () => {
     setSources(seedSources());
@@ -268,59 +215,48 @@ export function App() {
    *
    * A TAB COMING BACK INTO VIEW runs what went stale while it was hidden, and
    * nothing that ran seconds ago (wake), rather than every read at once.
+   *
+   * THE CLOCKS ARE A HOOK (live-clocks.ts useShellClocks), so a test mounts
+   * what the shell mounts. The shell hands it the reads and its own setters,
+   * and draws from what it returns: the outage line, whether the account is
+   * being read, the retries, and the token page's three states. Set only when
+   * one of these changes, not on every clock's start and end, which re-rendered
+   * the whole tree some twenty-three times a minute for nothing.
    */
-  useEffect(() => {
-    let alive = true;
+  const clockShell = useShellClocks(epoch, (alive) => {
     let firstAccount = true;
-    // The watcher below publishes only changes from a quiet shell, so the shell
-    // starts from one: a sign-out's banner must not outlive the clocks it
-    // described.
-    setShellClocks(QUIET_SHELL);
-    const readAccount = async () => {
-      const first = firstAccount;
-      firstAccount = false;
-      try {
-        const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
-        if(!alive) return;
-        setAccount({session,status});
-        setAccountFailed(false);
-        // Not on the first pass: there is no conversation of this session's to
-        // clear yet, and a draft typed while the page loaded is the owner's.
-        if(!first && session.hosted && !session.address){setTurns([]);setChatDraft("");}
-      } catch (error) {
-        // The reader gets one plain sentence (LoadFailure); the cause goes here.
-        console.warn("[merrymen] account read failed:", error);
-        if (alive) setAccountFailed(true);
-        throw error;
-      }
+    return {
+      fetchRead,
+      loadQuotes: loadTokenQuotes,
+      loadChanges: loadSessionChanges,
+      update: setSources,
+      readAccount: async () => {
+        const first = firstAccount;
+        firstAccount = false;
+        try {
+          const [session,status]=await Promise.all([requestJson<AccountState["session"]>("/api/auth/session"),requestJson<AccountState["status"]>("/api/grants")]);
+          if(!alive()) return;
+          setAccount({session,status});
+          setAccountFailed(false);
+          // Not on the first pass: there is no conversation of this session's to
+          // clear yet, and a draft typed while the page loaded is the owner's.
+          if(!first && session.hosted && !session.address){setTurns([]);setChatDraft("");}
+        } catch (error) {
+          // The reader gets one plain sentence (LoadFailure); the cause goes here.
+          console.warn("[merrymen] account read failed:", error);
+          if (alive()) setAccountFailed(true);
+          throw error;
+        }
+      },
+      hidden: () => document.hidden,
     };
-    const running = startClocks(
-      liveClocks({
-        fetchRead,
-        loadQuotes: loadTokenQuotes,
-        loadChanges: loadSessionChanges,
-        update: (change) => {
-          if (alive) setSources(change);
-        },
-        readAccount,
-        hidden: () => document.hidden,
-      }),
-      watchShellClocks((next) => {
-        if (alive) setShellClocks(next);
-      }),
-    );
-    clocks.current = running;
-    const onVisible = () => {
-      if (!document.hidden) running.wake();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      alive = false;
-      running.stop();
-      if (clocks.current === running) clocks.current = null;
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [epoch]);
+  });
+  /** The one outage line over all of them; null while every read on it is healthy. */
+  const banner = clockShell.shell.banner;
+  /** The account or the owner's book is being read right now — a retry asked for, or the timer's. */
+  const accountBusy = clockShell.shell.accountBusy;
+  /** The account and the owner's book, again, now — see ShellClocksHandle.refreshAccount. */
+  const refreshAccount = clockShell.refreshAccount;
 
   /**
    * A REAL-MONEY TRADE LANDING, SAID — see live-news.ts.
@@ -520,7 +456,7 @@ export function App() {
         ref={bodyRef}
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
-        {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={() => clocks.current?.retryNow()}/>}
+        {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -649,13 +585,10 @@ export function App() {
             )}
           </div>
         )}
-        {/* THREE STATES, NOT ONE — see `liveLoaded`. Waiting is not failing, and
-            a market list that came back without this address is a fact about the
-            address rather than a fact about the request. */}
-        {screen.kind === "token" && !token && !liveLoaded && (
-          <section className="hosted-entry"><p role="status">Loading token…</p></section>
-        )}
-        {screen.kind === "token" && !token && liveLoaded && (() => {
+        {/* THREE STATES, NOT ONE — see the hook's tokenMissing. Waiting is not
+            failing, and a market list that came back without this address is a
+            fact about the address rather than a fact about the request. */}
+        {screen.kind === "token" && !token && (() => {
           // WHICH READ WOULD HAVE HAD IT. Every listed equity comes from the
           // registry seed and /api/market; every coin comes from the launchpad
           // sweep. So an unreachable index means the coins are simply absent
@@ -669,7 +602,10 @@ export function App() {
           // AND ONLY THE READS THAT LIST TOKENS decide it — the same two the
           // button below retries, so pressing it can always clear what this
           // says (tokenMissingOf).
-          const missing = tokenMissingOf(shellClocks, live.reads, liveLoaded);
+          const missing = clockShell.tokenMissing(live.reads);
+          if (missing.loading) {
+            return <section className="hosted-entry"><p role="status">Loading token…</p></section>;
+          }
           const unreadable = missing.unreadable;
           return (
             <section className="hosted-entry">
@@ -682,7 +618,7 @@ export function App() {
               {/* The two reads that list tokens — not the account, which is
                   what this button used to refresh while the page said the
                   token could not be loaded. */}
-              {unreadable && <button onClick={() => refreshReads(...missing.retry)}>Try again</button>}
+              {unreadable && <button onClick={missing.retry}>Try again</button>}
               <button onClick={()=>goTab("home")}>Back to markets</button>
             </section>
           );
