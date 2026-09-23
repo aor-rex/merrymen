@@ -548,10 +548,35 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
  * position of those fills cost per unit; a plain mean of prices is not. Each
  * division is guarded per row, because Postgres raises on a zero divisor.
  * Each column ends in a comma, for splicing into a SELECT list.
+ *
+ * A SELL'S RESULT IS ONLY AS READ AS THE BASIS IT CLOSED. Its P&L is its
+ * proceeds minus the average cost of what it sold, and that cost was booked by
+ * the BUYS — any one of which may have been booked from the quote because its
+ * receipt could not be parsed (index.ts says so in the log: "cost basis booked
+ * from the quote (an estimate)"). A receipt-read sell over that basis is an
+ * estimated return, and checking the sell's own row alone published it as a
+ * read one. So a live fill counts as booked only when no quote-sourced trade
+ * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
+ * it sold" is the cash, which no figure here reads: only a sell's P&L is
+ * published.)
+ *
+ * "Before it", not "since the position was last flat", on purpose: an average
+ * cost carries every buy since the last time the book was empty, and the
+ * ledger has no column a reader can trust to say when that was (the quantities
+ * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
+ * later round trip its figure — nothing is shown — and never shows a guess.
+ * A paper sell closes the paper book, which no quote ever priced. No index is
+ * added for this: `trades_agent_time` already leads with the account.
  */
 export function fillFigures(t: string): string {
   const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
-  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL`;
+  const estimatedBasis = `(COALESCE(${t}.basis_source, '') = 'receipt' AND EXISTS (
+      SELECT 1 FROM trades q
+       WHERE q.agent_id = ${t}.agent_id
+         AND q.basis_source = 'quote'
+         AND LOWER(q.buy_token) = LOWER(${t}.sell_token)
+         AND q.created_at <= ${t}.created_at))`;
+  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL AND NOT ${estimatedBasis}`;
   const every = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
   return `
     CASE WHEN ${every(evidenced)} AND MIN(${t}.fill_price_usd) = MAX(${t}.fill_price_usd) THEN MIN(${t}.fill_price_usd)

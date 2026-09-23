@@ -23,6 +23,7 @@ const SLUG = "ems76d3cncwbt3dz";
 const OTHER = "hr5k2m9q4w7x3z8n";
 const NOW = Math.floor(Date.now() / 1000);
 const COIN = "T3139F043B88";
+const USDG = "0x05d0000000000000000000000000000000000005";
 
 type Decision = {
   id: string;
@@ -46,6 +47,12 @@ type Fill = {
   cash?: number | null;
   pnl?: number | null;
   basis?: string | null;
+  /** The trade's own account, when it is not the decision's usual author. */
+  agent?: string;
+  /** The coin that moved: bought on a buy, sold on a sell. */
+  token?: string;
+  /** When the trade was written — its order against the account's other trades. */
+  at?: number;
 };
 
 /**
@@ -58,7 +65,8 @@ async function ledger(decisions: Decision[], fills: Fill[] = [], opts: { premark
   raw.exec(`CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, mode TEXT, x_verified INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT, size_usdg REAL, source TEXT,
       reason TEXT, dropped_rule TEXT, hold_kind TEXT, ${opts.premark ? "" : "mark_usd REAL, mcap_usd REAL,"} at INTEGER);
-    CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, status TEXT, reject_rule TEXT,
+    CREATE TABLE trades(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, sell_token TEXT, buy_token TEXT, created_at INTEGER,
+      decision_id TEXT, status TEXT, reject_rule TEXT,
       fill_side TEXT, fill_price_usd REAL, fill_cash_usdg REAL, realized_pnl_usdg REAL, basis_source TEXT);
     CREATE TABLE posts(decision_id TEXT, body TEXT);
     INSERT INTO agents VALUES ('0xabc', 'Shogun', NULL, 'live', 0);
@@ -72,10 +80,14 @@ async function ledger(decisions: Decision[], fills: Fill[] = [], opts: { premark
     else insert.run(...(base as never[]), (d.mark ?? null) as never, (d.mcap ?? null) as never);
   }
   const trade = raw.prepare(
-    "INSERT INTO trades (decision_id, status, reject_rule, fill_side, fill_price_usd, fill_cash_usdg, realized_pnl_usdg, basis_source) VALUES (?,?,?,?,?,?,?,?)",
+    "INSERT INTO trades (agent_id, sell_token, buy_token, created_at, decision_id, status, reject_rule, fill_side, fill_price_usd, fill_cash_usdg, realized_pnl_usdg, basis_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
   );
   for (const f of fills) {
-    trade.run(f.decision, f.status, f.rule ?? null, f.side ?? null, f.price ?? null, f.cash ?? null, f.pnl ?? null, f.basis ?? null);
+    // Shaped like the worker's rows: a buy spends USDG for the coin, a sell
+    // the reverse.
+    const coin = f.token ?? "0xc0170000000000000000000000000000000000c0";
+    const [sold, bought] = f.side === "sell" ? [coin, USDG] : [USDG, coin];
+    trade.run(f.agent ?? "0xabc", sold, bought, f.at ?? NOW - 100, f.decision, f.status, f.rule ?? null, f.side ?? null, f.price ?? null, f.cash ?? null, f.pnl ?? null, f.basis ?? null);
   }
   return { raw, db };
 }
@@ -280,5 +292,55 @@ describe("a private book's size stays private (D1: a size is dollars)", () => {
     // A public book's id is what it always was, so a like cast on it stays.
     const pub = (await read([sir({ agent: "0xabc" })], [sirFill], { publicBook: ["0x1"] })).theses[0]!;
     assert.equal(pub.postId, postIdOf({ slug: SLUG, action: "sell", symbol: "AAPL", sizeUsdg: 4, reason: "Cutting AAPL.", shadow: false }));
+  });
+});
+
+describe("a sell's realized return is only as read as the basis it closed", () => {
+  // FD5. The fold checked `basis_source` on the SELL's own row. But the P&L a
+  // sell books is its proceeds minus the average cost of what it closed, and
+  // that cost was booked by the BUYS — one of which may have been booked from
+  // the pre-trade quote because its receipt could not be read (index.ts logs
+  // "cost basis booked from the quote (an estimate)"). A receipt-read sell over
+  // an estimated basis is an estimated return, published as a read one.
+  const TSLA = "0x7e5a000000000000000000000000000000007e5a";
+  const bought = (id: string, over: Partial<Decision> = {}): Decision =>
+    ({ id, action: "buy", symbol: "TSLA", size: 5, display: null, reason: `Buying TSLA ${id}.`, at: NOW - 7200, ...over });
+  const sold: Decision = { id: "s1", action: "sell", symbol: "TSLA", size: 6.5, display: null, reason: "Selling TSLA.", at: NOW - 600 };
+  const sellFill: Fill = { decision: "s1", status: "landed", side: "sell", price: 250, cash: 6.5, pnl: 1.5, basis: "receipt", token: TSLA, at: NOW - 600 };
+  const buyFill = (decision: string, basis: string, over: Partial<Fill> = {}): Fill =>
+    ({ decision, status: basis === "paper" ? "paper" : "landed", side: "buy", price: 200, cash: 5, pnl: 0, basis, token: TSLA, at: NOW - 7200, ...over });
+  const realized = async (decisions: Decision[], fills: Fill[]) =>
+    (await read(decisions, fills)).theses.find((t) => t.action === "sell")!.realizedPct;
+
+  it("A BUY BOOKED FROM THE QUOTE MAKES THE SELL'S RETURN AN ESTIMATE — and an estimate is not shown", async () => {
+    assert.equal(await realized([bought("b1"), sold], [buyFill("b1", "quote"), sellFill]), null);
+  });
+
+  it("the same round trip on a receipt-read buy is measured", async () => {
+    assert.equal(await realized([bought("b1"), sold], [buyFill("b1", "receipt"), sellFill]), 30);
+  });
+
+  it("one estimated buy among several is enough — the average cost carries every one", async () => {
+    const fills = [buyFill("b1", "receipt"), buyFill("b2", "quote", { at: NOW - 3600 }), sellFill];
+    assert.equal(await realized([bought("b1"), bought("b2", { at: NOW - 3600 }), sold], fills), null);
+  });
+
+  it("the token is matched as an address, whatever its case", async () => {
+    const fills = [buyFill("b1", "quote", { token: TSLA.toUpperCase().replace("0X", "0x") }), sellFill];
+    assert.equal(await realized([bought("b1"), sold], fills), null);
+  });
+
+  it("ONLY THIS AGENT'S BUYS OF THIS COIN, BEFORE THE SELL, built its basis", async () => {
+    // Another agent's estimated buy of the same coin is another book.
+    assert.equal(await realized([bought("b1", { agent: "0xdef" }), sold], [buyFill("b1", "quote", { agent: "0xdef" }), sellFill]), 30);
+    // An estimated buy of a different coin is another position.
+    assert.equal(await realized([bought("b1"), sold], [buyFill("b1", "quote", { token: "0x0000000000000000000000000000000000000bad" }), sellFill]), 30);
+    // An estimated buy AFTER the sell opened the next position, not this one.
+    assert.equal(await realized([bought("b1", { at: NOW - 60 }), sold], [buyFill("b1", "quote", { at: NOW - 60 }), sellFill]), 30);
+  });
+
+  it("a paper sell closes the paper book, which no quoted fill ever touches", async () => {
+    const paperSell: Fill = { ...sellFill, status: "paper", basis: "paper" };
+    assert.equal(await realized([bought("b1"), sold], [buyFill("b1", "quote"), paperSell]), 30);
   });
 });

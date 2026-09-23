@@ -19,16 +19,24 @@ import { PEER_THESIS_LIMIT, readPeerTheses } from "./peer-theses";
 
 const AGENT = "0x1111111111111111111111111111111111111111" as const;
 const NOW = Math.floor(Date.now() / 1000);
+const USDG = "0x05d0000000000000000000000000000000000005";
+const COIN = "0x00000000000000000000000000000a151b4a9e1b";
 
-async function ledger(fills: boolean) {
+/**
+ * A ledger shaped like the worker's. `live` books the round trip on chain,
+ * with the BUY's cost read per `buyBasis` — the pre-trade quote when its
+ * receipt could not be parsed.
+ */
+async function ledger(fills: boolean, opts: { live?: boolean; buyBasis?: "receipt" | "quote" } = {}) {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await db.exec(`
     CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, x_handle TEXT, mode TEXT);
     CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, at INTEGER, action TEXT, symbol TEXT, size_usdg REAL,
       source TEXT, reason TEXT, dropped_rule TEXT, hold_kind TEXT);
-    CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, status TEXT, reject_rule TEXT
-      ${fills ? ", fill_price_usd REAL, fill_cash_usdg REAL, realized_pnl_usdg REAL, basis_source TEXT" : ""});
+    CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, sell_token TEXT, buy_token TEXT, created_at INTEGER,
+      decision_id TEXT, status TEXT, reject_rule TEXT
+      ${fills ? ", fill_side TEXT, fill_price_usd REAL, fill_cash_usdg REAL, realized_pnl_usdg REAL, basis_source TEXT" : ""});
     CREATE TABLE posts (decision_id TEXT, body TEXT);
     INSERT INTO agents VALUES ('${AGENT}', 'Shogun', NULL, 'paper');`);
   const decide = db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?, 'TA151B4A9E1B', ?, 'brain', ?, NULL, ?)");
@@ -38,8 +46,12 @@ async function ledger(fills: boolean) {
     await decide.run(`hold-${i}`, AGENT, NOW - 30 * i, "hold", 0, `Review ${i}: edge unclear, so hold.`, "MODEL_HOLD");
   }
   if (fills) {
-    await db.exec(`INSERT INTO trades (decision_id, status, fill_price_usd, fill_cash_usdg, realized_pnl_usdg, basis_source)
-      VALUES ('buy', 'paper', 0.0004, 5, NULL, 'paper'), ('sell', 'paper', 0.00052, 6.5, 1.5, 'paper')`);
+    const [status, sellBasis] = opts.live ? ["landed", "receipt"] : ["paper", "paper"];
+    const buyBasis = opts.live ? (opts.buyBasis ?? "receipt") : "paper";
+    await db.exec(`INSERT INTO trades (agent_id, sell_token, buy_token, created_at, decision_id, status, fill_side,
+        fill_price_usd, fill_cash_usdg, realized_pnl_usdg, basis_source)
+      VALUES ('${AGENT}', '${USDG}', '${COIN}', ${NOW - 7200}, 'buy', '${status}', 'buy', 0.0004, 5, NULL, '${buyBasis}'),
+             ('${AGENT}', '${COIN}', '${USDG}', ${NOW - 3600}, 'sell', '${status}', 'sell', 0.00052, 6.5, 1.5, '${sellBasis}')`);
   } else {
     await db.exec(`INSERT INTO trades (decision_id, status) VALUES ('buy', 'paper'), ('sell', 'paper')`);
   }
@@ -71,6 +83,22 @@ describe("an agent's own landed trades are in the file its memory reads", () => 
       assert.equal(buy.entryPriceUsd, 0.0004);
     } finally {
       raw.close();
+    }
+  });
+
+  it("A CLOSE OVER A QUOTED BASIS IS REMEMBERED WITHOUT A RESULT — memory reads the feed's fold", async () => {
+    // FD5: the buy's receipt could not be parsed, so its cost was booked from
+    // the quote. The sell read its own receipt, and the return it booked is
+    // still an estimate — not a figure the agent is told it made.
+    for (const [buyBasis, want] of [["quote", null], ["receipt", 30]] as const) {
+      const { raw, db } = await ledger(true, { live: true, buyBasis });
+      try {
+        const sell = (await readPeerTheses(db, [AGENT])).find((t) => t.action === "sell")!;
+        assert.equal(sell.outcome, "landed");
+        assert.equal(sell.realizedPct, want, buyBasis);
+      } finally {
+        raw.close();
+      }
     }
   });
 
