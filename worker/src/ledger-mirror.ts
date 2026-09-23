@@ -257,6 +257,19 @@ function checksummed(lower: string): string {
 }
 
 /**
+ * The five binds for `agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?)`: the
+ * account as written, lowercase and EIP-55, the hash as written and
+ * lowercase. Every pair is a key of trades_agent_userop, so the lookup stays
+ * an index seek on both backends.
+ */
+function spellingsOf(r: Record<string, unknown>): string[] {
+  const account = String(r.agent_id ?? "");
+  const hash = String(r.user_op_hash ?? "");
+  const lower = account.toLowerCase();
+  return [account, lower, checksummed(lower), hash, hash.toLowerCase()];
+}
+
+/**
  * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
  * never inside them, the copies that were refused.
  *
@@ -642,6 +655,21 @@ export async function mirrorTenant(args: {
   // It also makes the pass idempotent for free: once a row is resolved the
   // UPDATE matches nothing, so re-reading the same window costs one bounded
   // SELECT and N no-op updates.
+  //
+  // THE SAME SPELLINGS AS THE DUPLICATE SEEK ABOVE. That seek now refuses a
+  // copy spelt the other way on every pass, so this UPDATE is the only road
+  // the copy's outcome has to the original. Matched on the exact spelling it
+  // found nothing, and an original left `submitted` by a child killed while
+  // waiting on the receipt stayed "sent, waiting on the chain" for good —
+  // worse than the duplicate it replaced, which at least showed the landing.
+  //
+  // AND IT MAY ONLY ADD EVIDENCE, NEVER ERASE IT. The row it now reaches is
+  // often the reconciler's copy: kind 'swap', no decision, no fill side, no
+  // gas. Bound as written, it overwrote the original's decision_id and
+  // fill_side with NULL — the row that proved WHY the agent traded would
+  // settle as an anonymous swap. Each evidence column keeps its value when
+  // the child has none (COALESCE); status and the outcome itself still move,
+  // and only ever from `submitted`.
   try {
     const resolved = (await child
       .prepare(
@@ -657,11 +685,16 @@ export async function mirrorTenant(args: {
       let n = 0;
       await shared.tx(async (db) => {
         const upd = db.prepare(
-          `UPDATE trades SET tx_hash = ?, status = ?, reject_rule = ?, decision_id = ?,
-                             fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
-                             realized_pnl_usdg = ?, basis_source = ?, gas_wei = ?,
-                             sponsored_gas_wei = ?, gas_usdg = ?, gas_units = ?, fill_cash_usdg = ?
-            WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
+          `UPDATE trades SET tx_hash = COALESCE(?, tx_hash), status = ?,
+                             reject_rule = COALESCE(?, reject_rule), decision_id = COALESCE(?, decision_id),
+                             fill_side = COALESCE(?, fill_side), fill_qty_raw = COALESCE(?, fill_qty_raw),
+                             fill_price_usd = COALESCE(?, fill_price_usd),
+                             realized_pnl_usdg = COALESCE(?, realized_pnl_usdg),
+                             basis_source = COALESCE(?, basis_source), gas_wei = COALESCE(?, gas_wei),
+                             sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
+                             gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
+                             fill_cash_usdg = COALESCE(?, fill_cash_usdg)
+            WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
           const res = await upd.run(
@@ -669,7 +702,7 @@ export async function mirrorTenant(args: {
             r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
-            r.agent_id, r.user_op_hash,
+            ...spellingsOf(r),
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports
           // it directly and the Postgres driver maps rowCount — so this counts

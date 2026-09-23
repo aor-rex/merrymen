@@ -209,6 +209,42 @@ for (const [label, destination] of [
       const rows = await tape(shared);
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.status, "landed");
+      // The copy is the reconciler's: no decision. Settling must not wipe
+      // the original's.
+      assert.equal(rows[0]!.decision_id, "d1", "the outcome is added, the evidence is kept");
+      first.raw.close();
+      rebuilt.raw.close();
+    });
+
+    it("a copy spelt the other way, arriving AFTER the rewind, still settles the original", async () => {
+      // The redeploy the skip exists for: the child was killed waiting on the
+      // receipt, so the shared original is `submitted` under the EIP-55
+      // account. The rebuilt child's first row is a refusal (that pass is the
+      // rewind); the reconciler's landed copy — lowercase, no decision, no
+      // side — only comes up on the next, ordinary pass. The copy is refused
+      // there, so this UPDATE is the only way the landing reaches the ledger.
+      const shared = dest();
+      const first = ledger([
+        { agent: CHECKSUMMED, hash: "0xop1", status: "submitted", side: "buy", decision: "d1", at: 1000 },
+      ]);
+      await mirrorTenant({ tenant: "t1", child: first.db, shared, nowSec: 2000 });
+      const rebuilt = ledger([{ agent: LOWER, hash: null, status: "rejected", decision: "d2", at: 5000 }]);
+      await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, nowSec: 5500 });
+      rebuilt.raw
+        .prepare(
+          `INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, tx_hash, status, epoch, created_at)
+           VALUES (?, 'swap', '0xvault', 5.0, '0xop1', 'tx0xop1', 'landed', 1, 5600)`,
+        )
+        .run(LOWER);
+      const report = await mirrorTenant({ tenant: "t1", child: rebuilt.db, shared, nowSec: 6000 });
+      assert.equal(report.restarted?.trades, undefined, "an ordinary pass, not the rewind");
+      assert.equal(report.copied.trades_already_mirrored, 1, "the copy is still refused");
+      const op1 = (await tape(shared)).filter((r) => r.user_op_hash === "0xop1");
+      assert.equal(op1.length, 1, "one row for one operation");
+      assert.equal(op1[0]!.status, "landed", "and the landing reached it");
+      assert.equal(op1[0]!.agent_id, CHECKSUMMED, "on the original's own row");
+      assert.equal(op1[0]!.fill_side, "buy");
+      assert.equal(op1[0]!.decision_id, "d1");
       first.raw.close();
       rebuilt.raw.close();
     });
