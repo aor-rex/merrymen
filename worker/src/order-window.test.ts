@@ -34,7 +34,7 @@ import { after, describe, it } from "node:test";
 
 import { ORDER_IN_FLIGHT_MS as SWEEP_IN_FLIGHT_MS, markRunning, writeCommand, writeCommandResult } from "./command-files";
 import { wrapSqlite } from "./db";
-import { ferryForChild } from "./orchestrator";
+import { COMMAND_RECEIPT_DDL, ferryForChild, missingReceiptColumn } from "./orchestrator";
 import { ORDER_IN_FLIGHT_MS, ORDER_STALE_GRACE_MS, placeHostedOrder } from "../../web/src/lib/order-state";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -49,11 +49,13 @@ after(() => {
   for (const h of homes) rmSync(h, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-function setup() {
+/** The table as production had it before receipts; `withReceipt` adds the column the orchestrator grows. */
+function setup(withReceipt = false) {
   const raw = new DatabaseSync(":memory:");
   raw.exec(`CREATE TABLE agent_commands (
     id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, args TEXT,
     created_at INTEGER NOT NULL, claimed_at INTEGER, done_at INTEGER, result TEXT)`);
+  if (withReceipt) raw.exec(COMMAND_RECEIPT_DDL);
   const home = mkdtempSync(path.join(tmpdir(), "merry-window-"));
   homes.push(home);
   return { raw, db: wrapSqlite(raw), home };
@@ -224,6 +226,92 @@ describe("AN ORDER THE CHILD HAS TAKEN IS NEVER CALLED 'NEVER RAN'", () => {
   });
 });
 
+/**
+ * "NEVER RAN" IS C3's `expired`, WHICHEVER PROCESS NOTICED IT.
+ *
+ * An order that expires in the child's queue is answered with an `expired`
+ * receipt (runTickCommand's hook). The same fact noticed by this sweep first —
+ * a row never delivered, or a file still queued past its deadline — was closed
+ * with the sentence alone, so the chat rendered one fact two ways depending on
+ * which process got there first.
+ */
+describe("the sweep's 'never ran' carries the same receipt the child writes", () => {
+  const receiptOf = (raw: DatabaseSync, id: string) => {
+    const r = raw.prepare("SELECT receipt FROM agent_commands WHERE id = ?").get(id) as { receipt: string | null };
+    return r.receipt === null ? null : JSON.parse(r.receipt);
+  };
+  /** Nothing was built or sent: every ledger field is null, and side and symbol are the order's own. */
+  const EXPIRED = { status: "expired", side: "buy", symbol: "TSLA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+
+  it("A FILE STILL QUEUED PAST ITS DEADLINE AND GRACE IS CLOSED WITH AN `expired` RECEIPT", async () => {
+    const { raw, db, home } = setup(true);
+    stillQueued(raw, home, "dead-order", WINDOW_MS + 2 * MIN + 30_000);
+    await pass(db, home);
+    assert.match(state(raw, "dead-order").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "dead-order"), EXPIRED);
+  });
+
+  it("AN ORDER NEVER DELIVERED IS CLOSED WITH ONE TOO", async () => {
+    const { raw, db, home } = setup(true);
+    const created = Date.now() - 7 * MIN - 30_000;
+    raw
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
+      .run("undelivered", ACCOUNT, JSON.stringify({ ...ORDER, symbol: "nvda" }), created);
+    for (let i = 0; i < 5; i += 1) {
+      raw
+        .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'selftest', NULL, ?)")
+        .run(`probe-${i}`, ACCOUNT, created - 1_000 - i);
+    }
+    await pass(db, home);
+    assert.match(state(raw, "undelivered").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "undelivered"), { ...EXPIRED, symbol: "NVDA" });
+  });
+
+  it("an order whose arguments name no valid side or symbol gets an `expired` receipt that prints neither", async () => {
+    const { raw, db, home } = setup(true);
+    const created = delivered(raw, "odd", WINDOW_MS + 2 * MIN + 30_000, { side: "yolo", symbol: "../x", usdgAmount: 5, expiresAt: Date.now() - 3 * MIN });
+    writeCommand(home, { id: "odd", kind: "trade", at: created, args: { side: "yolo", symbol: "../x" }, expiresAt: Date.now() - 3 * MIN });
+    await pass(db, home);
+    assert.deepEqual(receiptOf(raw, "odd"), { ...EXPIRED, side: null, symbol: null });
+  });
+
+  it("BUT 'MAY HAVE FILLED' CARRIES NO RECEIPT — nothing is known, so nothing is templated", async () => {
+    const { raw, db, home } = setup(true);
+    takenAndRunning(raw, home, "marker-late", WINDOW_MS + GRACE_MS + ORDER_IN_FLIGHT_MS + 30_000);
+    await pass(db, home);
+    assert.match(state(raw, "marker-late").result ?? "", /may have/);
+    assert.equal(receiptOf(raw, "marker-late"), null);
+  });
+
+  it("A TABLE THAT HAS NOT GROWN THE COLUMN YET STILL HAS THE ROW CLOSED — the receipt waits, the answer does not", async () => {
+    const { raw, db, home } = setup(false);
+    stillQueued(raw, home, "dead-order", WINDOW_MS + 2 * MIN + 30_000);
+    await pass(db, home);
+    const s = state(raw, "dead-order");
+    assert.ok(s.done_at);
+    assert.match(s.result ?? "", /never ran/);
+  });
+
+  it("THE FALLBACK KEEPS THE ROW'S OWN GUARD — a real answer that landed in between is never talked over", async () => {
+    // Two writes where there used to be one, so there is a gap between them.
+    // The up-leg can land the worker's real answer in it; the second write
+    // must hold the same `done_at IS NULL` the first one did.
+    const { raw, db, home } = setup(false);
+    stillQueued(raw, home, "raced", WINDOW_MS + 2 * MIN + 30_000);
+    const racing = {
+      ...db,
+      prepare: (sql: string) => {
+        if (/^UPDATE/.test(sql) && /receipt = \?/.test(sql)) {
+          raw.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(Date.now(), "bought 25.00 USDG of TSLA", "raced");
+        }
+        return db.prepare(sql);
+      },
+    };
+    await pass(racing, home);
+    assert.equal(state(raw, "raced").result, "bought 25.00 USDG of TSLA");
+  });
+});
+
 describe("the sweep and the one-at-a-time slot agree, row by row", () => {
   // THE SLOT IS WHAT LETS A SECOND ORDER IN. So wherever the sweep leaves a row
   // open because it may still trade, the route must still refuse the next one;
@@ -299,5 +387,118 @@ describe("the sweep and the one-at-a-time slot agree, row by row", () => {
     assert.ok(state(raw, "legacy").claimed_at, "the down-leg delivered it");
     assert.equal(state(raw, "legacy").done_at, null, "and the child would still run it");
     assert.deepEqual(await ask("third"), { ok: false, why: "in-flight" }, "delivered, it is held like any claimed order");
+  });
+});
+
+/**
+ * THE RECEIPT-LESS FALLBACK MAY ONLY ANSWER THE QUESTION IT EXISTS FOR.
+ *
+ * Both writers try the UPDATE with the receipt first and fall back to the old
+ * UPDATE on a table that has not grown the column. They fell back on ANY error.
+ * So a blip on a table that HAS the column closed the row with its sentence and
+ * a NULL receipt — and a closed row is never revisited (done_at is set, and the
+ * up-leg drops the result file), so it stayed that way: the child's `expired`
+ * receipt and a NULL one, two renderings of one fact. Anything but the missing
+ * column is a failed write, left for the next pass to retry whole.
+ */
+describe("a failed receipt write is retried, never closed without it", () => {
+  const receiptOf = (raw: DatabaseSync, id: string) => {
+    const r = raw.prepare("SELECT receipt FROM agent_commands WHERE id = ?").get(id) as { receipt: string | null };
+    return r.receipt === null ? null : JSON.parse(r.receipt);
+  };
+  const EXPIRED = { status: "expired", side: "buy", symbol: "TSLA", token: null, usdgActual: null, txHash: null, rejectRule: null };
+  /** A blip on exactly the write that carries the receipt: the table has the column, the connection does not answer. */
+  const blipOnReceipt = (raw: DatabaseSync, when = "1") =>
+    raw.exec(`CREATE TRIGGER blip BEFORE UPDATE OF receipt ON agent_commands WHEN ${when}
+      BEGIN SELECT RAISE(ABORT, 'Connection terminated unexpectedly'); END`);
+
+  it("A BLIP ON THE SWEEP'S RECEIPT WRITE LEAVES THE ROW OPEN, and the next pass closes it WITH the receipt", async () => {
+    // The reviewer's probe: pass 1 used to leave {done: true, receipt: null}.
+    const { raw, db, home } = setup(true);
+    stillQueued(raw, home, "dead-order", WINDOW_MS + 2 * MIN + 30_000);
+    blipOnReceipt(raw);
+    await pass(db, home);
+    assert.equal(state(raw, "dead-order").done_at, null, "not closed as 'never ran' without its receipt");
+    raw.exec("DROP TRIGGER blip");
+    await pass(db, home);
+    assert.match(state(raw, "dead-order").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "dead-order"), EXPIRED);
+  });
+
+  it("an undelivered order is the same: left open, then closed with its receipt by the next pass", async () => {
+    // Stuck behind five older commands, so pass 1 cannot deliver it and tries
+    // to close it. Pass 2 delivers it — past its deadline, which the child
+    // refuses at the claim — and closes it with the receipt.
+    const { raw, db, home } = setup(true);
+    const created = Date.now() - WINDOW_MS - GRACE_MS - 30_000;
+    raw
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
+      .run("undelivered", ACCOUNT, JSON.stringify({ ...ORDER, expiresAt: created + WINDOW_MS }), created);
+    for (let i = 0; i < 5; i += 1) {
+      raw
+        .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'selftest', NULL, ?)")
+        .run(`probe-${i}`, ACCOUNT, created - 1_000 - i);
+    }
+    blipOnReceipt(raw);
+    await pass(db, home);
+    assert.deepEqual(
+      { claimed: state(raw, "undelivered").claimed_at, done: state(raw, "undelivered").done_at },
+      { claimed: null, done: null },
+      "not closed without its receipt",
+    );
+    raw.exec("DROP TRIGGER blip");
+    await pass(db, home);
+    assert.match(state(raw, "undelivered").result ?? "", /never ran/);
+    assert.deepEqual(receiptOf(raw, "undelivered"), EXPIRED);
+  });
+
+  it("ONE ROW'S FAILED WRITE DOES NOT SKIP THE REST OF THE PASS", async () => {
+    const { raw, db, home } = setup(true);
+    stillQueued(raw, home, "blips", WINDOW_MS + 2 * MIN + 40_000);
+    stillQueued(raw, home, "fine", WINDOW_MS + 2 * MIN + 30_000);
+    blipOnReceipt(raw, "OLD.id = 'blips'");
+    await pass(db, home);
+    assert.equal(state(raw, "blips").done_at, null);
+    assert.match(state(raw, "fine").result ?? "", /never ran/, "the next row is still closed this pass");
+    assert.deepEqual(receiptOf(raw, "fine"), EXPIRED);
+  });
+
+  it("A BLIP ON THE UP-LEG'S RECEIPT WRITE KEEPS THE ANSWER ON DISK, and the next pass lands it WITH the receipt", async () => {
+    const { raw, db, home } = setup(true);
+    takenAndRunning(raw, home, "filled", 60_000);
+    const receipt = { status: "landed", side: "buy", symbol: "TSLA", token: null, usdgActual: 25, txHash: null, rejectRule: null };
+    writeCommandResult(home, { id: "filled", ok: true, line: "bought 25.00 USDG of TSLA", at: Date.now(), receipt } as never);
+    blipOnReceipt(raw);
+    await pass(db, home);
+    assert.equal(state(raw, "filled").done_at, null, "not answered without its receipt");
+    raw.exec("DROP TRIGGER blip");
+    await pass(db, home);
+    assert.equal(state(raw, "filled").result, "bought 25.00 USDG of TSLA");
+    assert.deepEqual(receiptOf(raw, "filled"), receipt);
+  });
+
+  it("a table WITHOUT the column still gets the up-leg's answer — the receipt waits, the answer does not", async () => {
+    const { raw, db, home } = setup(false);
+    takenAndRunning(raw, home, "filled", 60_000);
+    writeCommandResult(home, { id: "filled", ok: true, line: "bought 25.00 USDG of TSLA", at: Date.now() });
+    await pass(db, home);
+    assert.equal(state(raw, "filled").result, "bought 25.00 USDG of TSLA");
+  });
+
+  it("THE MISSING COLUMN IS NAMED, on either backend — nothing else counts as it", () => {
+    // SQLite, and Postgres's undefined_column as the pg driver raises it.
+    assert.equal(missingReceiptColumn(new Error("no such column: receipt")), true);
+    const pg = Object.assign(new Error('column "receipt" of relation "agent_commands" does not exist'), { code: "42703" });
+    assert.equal(missingReceiptColumn(pg), true);
+    // A blip, a lock, another column, a non-error: all failed writes.
+    assert.equal(missingReceiptColumn(new Error("Connection terminated unexpectedly")), false);
+    assert.equal(missingReceiptColumn(new Error("database is locked")), false);
+    assert.equal(missingReceiptColumn(new Error("no such column: result")), false);
+    assert.equal(
+      missingReceiptColumn(Object.assign(new Error('column "done_at" of relation "agent_commands" does not exist'), { code: "42703" })),
+      false,
+    );
+    assert.equal(missingReceiptColumn(Object.assign(new Error("timeout"), { code: "57014" })), false);
+    assert.equal(missingReceiptColumn("no such column: receipt"), false);
   });
 });

@@ -335,6 +335,28 @@ export function openChildLedger(home: string): { db: Db; close: () => void } | n
 }
 
 /**
+ * IS THIS THE ERROR A LEDGER WITHOUT `mark_usd`/`mcap_usd` GIVES — AND ONLY THAT?
+ *
+ * The decisions copy falls back to a SELECT without the mark columns for a
+ * child ledger that predates them. That fallback is permanent for every row it
+ * copies: a decision reaches the shared ledger once, exactly as first written
+ * (see the ON CONFLICT note below). So it may only ever answer the one question
+ * it exists for. A locked file, a timeout or any other column's absence is a
+ * failed pass, which the next pass retries WITH the marks; swallowing it here
+ * would publish up to a batch of posts that can never say "since posted".
+ *
+ * SQLite says `no such column: mark_usd`; Postgres says undefined_column (42703)
+ * and names the column. The column name is required in both, so the absence of
+ * some OTHER column is still a failure and still visible.
+ */
+export function missingMarkColumn(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const names = /\b(mark_usd|mcap_usd)\b/.test(e.message);
+  if (!names) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
+}
+
+/**
  * Copy one tenant's ledger forward.
  *
  * Never throws: a tenant whose ledger is mid-write, corrupt, or simply absent
@@ -741,13 +763,29 @@ export async function mirrorTenant(args: {
       .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
       .get(tenant, "decisions")) as { last_id: number } | undefined;
     const since = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
-    const rows = (await child
-      .prepare(
-        `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name, at
-         FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
-      )
-      .all(since, batch)) as Record<string, unknown>[];
+    // THE MARK COLUMNS ARE READ WHEN THE CHILD HAS THEM. This handle is
+    // read-only, so the mirror cannot migrate a child ledger; one opened
+    // before its own worker has run the ALTER would fail a SELECT naming
+    // `mark_usd`, and the whole decisions copy would stall behind it —
+    // silently, since a stalled table and an idle one print the same line.
+    // So the row is copied without them instead: a post with no mark claims
+    // nothing, and a post that never arrives says nothing at all.
+    //
+    // ONLY for that. Any other failure of the first read throws to the catch
+    // below and the pass retries with the marks — see missingMarkColumn.
+    const read = (marks: boolean) =>
+      child
+        .prepare(
+          `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
+                  reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                  ${marks ? "mark_usd, mcap_usd," : ""} at
+           FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
+        )
+        .all(since, batch) as Promise<Record<string, unknown>[]>;
+    const rows = await read(true).catch((e: unknown) => {
+      if (missingMarkColumn(e)) return read(false);
+      throw e;
+    });
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
@@ -765,9 +803,13 @@ export async function mirrorTenant(args: {
           // after the fill lands, say — must NOT be added to this statement; it
           // needs its own append-only table, inserted once, or it will pass
           // every test against a child sqlite and publish nothing in production.
+          //
+          // `mark_usd` and `mcap_usd` are safe here for the same reason: the
+          // writer puts them in the row's own INSERT, at decision time.
           `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                                  mark_usd, mcap_usd, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         );
         for (const r of rows) {
@@ -775,7 +817,7 @@ export async function mirrorTenant(args: {
             r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
             r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
             r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null,
-            r.provenance ?? null, r.display_name ?? null, r.at,
+            r.provenance ?? null, r.display_name ?? null, r.mark_usd ?? null, r.mcap_usd ?? null, r.at,
           );
         }
         // Same transaction as the rows, for the same reason the log tables do

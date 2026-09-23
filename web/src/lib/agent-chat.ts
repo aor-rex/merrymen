@@ -1,9 +1,13 @@
 /** Shared narration for the dashboard and consented partner integrations. */
+import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
-import { conceptsFor, renderConcepts } from "../../../packages/core/src/index";
+import { conceptsFor, llmProviderById, renderConcepts } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
+import { sseEvent, streamSafe } from "./chat-stream";
 import { resolveConfig } from "../../../worker/src/settings";
-import { resolveLlm, llmText, type LlmCreds } from "../../../worker/src/llm";
+import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
+import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
+import { redactSecrets } from "../../../worker/src/telegram/agent";
 
 /**
  * THIS PROMPT ONCE TOLD THE MODEL THERE WAS NO PAPER/LIVE SWITCH.
@@ -110,18 +114,39 @@ export interface AgentChatBody { message?: unknown; state?: unknown; history?: u
 export interface AgentReply {
   reply: string | null;
   command?: NonNullable<ReturnType<typeof splitCommand>["command"]>;
-  why?: "empty" | "no-llm" | "llm-error";
+  why?: "empty" | "no-llm" | "llm-error" | "cut-off";
+  /**
+   * WHICH KIND OF MODEL FAILURE, decided here — where the error object is,
+   * with its status — so the browser can say it in the agent's own words.
+   * worker/src/llm-failure.ts is the one classifier; Telegram uses it too.
+   */
+  kind?: LlmFailureKind;
+  /** The brain's provider, as the owner would name it. Absent when it has no name worth saying. */
+  provider?: string;
+  /** The provider's words, redacted and in one shape — for whoever debugs it. Never rendered. */
   detail?: string;
 }
 export interface AgentChatOptions {
   surface?: "dashboard" | "partner";
   credentials?: () => LlmCreds | null;
   complete?: typeof llmText;
+  /** The streamed completion, for agentReplyResponse. A test seam, like `complete`. */
+  stream?: typeof llmTextStream;
 }
 
-export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}): Promise<AgentReply> {
+/** The request one reply sends, or the answer that needs no model at all. */
+type Prepared =
+  | { early: AgentReply }
+  | { creds: LlmCreds; request: { system: string; prompt: string; maxTokens: number } };
+
+/**
+ * EVERYTHING UP TO THE MODEL CALL, shared by the answered and the streamed
+ * reply so the two cannot drift: the same state fitting, the same definitions,
+ * the same defanging of every marker in the input, the same system prompt.
+ */
+function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prepared {
   const message = typeof body.message === "string" ? body.message.slice(0, 2000).trim() : "";
-  if (!message) return { reply: null, why: "empty" };
+  if (!message) return { early: { reply: null, why: "empty" } };
   // WHOLE ENTRIES, NEVER A PREFIX. A blind slice cut mid-object and handed the
   // model malformed JSON with no marker, which it answered from anyway. See
   // lib/chat-state.ts for the trace.
@@ -137,7 +162,7 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
   const creds = (options.credentials ?? (() => resolveLlm(resolveConfig())))();
   if (!creds) {
     // No brain configured — the client falls back to its own ledger answers.
-    return { reply: null, why: "no-llm" };
+    return { early: { reply: null, why: "no-llm" } };
   }
 
   // WHICH DEFINITIONS THIS QUESTION NEEDS — decided here, by matching words,
@@ -186,20 +211,185 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     .filter(Boolean)
     .join("\n\n");
 
+  const request = { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 };
+  if (options.surface === "partner") request.system = PARTNER_SYSTEM + PARTNER_COMMANDS;
+  return { creds, request };
+}
+
+/** The complete reply, split: the words, and the proposal only if it ends them. */
+function finishReply(raw: string): AgentReply {
+  const { reply, command } = splitCommand(raw);
+  return { reply: reply || null, ...(command ? { command } : {}) };
+}
+
+export async function generateAgentReply(body: AgentChatBody, options: AgentChatOptions = {}): Promise<AgentReply> {
+  const prepared = prepareAgentReply(body, options);
+  if ("early" in prepared) return prepared.early;
   try {
-    const request = { system: SYSTEM + COMMANDS, prompt, maxTokens: concepts ? 700 : 400 };
-    if (options.surface === "partner") request.system = PARTNER_SYSTEM + PARTNER_COMMANDS;
-    const raw = (await (options.complete ?? llmText)(creds, request)).trim();
-    const { reply, command } = splitCommand(raw);
-    return { reply: reply || null, ...(command ? { command } : {}) };
+    const raw = (await (options.complete ?? llmText)(prepared.creds, prepared.request)).trim();
+    return finishReply(raw);
   } catch (e) {
-    // LLM unreachable/rate-limited — degrade to the client's deterministic path,
-    // and SAY WHAT THE PROVIDER SAID. "llm-error" alone is four characters that
-    // cover a dead model, a rejected key, a rate limit and an over-long prompt:
-    // four problems with four different fixes, indistinguishable to the one
-    // person who can fix any of them. On the hosted app they cannot read the
-    // logs either, so this is their only channel. Already redacted upstream.
-    const detail = e instanceof Error ? e.message : "";
-    return { reply: null, why: "llm-error", ...(options.surface === "partner" ? {} : { detail: detail.slice(0, 300) || undefined }) };
+    return failedReply(e, options, prepared.creds);
   }
+}
+
+/**
+ * The brain's provider as an owner would name it: "Groq", "Anthropic" — the
+ * catalogue label without its gloss. Nothing for an id the catalogue does not
+ * know, or for "custom", whose label describes a protocol, not a company.
+ */
+function providerName(id: string): string | undefined {
+  if (id === "custom") return undefined;
+  const label = llmProviderById(id)?.label;
+  return label ? label.replace(/\s*\(.*\)\s*$/, "") : undefined;
+}
+
+/**
+ * A failed call's message in providerError's shape — "<provider> <status> —
+ * <code>: <message>" — which is what describeLlmFailure reads.
+ *
+ * THE ANTHROPIC SDK THROWS ITS OWN ERROR, never passed through providerError:
+ * its message is the status followed by the WHOLE JSON body, request id and
+ * all. Read for what it is — its status and the provider's own type and
+ * message — or a rejected key classifies as "a reason I don't recognise" and
+ * the JSON is what the owner reads.
+ *
+ * NOT REDACTED HERE: failedReply redacts the whole line, whichever way it
+ * was made, before anything is cut from it or sent.
+ */
+function providerLineOf(e: unknown, creds: LlmCreds): string {
+  if (e instanceof Anthropic.APIError && typeof e.status === "number") {
+    const inner = (e.error as { error?: { type?: unknown; message?: unknown } } | undefined)?.error;
+    const said = [inner?.type, inner?.message].filter((x): x is string => typeof x === "string" && x.length > 0).join(": ");
+    const one = said.replace(/\s+/g, " ").trim();
+    return `${creds.provider} ${e.status}${one ? ` — ${one}` : ""}`;
+  }
+  return e instanceof Error ? e.message : "";
+}
+
+/**
+ * WHAT BECAME OF A MODEL CALL THAT FAILED, as the owner's chat is told it.
+ *
+ * "llm-error" alone is four characters that cover a dead model, a rejected
+ * key, a rate limit and an over-long prompt: four problems with four fixes,
+ * and a retry fixes only some of them. So the KIND is decided here and sent,
+ * and the browser says it in the agent's voice — never the provider's own
+ * text, which the chat used to paste into the agent's sentence (Anthropic's
+ * JSON included) and then tell the owner to "give it a moment" whatever it
+ * said. `detail` still rides along, redacted and in one shape, for whoever
+ * debugs it; nothing renders it.
+ *
+ * A PROVIDER STREAM THAT STOPPED SHORT IS A CUT-OFF, the same failure the
+ * browser reports for its own stream: half an answer, which asking again can
+ * fix. The partner surface keeps its bare answer, and never a detail.
+ *
+ * THE DETAIL REACHES THE BROWSER, so it is redacted — the brain's own key and
+ * anything shaped like a secret — for EVERY error, not only the SDK's: a
+ * transport error's own message can carry the key too (a key in a URL, say).
+ * Redacted whole, and only then cut to length, so a key that straddled the cut
+ * cannot leave its first half behind.
+ */
+function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds): AgentReply {
+  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+  const line = redactSecrets(providerLineOf(e, creds), [creds.apiKey].filter(Boolean));
+  if (/stream ended before the reply was finished/.test(line)) return { reply: null, why: "cut-off" };
+  // No status at all: the SDK never got an answer. describeLlmFailure knows
+  // undici's "fetch failed"; the SDK says "Connection error." instead.
+  const kind = e instanceof Anthropic.APIConnectionError ? "unreachable" : describeLlmFailure(line).kind;
+  const provider = providerName(creds.provider);
+  return {
+    reply: null,
+    why: "llm-error",
+    kind,
+    ...(provider ? { provider } : {}),
+    ...(line ? { detail: line.slice(0, 300) } : {}),
+  };
+}
+
+const json = (body: unknown, status: number) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+/**
+ * /api/chat's answer — streamed when the browser asked for it, JSON when not.
+ *
+ * STREAMED, the owner sees the agent's words as they are written instead of
+ * "thinking…" for the length of the whole completion. What may be shown is
+ * decided by streamSafe (lib/chat-stream.ts): nothing from the first `<<` on,
+ * no `<` that could still become one, no reasoning. The COMMAND is decided
+ * once, at the end, by splitCommand on the complete reply — so the end-anchor
+ * that makes a proposal a proposal is checked against the whole text, exactly
+ * as it was when the reply arrived in one piece, and the `done` event carries
+ * the only reply that is final.
+ *
+ * AN ANSWER THAT NEEDS NO MODEL IS JSON EVEN WHEN A STREAM WAS ASKED FOR. An
+ * empty message and a missing brain are known before anything is sent, and the
+ * browser reads the content type before it reads the body.
+ *
+ * A failure after the stream opened is an `error` event with the provider's
+ * own (already redacted) words, never a short reply: the owner may have watched
+ * half a sentence arrive, and the half is not the answer.
+ */
+export async function agentReplyResponse(
+  body: AgentChatBody,
+  how: { stream: boolean; signal?: AbortSignal },
+  options: AgentChatOptions = {},
+): Promise<Response> {
+  if (!how.stream) {
+    const result = await generateAgentReply(body, options);
+    return json(result, result.why === "empty" ? 400 : 200);
+  }
+  const prepared = prepareAgentReply(body, options);
+  if ("early" in prepared) return json(prepared.early, prepared.early.why === "empty" ? 400 : 200);
+  const { creds, request } = prepared;
+  // The owner closing the chat stops the provider too — nobody is reading.
+  const stop = new AbortController();
+  how.signal?.addEventListener("abort", () => stop.abort(), { once: true });
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (s: string) => {
+        try {
+          controller.enqueue(encoder.encode(s));
+        } catch {
+          /* the reader has gone; the abort above ends the provider call */
+        }
+      };
+      let raw = "";
+      let shown = "";
+      try {
+        const full = await (options.stream ?? llmTextStream)(creds, { ...request, signal: stop.signal }, (piece) => {
+          raw += piece;
+          const visible = streamSafe(raw);
+          // Only ever APPENDED: a screen that would rewrite what is already
+          // shown sends nothing more, and `done` settles it.
+          if (visible.length > shown.length && visible.startsWith(shown)) {
+            send(sseEvent("text", { t: visible.slice(shown.length) }));
+            shown = visible;
+          }
+        });
+        send(sseEvent("done", finishReply(full.trim())));
+      } catch (e) {
+        const { reply: _none, ...failed } = failedReply(e, options, creds);
+        send(sseEvent("error", failed));
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* already closed by a cancelled reader */
+        }
+      }
+    },
+    cancel() {
+      stop.abort();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      // no-transform: a compressing proxy that buffers the whole body would
+      // turn the stream back into one late answer.
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+    },
+  });
 }

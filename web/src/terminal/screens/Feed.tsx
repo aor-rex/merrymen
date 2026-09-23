@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { beatsOf, lanesOf, mentionTargets, pillBeats, type Beat, type Pill } from "../beat";
+import { useEffect, useMemo, useState } from "react";
+import { beatsOf, emptyFor, lanesOf, mentionTargets, pillBeats, type Beat, type Pill } from "../beat";
+import { freshAmong, freshKeyOf, markSeen } from "../feed-fresh";
 import type { LiveAgent, LiveToken, ReadState, Thesis } from "../live";
 import { Empty, ReadEmpty } from "../ui";
 import { useLikes } from "../likes";
@@ -61,6 +62,11 @@ export function Feed({
 }) {
   const [pill, setPill] = useState<Pill>("all");
   const [sort, setSort] = useState("latest");
+  // "REAL MONEY": off by default, so the feed still shows the fleet — most of
+  // it is paper, labelled — and one tap shows only what moved real money.
+  // Session state, not stored: a filter a reader forgot they set would make
+  // the feed look quiet on the next visit.
+  const [realOnly, setRealOnly] = useState(false);
   const likes = useLikes();
   const counts = likes?.counts;
 
@@ -72,10 +78,13 @@ export function Feed({
 
   const beats = useMemo(() => beatsOf(theses, agents), [theses, agents]);
   const replies = useMemo(() => repliesIn(beats), [beats]);
+  // Diffed over EVERY post read, not the rows this pill shows: switching to
+  // Holds lays out holds that were folded a moment ago, and those are not new.
+  const fresh = useFresh(beats);
   const shown = useMemo(() => {
     // Only All and Holds summarise, and only after every post was read one row
     // each — see pillBeats. The rest filter the posts themselves.
-    const kept = pillBeats(beats, active, replies, counts ?? {});
+    const kept = pillBeats(beats, active, replies, counts ?? {}, { realOnly });
     if (!likes || sort !== "liked") return kept;
     // MOST LIKED FIRST, then newest — a stable second key so equal counts do
     // not shuffle under the reader on every poll. Sorted in a COPY: `beats` is
@@ -83,7 +92,7 @@ export function Feed({
     return [...kept].sort(
       (a, b) => (counts?.[b.postId!] ?? 0) - (counts?.[a.postId!] ?? 0) || b.rankMs - a.rankMs,
     );
-  }, [beats, active, replies, counts, likes, sort]);
+  }, [beats, active, replies, counts, likes, sort, realOnly]);
   const lanes = useMemo(() => lanesOf(shown), [shown]);
 
   return (
@@ -105,16 +114,36 @@ export function Feed({
           </button>
         ))}
       </div>
+      <div className="feed-real-row">
+        <button
+          type="button"
+          className={realOnly ? "feed-real on" : "feed-real"}
+          aria-pressed={realOnly}
+          title={realOnly ? "Showing only agents trading real money" : "Hide agents on a paper book"}
+          onClick={() => setRealOnly((v) => !v)}
+        >
+          Real money
+        </button>
+      </div>
       {likes && <div className="feed-sort-row"><label className="feed-sort"><span className="sr-only">Sort posts</span><select aria-label="Sort posts" value={sort} onChange={event=>setSort(event.target.value)}><option value="latest">Latest</option><option value="liked">Most liked</option></select></label></div>}
       {sort === "liked" && likes && !likes.read && <p role="status">Likes unavailable.</p>}
       {shown.length === 0 ? (
-        active !== "all" ? (
+        beats.length > 0 && (active !== "all" || realOnly) ? (
           // FILTERED-EMPTY IS NOT QUIET. The read succeeded and the rows are
-          // there; this one pill matched none of them, and saying "Quiet"
-          // would blame the agents for the reader's own filter.
+          // there; this pill (or "Real money") matched none of them, and saying
+          // "Quiet" would blame the agents for the reader's own filter. And
+          // only when there WERE rows: with nothing read at all, "No trades in
+          // this window" would state a fact about a read that may never have
+          // happened — that answer belongs to ReadEmpty below.
           <Empty
-            title={emptyFor(active, likes?.read ?? false)}
-            action={{ label: "Show everything", onClick: () => setPill("all") }}
+            title={emptyFor(active, likes?.read ?? false, realOnly)}
+            action={{
+              label: "Show everything",
+              onClick: () => {
+                setPill("all");
+                setRealOnly(false);
+              },
+            }}
           />
         ) : (
           <ReadEmpty
@@ -131,32 +160,29 @@ export function Feed({
           onAgent={onProfile}
           likes={likes ?? undefined}
           mentions={replies}
+          fresh={fresh}
         />
       )}
     </div>
   );
 }
 
-function emptyFor(pill: Pill, likesRead: boolean): string {
-  switch (pill) {
-    case "trades":
-      return "No trades in this window.";
-    case "theses":
-      return "Nobody has published a view here yet.";
-    case "holds":
-      return "No holds in this window.";
-    case "debate":
-      return "No agent has named another one yet.";
-    case "top":
-      // THREE DIFFERENT NOTHINGS, and only one is about the posts.
-      return likesRead ? "Nothing has been liked in the last day." : "Likes unavailable.";
-    case "all":
-      return "Quiet.";
-    default: {
-      const _x: never = pill;
-      return _x;
-    }
-  }
+/**
+ * THE POSTS THIS PAGE HAD NOT SHOWN BEFORE THIS READ — see feed-fresh.ts.
+ *
+ * Recomputed only when the set of keys changes, so the five-second clock tick
+ * re-renders the rows without touching which of them are new; and marked seen
+ * only after commit, so a render React throws away cannot use the news up.
+ */
+function useFresh(beats: Beat[]): ReadonlySet<string> {
+  // A landed trade's key carries its newest fill's time (`freshKeyOf`), so a
+  // new fill grouped into a row already on screen still arrives.
+  const joined = beats.map(freshKeyOf).join("\n");
+  const fresh = useMemo(() => freshAmong(joined ? joined.split("\n") : []), [joined]);
+  useEffect(() => {
+    markSeen(joined ? joined.split("\n") : []);
+  }, [joined]);
+  return fresh;
 }
 
 /**
@@ -180,7 +206,9 @@ function repliesIn(beats: Beat[]): Map<string, Mention[]> {
   const out = new Map<string, Mention[]>();
   if (new Set([...handles.values()].map((m) => m.slug)).size < 2) return out;
   for (const b of beats) {
-    const text = `${b.kind === "view" ? b.head : ""} ${b.reason}`.toLowerCase();
+    // The agent's own post counts too: it is on the row, so an agent it names
+    // was named in words a reader can see.
+    const text = `${b.kind === "view" ? b.head : ""} ${b.reason} ${b.post ?? ""}`.toLowerCase();
     const named: Mention[] = [];
     for (const who of handles.values()) {
       // The `@` is required. Agent names are short words, and matching a bare

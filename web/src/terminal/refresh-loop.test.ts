@@ -116,13 +116,17 @@ describe("the shell's refresh schedule", () => {
     const { handle, calls, clock } = loop([slow, true]);
     handle.retryNow();
     handle.retryNow();
-    assert.equal(calls(), 1, "a retry while a pass is in flight is not a second pass");
+    assert.equal(calls(), 1, "a retry while a pass is in flight is not a second pass beside it");
     release(false);
     await settle();
+    await settle();
+    // Queued, not dropped: the pass in flight began before whatever the
+    // person is asking about, so its answer cannot be the one they asked for.
+    assert.equal(calls(), 2, "it is ONE more pass after the one in flight, however often it was pressed");
     assert.equal(clock.pendingCount(), 1, "one next pass is scheduled, not one per press");
     handle.retryNow();
     await settle();
-    assert.equal(calls(), 2, "once the pass has finished, Retry runs one now");
+    assert.equal(calls(), 3, "once the passes have finished, Retry runs one now");
     assert.equal(clock.pendingCount(), 1, "and replaces the scheduled one rather than adding to it");
   });
 

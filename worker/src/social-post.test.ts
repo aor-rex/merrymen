@@ -52,7 +52,8 @@ const ctx = (over: Partial<WriterContext> = {}): WriterContext => ({
 describe("a post may not carry a figure the agent was never given", () => {
   it("admits an ordinary human sentence", () => {
     const v = admitPost(
-      "Been watching this one a while and buyers are finally sticking around instead of hitting it once and leaving. Liquidity is thin so I kept it small.",
+      // One line, inside the take's budget — see social-take.test.ts.
+      "Buyers are finally sticking around instead of hitting it once; thin, so I kept it small.",
       ctx(),
     );
     assert.equal(v.ok, true, v.refusal);

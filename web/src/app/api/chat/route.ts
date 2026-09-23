@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { generateAgentReply, type AgentChatBody } from "@/lib/agent-chat";
+import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +17,10 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ reply: null, why: "bad body" }, { status: 400 });
   }
-  const result = await generateAgentReply(body);
-  return NextResponse.json(result, { status: result.why === "empty" ? 400 : 200 });
+  // STREAMED ONLY WHEN ASKED. The chat screen sends `Accept: text/event-stream`
+  // and reads the agent's words as they arrive; anything that did not ask gets
+  // the one JSON answer it always got. See agentReplyResponse for what may be
+  // shown before the reply is complete — nothing of a command marker, ever.
+  const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
+  return agentReplyResponse(body, { stream, signal: req.signal });
 }

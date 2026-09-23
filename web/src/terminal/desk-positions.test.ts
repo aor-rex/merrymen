@@ -19,6 +19,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { autonomyOf } from "@merrymen/core";
 import { positionFigures, positionsOf } from "./account";
+import { idleChat } from "./test-chat";
 import type { LiveMine, LiveToken } from "./live";
 
 // See wire-ring.test.ts: tsx compiles `.tsx` against a global React.
@@ -116,10 +117,7 @@ describe("a position with a known return", () => {
         perTrade: 10,
         perDay: 50,
         stopped: false,
-        turns: [],
-        draft: "",
-        onDraft: noop,
-        onTurn: noop,
+        chat: idleChat,
         onToken: noop,
         onDeposit: noop,
         onWithdraw: noop,
@@ -143,10 +141,7 @@ describe("a position with a known return", () => {
         perTrade: 10,
         perDay: 50,
         stopped: false,
-        turns: [],
-        draft: "",
-        onDraft: noop,
-        onTurn: noop,
+        chat: idleChat,
         onToken: noop,
         onDeposit: noop,
         onWithdraw: noop,

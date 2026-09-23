@@ -57,11 +57,17 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { openCommands, readCommandState, writeCommand } from "@merrymen/command-files";
-import { resolveConfig } from "@merrymen/settings";
+// RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
+// resolves against the root tsconfig, which has no @merrymen/command-files or
+// @merrymen/settings; the build resolves either way (lib/order-ceiling.ts
+// reaches settings the same way). ceiling/route.test.ts runs POST for real.
+import { openCommands, readCommandState, writeCommand } from "../../../../../worker/src/command-files";
+import { resolveConfig } from "../../../../../worker/src/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { ceilingFor } from "@/lib/order-ceiling";
+import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
 import {
   LEDGER_UNREADABLE,
   orderTtlMs,
@@ -114,29 +120,6 @@ async function orderTtlFor(req: Request): Promise<number> {
 const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
 
 /**
- * The most this owner allows one typed order to spend.
- *
- * Falls back to the house default when the tenant has stored nothing, and when
- * the store cannot be read — the SAFE direction, because the default is the
- * smaller number and the sealed per-trade cap is the real wall underneath it
- * either way. Enforced again in the worker, which reads the settings.json the
- * orchestrator wrote for that child: two gates, neither relying on the other.
- */
-async function ceilingFor(req: Request): Promise<number> {
-  const fallback = resolveConfig().telegramMaxActionUsdg;
-  if (!isHostedMode()) return fallback;
-  const tenant = tenantOf(req);
-  if (!tenant) return fallback;
-  try {
-    const stored = await getSettingsStore().get(tenant);
-    const own = stored?.telegramMaxActionUsdg;
-    return typeof own === "number" && Number.isFinite(own) && own >= 0 ? own : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-/**
  * The primary key for this order, in this minute.
  *
  * A HASH, and the minute bucket is what makes a retry idempotent without making
@@ -164,6 +147,13 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
   }
+  // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL. The session is whatever
+  // this browser held when the request left; the chat card names the owner who
+  // tapped, and another wallet signed in since (another tab can do it unseen)
+  // places nothing — before the ceiling, which would be the other wallet's.
+  if (isHostedMode() && ownerMismatch((body as { owner?: unknown }).owner, tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
+  }
   const read = readOrder(body);
   if ("error" in read) return NextResponse.json({ error: read.error }, { status: 400 });
   const order = read.order;
@@ -174,14 +164,13 @@ export async function POST(req: Request) {
   // silently inheriting nothing would let this surface claim more than the
   // owner's configured limit allows. Enforced again in the worker.
   //
-  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER. `resolveConfig()` reads
-  // the WEB process's own ~/.merrymen/settings.json merged with the server env
-  // — hosted, that is the house's file and has nothing to do with this tenant,
-  // whose settings live in the per-tenant store that /api/settings reads. So
-  // every hosted tenant was being held to the house default whatever they had
-  // configured. Self-hosted the two genuinely are one home, and the bare
-  // resolve is right there.
-  const ceiling = await ceilingFor(req);
+  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER — see lib/order-ceiling.ts,
+  // which GET /api/orders/ceiling also calls, so the chat's amount chips offer
+  // exactly the ceiling this refuses at. Falls back to the house's value (the
+  // smaller, SAFE direction) when the tenant stored none or the store cannot be
+  // read. Enforced again in the worker, which reads the settings.json the
+  // orchestrator wrote for that child: two gates, neither relying on the other.
+  const ceiling = await ceilingFor(req, isHostedMode());
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },
@@ -242,11 +231,23 @@ export async function POST(req: Request) {
  *
  * An unreadable ledger is a 503, not "none": a read that failed is not a
  * record of nothing, and the card treats a failed poll as no answer yet.
+ *
+ * THE RECEIPT RIDES ALONG when the worker wrote one (C3): the side, coin,
+ * size, hash and refusing rule it read off the ledger, shape-checked in
+ * lib/order-state.ts and never composed here. The chat templates its receipt
+ * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  const id = new URL(req.url).searchParams.get("id") ?? "";
+  const params = new URL(req.url).searchParams;
+  const id = params.get("id") ?? "";
+  // FOR THE OWNER WHO CONFIRMED, like POST: the chat's lookup after a lost
+  // placement names them, and what is open under another wallet's session
+  // (another tab signed it in) would be followed in their thread as theirs.
+  if (isHostedMode() && ownerMismatch(params.get("owner"), tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED_LOOKUP }, { status: 409 });
+  }
 
   if (!isHostedMode()) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a

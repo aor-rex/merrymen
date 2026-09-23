@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { idleNotice } from "../idle-notice";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
 import { renderWhy } from "./reasons";
 import type { Snapshot } from "./types";
@@ -116,14 +117,19 @@ describe("a stale weekend is reported, not just endured", () => {
     assert.ok(t.idle, "and the silence about buying is still explained");
   });
 
-  it("the worker reports it once per CHANGE, not once per tick", async () => {
+  it("the worker reports it once per CHANGE, not once per tick", () => {
     // A stale weekend is ~360 ticks. This repo already carries the incident
-    // where 1,242 identical rows told nobody anything.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-    assert.match(src, /lastIdleReason/, "the worker must remember what it last said");
-    const guard = src.indexOf("if (idleNow !== lastIdleReason)");
-    const write = src.indexOf("await addEvent(agentId, \"ok\", idleNow)");
-    assert.ok(guard > 0 && write > guard, "the event must sit inside the change guard");
+    // where 1,242 identical rows told nobody anything. Executed through
+    // idle-notice.ts, which the tick's idle block calls with what it last said.
+    const weekend = snap({ staleFeeds: new Set(["QQQ", "NVDA", "TSLA"]) });
+    let last: string | null = null;
+    const events: string[] = [];
+    for (let tick = 0; tick < 360; tick++) {
+      const n = idleNotice({ idle: steadyBasketTick(cfg(), weekend).idle, modeEmptied: null, last });
+      last = n.last;
+      if (n.event) events.push(n.event.message);
+    }
+    assert.equal(events.length, 1, "one weekend, one sentence");
+    assert.equal(events[0], renderWhy(steadyBasketTick(cfg(), weekend).idle!));
   });
 });

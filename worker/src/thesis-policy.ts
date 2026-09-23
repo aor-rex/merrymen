@@ -99,6 +99,40 @@ export interface ThesisRow {
    * a fault.
    */
   post?: string | null;
+  // ── WHAT THE CALL WAS WORTH, folded per group by the reader's SQL ─────────
+  //
+  // A row here is a GROUP of identical copies, so each figure below arrives
+  // already folded, and already NULL unless every copy in the group was read:
+  // one unevidenced copy makes the whole group's figure unread, because an
+  // average over the copies somebody happened to read is a guess. That rule
+  // lives in the SQL beside the fold (read-theses.ts); this module only ever
+  // sees the result and never turns an absent input into a zero.
+  //
+  // All optional: a reader that does not select them — the peer files — gets a
+  // post with no figures, which claims nothing.
+  /**
+   * What the group's fills paid per unit, averaged by cash (Σ cash / Σ units),
+   * from EVIDENCED fills only — a receipt or a paper book, never a quote,
+   * because a quoted fill is an estimate and an estimated entry price is a
+   * figure nobody read.
+   */
+  entry_price_usd?: number | null;
+  /** Σ realized P&L the group's fills booked, USDG, when every copy booked one. */
+  realized_pnl_usdg?: number | null;
+  /** Σ USDG those same fills received — the proceeds the P&L was booked against. */
+  closed_cash_usdg?: number | null;
+  /** The price the author saw when it decided, when every copy saw the same one. */
+  mark_usd?: number | null;
+  /** The coin's market cap at decision time, the same way. Memecoins only. */
+  mcap_usd?: number | null;
+  /**
+   * The author's owner opted into a public book — decorated by the caller from
+   * settings, like `slug`. Only an explicit `true` publishes a dollar figure,
+   * and a size is a dollar figure; anything else, including absence, keeps the
+   * percentages-only default. See `sizeUsdg` on PublicThesis for why the size
+   * went with the P&L.
+   */
+  public_book?: boolean | null;
 }
 
 export interface PublicThesis {
@@ -136,6 +170,22 @@ export interface PublicThesis {
    * Deployer-chosen text, so it passes the same address backstop as the rest.
    */
   displayName?: string | null;
+  /**
+   * THE TRADE'S SIZE — published only for a PUBLIC book, and null otherwise.
+   *
+   * It was published for every book, and on its own it looked harmless. Beside
+   * `realizedPct` it is not: a sell's size is about its proceeds, so the P&L
+   * the dollar gate withholds is `size × pct / (100 + pct)` — measured on the
+   * ledger, "sell AAPL 4.00 USDG" at −20% is exactly the −1.00 that
+   * `realizedUsd: null` was hiding. And a buy's size over `entryPriceUsd` is
+   * the quantity it now holds. So the one opt-in that keeps a book private had
+   * to cover the size too, or it covered nothing.
+   *
+   * The owner's rule is that percentages are the public default and `publicBook`
+   * is opt-in; the profile already hides sizes for a private book, and this is
+   * the feed agreeing with it. The HEAD drops the size with it (`headOf`), since
+   * "sell AAPL 4.00 USDG" is the same figure in a sentence.
+   */
   sizeUsdg: number | null;
   /**
    * Was this a pretend book?
@@ -184,6 +234,28 @@ export interface PublicThesis {
   /** Epoch seconds. Formatted by the page, so this module stays pure. */
   at: number;
   firstAt: number;
+  // ── THE CALL'S OWN FIGURES ───────────────────────────────────────────────
+  //
+  // A trade used to render beside the TOKEN's 24h change, and a reader took the
+  // token's day for the agent's result. These are the call's: what a buy paid,
+  // what a sell booked, the price a view was posted at. Each is null unless
+  // every input to it was read — a surface renders NOTHING for null, never 0%.
+  //
+  // Optional because an older server sends none of them; a consumer treats
+  // `undefined` exactly as null. The publisher always sets all five.
+  /** A landed (or paper) BUY's fill price, USD per unit. "Since entry" = live / this − 1. */
+  entryPriceUsd?: number | null;
+  /** A landed (or paper) SELL's realized return, percent of the cost it closed. */
+  realizedPct?: number | null;
+  /**
+   * The same sell's realized dollars — non-null ONLY when the author's owner
+   * made the book public. Percentages are the public default; sizes are opt-in.
+   */
+  realizedUsd?: number | null;
+  /** The price the author saw when it posted. "Since posted" = live / this − 1. */
+  markUsd?: number | null;
+  /** A memecoin's market cap at decision time, from the tape the agent read. */
+  mcapUsd?: number | null;
 }
 
 /**
@@ -365,8 +437,32 @@ export const ACCOUNT_STATE_RULES = [
   "wrong-chain",
   "no-gas",
   "no-cash",
+  // The account's own drawdown against its high-water mark. See the halt rule
+  // below, which is why this one also leaves for a MODEL's refusal.
+  "drawdown-breaker",
 ] as const;
 const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULES);
+
+/**
+ * THE ACCOUNT RULES THAT HALT EVERY BUY, FROM EVERY PRODUCER — dropped from the
+ * public feed whoever proposed the trade.
+ *
+ * The account-state rule above is for strategy sources only, and on purpose: a
+ * model refused on the day's count still stated a view about the coin, and the
+ * wall's answer is an honest ending to it. The breaker is different in kind.
+ * While it is tripped the wall refuses every non-exit intent for the same
+ * reason (policy.ts), so a refusal on it says nothing about the coin at all —
+ * and a Trencher, whose buys ride the Brain's own decision row, re-reviews every
+ * thirty seconds and writes that one fact in fresh model words each time.
+ * Measured on the live feed 2026-09-23: thirty refused buys in fifteen minutes,
+ * none of them collapsing, filling thirty of forty trade slots.
+ *
+ * THE OWNER STILL HEARS IT: `drawdown-breaker` is in owner-refusal.ts's
+ * account-wide set, so the event line fires once per change, and the trade row
+ * keeps its rule for the owner's desk. Only the public post goes.
+ */
+export const ACCOUNT_HALT_RULES = ["drawdown-breaker"] as const;
+const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
 /**
  * Every source a reader may put in a `WHERE source IN (…)`.
@@ -379,7 +475,7 @@ const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULE
 export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(SOURCE_POLICY));
 
 /**
- * THE SQL HALF OF THREE RULES BELOW, for a reader whose scan is bounded.
+ * THE SQL HALF OF FOUR RULES BELOW, for a reader whose scan is bounded.
  *
  * A reader takes the newest N groups and only then asks `publishableThesis`
  * about each. The class route re-proposes a refused entry every tick with
@@ -389,7 +485,7 @@ export const PUBLISHABLE_SOURCES: readonly string[] = Object.freeze(Object.keys(
  * reached the gate at all. The feed had nothing to show, and the alerts rail
  * said there had been no trades.
  *
- * So the three rules that drop a row for its SOURCE, ACTION or RULE rather than
+ * So the four rules that drop a row for its SOURCE, ACTION or RULE rather than
  * for its words are said in SQL too, built from the same constants, and the
  * scan spends its budget on rows that can publish. The gate still decides: this
  * may only ever be WIDER than publishableThesis, never narrower, and every row
@@ -415,6 +511,10 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
       `NOT (COALESCE(${d}.source, '') IN (${holes(TRADED_ONLY_SOURCES.length)}) AND ${unlanded})`,
       `NOT (COALESCE(${d}.action, '') IN (${holes(CASH_ACTIONS.length)}) AND ${unlanded})`,
       `NOT (COALESCE(${d}.source, '') IN (${holes(strategies.length)}) AND COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_STATE_RULES.length)}))`,
+      // Every source: a rejected trade is always a refused post (or, for a
+      // shadow source, no post at all), and the gate drops a refusal on a halt
+      // rule whoever wrote it — so this drops nothing the gate would publish.
+      `NOT (COALESCE(${t}.status, '') = ? AND COALESCE(${t}.reject_rule, '') IN (${holes(ACCOUNT_HALT_RULES.length)}))`,
     ].join(" AND "),
     args: [
       ...TRADED_ONLY_SOURCES,
@@ -424,8 +524,145 @@ export function publicationNarrowing(d: string, t: string): { sql: string; args:
       ...strategies,
       "rejected",
       ...ACCOUNT_STATE_RULES,
+      "rejected",
+      ...ACCOUNT_HALT_RULES,
     ],
   };
+}
+
+/**
+ * THE SQL HALF OF A CALL'S FIGURES — the fold a reader of GROUPED copies runs
+ * before handing a group to `publishableThesis` (see the figure fields on
+ * ThesisRow). Shared by the feed and the peer files for the reason
+ * `publicationNarrowing` is: two readers with their own copy of "when is a
+ * figure read" would publish two answers to it.
+ *
+ * A group is many identical copies, so each figure is one number for all of
+ * them, and it exists only when EVERY copy was read: one unevidenced fill in a
+ * ×3 buy makes the entry unread rather than an average of the two somebody
+ * happened to read. EVIDENCED is a fill off the settled receipt or the paper
+ * book — never the pre-trade quote, which `basis_source` calls an estimate,
+ * and an estimated entry price is a figure nobody read.
+ *
+ * The entry is averaged by what was PAID (Σ cash / Σ units), which is what a
+ * position of those fills cost per unit; a plain mean of prices is not. Each
+ * division is guarded per row, because Postgres raises on a zero divisor.
+ * Each column ends in a comma, for splicing into a SELECT list.
+ *
+ * A SELL'S RESULT IS ONLY AS READ AS THE BASIS IT CLOSED. Its P&L is its
+ * proceeds minus the average cost of what it sold, and that cost was booked by
+ * the BUYS — any one of which may have been booked from the quote because its
+ * receipt could not be parsed (index.ts says so in the log: "cost basis booked
+ * from the quote (an estimate)"). A receipt-read sell over that basis is an
+ * estimated return, and checking the sell's own row alone published it as a
+ * read one. So a live fill counts as booked only when no quote-sourced trade
+ * by the same account BOUGHT the coin it sold, before it. (For a buy the "coin
+ * it sold" is the cash, which no figure here reads: only a sell's P&L is
+ * published.) See `estimatedBasis`.
+ *
+ * SO A READER THAT SELECTS THESE puts `basisScope` in front of its statement
+ * and `basisJoin(t)` among its joins. One that forgets gets a missing-column
+ * error, which every reader here already answers by retrying without figures
+ * — a post loses its figures, never the feed its posts, and no guess is shown.
+ */
+export function fillFigures(t: string): string {
+  const evidenced = `(${t}.basis_source IN ('receipt', 'paper') AND ${t}.fill_price_usd > 0 AND ${t}.fill_cash_usdg > 0)`;
+  const booked = `${evidenced} AND ${t}.realized_pnl_usdg IS NOT NULL AND NOT ${estimatedBasis(t)}`;
+  const every = (cond: string) => `SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) = COUNT(*)`;
+  return `
+    CASE WHEN ${every(evidenced)} AND MIN(${t}.fill_price_usd) = MAX(${t}.fill_price_usd) THEN MIN(${t}.fill_price_usd)
+         WHEN ${every(evidenced)}
+         THEN SUM(${t}.fill_cash_usdg) / SUM(CASE WHEN ${evidenced} THEN ${t}.fill_cash_usdg / ${t}.fill_price_usd END) END AS entry_price_usd,
+    CASE WHEN ${every(booked)} THEN SUM(${t}.realized_pnl_usdg) END AS realized_pnl_usdg,
+    CASE WHEN ${every(booked)} THEN SUM(${t}.fill_cash_usdg) END AS closed_cash_usdg,`;
+}
+
+/**
+ * WHETHER THE COST A LIVE FILL CLOSED WAS AN ESTIMATE — a SQL predicate over the
+ * trades alias `t`, true when a quote-sourced trade by the same account bought
+ * the coin `t` sold, at or before it. Exported for any reader of a realized
+ * P&L, because "when is a realized figure read" must have one answer.
+ *
+ * "Before it", not "since the position was last flat", on purpose: an average
+ * cost carries every buy since the last time the book was empty, and the
+ * ledger has no column a reader can trust to say when that was (the quantities
+ * are 18-decimal strings no SQLite REAL sums exactly). Erring early costs a
+ * later round trip its figure — nothing is shown — and never shows a guess.
+ * A paper fill closes the paper book, which no quote ever priced, so it is
+ * never estimated here. Every column is one the base schema or the fill
+ * migration created, on both engines.
+ *
+ * READ ONCE PER STATEMENT, NOT ONCE PER ROW. This was a correlated EXISTS, and
+ * with no quote buy to find — the common case — it walked the account's whole
+ * earlier history for every receipt copy in the read: refusals are trade rows,
+ * a basket writes hundreds a day, and 40 sells over 200k rows took five
+ * seconds a read on the feed, the profile and every tenant's peer file. It now
+ * reads the joins `basisJoin` adds, over the set `basisScope` builds once, in
+ * front of the statement. A row whose account is not in that set is counted an
+ * ESTIMATE: the scope is a bound on the work, and a bound that could publish a
+ * guess would be the wrong way round.
+ */
+export function estimatedBasis(t: string): string {
+  return `(COALESCE(${t}.basis_source, '') = 'receipt' AND (basis_r.agent_id IS NULL OR (
+      basis_q.first_at IS NOT NULL AND basis_q.first_at <= ${t}.created_at)))`;
+}
+
+/**
+ * THE QUOTE-BOOKED BUYS A READ'S SELLS COULD HAVE CLOSED, as a WITH clause the
+ * reader puts in front of its statement, with its arguments first.
+ *
+ * `basis_read` is every account with a receipt-read sell in the read's window —
+ * the only accounts whose figures `estimatedBasis` is asked about. `basis_quote`
+ * is, for each of those accounts and each coin, its FIRST quote-booked buy: a
+ * sell is estimated exactly when that first one is at or before it, which is
+ * the EXISTS this replaced. One pass over those accounts' histories, through
+ * `trades_agent_time`, per statement — no index is added (the rule on
+ * `trades`), and none is needed.
+ *
+ * `since` is the read's own window, widened by a day so a trade written a
+ * moment before its decision's clock is still in scope (and one that is not
+ * reads as an estimate, never as a figure). `accounts`, when the read is for
+ * known agents, narrows it through `agents` — the ledger may spell an account
+ * in either case, and the index needs the spelling it holds.
+ */
+const BASIS_MARGIN_SEC = 24 * 3600;
+export function basisScope(opts: { since: number; accounts?: readonly string[] | null }): { sql: string; args: unknown[] } {
+  const since = Math.floor(Number(opts.since)) - BASIS_MARGIN_SEC;
+  const accounts = (opts.accounts ?? []).map((a) => a.toLowerCase());
+  const only = accounts.length
+    ? `AND br.agent_id IN (SELECT ba.smart_account FROM agents ba WHERE LOWER(ba.smart_account) IN (${accounts.map(() => "?").join(", ")}))`
+    : "";
+  return {
+    sql: `WITH basis_read AS (
+        SELECT DISTINCT br.agent_id AS agent_id FROM trades br
+         WHERE br.basis_source = 'receipt' AND COALESCE(br.fill_side, 'sell') <> 'buy' AND br.created_at > ?
+           ${only}
+      ), basis_quote AS (
+        SELECT bq.agent_id AS agent_id, LOWER(bq.buy_token) AS tok, MIN(bq.created_at) AS first_at
+          FROM trades bq
+         WHERE bq.basis_source = 'quote' AND bq.agent_id IN (SELECT agent_id FROM basis_read)
+         GROUP BY bq.agent_id, LOWER(bq.buy_token)
+      ) `,
+    args: [Number.isFinite(since) ? since : 0, ...accounts],
+  };
+}
+
+/** The two joins `estimatedBasis` reads, for the trades alias `t`. At most one row each. */
+export function basisJoin(t: string): string {
+  return `LEFT JOIN basis_read basis_r ON basis_r.agent_id = ${t}.agent_id
+         LEFT JOIN basis_quote basis_q ON basis_q.agent_id = ${t}.agent_id AND basis_q.tok = LOWER(${t}.sell_token)`;
+}
+
+/**
+ * The decision's own mark and market cap, folded the same way: two copies of a
+ * view seen at different prices have no one "when posted", so no mark.
+ */
+export function markFigures(d: string): string {
+  const one = (col: string) =>
+    `CASE WHEN COUNT(${d}.${col}) = COUNT(*) AND MIN(${d}.${col}) = MAX(${d}.${col}) THEN MIN(${d}.${col}) END AS ${col},`;
+  return `
+    ${one("mark_usd")}
+    ${one("mcap_usd")}`;
 }
 
 /**
@@ -660,6 +897,17 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
   }
 }
 
+/**
+ * THE ONE "PENDING" THAT IS AN ORDER ON ITS WAY — a submitted trade.
+ *
+ * `outcomeOf` files two different facts under "pending": this one, and every
+ * buy or sell decision that has no trade row at all ("no trade came of it"),
+ * which is usually a permanent non-event. Exported so a renderer that colours
+ * an order in flight tells the two apart by the publisher's own sentence
+ * rather than by a copy of it (beat.ts `inFlight`).
+ */
+export const IN_FLIGHT_TEXT = "sent, waiting on the chain";
+
 /** What the wall said, from the slug alone — the detail is never selected. */
 export function outcomeOf(
   status: string | null | undefined,
@@ -668,7 +916,7 @@ export function outcomeOf(
   if (status === "landed") return { outcome: "landed", text: "landed" };
   if (status === "paper") return { outcome: "landed", text: "filled on paper" };
   if (status === "reverted") return { outcome: "reverted", text: "reverted on-chain" };
-  if (status === "submitted") return { outcome: "pending", text: "sent, waiting on the chain" };
+  if (status === "submitted") return { outcome: "pending", text: IN_FLIGHT_TEXT };
   if (status !== "rejected") return { outcome: "pending", text: "no trade came of it" };
 
   // `reject_rule` is NOT a closed vocabulary — some paths write free-form text
@@ -687,12 +935,16 @@ export function outcomeOf(
  * back to another agent. Only one of those three is a React component, so a
  * claim that is only made conditional by CSS is not made conditional.
  */
-function headOf(row: ThesisRow, shadow: boolean): string {
+function headOf(row: ThesisRow, shadow: boolean, sized: boolean): string {
   // A HOLD HAS NO SIZE. Brain forces delta to 0 on a hold, which arrived here
   // as size_usdg 0 and rendered "hold NVDA 0.00 USDG" — a figure that means
   // nothing and reads as a bug. A hold is an answer, not a quantity.
+  //
+  // AND A PRIVATE BOOK'S TRADE HAS NO SIZE IN PUBLIC, whatever it traded: the
+  // head is the one string every surface prints, so a size withheld from
+  // `sizeUsdg` and left here would be withheld from nothing. See `sizeUsdg`.
   const size =
-    row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
+    sized && row.action !== "hold" && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg)
       ? `${row.size_usdg.toFixed(2)} USDG`
       : null;
   // A hold is already the conditional's answer — "would hold" is not English an
@@ -721,6 +973,16 @@ function nameOf(row: ThesisRow): string | null {
 }
 
 /**
+ * THE SHAPE OF AN ID THAT NEEDS A NAME BESIDE IT: `T` plus the last eleven hex
+ * of the contract, exactly as trencher-discovery.ts mints it.
+ *
+ * Only these are ever looked up for a name another row carried. A stock's name
+ * IS its ticker (coin-name.ts never names one), so looking one up would cost a
+ * scan to find nothing — or, worse, find a stray and rename TSLA.
+ */
+export const DERIVED_ID = /^T[0-9A-F]{11}$/;
+
+/**
  * THE HEAD A READER SEES: the name, with the id left to a tooltip.
  *
  * `head` keeps "JUGGERNAUT (T3139F043B88)" because /why and the peer files are
@@ -737,6 +999,62 @@ export function readerHead(t: Pick<PublicThesis, "head" | "symbol" | "displayNam
   // whatever a deployer typed: "$$CASH" printed "$CASH", and "A$`B" spliced
   // the head into itself. A function's return value is inserted as it is.
   return t.head.replace(`${name} (${t.symbol})`, () => name);
+}
+
+/**
+ * A FIGURE OF THE BOOK IN OUR OWN SENTENCE — the backstop for rows already
+ * written.
+ *
+ * `renderWhy`'s public register now carries no size, cost, proceeds, cash or
+ * floor (reasons.ts), because the sentence is written before anybody knows
+ * whose book will read it back. The rows written before that change still say
+ * "selling all 4.40 USDG of it against the 5.00 paid" — the realized P&L a
+ * private book withholds — and they stay readable for a day on the feed and a
+ * month on a profile. So a PRIVATE book's STRATEGY reason loses its figures
+ * here.
+ *
+ * THIS IS THE ONE PLACE THIS MODULE REWRITES RATHER THAN DROPS, and the reason
+ * is the one the address backstop gives for dropping: redaction is safe only
+ * when the string is understood. A strategy reason is not prose — it is one of
+ * a closed set of templates we wrote, and each rule below turns one old
+ * public sentence into exactly the sentence `renderWhy(w, "public")` now
+ * writes for the same `Why` (private-book.test.ts replays the old register
+ * through it). Anything with a figure left afterwards — an older wording, or
+ * a template nobody listed — loses the reason, not the figure: that is a
+ * sentence we did NOT understand, and it fails closed. A model's reason is
+ * never touched here: it is prose, and none of these rules could claim to
+ * understand it.
+ *
+ * `AMT` is exactly what reasons.ts `usdg()` prints.
+ */
+const AMT = String.raw`-?\d[\d,]*\.\d{2}`;
+const BOOK_FIGURE = /\d\s*USDG\b/;
+const ANY_FIGURE = /\d\s*USDG\b|\d[\d,]*\.\d{2}\b/;
+const LEGACY_FIGURES: readonly (readonly [RegExp, string])[] = [
+  [new RegExp(`^the schedule says buy — ${AMT} USDG into `), "the schedule says buy — cash into "],
+  [new RegExp(`^parking ${AMT} USDG of the cash idle above the ${AMT} floor — `), "parking some of the cash idle above the floor — "],
+  [new RegExp(`^${AMT} USDG idle above the ${AMT} floor — `), "cash idle above the floor — "],
+  [new RegExp(`, not a fault: I buy ${AMT} USDG a tick, so a small cap is gone quickly\\. `), ", not a fault. "],
+  [new RegExp(`^nothing bought — ${AMT} USDG on hand and one buy costs ${AMT}`), "nothing bought — the cash on hand is short of one buy"],
+  [new RegExp(`\\. There is ${AMT} USDG in the vault I can pull back`), ". There is cash in the vault I can pull back"],
+  [new RegExp(` — selling all ${AMT} USDG of it against the ${AMT} paid`), " — selling all of it"],
+  [new RegExp(`, so putting ${AMT} USDG into (\\S+) — `), ", so buying $1 — "],
+  [new RegExp(` — pulling ${AMT} USDG back from the vault `), " — pulling some back from the vault "],
+  [new RegExp(`laying down an equal-weight entry, ${AMT} USDG into each of `), "laying down an equal-weight entry into each of "],
+  [new RegExp(`^(\\S+) is ${AMT} USDG (over|under) its equal weight — `), "$1 is $2 its equal weight — "],
+  [new RegExp(`^taking ${AMT} USDG of (\\S+) — `), "buying into $1 — "],
+  [new RegExp(`^out of (\\S+) with ${AMT} USDG — `), "out of $1 — "],
+  // dip, trench-enter and gap-enter, after the vault sentence above has
+  // taken the one "N USDG in the vault" that is not a buy.
+  [new RegExp(`${AMT} USDG in(?= at the close print$| — |$)`), "buying in"],
+];
+
+/** The reason as a private book may publish it, or null when a figure could not be taken out. */
+export function withoutBookFigures(reason: string): string | null {
+  if (!BOOK_FIGURE.test(reason)) return reason;
+  let s = reason;
+  for (const [was, now] of LEGACY_FIGURES) s = s.replace(was, now);
+  return ANY_FIGURE.test(s) ? null : s;
 }
 
 /** Known operational templates, not a classifier of market sentiment. */
@@ -763,11 +1081,19 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   if (!policy) return null;
   if (row.hold_kind && PRIVATE_HOLD_KINDS.has(row.hold_kind)) return null;
 
+  // Strictly `=== true`, the same test the dollars take below: a settings blob
+  // is JSON, and a stray "true" string or a 1 is not the owner deciding to
+  // publish their book.
+  const bookPublic = row.public_book === true;
+
   // ── content ───────────────────────────────────────────────────────────────
   let reason: string | null = null;
   if (row.reason && row.reason.trim()) {
     reason = policy === "model" ? clip(row.reason) : row.reason.trim();
   }
+  // OUR SENTENCE, WITHOUT THE BOOK'S FIGURES, for a book that keeps them —
+  // see `withoutBookFigures`. A public book's sentence is its owner's choice.
+  if (reason && policy === "strategy" && !bookPublic) reason = withoutBookFigures(reason);
 
   /**
    * THE AGENT'S OWN WORDS, IN THEIR OWN FIELD — and never in `reason`.
@@ -830,7 +1156,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
    */
   if ((row.dropped_rule ?? "").startsWith("brain-")) return null;
 
-  const head = headOf(row, shadow);
+  const head = headOf(row, shadow, bookPublic);
 
   // DECIDED, versus FAILED TO HAPPEN.
   //
@@ -918,6 +1244,9 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   ) {
     return null;
   }
+  // And a HALT rule from any source, the model's included: see
+  // ACCOUNT_HALT_RULES for why the breaker is not a view about the coin.
+  if (outcome === "refused" && IS_ACCOUNT_HALT.has(row.reject_rule ?? "")) return null;
 
   const handle = (row.x_handle ?? "").trim() || null;
 
@@ -941,6 +1270,22 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // would trade a real loss for an imaginary one.
   const slug = typeof row.slug === "string" && SLUG_SHAPE.test(row.slug) ? row.slug : null;
 
+  // ── the call's own figures ────────────────────────────────────────────────
+  // Only a trade that FILLED paid or booked anything: a refusal, a revert or a
+  // pending buy has no entry and no result, whatever columns rode along.
+  const filled = outcome === "landed";
+  const entryPriceUsd = filled && action === "buy" ? positive(row.entry_price_usd) : null;
+  // A sell's return is its booked P&L over the cost it closed, and the cost is
+  // what it received minus what it booked. A cost of zero or less is not a
+  // cost, so it measures nothing. Percent first and divided last, so +1.5 on 5
+  // is exactly 30 rather than 30.000000000000004.
+  const pnl = filled && action === "sell" ? figure(row.realized_pnl_usdg) : null;
+  const proceeds = positive(row.closed_cash_usdg);
+  const cost = pnl !== null && proceeds !== null ? proceeds - pnl : null;
+  const realizedPct = pnl !== null && cost !== null && cost > 0 ? (pnl * 100) / cost : null;
+  // DOLLARS ARE OPT-IN — the P&L and, for the reason on `sizeUsdg`, the size.
+  const realizedUsd = realizedPct !== null && bookPublic ? pnl : null;
+
   return {
     name,
     slug,
@@ -951,7 +1296,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     displayName,
     paper: row.mode === "paper",
     sizeUsdg:
-      typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
+      bookPublic && typeof row.size_usdg === "number" && Number.isFinite(row.size_usdg) ? row.size_usdg : null,
     outcome,
     outcomeText: text,
     shadow,
@@ -960,5 +1305,29 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     said: Math.max(1, Number(row.said ?? 1)),
     at: Number(row.last_at ?? 0),
     firstAt: Number(row.first_at ?? row.last_at ?? 0),
+    entryPriceUsd,
+    realizedPct,
+    realizedUsd,
+    markUsd: positive(row.mark_usd),
+    mcapUsd: positive(row.mcap_usd),
   };
+}
+
+/**
+ * A figure as a reader handed it, or null for anything that is not one.
+ *
+ * node-postgres returns some aggregates as strings, and "3.1" is a read, not an
+ * absence. Everything else that is not a finite number — null, undefined, "",
+ * NaN, Infinity — is UNREAD and stays null, never 0.
+ */
+function figure(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : Number.NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** A price or a size: a figure, and above zero, or nothing. */
+function positive(v: unknown): number | null {
+  const n = figure(v);
+  return n !== null && n > 0 ? n : null;
 }

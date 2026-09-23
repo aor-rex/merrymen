@@ -505,3 +505,186 @@ export async function llmText(
   }
   return text;
 }
+
+// ── streamed narration ──────────────────────────────────────────────────────
+
+/**
+ * A provider's refusal that arrived INSIDE a stream, after the 200.
+ *
+ * Same redaction as providerError: this sentence reaches a browser, and a
+ * provider that echoed part of the request back would otherwise put it there.
+ */
+function streamError(creds: LlmCreds, e: { message?: unknown; code?: unknown }): string {
+  const detail = [e.code, e.message].filter((v) => typeof v === "string" && v).join(": ");
+  const safe = redactSecrets(detail, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
+  return `${creds.provider} stream failed${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+}
+
+/**
+ * llmText, A PIECE AT A TIME — for the owner's chat, where waiting for the whole
+ * completion left "thinking…" on screen for as long as the slowest provider took.
+ *
+ * ADDITIVE. llmText is untouched and every other caller keeps it; nothing here
+ * changes what any existing path sends or returns.
+ *
+ * `onText` receives the model's CONTENT as it arrives — raw, and deliberately
+ * so: deciding what of it may be shown (reasoning tags, a command marker still
+ * being written) is the caller's rule, stated once in web/src/lib/chat-stream.ts
+ * for the server and the browser alike. The reasoning SIDE CHANNEL
+ * (`reasoning_content`, `reasoning`) is never passed on at all.
+ *
+ * Returns the whole reply with inline reasoning stripped, exactly as llmText
+ * would have, and fails where llmText fails: an empty completion is an error
+ * rather than an answer, a provider that refuses the reasoning hint is asked
+ * once more without it, and a refusal is thrown in the provider's own words.
+ * An error that arrives mid-stream is thrown too — half a reply is not a reply.
+ */
+export async function llmTextStream(
+  creds: LlmCreds,
+  opts: { system: string; prompt: string; maxTokens?: number; signal?: AbortSignal },
+  onText: (piece: string) => void,
+): Promise<string> {
+  if (creds.transport === "anthropic") {
+    const client = new Anthropic({ apiKey: creds.apiKey });
+    const stream = await client.messages.create(
+      {
+        model: creds.model,
+        max_tokens: opts.maxTokens ?? 400,
+        thinking: { type: "disabled" },
+        system: opts.system,
+        messages: [{ role: "user", content: opts.prompt }],
+        stream: true,
+      },
+      { signal: opts.signal },
+    );
+    let raw = "";
+    let stopped = false;
+    for await (const ev of stream) {
+      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && ev.delta.text) {
+        raw += ev.delta.text;
+        onText(ev.delta.text);
+      }
+      if (ev.type === "message_stop" || (ev.type === "message_delta" && ev.delta.stop_reason)) stopped = true;
+    }
+    // See the OpenAI branch below: a stream that never said it stopped was cut.
+    if (!stopped) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
+    const text = raw.trim();
+    // llmText answers "" here and leaves the caller to notice; a stream the
+    // owner watched arrive empty is a failure, and is said as one.
+    if (!text) throw new Error(`${creds.provider} ${creds.model} returned an empty reply`);
+    return text;
+  }
+
+  const base: Record<string, unknown> = {
+    model: creds.model,
+    max_tokens: opts.maxTokens ?? 400,
+    temperature: 0.6,
+    messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
+    stream: true,
+  };
+  const send = (hint: Record<string, unknown>) =>
+    fetch(chatUrl(creds), {
+      method: "POST",
+      headers: openaiHeaders(creds),
+      body: JSON.stringify({ ...base, ...hint }),
+      signal: opts.signal,
+    });
+
+  let r = await send(quietReasoning(creds));
+  if (!r.ok) {
+    // The same one retry llmText makes, for the same reason and nothing else.
+    const why = await providerError(creds, r);
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    r = await send({});
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
+
+  let raw = "";
+  let finish: string | undefined;
+  let reasoned: number | undefined;
+  // A PROVIDER THAT IGNORES `stream` — some OpenAI-compatible hosts and local
+  // runtimes do — answers with one JSON body. Read it as llmText would and
+  // hand it on whole, rather than failing a reply that is sitting right there.
+  if (/application\/json/i.test(r.headers.get("content-type") ?? "") || !r.body) {
+    const j = (await r.json()) as {
+      choices?: { finish_reason?: string; message?: { content?: string } }[];
+      usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+    };
+    raw = j.choices?.[0]?.message?.content ?? "";
+    finish = j.choices?.[0]?.finish_reason;
+    reasoned = j.usage?.completion_tokens_details?.reasoning_tokens;
+    if (raw) onText(raw);
+  } else {
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let ended = false;
+    const line = (l: string) => {
+      const s = l.replace(/\r$/, "");
+      if (!s.startsWith("data:")) return; // `event:`, `id:`, keep-alive comments
+      const data = s.slice(5).trim();
+      if (!data) return;
+      if (data === "[DONE]") {
+        ended = true;
+        return;
+      }
+      let j: {
+        error?: { message?: unknown; code?: unknown };
+        choices?: { finish_reason?: string | null; delta?: { content?: string | null } }[];
+        usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+      };
+      try {
+        j = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (j.error) throw new Error(streamError(creds, j.error));
+      const choice = j.choices?.[0];
+      // `delta.reasoning_content` / `delta.reasoning` are the thinking bank —
+      // read past, never merged into content (the universal exclusion above).
+      const piece = choice?.delta?.content;
+      if (typeof piece === "string" && piece) {
+        raw += piece;
+        onText(piece);
+      }
+      if (choice?.finish_reason) finish = choice.finish_reason;
+      const rt = j.usage?.completion_tokens_details?.reasoning_tokens;
+      if (typeof rt === "number") reasoned = rt;
+    };
+    try {
+      while (!ended) {
+        const { value, done } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const l of lines) {
+          line(l);
+          if (ended) break;
+        }
+        if (done) {
+          if (buffer) line(buffer);
+          break;
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    // A STREAM THAT NEVER SAID IT FINISHED WAS CUT. A connection dropped
+    // mid-reply ends the body exactly like a finished one, and the half that
+    // had arrived was returned as the whole — which the chat then sent as its
+    // final reply. A finished completion always says so: a finish_reason on
+    // its last chunk, or [DONE].
+    if (!ended && !finish) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
+  }
+
+  const text = stripReasoningFromContent(raw).trim();
+  if (!text) {
+    const why =
+      finish === "length"
+        ? `ran out of tokens before writing a reply${reasoned ? ` (spent ${reasoned} on reasoning)` : ""} — raise maxTokens or pick a model that does not reason`
+        : `returned an empty reply (finish_reason: ${finish ?? "unknown"})`;
+    throw new Error(`${creds.provider} ${creds.model} ${why}`);
+  }
+  return text;
+}

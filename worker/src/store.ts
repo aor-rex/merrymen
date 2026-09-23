@@ -27,6 +27,9 @@ import { flowKey } from "./deposit-log";
 // The paper/live boundary. A rule rather than a convention, enforced at the one
 // function every flow writer passes through — see addFlow.
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
+// Which coin ids need a name beside them — the publication module's rule, so
+// the writer and the feed reader look up names for the same set.
+import { DERIVED_ID } from "./thesis-policy";
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
@@ -237,6 +240,8 @@ const SQLITE_SCHEMA = `
       evidence_json TEXT,          -- the banded fact layer behind a published post (safe to show)
       provenance TEXT,             -- WHAT KIND OF THING decided; see provenance.ts
       display_name TEXT,           -- the coin's own name, display only; see ClassEvidence.displayName
+      mark_usd REAL,               -- the price the author saw when it decided; see DecisionRow.mark_usd
+      mcap_usd REAL,               -- a memecoin's market cap at decision time; see DecisionRow.mcap_usd
       at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS decisions_agent_time ON decisions (agent_id, at DESC);
@@ -698,6 +703,14 @@ const SQLITE_ALTERS: string[] = [
     // any particular kind.
     "ALTER TABLE decisions ADD COLUMN provenance TEXT",
     "ALTER TABLE decisions ADD COLUMN display_name TEXT",
+    // WHAT THE CALL WAS MADE AT, so a view can later say "+x% since posted"
+    // and a memecoin trade "at $3.1M MC". Written in the SAME insert as the
+    // row — the mirror copies a decision once, exactly as first written, so a
+    // column filled in later would never reach the feed. Nullable with no
+    // default: unread is NULL, and a reader renders nothing for it. The web
+    // reader deploys beside this and selects both as optional.
+    "ALTER TABLE decisions ADD COLUMN mark_usd REAL",
+    "ALTER TABLE decisions ADD COLUMN mcap_usd REAL",
     // ── NORMALISE BEFORE CONSTRAINING, in this order and not the other ──────
     //
     // Rows written before the identity existed carry a NULL chain and whatever
@@ -1150,6 +1163,22 @@ export interface DecisionRow {
    * one field here a stranger wrote.
    */
   display_name?: string | null;
+  /**
+   * THE PRICE THE AUTHOR SAW, USD per unit, at the moment it decided.
+   *
+   * A view has no fill, so without this "was that call right?" has nothing to
+   * be measured from — the feed could only print the token's own 24h change,
+   * which readers took for the agent's result. Null when the mark was stale or
+   * not a price: a figure computed against the absence of a market would be
+   * one nobody read.
+   */
+  mark_usd?: number | null;
+  /**
+   * A MEMECOIN'S MARKET CAP at decision time, USD, from the tape the agent
+   * already read — so a trade can say "$5.00 at $3.1M MC". Null for anything
+   * the tape did not size, which is every stock.
+   */
+  mcap_usd?: number | null;
 }
 
 /** A fresh decision id. Kept here so every producer stamps the same shape. */
@@ -1161,8 +1190,8 @@ export async function addDecision(row: DecisionRow): Promise<void> {
   try {
     await getDb()
       .prepare(
-        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action, size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name, mark_usd, mcap_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1181,9 +1210,67 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.evidence_json ?? null,
         row.provenance ?? null,
         row.display_name ?? null,
+        row.mark_usd ?? null,
+        row.mcap_usd ?? null,
       );
   } catch (e) {
     console.error("[store] decision insert failed:", e);
+  }
+}
+
+/**
+ * THE NAME A DECISION ABOUT THIS COIN SHOULD CARRY: the tape's, or the one
+ * this agent's own newest named row gave it.
+ *
+ * A held coin drops off the tape's qualified list, and discovery then labels it
+ * with its own id — so every exit and review written after that went into the
+ * ledger unnamed and published "sell TA151B4A9E1B 5.01 USDG". The name its buy
+ * used is still here. `fromTape` wins when there is one; the lookup is only for
+ * an address-derived id (DERIVED_ID), and only ever within this agent, so one
+ * agent's label for an id can never become another's.
+ *
+ * THIS LEDGER DOES NOT SURVIVE A REDEPLOY, so it cannot be the last word. A
+ * coin bought before the latest deploy has no named row here any more, and the
+ * default Trencher holds for up to three days. `fromChain` is asked after a
+ * miss — the coin's own contract, which is still there (decision-name.ts). It
+ * is asked last because the buy's own name is what the feed already showed.
+ *
+ * Null on a miss or a read failure — absent, never a placeholder. The name was
+ * sanitised by coin-name.ts when it was first written, and the publication gate
+ * backstops it again.
+ *
+ * A TIE IS BROKEN ON THE NAME. `at` is whole seconds, so a buy and its review
+ * routinely share one, and `ORDER BY at DESC` alone returns whichever row the
+ * engine reaches first — SQLite and Postgres need not agree, and neither
+ * promises the same row twice. The name an exit is written with must not
+ * depend on that.
+ */
+export async function displayNameFor(
+  agentId: string,
+  symbol: string,
+  fromTape: string | null,
+  fromChain?: () => Promise<string | null>,
+): Promise<string | null> {
+  if (fromTape) return fromTape;
+  if (!DERIVED_ID.test(symbol)) return null;
+  let named: string | null = null;
+  try {
+    const r = (await getDb()
+      .prepare(
+        `SELECT display_name FROM decisions
+          WHERE agent_id = ? AND symbol = ? AND display_name IS NOT NULL AND display_name <> ''
+          ORDER BY at DESC, display_name LIMIT 1`,
+      )
+      .get(agentId, symbol)) as { display_name: string | null } | undefined;
+    named = r?.display_name ?? null;
+  } catch {
+    named = null;
+  }
+  if (named || !fromChain) return named;
+  try {
+    return await fromChain();
+  } catch {
+    return null;
   }
 }
 
@@ -2494,6 +2581,41 @@ export async function addEvent(
       .run(agentId, level, message);
   } catch (e) {
     console.error("[store] event insert failed:", e);
+  }
+}
+
+/**
+ * How many of an agent's newest events its owner's notice is chosen from — the
+ * LIMIT web/src/app/api/feed/route.ts reads them with.
+ */
+export const OWNER_NOTICE_WINDOW = 40;
+
+/**
+ * THE NOTICE THE OWNER'S SURFACES SHOW FOR THIS AGENT, by their own rule.
+ *
+ * The desk reads the agent's newest OWNER_NOTICE_WINDOW events, newest first by
+ * (created_at, id) — api/feed/route.ts — and shows the first warn or err with a
+ * message (terminal/live.ts mineOf; android Core.kt does the same). The rail
+ * reads the same feed. So this is what the owner is reading right now, asked of
+ * the table the child writes — which the mirror copies to the desk's database
+ * row for row. Events another process writes straight into the shared one (the
+ * orchestrator's) are not here; this is the child's own view of its notice.
+ *
+ * Null when nothing shows. UNDEFINED WHEN THE READ FAILED — unread is not
+ * "nothing shows", and a caller that acts on it writes a line it did not need.
+ */
+export async function ownerNotice(agentId: string): Promise<{ message: string; atMs: number } | null | undefined> {
+  try {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT level, message, created_at FROM events
+          WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ${OWNER_NOTICE_WINDOW}`,
+      )
+      .all(agentId)) as { level: string; message: string | null; created_at: number | string }[];
+    const shown = rows.find((r) => (r.level === "warn" || r.level === "err" || r.level === "error") && !!r.message);
+    return shown ? { message: shown.message!, atMs: Number(shown.created_at) * 1000 } : null;
+  } catch {
+    return undefined;
   }
 }
 

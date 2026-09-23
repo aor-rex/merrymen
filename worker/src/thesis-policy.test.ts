@@ -72,7 +72,7 @@ describe("what the SQL calls landed is what outcomeOf calls landed", () => {
 const SOURCES = ["class-route", "strategy:steady-basket", "strategy:even-keel", "strategist", "brain", "brain-shadow", "market-review"];
 const ACTIONS = [null, "buy", "sell", "hold", "vault-deposit", "vault-withdraw", "transfer"];
 const STATUSES = [null, "landed", "paper", "rejected", "reverted", "submitted"];
-const RULES = [null, "ops-cap", "live-not-enabled", "no-cash", "per-trade-cap", "asset-allowlist", "free text"];
+const RULES = [null, "ops-cap", "live-not-enabled", "no-cash", "drawdown-breaker", "per-trade-cap", "asset-allowlist", "free text"];
 
 async function matrix() {
   const raw = new DatabaseSync(":memory:");

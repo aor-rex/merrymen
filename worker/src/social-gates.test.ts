@@ -131,7 +131,11 @@ describe("3. owner remedies stay with the owner", () => {
       const pub = renderWhy(w, "public");
       const own = renderWhy(w, "owner");
       const firstClause = pub.split(/[—.,]/)[0]!.trim();
-      assert.ok(own.includes(firstClause), `${w.code}: registers disagree on the fact — "${firstClause}" not in owner copy`);
+      // Less the book's own figures, which the public copy never carries
+      // (reasons.ts, the public register): "AAPL is 0.27 USDG under" and
+      // "AAPL is under" state the same fact.
+      const fact = own.replace(/ ?-?[\d,]+\.\d{2}(?: USDG)?/g, "");
+      assert.ok(fact.includes(firstClause), `${w.code}: registers disagree on the fact — "${firstClause}" not in owner copy`);
     }
   });
 });

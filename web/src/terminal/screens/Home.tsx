@@ -14,7 +14,7 @@ import {
   type TokenTab,
   deltaClass,
 } from "../live";
-import { Coin, Face, NameBlock, Pill } from "../ui";
+import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
 import { usd, usdParts } from "@/lib/format";
 
@@ -250,7 +250,7 @@ export function Home({
                   {/* "—" until the ledger answers. Zero agents and an unread
                       ledger are different facts about a listed instrument. */}
                   <td>{t.agents ?? "—"}</td>
-                  <td title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</td>
+                  <td title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></td>
                   <td className={deltaClass(t.change24hPct)}>
                     {pctPts(t.change24hPct)}
                   </td>
@@ -295,7 +295,7 @@ export function Home({
                   )}
                 </div>
                 <div className="px">
-                  {coinPrice(t.priceUsd)}
+                  <MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} />
                   {chgPct != null && (
                     <small className={chgPct >= 0 ? "up" : "down"}>
                       {pctPts(chgPct)}

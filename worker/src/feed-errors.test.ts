@@ -77,7 +77,9 @@ describe("a long reason is cut at a boundary, and says that it was cut", () => {
   it("does not touch a strategy source's sentence, which is ours and already bounded", () => {
     // renderWhy output is under 220 by its own test; the policy must not start
     // trimming a strategy sentence just because clip exists.
-    const t = publishableThesis(row({ source: "strategy:even-keel", reason: "AAPL is 0.27 USDG under its equal weight — topping it up from cash" }))!;
+    // (A public book, so the sentence is exactly as written: a private book's
+    // loses its figures first — private-book.test.ts.)
+    const t = publishableThesis(row({ source: "strategy:even-keel", public_book: true, reason: "AAPL is 0.27 USDG under its equal weight — topping it up from cash" }))!;
     assert.equal(t.reason, "AAPL is 0.27 USDG under its equal weight — topping it up from cash");
   });
 });
@@ -144,9 +146,10 @@ describe("a hold has no size", () => {
     assert.equal(t.head, "hold NVDA");
   });
 
-  it("keeps the size on a buy and a sell", () => {
-    assert.equal(publishableThesis(row({ source: "strategist", action: "buy", symbol: "NVDA", size_usdg: 5, reason: "x", status: "landed" }))!.head, "buy NVDA 5.00 USDG");
-    assert.equal(publishableThesis(row({ source: "strategist", action: "sell", symbol: "NVDA", size_usdg: 3.6, reason: "x", status: "landed" }))!.head, "sell NVDA 3.60 USDG");
+  // A size is printed only for a PUBLIC book — private-book.test.ts.
+  it("keeps the size on a public book's buy and sell", () => {
+    assert.equal(publishableThesis(row({ source: "strategist", action: "buy", symbol: "NVDA", size_usdg: 5, reason: "x", status: "landed", public_book: true }))!.head, "buy NVDA 5.00 USDG");
+    assert.equal(publishableThesis(row({ source: "strategist", action: "sell", symbol: "NVDA", size_usdg: 3.6, reason: "x", status: "landed", public_book: true }))!.head, "sell NVDA 3.60 USDG");
   });
 });
 

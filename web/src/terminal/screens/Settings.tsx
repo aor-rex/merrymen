@@ -49,7 +49,8 @@ function Field(props: {
   );
 }
 
-export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: string | null}) {
+/** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
+export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -381,7 +382,11 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        // FOR THE WALLET THESE VALUES WERE READ FOR (SettingsView.owner): a
+        // different wallet signed in by another tab since is refused by the
+        // route, not written to. Sent whenever the view names one — "" too,
+        // a form read signed out, which no session is.
+        body: JSON.stringify(view && view.owner !== null ? { ...body, owner: view.owner } : body),
       });
       const json = (await res.json()) as { ok?: boolean; errors?: string[] };
       if (!res.ok) {
@@ -390,6 +395,7 @@ export default function SettingsPage({onFund, slug}:{onFund:()=>void; slug: stri
         return;
       }
       setStatus("Changes saved");
+      onSaved?.();
       setDraft({});
       setSymbols(null);
       setTgEnabled(null);

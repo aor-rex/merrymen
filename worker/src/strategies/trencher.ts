@@ -21,7 +21,7 @@
 
 import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy, Tick } from "./types";
+import { breakerIdle, type Snapshot, type Strategy, type Tick } from "./types";
 import type { Why } from "./reasons";
 import type { TrenchBrainOrder } from "../trencher-brain";
 
@@ -495,6 +495,16 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           pct: verdict.pct,
         } : null);
       }
+
+      // ── no entries at all while the drawdown breaker is tripped ─────────
+      //
+      // The wall refuses every one of them, so each was a refusal a tick — and,
+      // with the Brain required, a paid review of a coin it would never be
+      // allowed to buy. Seen on the live feed: thirty refused buys in fifteen
+      // minutes, each in fresh model words. So the candidates are not read and
+      // the Brain is not asked; exits above ran first and are untouched.
+      const brake = breakerIdle(snap);
+      if (brake) return intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
 
       // ── entries, only with what's left ─────────────────────────────────
       const heldSymbols = new Set(openNow.map((p) => p.symbol));

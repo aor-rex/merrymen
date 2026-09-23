@@ -95,9 +95,11 @@ describe("a market review publishes only when it changes", () => {
     assert.equal(JSON.parse(down.evidence_json).event, "flip");
     const post = publishableThesis(row(reviewSource(down), down));
     assert.ok(post, "a changed view reaches the feed");
-    // And peers and the agent's own memory read the same published sentence.
+    // Peers read the published sentence. The agent's own memory does not: the
+    // review is filed as a hold, and a hold is not memory (brain-memory.test.ts)
+    // — nothing in this sentence is the agent's own word anyway.
     assert.ok(sentimentLine([post], "TSLA", "sentiment")?.includes("below its mean"));
-    assert.ok(memoryLines([post], quote().at + 301).join(" ").includes("below its mean"));
+    assert.deepEqual(memoryLines([post], quote().at + 301), []);
   });
 
   it("A TWO-ROUND BREAKOUT PUBLISHES — the follow-up the review named", () => {

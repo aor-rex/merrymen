@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy, Tick } from "../strategies/types";
+import { breakerIdle, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
@@ -341,7 +341,29 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // so the latch is released and the floor can arm again if it returns.
       for (const s of [...floorFired]) if (!snap.holdings.has(s)) floorFired.delete(s);
 
-      if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return [];
+      // ── NO BUYS WHILE THE DRAWDOWN BREAKER IS TRIPPED ─────────────────
+      //
+      // The wall refuses every buy once the book sits at or past the loss
+      // limit sealed into the key, so a buy proposed now is a refusal a tick
+      // and a paid model call behind it. Every other builtin already reads
+      // this from the snapshot; this is the one that thinks, and it went on
+      // asking. BELOW the floor and the ceiling on purpose: those are exits,
+      // and the breaker is a brake on taking risk, never a lock on the doors.
+      //
+      // FLAT, the model could only answer with a buy, so it is not asked and
+      // not billed. Returned before the window is stamped, so the model is
+      // asked on the first tick after the breaker clears rather than up to a
+      // window later.
+      //
+      // BETWEEN WINDOWS the same reason is returned rather than a bare [],
+      // because the idle channel says a reason once per CHANGE: a quiet tick
+      // with no reason reads as a change, and the owner would be told again at
+      // every window for as long as the breaker stays tripped.
+      const brake = breakerIdle(snap);
+      const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
+      if (braked && snap.holdings.size === 0) return braked;
+
+      if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return braked ?? [];
       lastDecisionAt = t;
 
       // ── THE UNIVERSE THIS WINDOW ACTUALLY HAS ───────────────────────
@@ -453,7 +475,14 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
       }
 
-      const { intents, accepted, rejected } = proposalsToIntents(actions, universeNow, snap);
+      // HOLDING UNDER THE BREAKER, the model was asked because it may want to
+      // sell — and any buy it answered with is withheld HERE, before it can
+      // become an intent the wall is certain to refuse. Not journaled as a
+      // drop: a drop row publishes, and a tripped breaker is account state the
+      // public feed leaves out. The owner's log says it, below.
+      const allowed = brake ? actions.filter((a) => a.action !== "buy") : actions;
+      const withheld = actions.length - allowed.length;
+      const { intents, accepted, rejected } = proposalsToIntents(allowed, universeNow, snap);
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
       // survivor gets a decisionId stamped onto its intent (so the resulting trade
@@ -487,8 +516,11 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       }
 
       if (thesis) note("ok", `strategist: ${thesis}`);
+      if (withheld > 0) {
+        note("ok", `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`);
+      }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
-      for (const a of actions) {
+      for (const a of allowed) {
         if (a.action !== "hold" && a.reason) {
           note("ok", `strategist: ${a.action} ${a.sizeUsdg} USDG ${a.symbol} — ${a.reason}`);
         }
@@ -512,11 +544,17 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // Not reported when a `thesis` was written: that row IS the agent saying
       // what it decided, and two rows for one silence is the duplication the
       // de-duplication upstream exists to avoid.
+      //
+      // UNDER THE BREAKER the reason is the breaker, thesis or not: that is why
+      // nothing went out, and it is the owner's sentence only (publishesIdle),
+      // so it cannot be the second public row for one silence.
       const held = actions.filter((a) => a.action === "hold").length;
       const idle: Why | undefined =
-        intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
-          ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
-          : undefined;
+        intents.length === 0 && brake
+          ? brake
+          : intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
+            ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
+            : undefined;
       return idle ? { intents, why: intents.map(() => null), idle } : intents;
     },
   };

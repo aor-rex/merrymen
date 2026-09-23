@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { ORDER_STALE_GRACE_MS } from "@/lib/order-state";
-import { followOrder, followWindowMs, type OrderPoll } from "./order-follow";
+import { followDeadline, followOrder, followOrderUntil, followWindowMs, routeAnswer, serverPlacedAt, type OrderPoll } from "./order-follow";
 
 const MIN = 60_000;
 const T = 1_800_000_000_000;
@@ -175,6 +175,15 @@ describe("what the card takes from the POST", () => {
     }
     assert.equal(followWindowMs({ expiresInMs: 0 }), 0);
   });
+
+  it("AND THE SERVER'S OWN PLACEMENT TIME, which the thread holds against the ledger's clock", () => {
+    // POST computed both from one `now`, so their difference is that `now` —
+    // on the server's clock, whatever this browser's says.
+    assert.equal(serverPlacedAt({ id: "a1", expiresAt: EXPIRES, expiresInMs: WINDOW_MS }), EXPIRES - WINDOW_MS);
+    for (const bad of [null, undefined, {}, { expiresAt: EXPIRES }, { expiresInMs: WINDOW_MS }, { expiresAt: String(EXPIRES), expiresInMs: WINDOW_MS }, { expiresAt: EXPIRES, expiresInMs: -1 }, { expiresAt: Number.NaN, expiresInMs: 0 }, { expiresAt: 5, expiresInMs: 10 }]) {
+      assert.equal(serverPlacedAt(bad), null, JSON.stringify(bad));
+    }
+  });
 });
 
 describe("the screen going away", () => {
@@ -194,5 +203,74 @@ describe("the screen going away", () => {
     await followOrder("a1", WINDOW_MS, h.deps);
     assert.deepEqual(h.said, [], "nothing is said into a screen that has gone");
     assert.ok(h.polls.every((p) => p <= goneAt), "and nothing is asked after it went");
+  });
+});
+
+describe("AN ORDER OUTLIVES THE SCREEN THAT PLACED IT", () => {
+  // The poll used to die with the Agent screen, which is mounted only while
+  // the chat is open — so closing the dock, switching tabs or reloading ended
+  // it, and the outcome of an order the owner had just placed never reached
+  // them. The chat now keeps the order's deadline on this browser's clock and
+  // resumes it; these drive the resume.
+  it("THE DEADLINE IS FIXED ONCE, on this clock, and resuming keeps it", async () => {
+    const until = followDeadline(WINDOW_MS, T);
+    assert.equal(until, T + WINDOW_MS + ORDER_STALE_GRACE_MS + 60_000);
+    // Resumed five minutes later, after a reload: it waits out the SAME end.
+    const h = harness(() => ({ state: "running" }));
+    for (let i = 0; i < 5 * 12; i++) await h.deps.sleep(5_000);
+    await followOrderUntil("a1", until, h.deps);
+    assert.ok(h.clock() >= until, "it did not stop before the order's own end");
+    assert.ok(h.clock() < until + 10_000, "nor wait a second window from the reload");
+  });
+
+  it("A RESUME PAST ITS DEADLINE STILL ASKS ONCE before saying it does not know", async () => {
+    // Reopened an hour later: the answer has long been on the server, and
+    // "I could not get an answer" without asking would be false.
+    const h = harness(() => ({ state: "done", result: "bought 25.00 USDG of TSLA" }));
+    await followOrderUntil("a1", T - 60 * MIN, h.deps);
+    assert.deepEqual(h.said.map((s) => s.line), ["bought 25.00 USDG of TSLA"]);
+    assert.equal(h.polls.length, 1);
+  });
+
+  it("THE TERMINAL POLL IS HANDED ON, so its receipt can be rendered", async () => {
+    const receipt = { status: "filled", side: "buy", symbol: "TSLA", token: null, usdgActual: 25, txHash: null, rejectRule: null };
+    const heard: OrderPoll[] = [];
+    const h = harness(() => ({ state: "done", result: "bought 25.00 USDG of TSLA", receipt }));
+    await followOrder("a1", WINDOW_MS, { ...h.deps, say: (_line, poll) => heard.push(poll ?? null) });
+    assert.deepEqual(heard, [{ state: "done", result: "bought 25.00 USDG of TSLA", receipt }]);
+  });
+
+  it("and an unanswered end hands on nothing that could pass for one", async () => {
+    const heard: (OrderPoll | undefined)[] = [];
+    const h = harness(() => ({ state: "running" }));
+    await followOrder("a1", WINDOW_MS, { ...h.deps, say: (_line, poll) => heard.push(poll) });
+    assert.deepEqual(heard, [null]);
+  });
+});
+describe("A LOOKUP GIVEN A DEADLINE", () => {
+  it("IS GIVEN UP ON AT IT, and said as an answer that never came back", async () => {
+    // A snipe's lookup had no deadline, and the order it resolved to went out
+    // whenever it answered — however long after the owner tapped.
+    const original = globalThis.fetch;
+    let signalled = false;
+    globalThis.fetch = ((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        // With nothing to stop it, it answers a second later: too late to be the deadline.
+        if (!signal) return void setTimeout(() => _resolve(new Response("{}", { headers: { "content-type": "application/json" } })), 1_000);
+        signalled = true;
+        signal.addEventListener("abort", () => reject(signal.reason));
+      })) as typeof fetch;
+    // AbortSignal.timeout does not hold the process open; this does, for the wait.
+    const awake = setTimeout(() => {}, 10_000);
+    try {
+      const started = Date.now();
+      assert.equal(await routeAnswer("/api/snipe", { method: "POST" }, 20), null);
+      assert.ok(signalled, "the request carried the deadline");
+      assert.ok(Date.now() - started < 5_000, "and was given up on at it");
+    } finally {
+      clearTimeout(awake);
+      globalThis.fetch = original;
+    }
   });
 });

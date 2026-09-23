@@ -8382,3 +8382,179 @@ html[lang|="ko"] .terminal-host {
   white-space: nowrap;
   user-select: all;
 }
+
+/* ══ WAVE 2 — THE FEED ROW ════════════════════════════════════════════════
+   Appended as one block rather than edited into the shared selectors above,
+   so it can be read, reviewed and reverted as a unit. Everything here is new
+   classes; nothing above changes meaning. */
+
+/* A POST THE PAGE HAD NOT SHOWN BEFORE (feed-fresh.ts). 400ms: long enough to
+   be seen arriving, short enough to be over before it is read. The highlight
+   fades to nothing, so a row that stays on screen ends up like every other. */
+:where(.terminal-host) .wire-beat.wire-new {
+  animation: wire-arrive 400ms var(--ease) both;
+}
+:where(.terminal-host) .wire-beat.wire-new > .wire-body {
+  animation: wire-glow 400ms ease-out both;
+  border-radius: 10px;
+}
+@keyframes wire-arrive {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+}
+@keyframes wire-glow {
+  from {
+    background: color-mix(in srgb, var(--up) 14%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+/* Motion is opt-out at the OS, and that answer wins: the row simply appears. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .wire-beat.wire-new,
+  :where(.terminal-host) .wire-beat.wire-new > .wire-body {
+    animation: none;
+  }
+}
+
+/* "[Buy] $5.00 at $3.1M MC". The colour means money moved (beat.ts pillOf):
+   a muted pill for a refusal or a shadow call, and a dashed edge while an
+   order is still in flight, the way the card's "buying" chip does it. */
+:where(.terminal-host) .wire-deal {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+:where(.terminal-host) .wire-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+:where(.terminal-host) .wire-pill.buy {
+  color: var(--up);
+  background: color-mix(in srgb, var(--up) 14%, transparent);
+}
+:where(.terminal-host) .wire-pill.sell {
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+}
+:where(.terminal-host) .wire-pill.muted {
+  color: var(--faint);
+  border-color: var(--line);
+}
+:where(.terminal-host) .wire-pill.unsettled {
+  border-style: dashed;
+  border-color: currentColor;
+}
+:where(.terminal-host) .wire-mc {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* THE CALL'S OWN FIGURE, where the token's 24h change used to sit: "+10.0%
+   since entry", "−4.0% realized", "+2.1% since posted". Absent — not grey,
+   not 0% — when an input was not read. */
+:where(.terminal-host) .wire-call {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+:where(.terminal-host) .wire-call.up { color: var(--up); }
+:where(.terminal-host) .wire-call.down { color: var(--down); }
+:where(.terminal-host) .wire-call.flat { color: var(--tx-2); }
+:where(.terminal-host) .wire-call small {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+/* Takes the figure's tone: the shared `.wire-part-fig b` rule would paint it
+   the neutral text colour, and a loss would read like a size. */
+:where(.terminal-host) .wire-call .wire-call-usd {
+  margin-left: 2px;
+  color: inherit;
+  font-size: 11.5px;
+}
+
+/* THE AGENT'S OWN LINE leads the row when it wrote one; our reason sits
+   behind "why". The post is the brighter of the two because it is the voice. */
+:where(.terminal-host) .wire-why.wire-post {
+  color: var(--tx);
+}
+:where(.terminal-host) .wire-more {
+  margin: -4px 0 8px;
+}
+:where(.terminal-host) .wire-more > summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--faint);
+  font-size: 11px;
+  list-style: none;
+}
+:where(.terminal-host) .wire-more > summary::-webkit-details-marker {
+  display: none;
+}
+:where(.terminal-host) .wire-more > summary::after {
+  content: " ›";
+}
+:where(.terminal-host) .wire-more[open] > summary::after {
+  content: " ⌄";
+}
+:where(.terminal-host) .wire-more > .wire-why {
+  margin-top: 4px;
+  color: var(--tx-2);
+}
+
+/* "Real money" — one tap that hides every paper book. */
+:where(.terminal-host) .feed-real-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 0 8px;
+}
+:where(.terminal-host) .feed-real {
+  min-height: 32px;
+  padding: 4px 12px;
+  color: var(--tx-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+}
+:where(.terminal-host) .feed-real.on {
+  color: var(--ink);
+  background: var(--up);
+  border-color: var(--up);
+}
+
+/* The same "why" on the card and in the alerts column. Unscoped because those
+   two render outside the terminal host; this sheet is loaded globally. */
+.mm-why,
+.mm-alert-why {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.mm-why > summary,
+.mm-alert-why > summary {
+  cursor: pointer;
+  opacity: 0.7;
+}
+.mm-why > p {
+  margin: 4px 0 0;
+}
+.mm-alert-why > span {
+  display: block;
+  margin-top: 2px;
+}
+/* ══ end Wave 2 — the feed row ═══════════════════════════════════════════ */

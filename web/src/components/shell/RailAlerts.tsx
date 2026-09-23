@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AgentAvatar } from "@/components/AgentAvatar";
-import { badgeOf } from "@/lib/thesis-badge";
+import { badgeOf, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
 import { usdAdaptive } from "@/lib/format";
+import { sayOf } from "@/lib/post-line";
 import { alertsOf, alertsRead, coinName, emptyAlerts, type AlertsRead } from "@/lib/rail-alerts";
 
 /**
@@ -101,39 +102,63 @@ export function RailAlerts() {
     <div className="mm-alerts">
       <p className="mm-kicker">Alerts</p>
       <ul>
-        {theses.map((t, i) => {
-          const b = badgeOf(t);
-          const size = money(t.sizeUsdg);
-          const coin = coinName(t);
-          const row = (
-            <>
-              <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
-              <span className="who">
-                <span className="nm">{t.name}</span>
-                <span className={`mm-chip ${badgeClass(b.kind)}${t.outcome === "pending" ? " unsettled" : ""}`}>
-                  {b.label}
-                </span>
-                <time className="mono">{timeAgo(t.at)}</time>
-              </span>
-              {(t.symbol || size) && (
-                <span className="did mono">
-                  {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
-                  {size && <span className="amt">{size}</span>}
-                  {t.paper && <span className="pp">paper</span>}
-                </span>
-              )}
-              {/* THE LINE NOBODY ELSE'S TAPE HAS. One clause of the reasoning,
-                  clamped — enough to know whether it is worth opening. */}
-              {t.reason && <span className="say">{t.reason}</span>}
-            </>
-          );
-          return (
-            <li key={`${t.slug ?? t.name}:${t.at}:${i}`} className="mm-alert">
-              {t.slug ? <Link href={`/a/${t.slug}`}>{row}</Link> : <span>{row}</span>}
-            </li>
-          );
-        })}
+        {theses.map((t, i) => (
+          <li key={`${t.slug ?? t.name}:${t.at}:${i}`} className="mm-alert">
+            <AlertRow t={t} />
+          </li>
+        ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * ONE ALERT. Exported so a test can render it: the column above fetches in an
+ * effect, which a static render never runs, so the row is the unit that can be
+ * checked.
+ */
+export function AlertRow({ t }: { t: PublicThesis }) {
+  const b = badgeOf(t);
+  const size = money(t.sizeUsdg);
+  const coin = coinName(t);
+  // The agent's own line leads when it wrote one; our reason sits behind "why"
+  // (lib/post-line.ts).
+  const { say, why } = sayOf(t);
+  const row = (
+    <>
+      <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
+      <span className="who">
+        <span className="nm">{t.name}</span>
+        <span className={`mm-chip ${badgeClass(b.kind)}${inFlightOf(t) ? " unsettled" : ""}`}>
+          {b.label}
+        </span>
+        <time className="mono">{timeAgo(t.at)}</time>
+      </span>
+      {(t.symbol || size) && (
+        <span className="did mono">
+          {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
+          {size && <span className="amt">{size}</span>}
+          {t.paper && <span className="pp">paper</span>}
+        </span>
+      )}
+      {/* THE LINE NOBODY ELSE'S TAPE HAS. One clause of the reasoning — or the
+          agent's own one-liner — clamped: enough to know whether it is worth
+          opening. */}
+      {say && <span className="say">{say}</span>}
+    </>
+  );
+  return (
+    <>
+      {t.slug ? <Link href={`/a/${t.slug}`}>{row}</Link> : <span>{row}</span>}
+      {/* THE LINK'S SIBLING, NEVER ITS CHILD. A <details> inside an <a> is
+          interactive content inside a link — invalid, and a browser hoists it
+          out of the markup that was written. */}
+      {why && (
+        <details className="mm-alert-why">
+          <summary>why</summary>
+          <span>{why}</span>
+        </details>
+      )}
+    </>
   );
 }

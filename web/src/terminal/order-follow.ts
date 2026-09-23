@@ -23,13 +23,19 @@
  * (`expiresInMs`) and is counted from when the reply arrived — see
  * followWindowMs for what comparing the server's epoch with Date.now() did.
  *
- * STILL DIES WITH THE SCREEN (`alive`). Lifting the poll out of the component
- * so a tab switch does not end it is the next step, not this one.
+ * IT NO LONGER DIES WITH THE SCREEN. The poll ran inside Agent.tsx, which is
+ * mounted only while the chat is on screen, so closing the dock, switching tab
+ * or reloading ended it and the owner never heard how an order they had just
+ * placed went. The chat controller (chat-controller.ts) now runs it at App
+ * level and keeps each order's deadline — fixed once, on this browser's clock,
+ * by followDeadline — so a reload resumes the same wait through
+ * followOrderUntil rather than starting a new one. `alive` now means "this
+ * owner's chat still exists", not "this screen is open".
  */
 import { ORDER_STALE_GRACE_MS } from "@/lib/order-state";
 
 /** One poll's reading. Null is a poll that could not be read — not an answer. */
-export type OrderPoll = { state?: string; result?: string | null } | null;
+export type OrderPoll = { state?: string; result?: string | null; receipt?: unknown } | null;
 
 export interface FollowDeps {
   poll(id: string): Promise<OrderPoll>;
@@ -37,7 +43,11 @@ export interface FollowDeps {
   now(): number;
   /** False once the screen that asked has gone away. */
   alive(): boolean;
-  say(line: string): void;
+  /**
+   * The sentence, and the terminal poll it came from — null when the window
+   * ran out with no answer, so nothing unanswered can pass for a receipt.
+   */
+  say(line: string, poll?: OrderPoll): void;
 }
 
 /** How often the card asks. Unchanged from the loop this replaced. */
@@ -101,6 +111,77 @@ export function unansweredLine(last: OrderPoll): string {
   );
 }
 
+/**
+ * A WRITE WHOSE ANSWER MAY NEVER HAVE COME BACK.
+ *
+ * The route's answer — its status and the JSON it wrote, success or refusal —
+ * or NULL when there is none to read: the request threw (the connection
+ * dropped, possibly AFTER the server acted), or an error status came back with
+ * no body the route wrote (a gateway's page, which says nothing about what
+ * happened behind it). Null is "unknown", and a caller must never say it as a
+ * refusal: for an order, the row may exist. The card used to say "That didn't
+ * go through: Failed to fetch" — raw exception text, and a claim nobody could
+ * make — and leave itself ready to place the same order again.
+ *
+ * `timeoutMs`, when given, is how long the answer may take before it is given
+ * up on — and then it is null, like any answer that never came back.
+ */
+export async function routeAnswer<T>(
+  url: string,
+  init: RequestInit,
+  timeoutMs?: number,
+): Promise<{ ok: boolean; status: number; body: T | null } | null> {
+  let res: Response;
+  try {
+    res = await fetch(url, timeoutMs === undefined ? init : { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    return null;
+  }
+  const body = /application\/json/i.test(res.headers.get("content-type") ?? "")
+    ? ((await res.json().catch(() => null)) as T | null)
+    : null;
+  if (!res.ok && body === null) return null;
+  return { ok: res.ok, status: res.status, body };
+}
+
+/**
+ * HOW LONG A SNIPE'S LOOKUP MAY TAKE before the card gives up on it.
+ *
+ * The lookup places nothing, but the order it resolves to is placed after it
+ * answers — so an unbounded lookup was an unbounded wait between the owner's
+ * tap and an order going out, in which the owner could leave, another could
+ * sign in, and the price could move. Past this, it is an answer that never
+ * came back: nothing was placed, and the card stays for another tap.
+ */
+export const SNIPE_LOOKUP_MS = 15_000;
+
+/**
+ * THE ORDER OPEN ON THIS OWNER'S KEY RIGHT NOW, by id — or null when there is
+ * none, or it could not be read.
+ *
+ * Asked ONCE, after a placement whose answer was lost. One order is open at a
+ * time, so an open one is the order that placement made, or the one it was
+ * refused beside; either way following it tells the owner what their key is
+ * doing, and its receipt names the order. GET without an id answers the
+ * newest order hosted; self-hosted it answers none, and the owner is told to
+ * check their trades.
+ *
+ * FOR THE OWNER WHO CONFIRMED (`owner`, ConfirmScope.owner): the route refuses
+ * a session that is not theirs, which reads here as none — another tab may
+ * have signed a different wallet in, and its order is not this owner's.
+ */
+export async function fetchOpenOrder(owner: string | null): Promise<string | null> {
+  try {
+    const r = await fetch(owner ? `/api/orders?owner=${encodeURIComponent(owner)}` : "/api/orders", { signal: AbortSignal.timeout(8_000) });
+    if (!r.ok) return null;
+    const b = (await r.json()) as { id?: unknown; state?: unknown };
+    const open = b.state === "queued" || b.state === "running";
+    return open && typeof b.id === "string" && /^[0-9a-f]{16,64}$/i.test(b.id) ? b.id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The real poll, as the card makes it. */
 export async function fetchOrderPoll(id: string): Promise<OrderPoll> {
   try {
@@ -125,25 +206,74 @@ export function followWindowMs(body: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
+/**
+ * WHEN THE SERVER PLACED THE ORDER, ON THE SERVER'S CLOCK — or null when the
+ * reply did not say.
+ *
+ * POST computes `expiresAt` and `expiresInMs` from one `now` of its own
+ * (order-state.ts placedResponse), so their difference is that `now`. Not a
+ * deadline to wait on — followWindowMs is for that — but the one moment the
+ * chat can hold against the LEDGER's clock: the thread reads a receipt's
+ * order's life from it, so a browser clock minutes off cannot make one trade
+ * two lines (chat-thread.ts lifeOf).
+ */
+export function serverPlacedAt(body: unknown): number | null {
+  const b = body as { expiresAt?: unknown; expiresInMs?: unknown } | null | undefined;
+  const at = b?.expiresAt;
+  const left = b?.expiresInMs;
+  if (typeof at !== "number" || typeof left !== "number" || !Number.isFinite(at) || !Number.isFinite(left) || left < 0) return null;
+  const placed = at - left;
+  return placed > 0 ? placed : null;
+}
+
+/**
+ * When to stop asking, as a moment on THIS browser's clock.
+ *
+ * Measured from `now` — when the POST's reply is in hand — so the wait can
+ * only come out longer than the server's, never shorter. Fixed ONCE and kept
+ * with the order, so a resumed follow waits out the same end instead of a
+ * fresh window from the reload.
+ */
+export function followDeadline(expiresInMs: number | null, now: number): number {
+  return (
+    now +
+    (expiresInMs !== null && Number.isFinite(expiresInMs) ? Math.max(0, expiresInMs) + ORDER_STALE_GRACE_MS : FALLBACK_WAIT_MS) +
+    FOLLOW_SLACK_MS
+  );
+}
+
 export async function followOrder(
   id: string,
   /** From followWindowMs: the order's window left at the POST, on no particular clock. */
   expiresInMs: number | null,
   deps: Partial<Pick<FollowDeps, "poll" | "sleep" | "now">> & Pick<FollowDeps, "alive" | "say">,
 ): Promise<void> {
+  const now = deps.now ?? Date.now;
+  return followOrderUntil(id, followDeadline(expiresInMs, now()), deps);
+}
+
+/**
+ * Follow an order to its answer or to `giveUpAt` — the deadline followDeadline
+ * fixed when it was placed, however long ago that was.
+ *
+ * IT ASKS AT LEAST ONCE. A follow resumed after its deadline — a chat reopened
+ * an hour later — would otherwise say "I could not get an answer" without
+ * having asked, about an order whose answer has long been on the server.
+ */
+export async function followOrderUntil(
+  id: string,
+  giveUpAt: number,
+  deps: Partial<Pick<FollowDeps, "poll" | "sleep" | "now">> & Pick<FollowDeps, "alive" | "say">,
+): Promise<void> {
   const poll = deps.poll ?? fetchOrderPoll;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? Date.now;
-  // Measured from NOW on THIS clock. Starting the count when the reply is in
-  // hand can only make the wait longer than the server's, never shorter.
-  const giveUpAt =
-    now() +
-    (expiresInMs !== null && Number.isFinite(expiresInMs) ? Math.max(0, expiresInMs) + ORDER_STALE_GRACE_MS : FALLBACK_WAIT_MS) +
-    FOLLOW_SLACK_MS;
   let last: OrderPoll = null;
-  while (now() < giveUpAt) {
+  let asked = false;
+  while (now() < giveUpAt || !asked) {
     await sleep(FOLLOW_EVERY_MS);
     if (!deps.alive()) return;
+    asked = true;
     let read: OrderPoll;
     try {
       read = await poll(id);
@@ -153,9 +283,9 @@ export async function followOrder(
     if (read) last = read;
     const answer = orderAnswer(read);
     if (answer) {
-      deps.say(answer);
+      deps.say(answer, read);
       return;
     }
   }
-  if (deps.alive()) deps.say(unansweredLine(last));
+  if (deps.alive()) deps.say(unansweredLine(last), null);
 }

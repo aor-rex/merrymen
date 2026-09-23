@@ -2,20 +2,12 @@
  * reach the feed. Both may describe a tick with no trade, but only one offers
  * reasoning a peer can compare with its own evidence. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { publishableThesis, PUBLISHABLE_SOURCES } from "./thesis-policy";
+import { publicationSourceFor, publishableThesis, PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { marketReview } from "./market-review";
-
-const codeOf = (src: string) =>
-  src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .split(/\r?\n/)
-    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
-    .join("\n");
-
-const INDEX = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
+import { idleNotice, idleViewRow } from "./idle-notice";
+import { renderWhy, type Why } from "./strategies/reasons";
 
 /** The row the worker now writes when a deterministic strategy sits a tick out. */
 const idleRow = (over: Record<string, unknown> = {}) => ({
@@ -100,42 +92,45 @@ describe("a public view needs market reasoning, not an idle notice", () => {
 });
 
 describe("how often it is written", () => {
-  it("ONCE PER CHANGE, NOT ONCE PER TICK", () => {
+  // Executed through idle-notice.ts, which decides what the tick's idle block
+  // writes. These were source greps over index.ts; they pinned the same rules.
+  const underOne: Why = { code: "under-one-buy", cashRaw: 1_000_000n, needRaw: 5_000_000n, vaultRaw: 0n };
+
+  it("ONCE PER CHANGE, NOT ONCE PER TICK — the view and the event together", () => {
     // renderWhy is deterministic, so an unchanged reason would write an
     // identical row every 240 seconds. read-theses would still group them into
     // ONE post — `reason` is part of its key — but the ledger would carry
     // ~12,000 rows a day saying the same sentence, and this repo already has
     // the incident where 1,242 identical rows told nobody anything.
-    const at = INDEX.indexOf("if (idleNow !== lastIdleReason) {");
-    assert.ok(at > 0, "the de-duplication must still gate it");
-    const block = INDEX.slice(at, INDEX.indexOf("\n    }", at));
-    assert.match(block, /await addDecision\(\{/, "the row is written inside the change gate");
-    assert.match(block, /await addEvent\(agentId, "ok", idleNow\)/, "beside the event, not instead of it");
+    const first = idleNotice({ idle: underOne, modeEmptied: null, last: null });
+    assert.ok(first.event, "the owner is told");
+    assert.ok(first.view, "beside the event, not instead of it");
+    const again = idleNotice({ idle: underOne, modeEmptied: null, last: first.last });
+    assert.equal(again.event, null);
+    assert.equal(again.view, null, "the row is written only on a change");
   });
 
   it("and it carries the strategy's own source and words", () => {
-    // Scoped to the IDLE block. `ensureDecision` also calls addDecision — with
-    // an action, a symbol and a size, which is correct there and is exactly
-    // what this test asserts is absent here, so searching the whole file finds
-    // the wrong call and fails on the right code.
-    const block = INDEX.indexOf("if (idleNow !== lastIdleReason) {");
-    const at = INDEX.indexOf("await addDecision({", block);
-    const call = INDEX.slice(at, INDEX.indexOf("});", at) + 3);
+    const n = idleNotice({ idle: underOne, modeEmptied: null, last: null });
+    // THE PUBLIC REGISTER of the same Why. Still the strategy's own words —
+    // renderWhy(idle, "public") — minus the remedy clause, which is advice for
+    // the owner and was going out on a public feed ("Add funds or lower the
+    // size per trade" was live for weeks). The event keeps the owner's copy.
+    assert.equal(n.view, renderWhy(underOne, "public"));
+    assert.match(n.event!.message, /Add funds or lower the size per trade/);
+    assert.doesNotMatch(n.view!, /Add funds/);
+    const row = idleViewRow({ id: "d1", agentId: "0xagent", strategyName: "llm-strategist(anthropic:claude-opus-4)", reason: n.view! });
     // Through the helper, not the template. The template spelled the source
     // `strategy:llm-strategist(anthropic:claude-opus-4)` for the strategist —
     // a key SOURCE_POLICY has never contained — so this very sentence, the one
     // written to prove the agent was thinking rather than idle, published
     // nothing at all. See strategist-publish.test.ts.
-    assert.match(call, /source: publicationSourceFor\(strategy\.name\)/);
-    // THE PUBLIC REGISTER of the same Why. Still the strategy's own words —
-    // renderWhy(idle, "public") — minus the remedy clause, which is advice for
-    // the owner and was going out on a public feed ("Add funds or lower the
-    // size per trade" was live for weeks). The event beside it keeps idleNow.
-    assert.match(call, /reason: idlePublic/);
+    assert.equal(row.source, publicationSourceFor("llm-strategist(anthropic:claude-opus-4)"));
+    assert.equal(row.source, "strategy:llm-strategist", "the engine suffix never reaches the key");
+    const basket = idleViewRow({ id: "d2", agentId: "0xagent", strategyName: "steady-basket", reason: "x" });
+    assert.ok((PUBLISHABLE_SOURCES as readonly string[]).includes(basket.source), basket.source);
     // No action, no symbol, no size — that absence is what makes it a view,
     // and `outcomeOf` is what turns the absence into the word.
-    assert.ok(!/\baction:/.test(call), "an idle decision has no action");
-    assert.ok(!/\bsymbol:/.test(call), "and names no instrument");
-    assert.ok(!/\bsize_usdg:/.test(call), "and no size");
+    assert.deepEqual(Object.keys(row).sort(), ["agent_id", "id", "reason", "source"]);
   });
 });

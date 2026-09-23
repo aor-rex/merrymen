@@ -27,6 +27,7 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
@@ -69,6 +70,23 @@ export interface SettingsView {
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
+  /**
+   * WHOSE SETTINGS THESE ARE — the signed-in tenant the values were read for,
+   * hosted; null self-hosted, where the box has one operator.
+   *
+   * The Settings form sends it back with its save, and the PUT refuses a body
+   * that names someone other than the session (409 OWNER_CHANGED_SETTING).
+   * Another tab can sign a different wallet in unseen, and without this the
+   * form open on screen — loaded for one wallet — saved its edits to the other
+   * wallet's agent: "Trade for real" turned on for an agent its owner never
+   * looked at, while this tab said "Changes saved". Carried in the same answer
+   * as the values, so the claim is exactly whose values the form shows.
+   *
+   * "" when hosted and signed out: the form showed nobody's values, so its
+   * save names nobody, and the PUT refuses it for whichever wallet signs in
+   * before it goes out (a 7-day session can lapse with the page open).
+   */
+  owner: string | null;
 }
 
 const STRATEGIES_DIR = homePaths.strategies();
@@ -157,6 +175,7 @@ export async function GET(req: Request) {
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
+    owner: isHostedMode() ? (tenant ?? "") : null,
   };
   return NextResponse.json(view);
 }
@@ -292,6 +311,11 @@ export async function PUT(req: Request) {
   } catch {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
+  // THE OWNER WHO CONFIRMED, when a chat card sent this (lib/order-owner.ts).
+  // Not a setting: taken off before anything below reads the body, so it is
+  // never stored and never reported as an unknown key.
+  const claimedOwner = (body as { owner?: unknown } | null)?.owner;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -303,6 +327,11 @@ export async function PUT(req: Request) {
     // tenant still could.
     tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL — before any field is read
+    // or written. Another tab can sign a different wallet in unseen, and a
+    // chat card's change would otherwise be made to that wallet's agent. A
+    // body that names nobody (the Settings screen's own form) is judged as before.
+    if (ownerMismatch(claimedOwner, tenant)) return NextResponse.json({ errors: [OWNER_CHANGED_SETTING] }, { status: 409 });
     // Drop every house-key + remote-execution field before the handler sees it.
     // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
     // fields, and rejecting the whole payload for their mere presence would break
@@ -595,6 +624,29 @@ export async function PUT(req: Request) {
     if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
     else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
     else errors.push("assetMode: must be all, stocks or crypto");
+  }
+
+  /**
+   * ── the public book ──────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, not a line in `BOOL_FIELDS`, because it is a DISCLOSURE
+   * consent rather than a behaviour switch: turning it on puts this agent's
+   * sizes and dollar P&L on a public URL. read-agent.ts had read it for months
+   * while this handler had no branch, so an owner could not publish their book
+   * at all — the PUT said {ok:true} and dropped the field.
+   *
+   * A real boolean or nothing. "false" is truthy to any reader that forgets
+   * `=== true`, so a string is refused rather than coerced. Null clears back to
+   * the default, which is private.
+   *
+   * Tenant-settable on purpose, like liveTradingEnabled: it is the owner's
+   * decision about the owner's agent, and nothing the house may decide for them.
+   */
+  if ("publicBook" in body) {
+    const v = body.publicBook;
+    if (v === null || v === undefined) setOrClear("publicBook", undefined);
+    else if (typeof v === "boolean") setOrClear("publicBook", v);
+    else errors.push("publicBook: must be true or false");
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────

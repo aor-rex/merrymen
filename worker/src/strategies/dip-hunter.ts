@@ -9,7 +9,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import { opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
+import { breakerIdle, opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
 
 export interface DipHunterConfig {
   legs: { symbol: string; token: `0x${string}` }[];
@@ -85,6 +85,12 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
        * "ops-spent" with silence, and every change is an event to the owner.
        */
       if (opsSpent(snap)) return { intents: [], why: [], idle: { code: "ops-spent" } };
+      // The drawdown breaker, on the same terms and for the same reasons: after
+      // the loop so the highs keep moving, ahead of `!best` so the sentence
+      // does not flicker with the price. This strategy only ever buys, so
+      // tripped, there is nothing it may propose.
+      const brake = breakerIdle(snap);
+      if (brake) return { intents: [], why: [], idle: brake };
 
       if (!best) {
         /**

@@ -131,6 +131,24 @@ export interface Snapshot {
    * went quiet on an unread count would be inventing a refusal nobody made.
    */
   opsHeadroom?: number | null;
+  /**
+   * THE ACCOUNT'S DRAWDOWN, as the wall measures it: how far equity sits below
+   * the peak the breaker judges against, in bps, beside the limit sealed into
+   * the grant. Built by `drawdownOf` from the same peak, equity and limit
+   * checkPolicy compares for `drawdown-breaker`.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`. Once the breaker is tripped the wall
+   * refuses every buy, so a strategy that goes on proposing them is a refusal a
+   * tick — and for a Trencher a paid Brain review a tick too. This only ever
+   * SHRINKS what is proposed; checkPolicy remains the rule, and an exit is
+   * never withheld because of it — the breaker is a brake on taking risk,
+   * never a lock on the doors.
+   *
+   * Absent or NULL means NOT MEASURED: no peak yet, equity that could not be
+   * totalled, a fixture, a backtest. That is not a tripped breaker, and a
+   * strategy that went quiet on it would be inventing a refusal nobody made.
+   */
+  drawdown?: { bps: number; limitBps: number } | null;
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;
@@ -213,6 +231,47 @@ export function opsSpent(snap: Snapshot): boolean {
 export function opsHeadroomOf(maxOpsPerDay: number, opsToday: number): number | null {
   if (!Number.isFinite(maxOpsPerDay) || !Number.isFinite(opsToday)) return null;
   return Math.max(0, maxOpsPerDay - opsToday);
+}
+
+/**
+ * The drawdown the wall would judge a buy against, or null when it would not
+ * judge one at all.
+ *
+ * checkPolicy's own arithmetic, line for line: no peak, or a book whose total
+ * is known to be partial, and the rule does not run — so neither does this. A
+ * limit that is not a finite number is a limit nobody read.
+ */
+export function drawdownOf(s: {
+  peakUsdg: bigint;
+  equityUsdg: bigint;
+  equityKnown: boolean;
+  maxDrawdownBps: number;
+}): { bps: number; limitBps: number } | null {
+  if (s.peakUsdg <= 0n || !s.equityKnown || !Number.isFinite(s.maxDrawdownBps)) return null;
+  return { bps: Number(((s.peakUsdg - s.equityUsdg) * 10_000n) / s.peakUsdg), limitBps: s.maxDrawdownBps };
+}
+
+/**
+ * Has the drawdown breaker been MEASURED as tripped? One definition for every
+ * reader, because the risk is the unread case: absent, null and non-finite are
+ * all "nobody measured", and each answers false.
+ */
+export function breakerTripped(snap: Pick<Snapshot, "drawdown">): boolean {
+  const d = snap.drawdown;
+  return !!d && Number.isFinite(d.bps) && Number.isFinite(d.limitBps) && d.bps >= d.limitBps;
+}
+
+/**
+ * The idle reason a tripped breaker gives, or undefined.
+ *
+ * THE LIMIT, NOT THE DRAWDOWN. The idle channel tells the owner once per
+ * CHANGE of sentence, and the drawdown moves every tick the book does — a
+ * sentence carrying it would be a new event every tick for as long as the
+ * breaker stays tripped. The limit is sealed into the key and does not move.
+ */
+export function breakerIdle(snap: Pick<Snapshot, "drawdown">): Why | undefined {
+  const d = snap.drawdown;
+  return d && breakerTripped(snap) ? { code: "breaker-tripped", limitBps: d.limitBps } : undefined;
 }
 
 /** Normalise either return shape. The one place that knows about both. */
