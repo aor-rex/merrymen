@@ -201,6 +201,40 @@ export function placedResponse(
   };
 }
 
+// ── the ceiling on one chat order ─────────────────────────────────────────
+
+/**
+ * THE MOST ONE CHAT ORDER MAY SPEND, as the orders route enforces it — and
+ * as the chat's amount chips offer it, because they read it from the same
+ * resolution (lib/order-ceiling.ts, /api/orders/ceiling).
+ *
+ * Hosted, the tenant's own stored value; with nothing usable stored, or a
+ * store that cannot be read, the house's (`fallback`: resolveConfig(), the web
+ * process's own settings file and env). The fallback is the SAFE direction —
+ * the default is the smaller number, and the sealed per-trade cap is the real
+ * wall underneath either way. Self-hosted the web process and the worker
+ * genuinely share one home, so the house's value IS the owner's and no store
+ * is read. Zero is a value an owner may set: "no chat ceiling".
+ *
+ * The chips used to read the owner's value over SETTINGS_DEFAULTS instead,
+ * so a house whose env set a ceiling below 25 offered a "(max)" chip this
+ * refused.
+ */
+export async function chatOrderCeiling(s: {
+  hosted: boolean;
+  tenant: string | null;
+  fallback: number;
+  stored: (tenant: string) => Promise<{ telegramMaxActionUsdg?: unknown } | null | undefined>;
+}): Promise<number> {
+  if (!s.hosted || !s.tenant) return s.fallback;
+  try {
+    const own = (await s.stored(s.tenant))?.telegramMaxActionUsdg;
+    return typeof own === "number" && Number.isFinite(own) && own >= 0 ? own : s.fallback;
+  } catch {
+    return s.fallback;
+  }
+}
+
 // ── the order itself ──────────────────────────────────────────────────────
 
 export interface OrderBody {

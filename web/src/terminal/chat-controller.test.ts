@@ -50,6 +50,7 @@ beforeEach(() => {
   calls = [];
   routes = {
     "GET /api/settings": () => json({ values: { liveTradingEnabled: true }, defaults: { telegramMaxActionUsdg: 25 } }),
+    "GET /api/orders/ceiling": () => json({ ceilingUsdg: 25 }),
   };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -403,10 +404,10 @@ describe("chips", () => {
     assert.equal(count("POST", "/api/orders"), 0, "a chip places nothing");
   });
 
-  it("THE OWNER'S OWN CHAT CEILING CLAMPS when it is the smaller, over the house default", async () => {
-    // The sealed cap is 100 here, so only the ceiling the owner set can stop a
-    // chip offering a size the orders route would refuse.
-    routes["GET /api/settings"] = () => json({ values: { telegramMaxActionUsdg: 20 }, defaults: { telegramMaxActionUsdg: 25 } });
+  it("THE CHAT CEILING CLAMPS when it is the smaller", async () => {
+    // The sealed cap is 100 here, so only the chat ceiling can stop a chip
+    // offering a size the orders route would refuse.
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 20 });
     routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
     await ui.render(h({ perTrade: 100 }));
     await settle();
@@ -416,6 +417,30 @@ describe("chips", () => {
       Array.from(ui.container.querySelectorAll(".desk-prompts button")).map((b) => b.textContent),
       ["$5.00", "$10.00", "$20.00 (max)"],
     );
+  });
+
+  it("THE CEILING IS THE ONE THE ORDERS ROUTE ENFORCES, not the default the settings screen shows", async () => {
+    // /api/settings says 25 (SETTINGS_DEFAULTS); the route falls back to the
+    // house's own value, here 10 from its env. A "$25.00 (max)" chip was one
+    // the route refused.
+    routes["GET /api/settings"] = () => json({ values: {}, defaults: { telegramMaxActionUsdg: 25 } });
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("buy some");
+    await until(() => buttons("$10.00 (max)").length === 1, "the route's ceiling");
+    assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
+  });
+
+  it("WITH THE CEILING UNREAD NO AMOUNT IS OFFERED", async () => {
+    routes["GET /api/orders/ceiling"] = () => json({ error: "the ledger could not be read" }, 503);
+    routes["POST /api/chat"] = () => json({ reply: "How much?" });
+    await ui.render(h({ perTrade: 100 }));
+    await settle();
+    await typeAndSend("buy");
+    await until(() => /How much\?/.test(text()), "reply");
+    assert.ok(!Array.from(ui.container.querySelectorAll(".desk-prompts button")).some((b) => b.textContent?.startsWith("$")));
   });
 
   it("WITH THE CAP UNREAD NO AMOUNT IS OFFERED", async () => {

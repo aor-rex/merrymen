@@ -899,7 +899,7 @@ export function Agent({
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,
               perTrade,
-              ceiling: ceilingOf(chat.settings),
+              ceiling: chat.ceiling,
             }).map((q) => (
               <button type="button" key={q.label} onClick={() => send(q.message)}>
                 {q.label}
@@ -946,19 +946,6 @@ export function Agent({
       </div>
     </div>
   );
-}
-
-/**
- * The owner's ceiling on one chat order, as /api/settings reported it — the
- * owner's own value over the house default, as the orders route resolves it.
- * Null when the settings were not read: no chip may suggest a size against a
- * limit nobody read.
- */
-function ceilingOf(settings: ChatController["settings"]): number | null {
-  const own = settings?.values?.telegramMaxActionUsdg;
-  const fallback = settings?.defaults?.telegramMaxActionUsdg;
-  const v = typeof own === "number" ? own : fallback;
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
 /** A receipt's pill and line — templated from the worker's ledger facts, never written. */

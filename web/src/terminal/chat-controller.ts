@@ -89,6 +89,12 @@ export interface ChatController {
   unread: boolean;
   /** /api/settings as last read, or null when it has not been. */
   settings: ChatSettings | null;
+  /**
+   * The most one chat order may spend, as the orders route enforces it
+   * (/api/orders/ceiling) — or null when it has not been read, and then no
+   * chip offers an amount.
+   */
+  ceiling: number | null;
   send(question: string, ctx: ChatContext): Promise<boolean>;
   /** Ask again the question a failed line carries. */
   retry(messageId: string, ctx: ChatContext): Promise<boolean>;
@@ -237,6 +243,7 @@ export function useChatController(o: {
   const confirmingRef = useRef(false);
   const [unread, setUnread] = useState(false);
   const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [ceiling, setCeiling] = useState<number | null>(null);
 
   /**
    * Change THIS owner's thread — never whoever is signed in by the time an
@@ -270,6 +277,7 @@ export function useChatController(o: {
     setUnread(false);
     settingsCache.current = null;
     setSettings(null);
+    setCeiling(null);
   }, [o.chatKey]);
 
   // Written back on every change rather than on unmount: a tab the phone
@@ -316,9 +324,33 @@ export function useChatController(o: {
     });
     return flight;
   }, [clock]);
+  // ── the ceiling the amount chips clamp to ──────────────────────────────
+  //
+  // THE ORDERS ROUTE'S OWN, read from the route that shares its resolution.
+  // The chips used to take the owner's value over SETTINGS_DEFAULTS from
+  // /api/settings, while the route falls back to the house's file and env —
+  // so a house ceiling below 25 offered a "(max)" chip it refused. Read with
+  // the settings; a read that fails leaves the last good one, and one never
+  // read is null, which offers no amount at all.
+  const readCeiling = useCallback(async () => {
+    const key = keyRef.current;
+    let value: number | null = null;
+    try {
+      const r = await fetch("/api/orders/ceiling", { signal: AbortSignal.timeout(5_000) });
+      if (r.ok && /application\/json/i.test(r.headers.get("content-type") ?? "")) {
+        const v = ((await r.json()) as { ceilingUsdg?: unknown }).ceilingUsdg;
+        if (typeof v === "number" && Number.isFinite(v) && v >= 0) value = v;
+      }
+    } catch {
+      /* unread — no amount is offered against a limit nobody read */
+    }
+    if (value !== null && keyRef.current === key && mounted.current) setCeiling(value);
+  }, []);
   useEffect(() => {
-    if (o.open && o.chatKey) void readSettings();
-  }, [o.open, o.chatKey, readSettings]);
+    if (!o.open || !o.chatKey) return;
+    void readSettings();
+    void readCeiling();
+  }, [o.open, o.chatKey, readSettings, readCeiling]);
 
   // ── sending ─────────────────────────────────────────────────────────────
   const send = useCallback(
@@ -531,7 +563,8 @@ export function useChatController(o: {
   const refreshSettings = useCallback(() => {
     settingsCache.current = null;
     void readSettings();
-  }, [readSettings]);
+    void readCeiling();
+  }, [readSettings, readCeiling]);
 
   return {
     messages: thread.key === o.chatKey ? thread.messages : [],
@@ -545,6 +578,7 @@ export function useChatController(o: {
     confirm,
     unread,
     settings,
+    ceiling,
     send: (question, ctx) => send(question, ctx),
     retry,
     say,

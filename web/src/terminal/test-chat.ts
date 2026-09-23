@@ -25,6 +25,7 @@ export const idleChat: ChatController = {
   confirm: async () => {},
   unread: false,
   settings: null,
+  ceiling: null,
   send: async () => false,
   retry: async () => false,
   say: noop,
