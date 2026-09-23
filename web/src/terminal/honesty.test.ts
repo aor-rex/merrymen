@@ -122,8 +122,10 @@ describe("a decision nothing came of is not a trade", () => {
 
   it("AND ONE STILL IN FLIGHT IS NEITHER TENSE", () => {
     // A submitted operation is genuinely undecided: claiming it landed is the
-    // older bug, and claiming it failed would be the mirror of it.
-    const pending = beatsOf([t({ at: 1, outcome: "pending" })], [agent()]);
+    // older bug, and claiming it failed would be the mirror of it. "Submitted"
+    // is the publisher's "sent, waiting on the chain"; its other "pending" —
+    // no trade came of it — is not in flight (feed-row-shape.test.ts).
+    const pending = beatsOf([t({ at: 1, outcome: "pending", outcomeText: "sent, waiting on the chain" })], [agent()]);
     assert.equal(verbOf(asTrade(pending[0])), "is buying");
   });
 

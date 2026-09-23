@@ -16,7 +16,7 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { beatsOf, lanesOf, type FeedRow } from "./beat";
+import { beatsOf, lanesOf, pillBeats, type FeedRow } from "./beat";
 import type { LiveAgent } from "./live";
 import { postOf, sayOf } from "../lib/post-line";
 
@@ -116,6 +116,59 @@ describe("the rail", () => {
     const html = await renderWire([row({ outcome: "refused", outcomeText: "past today's spending cap" })]);
     assert.ok(!html.includes("filling faster"));
     assert.match(html, /Buying CASHCAT: curve at 41%/);
+  });
+});
+
+describe("the summaries keep the why too (FE6)", () => {
+  // A watch line and a chorus printed `latest.post ?? latest.reason`, so once
+  // a post led, the reason was gone from the row — and for a chorus the
+  // reason is the very sentence the crowd was grouped on, which no other row
+  // shows (the Holds pill folds choruses too). Latent until views carry
+  // posts; postOf already says a view's post always leads.
+  const hold = (over: Partial<FeedRow>) =>
+    row({ action: "hold", outcome: "view", outcomeText: "held — no trade, by choice", sizeUsdg: null, ...over });
+  const summaryHtml = async (rows: FeedRow[]) => {
+    const { Wire } = await import("./wire");
+    const lanes = lanesOf(pillBeats(beatsOf(rows, agents), "all", new Map(), {}));
+    return renderToStaticMarkup(createElement(Wire, { lanes, tokens: [] }));
+  };
+  const outsideTheButton = (html: string) => {
+    const button = html.slice(html.indexOf('class="wire-hit"'), html.indexOf("</button>", html.indexOf('class="wire-hit"')));
+    assert.ok(!button.includes("<details"), "a details inside the button is interactive content inside a button");
+  };
+
+  it("A WATCH LINE leads with its latest hold's post and keeps the reason behind why", async () => {
+    const standing = { said: 3, unchangedSince: NOW - 3600 };
+    const html = await summaryHtml([
+      hold({ symbol: "AAA", head: "hold AAA", postId: "1".repeat(32), reason: "AAA: range intact.", post: "AAA is coiling; I'd rather wait.", at: NOW, ...standing }),
+      hold({ symbol: "BBB", head: "hold BBB", postId: "2".repeat(32), reason: "BBB: volume thin.", post: null, at: NOW - 60, ...standing }),
+    ]);
+    assert.match(html, /is still watching/);
+    assert.ok(html.indexOf("AAA is coiling") < html.indexOf("AAA: range intact."), "the post leads");
+    assert.match(html.slice(html.indexOf('class="wire-more"')), /<summary>why<\/summary><p class="wire-why">AAA: range intact\.<\/p>/);
+    outsideTheButton(html);
+  });
+
+  it("A CHORUS keeps the sentence its crowd was grouped on, behind why", async () => {
+    const said = "TSLA +1.1% over 20h, above its mean.";
+    const html = await summaryHtml([
+      hold({ slug: "shogun", name: "Shogun", symbol: "TSLA", head: "hold TSLA", postId: "3".repeat(32), reason: said, post: "TSLA looks heavy up here.", at: NOW }),
+      hold({ slug: "sirsendit", name: "SirSendIt", symbol: "TSLA", head: "hold TSLA", postId: "4".repeat(32), reason: said, post: null, at: NOW - 60 }),
+    ]);
+    assert.match(html, /2 agents holding/);
+    assert.match(html, /TSLA looks heavy up here\./);
+    assert.match(html.slice(html.indexOf('class="wire-more"')), /<summary>why<\/summary><p class="wire-why">TSLA \+1\.1% over 20h, above its mean\.<\/p>/);
+    outsideTheButton(html);
+  });
+
+  it("with no post, a summary reads exactly as before: the reason, no expander", async () => {
+    const standing = { said: 3, unchangedSince: NOW - 3600, post: null };
+    const html = await summaryHtml([
+      hold({ symbol: "AAA", head: "hold AAA", postId: "1".repeat(32), reason: "AAA: range intact.", at: NOW, ...standing }),
+      hold({ symbol: "BBB", head: "hold BBB", postId: "2".repeat(32), reason: "BBB: volume thin.", at: NOW - 60, ...standing }),
+    ]);
+    assert.match(html, /AAA: range intact\./);
+    assert.ok(!html.includes("wire-more"));
   });
 });
 

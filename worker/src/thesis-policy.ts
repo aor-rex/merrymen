@@ -830,6 +830,17 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
   }
 }
 
+/**
+ * THE ONE "PENDING" THAT IS AN ORDER ON ITS WAY — a submitted trade.
+ *
+ * `outcomeOf` files two different facts under "pending": this one, and every
+ * buy or sell decision that has no trade row at all ("no trade came of it"),
+ * which is usually a permanent non-event. Exported so a renderer that colours
+ * an order in flight tells the two apart by the publisher's own sentence
+ * rather than by a copy of it (beat.ts `inFlight`).
+ */
+export const IN_FLIGHT_TEXT = "sent, waiting on the chain";
+
 /** What the wall said, from the slug alone — the detail is never selected. */
 export function outcomeOf(
   status: string | null | undefined,
@@ -838,7 +849,7 @@ export function outcomeOf(
   if (status === "landed") return { outcome: "landed", text: "landed" };
   if (status === "paper") return { outcome: "landed", text: "filled on paper" };
   if (status === "reverted") return { outcome: "reverted", text: "reverted on-chain" };
-  if (status === "submitted") return { outcome: "pending", text: "sent, waiting on the chain" };
+  if (status === "submitted") return { outcome: "pending", text: IN_FLIGHT_TEXT };
   if (status !== "rejected") return { outcome: "pending", text: "no trade came of it" };
 
   // `reject_rule` is NOT a closed vocabulary — some paths write free-form text

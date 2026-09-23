@@ -1,4 +1,4 @@
-import { readerHead } from "@merrymen/thesis";
+import { IN_FLIGHT_TEXT, readerHead } from "@merrymen/thesis";
 import { pctBps, usd as usdText } from "@/lib/format";
 import { postOf } from "@/lib/post-line";
 import { xHandleTag } from "@/lib/x-handle";
@@ -90,8 +90,8 @@ interface Core {
    * groups on MAX(d.at), which a re-proposed thesis advances every tick. So
    * every refresh remounted every row, and "which of these is new?" had no
    * answer, because by key they all were. The old shape survives only as the
-   * fallback for a row with no postId (a server from before it), and as the
-   * last tie-break when two rows share one — see `keyBeats`.
+   * fallback for a row with no postId (a server from before it). Rows that
+   * share a postId get suffixed keys, and each keeps its own — see `keyBeats`.
    */
   id: string;
   /**
@@ -333,6 +333,36 @@ export type Lane =
   | { kind: "lull"; id: string; ms: number };
 
 /**
+ * AN ORDER ON ITS WAY: a trade that was sent and has not settled.
+ *
+ * "pending" is not that on its own. The publisher files two facts under it
+ * (thesis-policy.ts `outcomeOf`): a submitted trade — "sent, waiting on the
+ * chain" — and every buy or sell decision with no trade row at all — "no trade
+ * came of it" — which is usually a permanent non-event. Read as one, the
+ * second wore the money colour, said "is buying" and filled the Trades pill
+ * with orders that were never sent. Told apart by the publisher's own
+ * sentence, imported rather than copied.
+ */
+export function inFlight(b: TradeBeat): boolean {
+  return b.outcome === "pending" && b.outcomeText === IN_FLIGHT_TEXT;
+}
+
+/**
+ * NOTHING MOVED, AND NOTHING IS GOING TO: refused at the wall, reverted on
+ * chain, dropped before either — or a "pending" decision nothing was ever sent
+ * for (`inFlight`). One test for every place the rail draws that difference:
+ * the tense, the pill, the accent, the wall's sentence and the Trades pill.
+ */
+export function cameToNothing(b: TradeBeat): boolean {
+  return (
+    b.outcome === "refused" ||
+    b.outcome === "reverted" ||
+    b.outcome === "dropped" ||
+    (b.outcome === "pending" && !inFlight(b))
+  );
+}
+
+/**
  * The verb, and the conditional that has to survive into it.
  *
  * "would buy" and "bought" are the difference between a stated intention and a
@@ -355,16 +385,17 @@ export function verbOf(b: TradeBeat): string {
    * day's cap. The owner then went looking for NVDA in a portfolio that
    * correctly did not contain it.
    *
-   * `tried to buy` for the three that ended: refused at the wall, reverted on
-   * chain, dropped before either. `is buying` for one still in flight, because
-   * "submitted" is genuinely undecided and neither tense fits it.
+   * `tried to buy` for the ones that ended: refused at the wall, reverted on
+   * chain, dropped before either, or never sent at all (`cameToNothing`).
+   * `is buying` for one still in flight, because "submitted" is genuinely
+   * undecided and neither tense fits it.
    *
    * An ABSENT outcome keeps the old wording deliberately. Every row the feed
    * API produces is classified by `outcomeOf`, so this arm is unreachable in
    * practice; making it claim less would only change rows we know nothing
    * about, and guessing quieter is still guessing.
    */
-  if (b.outcome === "refused" || b.outcome === "reverted" || b.outcome === "dropped") {
+  if (cameToNothing(b)) {
     return b.action === "hold" ? "meant to hold" : `tried to ${b.action}`;
   }
   if (b.outcome === "pending") {
@@ -401,7 +432,8 @@ export function whoOf(b: Beat): string {
  * (wire.tsx, `turned`). So a trade the wall turned back is a muted "Tried",
  * and a shadow call a muted "Would buy" — the same conditional `verbOf` and
  * `badgeOf` keep, checked FIRST for the same reason. An order still in flight
- * wears its colour with an unsettled edge, like the card's "buying" chip.
+ * wears its colour with an unsettled edge, like the card's "buying" chip; a
+ * "pending" decision nothing was sent for is not in flight, and is a "Tried".
  */
 export interface TradePill {
   label: "Buy" | "Sell" | "Hold" | "Tried" | "Would buy" | "Would sell" | "Would hold";
@@ -414,10 +446,8 @@ export function pillOf(b: TradeBeat): TradePill {
     const label = b.action === "buy" ? "Would buy" : b.action === "sell" ? "Would sell" : "Would hold";
     return { label, tone: "muted", unsettled: false };
   }
-  if (b.outcome === "refused" || b.outcome === "reverted" || b.outcome === "dropped") {
-    return { label: "Tried", tone: "muted", unsettled: false };
-  }
-  const unsettled = b.outcome === "pending";
+  if (cameToNothing(b)) return { label: "Tried", tone: "muted", unsettled: false };
+  const unsettled = inFlight(b);
   switch (b.action) {
     case "buy":
       return { label: "Buy", tone: "buy", unsettled };
@@ -493,27 +523,71 @@ export function callFigure(b: TradeBeat | ViewBeat, livePriceUsd: number | null)
  * realized −$0.16", not a hyphen beside a minus).
  */
 export function callFigureText(f: CallFigure): { pct: string; usd: string | null; tone: "up" | "down" | "flat" } {
+  // THE SIGN FOLLOWS THE PRINTED CENTS, as the colour below follows the printed
+  // percent: under half a cent prints "$0.00", and "−$0.00" beside a flat
+  // "0.0%" claimed a loss the number does not show.
   const usd =
-    f.usd === null ? null : `${f.usd > 0 ? "+" : f.usd < 0 ? "−" : ""}${usdText(Math.abs(f.usd))}`;
+    f.usd === null
+      ? null
+      : `${Math.abs(f.usd) < 0.005 ? "" : f.usd > 0 ? "+" : "−"}${usdText(Math.abs(f.usd))}`;
   // The colour follows the printed figure: under half a tenth prints "0.0%",
   // and a green "0.0%" would claim a gain the number does not show.
   const tone = Math.abs(f.pct) < 0.05 ? "flat" : f.pct > 0 ? "up" : "down";
   return { pct: pctBps(f.pct * 100), usd, tone };
 }
 
+/** A contract address, as a memecoin LiveToken's id carries it. */
+const ADDRESS = /^0x[0-9a-f]{40}$/i;
+
 /**
- * THE LIVE PRICE OF A ROW'S COIN, only when exactly one token answers to it.
+ * THE TOKEN A ROW IS ABOUT — by the address its id was minted from, never by
+ * a ticker a deployer chose. Only when exactly one token answers.
  *
- * Memecoin tickers are not unique, and the logo lookup can afford to pick the
- * first match — a wrong logo is cosmetic. A price is not: a since-entry figure
- * computed against the other PEPE is a false number about the agent's call.
- * So two tokens with one symbol read as no price at all.
+ * A trench or class row's symbol is `T` plus the last eleven hex of the
+ * contract (trencher-discovery.ts), because a coin's own symbol() is text
+ * anybody can set, and one calling itself NVDA must never resolve to a stock's
+ * price (class-evidence.ts). A memecoin LiveToken takes its symbol from exactly
+ * that text — the pool name or symbol() (live.ts). Matching the two by ticker
+ * undid the rule on the client: the row never found its own coin, anybody who
+ * deployed a coin named after a published id chose the row's "since entry"
+ * (+499,900% in the review's probe), and a memecoin called TSLA blanked every
+ * TSLA stock row as ambiguous.
+ *
+ * So a T-id is matched ONLY to a memecoin whose address ends in its eleven hex,
+ * and any other symbol ONLY to a listed stock or ETF, whose symbol is ours. A
+ * memecoin never answers to a ticker. Two answers are a guess, and a guess is
+ * no token: a price computed against the wrong coin is a false number about
+ * the agent's call, and a link to it sends the reader to somebody else's coin.
  */
-export function livePriceOf(tokens: readonly LiveToken[], symbol: string | null): number | null {
+export function tokenFor(tokens: readonly LiveToken[], symbol: string | null): LiveToken | null {
   if (!symbol) return null;
   const want = symbol.toUpperCase();
-  const hits = tokens.filter((t) => t.symbol.toUpperCase() === want);
-  return hits.length === 1 ? price(read(hits[0]!.priceUsd)) : null;
+  const hits = TRENCH_ID.test(want)
+    ? tokens.filter((t) => t.kind === "memecoin" && ADDRESS.test(t.id) && t.id.toLowerCase().endsWith(want.slice(1).toLowerCase()))
+    : tokens.filter((t) => (t.kind === "stock" || t.kind === "etf") && t.symbol.toUpperCase() === want);
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/**
+ * THE SIZE A ROW PRINTS beside its figure — none beside a realized percent
+ * whose dollars were withheld.
+ *
+ * A sell's size is its proceeds, so a size beside "−4.0% realized" is the
+ * withheld P&L one line of arithmetic away (size × pct / (100 + pct)). The
+ * publisher no longer sends a private book's size at all (thesis-policy.ts
+ * `sizeUsdg`); the row does not lean on that alone, because it is the row that
+ * would print the pair. A public book's sell carries its dollars, so it keeps
+ * its size.
+ */
+export function dealSizeOf(b: TradeBeat | ViewBeat): number | null {
+  if (b.kind === "trade" && b.realizedPct !== null && b.realizedUsd === null) return null;
+  return b.sizeUsd;
+}
+
+/** The live price of a row's coin — see `tokenFor` for which coin that is. */
+export function livePriceOf(tokens: readonly LiveToken[], symbol: string | null): number | null {
+  const token = tokenFor(tokens, symbol);
+  return token ? price(read(token.priceUsd)) : null;
 }
 
 function actorOf(t: FeedRow, agents: Map<string, LiveAgent>): Actor | null {
@@ -546,6 +620,8 @@ function actorOf(t: FeedRow, agents: Map<string, LiveAgent>): Actor | null {
 export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
   const bySlug = new Map(agents.map((a) => [a.slug, a]));
   const out: Beat[] = [];
+  // Each row's first copy, index-aligned with `out` — only `keyBeats` reads it.
+  const firstOf: number[] = [];
 
   for (const t of theses) {
     if (t.at == null) continue;
@@ -555,6 +631,7 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
     // everything downstream of here is milliseconds and says so in its name.
     const atSec = t.at;
     const atMs = atSec * 1000;
+    const first = typeof t.firstAt === "number" && Number.isFinite(t.firstAt) ? t.firstAt : atSec;
     const reason = takeFor(t.reason, bySlug.get(actor.slug)?.thesis);
     // Carried from the published row. `shadow` is set by the publisher; the
     // `outcome` check is the belt to it, for a row written before the flag
@@ -628,6 +705,7 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
         action,
         symbol,
       });
+      firstOf.push(first);
       continue;
     }
 
@@ -662,21 +740,23 @@ export function beatsOf(theses: FeedRow[], agents: LiveAgent[]): Beat[] {
       hold: action === "hold",
       more: t.moreNames === true,
     });
+    firstOf.push(first);
   }
 
   // EVERY POST, ONE ROW EACH. Folding into choruses and watch lines is a
   // presentation of the All and Holds pills (see `pillBeats`), not of the read:
   // a chorus is not a post, so a liked hold folded here left Top and lost its
   // like control, and a member's mention of another agent left Debates.
-  keyBeats(out);
+  keyBeats(out, firstOf);
   out.sort((a, b) => b.rankMs - a.rankMs);
   return out;
 }
 
 /**
- * WHICH ROW OWNS A SHARED POSTID. Settled first: when the same thesis is read
- * pending and landed, the landed row is the one that stays, so it keeps the
- * key the pending row's element was drawn under and React updates it in place.
+ * WHO GETS THE BARE POSTID when several NEW rows of one post arrive together.
+ * Settled first, so a thesis first read pending and landed at once is drawn
+ * with the landed row on the post's own id. Only newcomers are ordered by it —
+ * a row already on screen keeps whatever key it had (`keyBeats`).
  */
 const KEY_PRIORITY: Record<string, number> = {
   landed: 0,
@@ -689,37 +769,114 @@ const KEY_PRIORITY: Record<string, number> = {
 };
 
 /**
- * C2: EACH BEAT'S RENDER KEY IS ITS POSTID — unique, and independent of the
- * order the rows arrived in.
+ * WHICH ROW HOLDS EACH RENDER KEY, and back. Module-level for the reason the
+ * seen set in feed-fresh.ts is: it has to outlive a Feed that switching tabs
+ * unmounts. Presentation state per page load — nothing here is stored or sent.
+ */
+const keyOwner = new Map<string, string>();
+const ownedKey = new Map<string, string>();
+/** A long session is bounded: past this, keys are dealt afresh from the current read. */
+const KEYS_MAX = 5_000;
+const SEP = String.fromCharCode(31);
+
+function dealAfresh(): void {
+  keyOwner.clear();
+  ownedKey.clear();
+}
+
+/** Tests only: a fresh page load. */
+export function forgetKeysForTest(): void {
+  dealAfresh();
+}
+
+const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * C2: EACH BEAT'S RENDER KEY IS ITS POSTID — unique, stable across refreshes,
+ * and it STAYS WITH THE ROW THAT HAD IT.
  *
  * A postId is not unique per ROW: post-id.ts leaves the outcome out on purpose,
- * so one thesis read pending and landed, or refused under two different rules,
- * is two rows with one id. Two equal React keys drop or merge a row. So a
- * collision falls back through keys that are still stable across refreshes —
- * postId plus outcome, then plus the outcome's sentence — before the old
- * `at`-bearing id, which only a row with no stable name at all ends up on.
+ * so one thesis read pending and landed, or refused under two rules, is two
+ * rows with one id, and two equal React keys drop or merge a row. So a
+ * collision falls back through keys that are still stable — postId plus
+ * outcome, then plus the outcome's sentence.
  *
- * Assigned in a fixed order (settled first, then by the old id), never in the
- * feed's order: `rankMs` moves as rows are re-read, and a key that depended on
- * it would move with it.
+ * WHO HAS WHICH is remembered, not recomputed. It was recomputed on every read
+ * — settled first, ties broken on the `at`-bearing legacy id — so when a
+ * landed trade joined a refusal already on screen, the NEW row took the
+ * refusal's key, element and open "why", and the refusal was re-keyed,
+ * remounted and slid in as if it had just arrived. And two refusals
+ * under different rules swapped keys whenever a re-proposal reordered their
+ * times. Now a row is known by what it says — post, outcome, the
+ * outcome's sentence — never by its clock; a row that had a key keeps it, and
+ * a newcomer takes the first key nobody on screen holds. When a row leaves, its
+ * key is free: an order that lands takes over the element it was drawn under
+ * while in flight, because it is the same trade.
+ *
+ * Two rows that say exactly the same thing (two unrecognised rules both read
+ * "the wall turned it back") are told apart by their first copy, which moves
+ * only when the window ages a copy out.
  */
-function keyBeats(beats: Beat[]): void {
-  const order = [...beats].sort(
-    (a, b) =>
-      (KEY_PRIORITY[a.outcome ?? ""] ?? 9) - (KEY_PRIORITY[b.outcome ?? ""] ?? 9) ||
-      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+function keyBeats(beats: Beat[], firstOf: readonly number[]): void {
+  if (ownedKey.size > KEYS_MAX) dealAfresh();
+  const ident: (string | null)[] = beats.map((b) =>
+    b.postId ? [b.postId, b.outcome ?? "", b.outcomeText ?? ""].join(SEP) : null,
   );
-  const used = new Set<string>();
-  for (const b of order) {
-    const legacy = b.id;
-    const tries = b.postId
-      ? [b.postId, `${b.postId}:${b.outcome ?? ""}`, `${b.postId}:${b.outcome ?? ""}:${b.outcomeText ?? ""}`, legacy]
-      : [legacy];
-    let key = tries.find((k) => !used.has(k)) ?? legacy;
-    for (let n = 2; used.has(key); n++) key = `${legacy}#${n}`;
-    used.add(key);
-    b.id = key;
+  const same = new Map<string, number[]>();
+  ident.forEach((id, i) => {
+    if (id !== null) same.set(id, [...(same.get(id) ?? []), i]);
+  });
+  for (const [id, rows] of same) {
+    if (rows.length < 2) continue;
+    rows.sort((x, y) => firstOf[x]! - firstOf[y]! || byText(beats[x]!.id, beats[y]!.id));
+    rows.forEach((i, n) => {
+      if (n > 0) ident[i] = `${id}${SEP}${n}`;
+    });
   }
+
+  const used = new Set<string>();
+  const keys: (string | null)[] = beats.map(() => null);
+  // A ROW THAT HAD A KEY KEEPS IT.
+  ident.forEach((id, i) => {
+    const had = id === null ? undefined : ownedKey.get(id);
+    if (had !== undefined && !used.has(had)) {
+      keys[i] = had;
+      used.add(had);
+    }
+  });
+  // Newcomers, in an order that is not the clock's.
+  const newcomers = beats
+    .map((_, i) => i)
+    .filter((i) => keys[i] === null)
+    .sort(
+      (x, y) =>
+        (KEY_PRIORITY[beats[x]!.outcome ?? ""] ?? 9) - (KEY_PRIORITY[beats[y]!.outcome ?? ""] ?? 9) ||
+        byText(ident[x] ?? beats[x]!.id, ident[y] ?? beats[y]!.id),
+    );
+  for (const i of newcomers) {
+    const b = beats[i]!;
+    const id = ident[i];
+    let key: string;
+    if (b.postId && id !== null) {
+      const full = `${b.postId}:${b.outcome ?? ""}:${b.outcomeText ?? ""}`;
+      key = [b.postId, `${b.postId}:${b.outcome ?? ""}`, full].find((k) => !used.has(k)) ?? full;
+      for (let n = 2; used.has(key); n++) key = `${full}#${n}`;
+      const before = keyOwner.get(key);
+      if (before !== undefined) ownedKey.delete(before);
+      keyOwner.set(key, id);
+      ownedKey.set(id, key);
+    } else {
+      // No postId (a server from before it): the old id, as it always was.
+      const legacy = b.id;
+      key = legacy;
+      for (let n = 2; used.has(key); n++) key = `${legacy}#${n}`;
+    }
+    used.add(key);
+    keys[i] = key;
+  }
+  beats.forEach((b, i) => {
+    b.id = keys[i]!;
+  });
 }
 
 /**
@@ -942,8 +1099,9 @@ function keepBeat(
       // the owner's desk and events say it too — they are just not trades.
       // An ALLOW-LIST, so an outcome this file has not heard of stays out
       // rather than being counted as money that moved; and a shadow call, which
-      // could never have traded, is out by the same rule.
-      return beat.kind === "trade" && !beat.shadow && (beat.outcome === "landed" || beat.outcome === "pending");
+      // could never have traded, is out by the same rule. "In flight" is a
+      // SENT order — a decision nothing was sent for is not one (`inFlight`).
+      return beat.kind === "trade" && !beat.shadow && (beat.outcome === "landed" || inFlight(beat));
     case "theses":
       return beat.kind === "view" && !beat.hold;
     case "holds":
