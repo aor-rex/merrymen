@@ -10,11 +10,19 @@
  * and it fills on every proposal, so it would be the loudest thing on the feed
  * and the least news. Refusals and pending orders are not fills.
  *
- * DETECTED BY `postId`, which is stable across reads (lib/post-id.ts leaves the
- * outcome and the time out of it on purpose). So a pending trade that lands
- * keeps its id — which is why the set remembers only LANDED ids: the landing is
- * the news. A post with no id (an agent with no public slug) cannot be told
- * apart from itself across reads, and is never counted.
+ * DETECTED BY `postId` AND `at` TOGETHER — a fill, not a post. The id is stable
+ * across reads (lib/post-id.ts leaves the outcome and the time out of it on
+ * purpose), so a pending trade that lands keeps its id, which is why the set
+ * remembers only LANDED rows: the landing is the news. But the id names a
+ * THESIS, not a trade: it hashes the author, side, symbol, size and reason, and
+ * the feed groups every landed copy of one post into one row whose `at` is the
+ * newest copy. A steady-basket leg says the same sentence on every tick, so
+ * keyed on the id alone its second fill (the same id, a newer `at`) was never
+ * announced, and a leg that had filled before the page opened stayed silent for
+ * the rest of the session. `at` moves only when a new landed copy joins the
+ * group, so (postId, at) changes exactly when something filled. A post with no
+ * id (an agent with no public slug) cannot be told apart from itself across
+ * reads, and is never counted.
  *
  * NEVER ON THE FIRST READ. Everything on the feed when the page opened is what
  * the reader walked in on. And a fill first seen long after it happened is not
@@ -47,6 +55,14 @@ export function isLandedTrade(t: Thesis): boolean {
   );
 }
 
+/**
+ * The fill a landed row stands for: its post, at its newest copy. Never the id
+ * alone — see the header.
+ */
+export function fillKey(t: Thesis): string {
+  return `${t.postId}@${typeof t.at === "number" && Number.isFinite(t.at) ? t.at : ""}`;
+}
+
 export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
   const freshSec = opts.freshSec ?? FRESH_SEC;
   const cap = opts.cap ?? 2_000;
@@ -62,7 +78,7 @@ export function createArrivals(opts: { freshSec?: number; cap?: number } = {}) {
       const news: Thesis[] = [];
       for (const t of theses) {
         if (!isLandedTrade(t)) continue;
-        const id = t.postId!;
+        const id = fillKey(t);
         if (seen.has(id)) continue;
         seen.add(id);
         const age = typeof t.at === "number" && Number.isFinite(t.at) ? nowSec - t.at : null;

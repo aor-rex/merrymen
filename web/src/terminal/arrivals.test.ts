@@ -81,6 +81,29 @@ describe("arrivals, read by read", () => {
     assert.deepEqual(a.take([{ ...pending, outcome: "landed" }], NOW).length, 1);
   });
 
+  it("THE SAME SHAPE FILLING AGAIN IS NEWS — a post id names a thesis, not a trade", () => {
+    // postId hashes slug, action, symbol, size, reason and shadow, and the feed
+    // groups every landed copy of one post into a single row whose `at` is the
+    // newest copy. A steady-basket leg says the same sentence on every tick, so
+    // its second fill arrives as the SAME id with a newer `at` (and a bigger
+    // `said`) — and keyed on the id alone it was never announced again.
+    const a = createArrivals();
+    const earlier = NOW - 4 * 3600;
+    a.take([], earlier);
+    const leg = row({ at: earlier - 10, said: 1 });
+    assert.equal(a.take([leg], earlier).length, 1, "the first fill is news");
+    const again = { ...leg, at: NOW - 10, said: 2 };
+    assert.deepEqual(a.take([again], NOW).map((t) => t.at), [NOW - 10], "and so is the next fill of the same shape");
+    assert.deepEqual(a.take([again], NOW + 10), [], "the same copy read again is not");
+  });
+
+  it("a leg that filled before the page opened still announces its next fill", () => {
+    const a = createArrivals();
+    const leg = row({ at: NOW - 2 * 3600, said: 3 });
+    a.take([leg], NOW - 60);
+    assert.deepEqual(a.take([{ ...leg, at: NOW - 5, said: 4 }], NOW).length, 1);
+  });
+
   it("a fill first seen long after it happened is not news — a reader re-ranking old rows must not chime", () => {
     const a = createArrivals();
     a.take([], NOW);
