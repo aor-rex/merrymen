@@ -374,6 +374,26 @@ describe("a browser clock that is wrong does not split one trade", () => {
     }
   });
 
+  it("OF TWO SELLS INSIDE THE ORDER'S LIFE, THE NEAREST IS JUDGED ON THE SERVER'S CLOCK TOO", () => {
+    // The agent's own sell of the coin 100 s after the chat sell filled is
+    // still inside the order's life and its slack, so both sells match and the
+    // nearer one wins. Measured from the answer line's own `at` — this
+    // browser's clock, eleven minutes fast — the agent's sell was the nearer:
+    // the receipt took the agent's trade's card, and the chat order's own fill
+    // became a second "Filled" line. Two trades crossed, one sell shown twice.
+    for (const skew of [11, -11, 0]) {
+      const own = fill("sell");
+      const agents = fill("sell", { at: T + 100, sizeUsdg: 3 });
+      const [placed, answer] = lines("sell", skew);
+      const receiptFirst = mergeFills([placed!, answer!], [agents, own], since);
+      const tapeFirst = absorbFill([...mergeFills([placed!], [agents, own], since), answer!], "o");
+      for (const [order, merged] of [["receipt first", receiptFirst], ["tape first", tapeFirst]] as const) {
+        assert.equal(merged.find((m) => m.id === "o")!.trade?.at, T, `${skew}m, ${order}: the receipt took the order's own fill`);
+        assert.deepEqual(events(merged).map((e) => e.trade?.at), [T + 100], `${skew}m, ${order}: the agent's sell is its own line, once`);
+      }
+    }
+  });
+
   it("AND A BUY OF THE SAME SIZE FROM BEFORE THE ORDER IS NOT ITS FILL, once its life is on the server's clock", () => {
     // The agent's own $5 buy of the coin ten minutes before the owner asked
     // agrees on every fact but time. With the order's life known, a receipt
