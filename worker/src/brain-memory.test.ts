@@ -6,7 +6,9 @@
  * it was shown a template ("edge unclear, so hold") and repeated it. What an
  * agent learns from is what it actually did and how that ended, plus where it
  * last stood on each name — so memory is now the last few LANDED trades with
- * their results, and the latest view per name, one line each.
+ * their results, and the latest view per name, one line each. NOT ITS OWN
+ * HOLDS, not even the latest one per name: the first cut kept those as views,
+ * and a Trencher's memory still opened with three of the template it repeats.
  *
  * Every line is still rendered from gated output only (brain-material.test.ts
  * pins that), and a result is shown only when it was read — never a 0%.
@@ -55,6 +57,21 @@ const chatter = Array.from({ length: 30 }, (_, i) =>
   post({ symbol: `TAAAAAAAAAA${i % 3}`, head: `hold TAAAAAAAAAA${i % 3}`, reason: `Review ${i}: edge unclear, so hold.`, at: NOW - 30 * i }),
 );
 
+/** A shadow agent's stated calls — views that are not holds — every thirty seconds across three coins. */
+const calls = Array.from({ length: 30 }, (_, i) =>
+  post({
+    symbol: `TCCCCCCCCCC${i % 3}`,
+    head: `would buy TCCCCCCCCCC${i % 3} 5.00 USDG`,
+    action: "buy",
+    sizeUsdg: 5,
+    outcome: "shadow",
+    outcomeText: "a stated intention — not traded",
+    shadow: true,
+    reason: `Call ${i}: flow is turning.`,
+    at: NOW - 30 * i,
+  }),
+);
+
 describe("memory is what the agent did, and where it last stood", () => {
   it("THE LANDED TRADES SURVIVE THIRTY NEWER HOLDS — and only the last three of them", () => {
     const lines = memoryLines([...chatter, trade(1), trade(2), trade(3), trade(4)], NOW);
@@ -64,24 +81,46 @@ describe("memory is what the agent did, and where it last stood", () => {
     assert.ok(!lines.some((l) => l.includes("Entry 4")), "the fourth-newest trade is left out");
   });
 
-  it("ONE LINE PER NAME for views — its latest, not its last ten repeats", () => {
-    const lines = memoryLines(chatter, NOW);
-    const views = lines.filter((l) => l.includes("hold TAAAAAAAAAA"));
-    assert.equal(views.length, 3, "three coins, three lines");
-    for (const coin of ["TAAAAAAAAAA0", "TAAAAAAAAAA1", "TAAAAAAAAAA2"]) {
-      assert.equal(views.filter((l) => l.includes(coin)).length, 1, coin);
-    }
-    assert.ok(lines.some((l) => l.includes("Review 0:")), "the newest word on the first coin");
-    assert.ok(!lines.some((l) => l.includes("Review 3:")), "not an older repeat of it");
+  it("ITS OWN HOLDS ARE NOT MEMORY — not the stream of them, and not the latest one per name", () => {
+    // Thirty reviews of three coins, all holds. The first cut kept the newest
+    // hold per name as a "view", so this handed the Brain three copies of the
+    // sentence it was repeating.
+    assert.deepEqual(memoryLines(chatter, NOW), []);
+    // A shadow agent's hold is still a hold.
+    assert.deepEqual(memoryLines(chatter.map((t) => ({ ...t, outcome: "shadow" as const, shadow: true })), NOW), []);
   });
 
-  it("A NAME REVIEWED TEN TIMES IN A ROW IS STILL ONE LINE, and the next names get theirs", () => {
-    // The held coin is reviewed on every pass, so its holds are the newest ten.
-    const held = Array.from({ length: 10 }, (_, i) =>
-      post({ symbol: "TBBBBBBBBBBB", head: "hold TBBBBBBBBBBB", reason: `Held review ${i}.`, at: NOW - 10 * i }));
-    const lines = memoryLines([...held, ...chatter.map((t) => ({ ...t, at: t.at - 600 }))], NOW);
+  it("MEMORY NEVER LEADS WITH A HOLD, however much newer the holds are", () => {
+    const lines = memoryLines([...chatter, trade(1)], NOW);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /Entry 1/, "what it did leads");
+    assert.ok(!lines.some((l) => /edge unclear, so hold/.test(l)));
+  });
+
+  it("A VIEW ABOUT THE BOOK is still remembered — a view is not a hold", () => {
+    const book = post({ head: "", action: null, symbol: null, outcomeText: "a view, no trade", reason: "Staying flat until breadth returns." });
+    const lines = memoryLines([...chatter, book], NOW);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /Staying flat until breadth returns/);
+  });
+
+  it("ONE LINE PER NAME for views — its latest, not its last ten repeats", () => {
+    const lines = memoryLines(calls, NOW);
+    const views = lines.filter((l) => l.includes("would buy TCCCCCCCCCC"));
+    assert.equal(views.length, 3, "three coins, three lines");
+    for (const coin of ["TCCCCCCCCCC0", "TCCCCCCCCCC1", "TCCCCCCCCCC2"]) {
+      assert.equal(views.filter((l) => l.includes(coin)).length, 1, coin);
+    }
+    assert.ok(lines.some((l) => l.includes("Call 0:")), "the newest word on the first coin");
+    assert.ok(!lines.some((l) => l.includes("Call 3:")), "not an older repeat of it");
+  });
+
+  it("A NAME CALLED TEN TIMES IN A ROW IS STILL ONE LINE, and the next names get theirs", () => {
+    const again = Array.from({ length: 10 }, (_, i) =>
+      post({ ...calls[0]!, symbol: "TBBBBBBBBBBB", head: "would buy TBBBBBBBBBBB 5.00 USDG", reason: `Again ${i}.`, at: NOW - 10 * i }));
+    const lines = memoryLines([...again, ...calls.map((t) => ({ ...t, at: t.at - 600 }))], NOW);
     assert.equal(lines.filter((l) => l.includes("TBBBBBBBBBBB")).length, 1);
-    assert.equal(lines.length, 3, "the held coin and two other names");
+    assert.equal(lines.length, 3, "the repeated name and two other names");
   });
 
   it("a refused or pending trade is not remembered as a trade", () => {
@@ -112,9 +151,9 @@ describe("memory is what the agent did, and where it last stood", () => {
   });
 
   it("newest first across both, and bounded", () => {
-    const lines = memoryLines([...chatter, trade(1), trade(2), trade(3), trade(4)], NOW);
-    assert.equal(lines.length, 6, "three trades and three names");
-    assert.match(lines[0]!, /Review 0:/, "the newest thing it said leads");
+    const lines = memoryLines([...chatter, ...calls, trade(1), trade(2), trade(3), trade(4)], NOW);
+    assert.equal(lines.length, 6, "three trades and three names — and none of the holds");
+    assert.match(lines[0]!, /Call 0:/, "the newest thing it said leads");
     assert.match(lines.at(-1)!, /Entry 3/, "the oldest remembered trade ends it");
   });
 });
