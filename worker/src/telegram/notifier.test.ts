@@ -235,7 +235,9 @@ test("every condition alert that fires is observable", () => {
   // an owner had actually been told, there was nothing to look at but the
   // absence of a complaint. The KEY only — never the message body, which is
   // chat content.
-  const fire = NOTIFIER.slice(NOTIFIER.indexOf("const fire = "), NOTIFIER.indexOf("if (inputs.grantExpiresAt"));
+  const end = NOTIFIER.indexOf(`// ── "SIGN NOW"`);
+  assert.ok(end > 0, "the slice's end marker moved — re-anchor this test");
+  const fire = NOTIFIER.slice(NOTIFIER.indexOf("const fire = "), end);
   assert.match(fire, /console\.log\(`\[notify\] condition alert sent — \$\{key\}`\)/);
   assert.doesNotMatch(fire, /console\.log\([^)]*\$\{message\}/, "the message body must not reach the log");
 });

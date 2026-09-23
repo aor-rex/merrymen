@@ -104,6 +104,12 @@ export interface TelegramState {
   lastRemedyRule: string | null;
   /** Condition-episode dedupe: key → unix seconds last fired. */
   firedAlerts: Record<string, number>;
+  /**
+   * The "sign now" state last seen, and since when — so a blocker is spoken
+   * only once it has held for the settle window (sign-prompt.ts). Null when
+   * nothing needs signing.
+   */
+  signWatch: { key: string; since: number } | null;
   /** YYYY-MM-DD of the last daily digest sent. */
   lastDigestDate: string;
   /** YYYY-MM-DD of the last journal entry. Tracked separately from the digest:
@@ -130,6 +136,7 @@ const DEFAULT: TelegramState = {
   lastTradeDigestAt: 0,
   lastRemedyRule: null,
   firedAlerts: {},
+  signWatch: null,
   lastDigestDate: "",
   lastJournalDate: "",
   priceAlerts: [],
@@ -164,6 +171,11 @@ export function loadTelegramState(): TelegramState {
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
       lastRemedyRule: typeof s.lastRemedyRule === "string" ? s.lastRemedyRule : null,
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},
+      signWatch:
+        s.signWatch && typeof s.signWatch === "object" &&
+        typeof s.signWatch.key === "string" && typeof s.signWatch.since === "number"
+          ? { key: s.signWatch.key, since: s.signWatch.since }
+          : null,
       lastDigestDate: typeof s.lastDigestDate === "string" ? s.lastDigestDate : "",
       lastJournalDate: typeof s.lastJournalDate === "string" ? s.lastJournalDate : "",
       priceAlerts: Array.isArray(s.priceAlerts)

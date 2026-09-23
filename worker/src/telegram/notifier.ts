@@ -29,8 +29,10 @@ import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
 import { narrateJournal, narrateTrade } from "./interpreter";
-import { readReport, type StatusContext } from "./reads";
+import { dashboardBase, readReport, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
+import { loadGrantFile } from "../grant";
+import { signDecision, signKeyboard, signNeed, signPromptText, signUrl } from "./sign-prompt";
 import type { StateRef, Watcher } from "./state";
 
 export interface AlertInputs {
@@ -127,6 +129,26 @@ function decisionFor(db: DatabaseSync, decisionId: string | null | undefined): D
     return row ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The worker's own verdict on why this agent is not trading for real — the
+ * RULE, not the sentence (reads.ts `readLiveBlocker` returns the sentence).
+ * Null on any read failure: unknown, never "clear".
+ */
+function liveBlockerRule(agentId: string): string | null {
+  const db = openRO();
+  if (!db) return null;
+  try {
+    const row = db.prepare("SELECT live_blocker FROM agents WHERE smart_account = ?").get(agentId) as
+      | { live_blocker: string | null }
+      | undefined;
+    return row?.live_blocker?.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
   }
 }
 
@@ -501,14 +523,42 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
     };
 
-    if (inputs.grantExpiresAt !== null) {
-      const left = inputs.grantExpiresAt - now();
-      if (left > 0 && left < 86_400) {
-        // Key includes the expiry so a re-signed grant alerts afresh.
-        await fire(
-          `grant-expiry:${inputs.grantExpiresAt}`,
-          `⏳ your permission grant dies in ${Math.max(1, Math.floor(left / 3600))}h — re-sign at the dashboard /grant to keep the band riding.`,
-        );
+    // ── "SIGN NOW", WITH THE BUTTON ─────────────────────────────────────────
+    //
+    // Replaces the old expiry line ("re-sign at the dashboard /grant"), which
+    // named a page and made the owner go and find it, and which said nothing
+    // at all when an UPDATE was the reason a signature was needed. Everything
+    // that decides lives in sign-prompt.ts; this only reads and sends.
+    //
+    // Read from the grant FILE, not `inputs.grantExpiresAt`: that comes from
+    // the armed agent, and an expired grant is exactly the one that is no
+    // longer armed — so the input goes null at the moment it matters most.
+    {
+      const grant = loadGrantFile();
+      const who = deps.getAgentId() ?? grant?.smartAccount ?? null;
+      const signInputs = {
+        blocker: who ? liveBlockerRule(who) : null,
+        grantExpiresAt: grant?.expiresAt ?? null,
+        grantedAt: grant?.grantedAt ?? null,
+        now: now(),
+      };
+      const need = signNeed(signInputs);
+      const st = deps.stateRef.get();
+      const d = signDecision(need, st.signWatch, need ? st.firedAlerts[need.key] : undefined, now());
+      if ((d.watch?.key ?? null) !== (st.signWatch?.key ?? null) || (d.watch?.since ?? null) !== (st.signWatch?.since ?? null)) {
+        deps.stateRef.set({ ...deps.stateRef.get(), signWatch: d.watch });
+      }
+      if (d.send && need) {
+        const sent = await sendMessage({ token }, chatId, signPromptText(need.reason, signInputs, getName()), {
+          keyboard: signKeyboard(signUrl(dashboardBase(), need.reason)),
+        });
+        // Recorded only when it actually went out, so a transient send
+        // failure retries next pass instead of going quiet for a day.
+        if (sent.ok) {
+          console.log(`[notify] sign prompt sent — ${need.key}`);
+          const now2 = deps.stateRef.get();
+          deps.stateRef.set({ ...now2, firedAlerts: { ...now2.firedAlerts, [need.key]: now() } });
+        }
       }
     }
     // ── A CEILING SO LOW THE AGENT HAS NOTHING WORTH DOING ─────────────────
