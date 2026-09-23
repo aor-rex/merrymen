@@ -20,8 +20,9 @@ import type { AgentFacts, CallFact, loadFacts } from "./facts";
 import { admitAgentLine } from "./policy";
 import { allMembers, appendMessage, ensureGroupchatSchema, hideOwnMessage, readRoom, setMemberPrefs } from "./store";
 import * as T from "./templates";
+import * as Topics from "./topics";
 import type { MessageKind } from "./types";
-import { classifyLine, roomMemory, type Intent, type LineClass, type SpeakCtx } from "./voice";
+import { classifyLine, roomMemory, templateLine, topicPromptOf, type Intent, type LineClass, type SpeakCtx } from "./voice";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -86,12 +87,13 @@ function callAt(atMs: number, over: Partial<CallFact> = {}): CallFact {
 }
 
 /**
- * THE FAKE LEDGER. Returns every call that has HAPPENED, over a whole day —
- * deliberately wider than facts.ts's six hours, so the conductor's own window
- * is what drops a stale call here.
+ * THE FAKE LEDGER. Returns every call that has HAPPENED over the window the
+ * conductor asks for, and six hours when it names none — exactly facts.ts — so
+ * the conductor's own announcement window is what drops a stale call here.
  */
 function fakeFacts(fleet: Map<string, Fixture>, seen?: { calls: number }): typeof loadFacts {
-  return async (_shared, roster, _profiles, nowSec) => {
+  return async (_shared, roster, _profiles, nowSec, opts = {}) => {
+    const windowSec = opts.callWindowSec ?? 6 * 3600;
     if (seen) seen.calls += 1;
     const out = new Map<string, AgentFacts>();
     for (const r of roster) {
@@ -106,7 +108,7 @@ function fakeFacts(fleet: Map<string, Fixture>, seen?: { calls: number }): typeo
         ageDays: 12,
         strategy: "steady-basket",
         traits: ["moves early and does not wait around"],
-        calls: f.calls.filter((c) => c.atSec <= nowSec && c.atSec > nowSec - 24 * 3600).sort((a, b) => b.atSec - a.atSec),
+        calls: f.calls.filter((c) => c.atSec <= nowSec && c.atSec > nowSec - windowSec).sort((a, b) => b.atSec - a.atSec),
       });
     }
     return out;
@@ -1553,7 +1555,7 @@ function ritual(l: Lively, r: Row): boolean {
 }
 
 /** The pools an answer to a line of this class may be drawn from — the spec, written independently of voice.ts. */
-function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: AgentFacts["mode"]): (readonly string[])[] {
+function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: AgentFacts["mode"], text = "", names: string[] = []): (readonly string[])[] {
   const trading = mode !== "idle";
   const own = audience === "own";
   const person = audience !== "agent";
@@ -1592,7 +1594,18 @@ function poolsFor(cls: LineClass, audience: "agent" | "own" | "owner", mode: Age
     case "ask-here":
       return [T.ANSWER.here];
     case "ask-fun":
-      return [T.ANSWER.fun];
+      return [T.ANSWER.fun, Topics.JOKES, ...Object.values(Topics.TAKES)];
+    case "ask-topic": {
+      // About what was asked: one of that prompt's stances, never another prompt's.
+      const prompt = topicPromptOf(text, names);
+      return prompt ? [...prompt.stances] : [T.ANSWER.unknown];
+    }
+    case "take":
+      return [Topics.TAKE_REPLY.agree, Topics.TAKE_REPLY.disagree, Topics.TAKE_REPLY.amused];
+    case "musing":
+      return [Topics.MUSING_REPLY];
+    case "joke":
+      return [Topics.JOKE_REPLY];
     case "ask":
       return [T.ANSWER.unknown];
     case "thanks":
@@ -1696,7 +1709,7 @@ function assertLively(l: Lively): void {
     const call = target!.call_decision_id ? l.fleet.flatMap((f) => f.calls).find((c) => c.decisionId === target!.call_decision_id) ?? null : null;
     const cls = classifyLine(target!.body, { call, kind: target!.kind, names, self: replier.name });
     const audience = target!.author_kind === "owner" ? (target!.tenant === r.tenant ? "own" : "owner") : "agent";
-    const pools = poolsFor(cls, audience, replier.mode);
+    const pools = poolsFor(cls, audience, replier.mode, target!.body, names);
     // AN ANSWER UNDER ONE OF THE REPLIER'S CARDS is about that card: only its
     // words, never another trade's reason.
     const card = target!.reply_to === null ? undefined : byId.get(target!.reply_to);
@@ -2076,6 +2089,193 @@ describe("a fair share of the room", () => {
     }
     const mean = busiest.reduce((a, b) => a + b, 0) / busiest.length;
     assert.ok(mean <= 0.2, `the busiest agent wrote ${Math.round(mean * 100)}% of the room on average`);
+  });
+});
+
+// ── off-trading talk, one card per move, a room that does not pile on ───────
+
+describe("most of what the room starts is not about trading", () => {
+  /**
+   * THE OWNER'S ASK: "make them talk about more stuff outside trading". A live
+   * hour had every line be a call, a reaction to one, or a sentence about the
+   * tape. What an agent STARTS is the conductor's choice (TOPICS); what it
+   * answers follows. The model seam sees every banter intent the conductor
+   * hands out, so this counts the choice itself, and a template writes the line.
+   */
+  it("over a few hours with a dozen agents, most banter an agent starts is off-trading, and it moves between subjects", async () => {
+    const intents: Extract<Intent, { kind: "banter" }>[] = [];
+    let k = 0;
+    const llm = async (_c: LlmCreds, intent: Intent, ctx: SpeakCtx) => {
+      if (intent.kind === "banter") intents.push(intent);
+      return templateLine(intent, ctx, rngOf(9000 + k++));
+    };
+    const names = LIVELY_NAMES.slice(0, 12);
+    const fleet = names.map((n, i) => fixture(0x30 + i, n, null, { mode: i % 3 === 0 ? "paper" : "live" }));
+    fleet[0]!.calls.push(callAt(T0 + 30 * MIN, { symbol: "WIF", name: "Dogwifhat" }));
+    fleet[1]!.calls.push(callAt(T0 + 90 * MIN, { symbol: "BONK", name: "Bonk", paper: true }));
+    const sim = new Sim(fleet, { creds: CREDS, llm, llmPerDay: 100_000, seed: 31 });
+    await sim.setup();
+    await sim.run(T0, T0 + 4 * HOUR, 15 * SEC);
+    const rows = sim.rows();
+    sim.close();
+
+    assert.ok(intents.length >= 40, `fixture: only ${intents.length} banter starters in four hours`);
+    const topic = intents.filter((i) => i.topic === "topic");
+    const share = topic.length / intents.length;
+    assert.ok(share >= 0.55, `only ${Math.round(share * 100)}% of ${intents.length} banter starters were off-trading`);
+    // THE ROOM MOVES ON: no subject twice within the last few (SUBJECT_RING), and many of them in an afternoon.
+    const subjects = topic.map((i) => i.subject);
+    assert.ok(subjects.every((s) => s !== undefined && (Topics.SUBJECTS as readonly string[]).includes(s)), "a topic banter without a subject");
+    for (let i = 1; i < subjects.length; i++) {
+      assert.ok(!subjects.slice(Math.max(0, i - 4), i).includes(subjects[i]), `"${subjects[i]}" again within four: ${subjects.slice(Math.max(0, i - 4), i + 1).join(", ")}`);
+    }
+    assert.ok(new Set(subjects).size >= 10, `only ${new Set(subjects).size} subjects in four hours`);
+    // And what was written reads that way: most lines nobody asked for come from topics.ts.
+    const pools = [...Topics.PROMPTS.flatMap((p) => [p.room, p.peer]), ...Object.values(Topics.TAKES), Topics.MUSINGS, Topics.JOKES];
+    const names12 = fleet.map((f) => f.name);
+    const starters = rows.filter((r) => r.author_kind === "agent" && r.reply_to === null && r.kind === "chat" && !r.dedupe_key?.startsWith("hello:"));
+    const off = starters.filter((r) => {
+      const mem = roomMemory([r.body], names12);
+      return pools.some((pool) => pool.some((t) => mem.has(piecesOf(t))));
+    });
+    assert.ok(off.length / starters.length >= 0.5, `only ${off.length} of ${starters.length} written starters came from topics.ts`);
+  });
+
+  it("an owner's question to the room about anything draws answers about it; their own agent answers first", async () => {
+    const fleet = awakeFleet(8, 0x90);
+    const me = fleet[2]!;
+    const prompt = Topics.PROMPTS.find((p) => p.id === "cats-or-dogs") ?? Topics.PROMPTS[0]!;
+    let drew = 0;
+    for (const seed of [1, 2, 3, 4]) {
+      const sim = new Sim(fleet, { seed });
+      await sim.setup();
+      await sim.run(T0, T0 + MIN, 15 * SEC);
+      const text = prompt.id === "cats-or-dogs" ? "cats or dogs everyone?" : `${prompt.room[0]} everyone?`;
+      const q = await sim.owner(me.tenant, text, T0 + MIN + 5 * SEC);
+      await sim.run(T0 + MIN + 15 * SEC, T0 + 5 * MIN, 15 * SEC);
+      const answers = sim.agentRows().filter((r) => r.reply_to === q);
+      sim.close();
+      assert.ok(answers.some((r) => r.tenant === me.tenant), `seed ${seed}: the owner's own agent did not answer`);
+      for (const r of answers) {
+        const mem = roomMemory([r.body], fleet.map((f) => f.name));
+        assert.ok(prompt.stances.some((st) => st.some((t) => mem.has(piecesOf(t)))), `seed ${seed}: "${text}" answered with "${r.body}"`);
+      }
+      if (answers.some((r) => r.tenant !== me.tenant)) drew++;
+    }
+    assert.ok(drew >= 3, `the room joined in on only ${drew} of 4 owners' questions to everyone`);
+  });
+});
+
+describe("one card per move", () => {
+  /**
+   * THE LIVE READ, REPLAYED: one agent's four paper buys of one coin in ten
+   * minutes were four cards and four pile-ons. Now: one card, and a restart in
+   * the middle of the burst does not post a second one. A re-entry (buy, sell,
+   * buy) is three cards, and the same coin bought live after paper is news.
+   */
+  it("collapses a repeated buy of the same coin, across a restart, and still posts re-entries and a live buy after paper", async () => {
+    const bonk = { symbol: "BONK", name: "Bonk", token: "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" };
+    const wif = { symbol: "WIF", name: "Dogwifhat", token: "0xdddddddddddddddddddddddddddddddddddddddd" };
+    const fleet = awakeFleet(6, 0xb0);
+    const [busy, trader] = fleet;
+    busy!.mode = "paper";
+    const paperBuys = [1, 4, 7, 10].map((m) => callAt(T0 + m * MIN, { ...bonk, paper: true }));
+    const liveBuy = callAt(T0 + 20 * MIN, { ...bonk, paper: false });
+    const lateRepeat = callAt(T0 + 26 * MIN, { ...bonk, paper: false });
+    busy!.calls.push(...paperBuys, liveBuy, lateRepeat);
+    const reentry = [callAt(T0 + 2 * MIN, wif), callAt(T0 + 12 * MIN, { ...wif, side: "sell" }), callAt(T0 + 22 * MIN, wif)];
+    trader!.calls.push(...reentry);
+    const sim = new Sim(fleet, { seed: 17 });
+    await sim.setup();
+    // The first card lands, then the process restarts in the middle of the burst.
+    await sim.run(T0, T0 + 5 * MIN + 30 * SEC, 15 * SEC);
+    assert.equal(sim.agentRows().filter((r) => r.kind === "call" && r.tenant === busy!.tenant).length, 1, "fixture: the first card is out before the restart");
+    sim.conductor = sim.fresh(1);
+    await sim.run(T0 + 5 * MIN + 30 * SEC, T0 + 45 * MIN, 15 * SEC);
+    const cards = (f: Fixture) => sim.agentRows().filter((r) => r.kind === "call" && r.tenant === f.tenant);
+    const busyCards = cards(busy!).map((r) => r.call_decision_id);
+    assert.deepEqual(busyCards, [paperBuys[0]!.decisionId, liveBuy.decisionId], "four paper buys are one card; the live buy is its own; a second live buy is not");
+    assert.deepEqual(
+      cards(trader!).map((r) => r.call_decision_id),
+      reentry.map((c) => c.decisionId),
+      "a buy, its sell and a re-entry are three cards",
+    );
+    // And a second restart, with every repeat still inside its window, posts none of them.
+    sim.conductor = sim.fresh(2);
+    await sim.run(T0 + 45 * MIN, T0 + 60 * MIN, 15 * SEC);
+    assert.equal(cards(busy!).length, 2, "a restart re-weighed the collapsed buys and posted one");
+    sim.close();
+  });
+
+  /**
+   * A RESTART JUST PAST THE FIRST CARD'S SIX HOURS. The ledger only hands back
+   * six hours of fills by default, so a process started at +6h02m no longer saw
+   * the first buy (+1m) its card was for, and the second (+4m, still inside the
+   * announcement window) looked like news: a card six hours late. The conductor
+   * now asks for the announcement window plus CALL_REPEAT_MS.
+   */
+  it("a restart just past the first card's six hours still posts no repeat of it", async () => {
+    const bonk = { symbol: "BONK", name: "Bonk", token: "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0", paper: true };
+    const fleet = awakeFleet(4, 0xd0);
+    const [busy] = fleet;
+    busy!.mode = "paper";
+    const buys = [1, 4, 7].map((m) => callAt(T0 + m * MIN, bonk));
+    busy!.calls.push(...buys);
+    const sim = new Sim(fleet, { seed: 5 });
+    await sim.setup();
+    await sim.run(T0, T0 + 20 * MIN, 15 * SEC);
+    const cards = () => sim.agentRows().filter((r) => r.kind === "call" && r.tenant === busy!.tenant).map((r) => r.call_decision_id);
+    assert.deepEqual(cards(), [buys[0]!.decisionId], "fixture: one card for the burst");
+    const back = T0 + 6 * HOUR + 2 * MIN;
+    sim.conductor = sim.fresh(1);
+    await sim.run(back, back + 10 * MIN, 15 * SEC);
+    assert.deepEqual(cards(), [buys[0]!.decisionId], "the restarted process posted a repeat six hours late");
+    sim.close();
+  });
+});
+
+describe("the room notices a trade; it does not cheer every one", () => {
+  /**
+   * A dozen agents, each calling a different coin every so often: more cards
+   * than any room should cheer. At most CALL_REACTS_PER_HOUR (six) reactions
+   * in any rolling hour — late ones from banter included — and none to an
+   * agent whose previous card was reacted to within half an hour.
+   */
+  it("at most six call reactions in any rolling hour, and none to an agent's card within half an hour of its last reacted one", async () => {
+    const fleet = LIVELY_NAMES.slice(0, 12).map((n, i) => fixture(0xc0 + i, n, null));
+    for (const [i, f] of fleet.entries()) {
+      for (let t = (i * 3 + 1) * MIN; t < 150 * MIN; t += 25 * MIN) {
+        f.calls.push(callAt(T0 + t, { symbol: `C${String.fromCharCode(65 + i)}${String.fromCharCode(65 + (t / MIN) % 26)}X`, name: null, token: `0x${(0xc0 + i).toString(16)}${(t / MIN).toString(16).padStart(4, "0")}`.padEnd(42, "0"), bands: [] }));
+      }
+    }
+    for (const seed of [3, 4]) {
+      const sim = new Sim(fleet, { seed });
+      await sim.setup();
+      await sim.run(T0, T0 + 150 * MIN, 15 * SEC);
+      const rows = sim.rows();
+      sim.close();
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const cardsPosted = rows.filter((r) => r.kind === "call").length;
+      assert.ok(cardsPosted >= 50, `fixture (seed ${seed}): only ${cardsPosted} cards`);
+      const reacts = rows.filter((r) => r.author_kind === "agent" && r.reply_to !== null && byId.get(r.reply_to)?.kind === "call");
+      assert.ok(reacts.length >= 3, `fixture (seed ${seed}): the room never reacted at all`);
+      assert.ok(inRollingHour(reacts, () => true) <= 6, `seed ${seed}: ${inRollingHour(reacts, () => true)} call reactions inside an hour`);
+      // Per author: the cards that drew a reaction, by when their first reaction landed.
+      const firstReact = new Map<number, number>();
+      for (const r of reacts) if (!firstReact.has(r.reply_to!)) firstReact.set(r.reply_to!, r.created_at_ms);
+      const byAuthor = new Map<string, number[]>();
+      for (const [card, at] of firstReact) {
+        const author = byId.get(card)!.tenant;
+        byAuthor.set(author, [...(byAuthor.get(author) ?? []), at]);
+      }
+      for (const [author, times] of byAuthor) {
+        times.sort((a, b) => a - b);
+        for (let i = 1; i < times.length; i++) {
+          // Half an hour, less the minute and a half a reaction takes to land.
+          assert.ok(times[i]! - times[i - 1]! >= 28 * MIN, `seed ${seed}: ${author} had two cards reacted to ${Math.round((times[i]! - times[i - 1]!) / MIN)} min apart`);
+        }
+      }
+    }
   });
 });
 

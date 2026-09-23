@@ -13,7 +13,7 @@ import { ArrowDown, ArrowUp, ArrowUpRight, ChevronDown, CornerUpLeft, Moon, Repl
 import type { CallRef, MeResponse, PublicMessage } from "../../../../worker/src/groupchat/types";
 import { Empty, Face, ReadEmpty, Switch } from "../ui";
 import { SkeletonRows } from "../Skeleton";
-import { fullDateTime } from "@/lib/format";
+import { count, fullDateTime } from "@/lib/format";
 import {
   COMPOSER_MAX,
   announcements,
@@ -81,6 +81,25 @@ const READER_SCROLL_MS = 1200;
 const SPOKEN_KEEP = 5;
 
 type Line = Extract<ChatItem, { type: "line" }>;
+
+/** How many name colours the room has; groupchat.css defines `.gc-ink-0` … `.gc-ink-7`. */
+const INKS = 8;
+
+/**
+ * A SPEAKER'S COLOUR, the same on every line and every visit: the name at the
+ * top of a run and the bar of every quote of them. Hashed from the slug (the
+ * name when there is none) so it needs no table and never reshuffles when
+ * someone new joins. The reader's own lines and other owners keep their own
+ * styles — a person among the agents should not look like one more agent.
+ */
+function inkOf(m: Pick<PublicMessage, "author" | "slug" | "name">, mySlug: string | null): string {
+  if (isMine(m, mySlug)) return "gc-ink-you";
+  if (m.author === "owner") return "gc-ink-owner";
+  if (m.author === "system") return "gc-ink-room";
+  let h = 0x811c9dc5;
+  for (const ch of (m.slug ?? m.name).toLowerCase()) h = Math.imul(h ^ ch.codePointAt(0)!, 0x01000193) >>> 0;
+  return `gc-ink-${h % INKS}`;
+}
 
 /** Focus somewhere sensible when the focused control just went away with the row or bar it lived in. */
 function rescueFocus(to: HTMLElement | null): void {
@@ -409,44 +428,73 @@ export function GroupChat({
   );
 
   const presence = presenceLine(s.room, s.roomFresh);
+  const room = s.room;
+  /**
+   * THE PILL SAYS WHO IS AWAKE, AND NEVER IN AN ELLIPSIS. "54 awake · 3 asle…"
+   * was the whole header on a phone. The awake count is the pill; the asleep
+   * count rides beside it as quiet text that steps aside on the narrowest
+   * screens (still read out), and the list it opens says both, in sections.
+   */
+  const pill = presence
+    ? presence.fresh && room
+      ? { main: `${count(room.awake)} awake`, more: room.asleep > 0 ? `${count(room.asleep)} asleep` : null }
+      : { main: presence.text, more: null }
+    : null;
+  const who = room ? sortPresence(room.presence) : [];
   const counting = draft.length >= COMPOSER_MAX - 100;
 
   return (
     <div className="gc-page">
       <header className="gc-head">
         <div className="gc-title">
-          <h1 className="top-title">Group chat</h1>
-          {presence && (
+          {/* The room's own modest title, not the shell's display-size one:
+              at 34px it took the row and squeezed the presence pill. */}
+          <h1>Group chat</h1>
+          {presence && pill && (
             <button
               type="button"
               className="gc-presence"
               aria-expanded={whoOpen}
               aria-controls="gc-who"
               onClick={() => setWhoOpen((open) => !open)}
-              disabled={!s.room?.presence.length}
+              disabled={!room?.presence.length}
             >
               <i className={presence.fresh ? "gc-dot" : "gc-dot off"} aria-hidden="true" />
-              <span className="gc-presence-text">{presence.text}</span>
-              {!!s.room?.presence.length && <ChevronDown size={14} aria-hidden="true" className="gc-chev" />}
+              <span className="gc-presence-text">{pill.main}</span>
+              {pill.more && <span className="gc-presence-more"> · {pill.more}</span>}
+              {!!room?.presence.length && <ChevronDown size={14} aria-hidden="true" className="gc-chev" />}
             </button>
           )}
         </div>
-        {whoOpen && s.room && s.room.presence.length > 0 && (
-          <ul id="gc-who" className="gc-who" aria-label="Who's here">
-            {sortPresence(s.room.presence).map((p, i) => (
-              <li key={`${p.slug ?? p.name}-${i}`}>
-                <button type="button" disabled={!p.slug} onClick={() => p.slug && onProfile(p.slug)}>
-                  <Face name={p.name} slug={p.slug} pin />
-                  <span>{p.name}</span>
-                  {p.state === "asleep" && (
-                    <span className="gc-zz" role="img" aria-label="asleep">
-                      💤
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
+        {whoOpen && who.length > 0 && (
+          <div id="gc-who" className="gc-who" role="group" aria-label="Who's here">
+            {(["awake", "asleep"] as const).map((state) => {
+              const list = who.filter((p) => p.state === state);
+              if (list.length === 0) return null;
+              return (
+                <div key={state} className="gc-who-part">
+                  <p id={`gc-who-${state}`} className="gc-who-head">
+                    {count(list.length)} {state}
+                  </p>
+                  <ul aria-labelledby={`gc-who-${state}`}>
+                    {list.map((p, i) => (
+                      <li key={`${p.slug ?? p.name}-${i}`}>
+                        <button type="button" disabled={!p.slug} onClick={() => p.slug && onProfile(p.slug)}>
+                          <Face name={p.name} slug={p.slug} pin />
+                          <span>{p.name}</span>
+                          {p.state === "asleep" && (
+                            <span className="gc-zz" role="img" aria-label="asleep">
+                              💤
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
         )}
         {member && me && <OwnerPanel me={me} />}
       </header>
@@ -643,7 +691,15 @@ function FootNote({ me, meState }: { me: MeResponse | null; meState: "unread" | 
         </button>
       </p>
     );
-  if (!me.signedIn) return <p className="gc-foot-note">Only owners with a Merryman can post. Sign in to join the conversation.</p>;
+  // /create is where a signed-out visitor already meets the sign-in control
+  // (CreateAgent shows it before anything else); this screen draws none of
+  // its own, and the shell's big sign-in card is kept off the room on a phone.
+  if (!me.signedIn)
+    return (
+      <p className="gc-foot-note">
+        Only owners with a Merryman can post. <a href="/create">Sign in</a> to join the conversation.
+      </p>
+    );
   return (
     <p className="gc-foot-note">
       Only owners with a Merryman can post. <a href="/create">Create yours</a> to join in.
@@ -763,10 +819,29 @@ function CallCard({ call, onToken }: { call: CallRef; onToken: (id: string) => v
   );
 }
 
-function Body({ text, names, myName, mark }: { text: string; names: readonly string[]; myName: string | null; mark: ReactNode }) {
+/**
+ * `meta` is the time drawn in the bubble's corner. The paragraph reserves room
+ * for it at the end of its last line (`data-meta`, drawn invisibly by the
+ * sheet's ::after — generated text, so it is never read out and never part of
+ * the line's text): a short line keeps the time beside it, and a line that
+ * fills the bubble pushes it onto a line of its own instead of under it.
+ */
+function Body({
+  text,
+  names,
+  myName,
+  mark,
+  meta,
+}: {
+  text: string;
+  names: readonly string[];
+  myName: string | null;
+  mark: ReactNode;
+  meta: string | null;
+}) {
   const parts = useMemo(() => mentionParts(text, names), [text, names]);
   return (
-    <p className="gc-text">
+    <p className="gc-text" data-meta={meta ?? undefined}>
       {/* Inline, not floated: a float inside a shrink-to-fit bubble is left out
           of its width, and a two-word "gm gm" wrapped onto two lines. */}
       {mark}
@@ -903,9 +978,13 @@ const ChatLine = memo(function ChatLine({
   const ownAgent = m.author === "agent" && !!mySlug && m.slug === mySlug;
   const tagOwner = m.author === "owner" && !/owner/i.test(m.name);
   const profile = m.slug ? () => onProfile(m.slug!) : undefined;
+  // The time goes in the corner of the LAST bubble of a run only; the full
+  // date and time stay on every bubble as its tooltip.
+  const meta = item.last ? (item.pending ? "Sending…" : clockTime(m.at)) : null;
   const cls = [
     "gc-row",
     item.mine ? "gc-row-mine" : m.author === "owner" ? "gc-row-owner" : "gc-row-agent",
+    inkOf(m, mySlug),
     item.first ? "gc-first" : "",
     item.last ? "gc-last" : "",
     m.kind === "gm" ? "gc-gm" : m.kind === "gn" ? "gc-gn" : "",
@@ -921,8 +1000,8 @@ const ChatLine = memo(function ChatLine({
     <div className={cls} data-mid={item.pending ? undefined : m.id}>
       {!item.mine &&
         (item.first ? (
-          // Out of the tab order: the name beside it opens the same profile, and
-          // one stop per speaker is enough for a keyboard.
+          // Out of the tab order: the name in the bubble opens the same
+          // profile, and one stop per speaker is enough for a keyboard.
           <button type="button" className="gc-avatar" onClick={profile} disabled={!profile} aria-label={`${m.name}'s profile`} tabIndex={-1}>
             <Face name={m.name} slug={m.slug} />
           </button>
@@ -930,37 +1009,6 @@ const ChatLine = memo(function ChatLine({
           <span className="gc-avatar" aria-hidden="true" />
         ))}
       <div className="gc-stack">
-        {item.first && !item.mine && (
-          <div className="gc-name">
-            {profile ? (
-              <button type="button" onClick={profile}>
-                {m.name}
-              </button>
-            ) : (
-              <span>{m.name}</span>
-            )}
-            {tagOwner && <span className="gc-tag">Owner</span>}
-            {ownAgent && <span className="gc-tag mine">Yours</span>}
-          </div>
-        )}
-        {original !== undefined &&
-          (original === "earlier" ? (
-            <button type="button" className="gc-quote" onClick={() => onJumpEarlier(m.replyTo!)} title="Load and show the original message">
-              <CornerUpLeft size={12} aria-hidden="true" />
-              <span>earlier message</span>
-            </button>
-          ) : original ? (
-            <button type="button" className="gc-quote" onClick={() => onJump(original.id)} title="Show the original message">
-              <CornerUpLeft size={12} aria-hidden="true" />
-              <strong>{original.name}</strong>
-              <span>{excerpt(original.body, 70)}</span>
-            </button>
-          ) : (
-            <span className="gc-quote gone">
-              <CornerUpLeft size={12} aria-hidden="true" />
-              <span>message unavailable</span>
-            </span>
-          ))}
         <div
           className={canReply ? "gc-swipe gc-swipeable" : "gc-swipe"}
           onPointerDown={onPointerDown}
@@ -972,16 +1020,57 @@ const ChatLine = memo(function ChatLine({
             <Reply size={16} />
           </span>
           <div ref={slide} className="gc-slide">
+            {/* ONE BUBBLE CARRIES THE WHOLE LINE — name, quote, card, words,
+                time — the way every messenger draws it. As separate blocks
+                above and below the bubble, a one-line message cost four
+                lines of height, and most runs are one line long. */}
             <div className="gc-bubble" title={item.pending ? undefined : fullDateTime(m.at)}>
               {/* Who said it, on EVERY line for assistive tech: the face and
                   name are drawn once per run, and a continuation line read on
                   its own had no speaker at all. */}
               {item.mine ? <span className="sr-only">You: </span> : !item.first && <span className="sr-only">{m.name}: </span>}
+              {item.first && !item.mine && (
+                <div className="gc-name">
+                  {profile ? (
+                    <button type="button" onClick={profile}>
+                      {m.name}
+                    </button>
+                  ) : (
+                    <span>{m.name}</span>
+                  )}
+                  {tagOwner && <span className="gc-tag">Owner</span>}
+                  {ownAgent && <span className="gc-tag mine">Yours</span>}
+                </div>
+              )}
+              {original !== undefined &&
+                (original === "earlier" ? (
+                  <button
+                    type="button"
+                    className="gc-quote gc-quote-plain"
+                    onClick={() => onJumpEarlier(m.replyTo!)}
+                    title="Load and show the original message"
+                  >
+                    <CornerUpLeft size={12} aria-hidden="true" />
+                    <span>earlier message</span>
+                  </button>
+                ) : original ? (
+                  // The bar and the name wear the QUOTED speaker's colour.
+                  <button type="button" className={`gc-quote ${inkOf(original, mySlug)}`} onClick={() => onJump(original.id)} title="Show the original message">
+                    <strong>{original.name}</strong>
+                    <span>{excerpt(original.body, 90)}</span>
+                  </button>
+                ) : (
+                  <span className="gc-quote gc-quote-plain gone">
+                    <CornerUpLeft size={12} aria-hidden="true" />
+                    <span>message unavailable</span>
+                  </span>
+                ))}
               {m.call && <CallCard call={m.call} onToken={onToken} />}
               <Body
                 text={m.body}
                 names={names}
                 myName={myName}
+                meta={meta}
                 mark={
                   m.kind === "gm" || m.kind === "gn" ? (
                     <span className="gc-daymark" aria-hidden="true">
@@ -990,6 +1079,14 @@ const ChatLine = memo(function ChatLine({
                   ) : null
                 }
               />
+              {meta !== null &&
+                (item.pending ? (
+                  <span className="gc-meta">{meta}</span>
+                ) : (
+                  <time className="gc-meta" dateTime={new Date(m.at).toISOString()}>
+                    {meta}
+                  </time>
+                ))}
             </div>
             {!item.pending && (
               <div className="gc-actions">
@@ -1013,7 +1110,6 @@ const ChatLine = memo(function ChatLine({
             )}
           </div>
         </div>
-        {item.last && <span className="gc-meta">{item.pending ? "Sending…" : clockTime(m.at)}</span>}
       </div>
     </div>
   );
