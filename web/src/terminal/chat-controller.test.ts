@@ -14,13 +14,16 @@
  * book read again when an outcome lands; and a snipe followed like any order.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import React, { act, createElement } from "react";
-import { autonomyOf } from "@merrymen/core";
+import { autonomyOf, LLM_PROVIDERS, SETTINGS_DEFAULTS, STOCK_TOKENS } from "@merrymen/core";
+import type { SettingsView } from "@/app/api/settings/route";
 import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
 import { sseEvent } from "@/lib/chat-stream";
 import type { LiveMine, Thesis } from "./live";
 import { Agent } from "./screens/Agent";
+import SettingsPage from "./screens/Settings";
 import { ownerOfChatKey, useChatController, type ChatController } from "./chat-controller";
 import { chatKeyFor } from "./chat-store";
 import { MAX_MESSAGES, tradeKeyOf } from "./chat-thread";
@@ -95,6 +98,8 @@ function Harness(p: {
   moves?: Thesis[] | null;
   perTrade?: number | null;
   onOutcome?: () => void;
+  /** The Settings screen beside the chat, wired to it as App.tsx wires it — desktop's dock stays open over it. */
+  settingsScreen?: boolean;
 }) {
   const c = useChatController({
     chatKey: p.chatKey === undefined ? KEY : p.chatKey,
@@ -127,6 +132,7 @@ function Harness(p: {
     createElement("i", { "data-unread": String(c.unread) }),
     p.show === false ? null : screen("body"),
     p.twice ? screen("dock") : null,
+    p.settingsScreen ? createElement(SettingsPage, { onFund: noop, slug: null, onSaved: c.refreshSettings }) : null,
   );
 }
 const h = (p: Parameters<typeof Harness>[0] = {}) => createElement(Harness, p);
@@ -188,6 +194,27 @@ function stream() {
     close: () => ctl.close(),
   };
 }
+
+/** A GET /api/settings answer with nothing stored, in the route's own type — the Settings screen draws every field from it. */
+const unset = { set: false, hint: null };
+const SETTINGS_VIEW: SettingsView = {
+  bundlerApiKey: unset,
+  groqApiKey: unset,
+  anthropicApiKey: unset,
+  llmApiKey: unset,
+  rialtoApiKey: unset,
+  telegramBotToken: unset,
+  telegramTranscribeKey: unset,
+  virtualsApiKey: unset,
+  bitqueryApiKey: unset,
+  merrymenToken: unset,
+  values: {},
+  defaults: SETTINGS_DEFAULTS,
+  knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
+  officialCoins: [],
+  strategies: { builtin: ["steady-basket"], custom: [] },
+  llmProviders: LLM_PROVIDERS,
+};
 
 const count = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.split("?")[0] === path).length;
 
@@ -464,6 +491,41 @@ describe("chips", () => {
     await settle(5);
     assert.deepEqual(chips(), ["$5.00", "$7.00 (max)"], "the ceiling the owner just set");
     assert.equal(count("GET", "/api/orders/ceiling"), 3, "once when the chat opened, and once for each question of how much");
+  });
+
+  it("A CEILING SAVED ON THE SETTINGS SCREEN IS THE ONE THE CHIPS ALREADY ON SCREEN OFFER — and a refused save reads nothing", async () => {
+    // On desktop the dock stays open beside the Settings screen, so chips
+    // drawn before a save kept offering the old "(max)" until the next
+    // question, and the order a tap led to was refused at the new one. The
+    // screen now says it saved (onSaved) and App hands it the chat's own
+    // re-read — mounted here as App mounts it, pinned below.
+    routes["GET /api/settings"] = () => json(SETTINGS_VIEW);
+    routes["POST /api/chat"] = () => json({ reply: "How much should I put in?" });
+    await ui.render(h({ perTrade: 100, settingsScreen: true }));
+    await until(() => buttons("Save changes").length === 1, "the Settings screen");
+    await typeAndSend("buy some");
+    await until(() => buttons("$25.00 (max)").length === 1, "chips against 25");
+    routes["GET /api/orders/ceiling"] = () => json({ ceilingUsdg: 10 });
+    routes["PUT /api/settings"] = () => json({ errors: ["telegramMaxActionUsdg: must be a number"] }, 400);
+    const reads = count("GET", "/api/orders/ceiling");
+    await ui.click("Save changes");
+    await until(() => /telegramMaxActionUsdg: must be a number/.test(text()), "the refused save");
+    await settle(10);
+    assert.equal(count("GET", "/api/orders/ceiling"), reads, "a refused save changed nothing, so nothing is read again");
+    assert.equal(buttons("$25.00 (max)").length, 1);
+    routes["PUT /api/settings"] = () => json({ ok: true });
+    await ui.click("Save changes");
+    await until(() => buttons("$10.00 (max)").length === 1, "the ceiling just saved, on the chips already there");
+    assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
+    assert.equal(count("POST", "/api/chat"), 1, "without asking again");
+  });
+
+  it("AND APP HANDS THE SETTINGS SCREEN THE CHAT'S RE-READ — the one line that joins the two", () => {
+    // App is too large to mount here; this is the wire the test above mounts.
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const at = app.indexOf("<Settings ");
+    assert.ok(at > 0, "App mounts the Settings screen");
+    assert.match(app.slice(at, app.indexOf("/>", at)), /\sonSaved=\{chat\.refreshSettings\}/);
   });
 
   it("A MESSAGE THAT ASKS NOTHING OF HOW MUCH DOES NOT READ THE CEILING", async () => {
