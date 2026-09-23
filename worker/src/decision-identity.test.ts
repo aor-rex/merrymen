@@ -317,8 +317,18 @@ describe("the tick wires the identity through", () => {
     assert.ok(mint > verify, "a new id is only minted when none was supplied");
   });
 
-  it("records provenance on every decision it mints", () => {
-    assert.match(INDEX, /provenance: known\?\.provenance \?\? provenanceOf\(source, known\?\.whyCode\)/);
+  it("records provenance on every decision it mints — the row builder ensureDecision calls, executed", async () => {
+    // Was a grep for the inline field in index.ts; the row is now built by
+    // decision-row.ts (decision-name.integration.test.ts writes it through the
+    // real store), so the rule is run rather than read.
+    const { intentDecisionRow } = await import("./decision-row");
+    const mint = (source: string, known?: { whyCode?: string; provenance?: (typeof PROVENANCE_KINDS)[number] }) =>
+      intentDecisionRow({ id: "d", agentId: AGENT, source, described: { action: "sell", symbol: "NVDA", sizeUsdg: 1 }, known, name: async () => null });
+    assert.equal((await mint("chat")).provenance, "owner-command");
+    assert.equal((await mint("brain")).provenance, "brain");
+    assert.equal((await mint("strategy:even-keel", { whyCode: "stop-floor" })).provenance, "hard-risk-exit");
+    assert.equal((await mint("strategy:even-keel", { whyCode: "dca-leg" })).provenance, "deterministic-strategy");
+    assert.equal((await mint("chat", { provenance: "brain" })).provenance, "brain", "what the producer recorded wins");
   });
 
   it("every execution caller consumes the decision verdict", () => {

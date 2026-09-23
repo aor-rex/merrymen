@@ -107,7 +107,8 @@ import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
-import { idleNotice, idleViewRow, modeEmptiedFact } from "./idle-notice";
+import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
+import { classEntryGate, classRouteLooks } from "./class-entry-gate";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
@@ -133,7 +134,8 @@ import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock, quietReviewRow } from "./market-review";
-import { ChainCoinNames, makeDecisionNamer } from "./decision-name";
+import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
+import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -680,6 +682,9 @@ async function main() {
     const current=active;
     void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape()).then(result=>{
       if (autoTrenchContext===context) autoTrench=result;
+      // The held coins' names are read now, minutes before any exit needs one:
+      // a decision never waits for the chain (decision-name.ts).
+      if (autoTrenchContext===context) warmHeldNames(coinNames, result);
     }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
   }
   const trenchTapeReader = new TrenchTapeReader();
@@ -753,8 +758,13 @@ async function main() {
   const paperActive = () => execMode().mode === "paper";
   /** The last leg that blocked the live rail, so the event fires on change only. */
   let lastLiveBlocker: RefuseRule | null | undefined;
-  /** The last reason a tick proposed nothing, so THAT fires on change only too. */
-  let lastIdleReason: string | null = null;
+  /**
+   * WHY A TICK PROPOSED NOTHING, told once per change — and a warning that
+   * still stands kept on the owner's notice. The state (`lastIdleReason`, as
+   * it was), both writes and the store they go to live in idle-notice.ts,
+   * where a test runs them on the real store.
+   */
+  const idleChannel = idleChannelOnStore((line) => console.log(line));
   /**
    * The last policy refusal an owner was TOLD about, so it fires on change only.
    *
@@ -6025,8 +6035,9 @@ async function main() {
    * the one this agent's buy used, else the coin's own contract — the one
    * source a redeploy does not wipe. See decision-name.ts. Mainnet, like
    * discovery's own reads of these tokens: a paper Trencher trades mainnet
-   * coins too. Bounded and cached there, so an exit waits at most once per
-   * coin for a word nobody prices against.
+   * coins too. NEVER WAITED FOR: a decision takes what is already known and
+   * the read names the next one, so no exit sits behind a word nobody prices
+   * against. Discovery starts the reads for held coins (warmHeldNames).
    */
   const coinNames = new ChainCoinNames((address) =>
     mainnetClient().readContract({ address, abi: erc20Abi, functionName: "symbol" }),
@@ -6228,38 +6239,24 @@ async function main() {
 
     const id = newDecisionId();
     intent.decisionId = id;
-    const d = describeIntent(intent);
-    await addDecision({
+    // THE ROW, built in decision-row.ts where a test runs it: the symbol the
+    // producer knows, the coin's name from the one namer (never a wait on the
+    // chain — an exit's swap is sent only after this returns), and the
+    // provenance its why code gives.
+    const row = await intentDecisionRow({
       id,
-      agent_id: active.agentId,
+      agentId: active.agentId,
       source,
-      symbol: known?.symbol ?? d.symbol,
-      // A SELL IS A ROW TOO. The mechanical exits — stop, take, drain, aged —
-      // never pass through the Brain, so they were the one side of a Trencher
-      // round trip the feed could not name: "buy AI (T3AD…)" and then "sell
-      // T3AD…" for the same coin, minutes apart. Same column, same rule, and
-      // it is a no-op for the issuer-backed tickers these strategies mostly
-      // trade — see coin-name.ts.
-      //
-      // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN. A held coin
-      // drops off the qualified list and discovery then labels it with its
-      // own id, so an exit written after that carried no name and published
-      // "sell TA151B4A9E1B 5.01 USDG" — and after a redeploy the buy's row
-      // is gone too. See decisionName.
-      display_name: await decisionName(active.agentId, known?.symbol ?? d.symbol ?? ""),
-      action: known?.action ?? d.action,
-      size_usdg: d.sizeUsdg,
       reason,
-      evidence_json: known?.evidence ?? null,
-      // RECORDED, NOT INFERRED LATER. `source` cannot answer this on its own:
-      // an even-keel buy and an even-keel stop-floor sell publish under the
-      // same source and are different kinds of decision. See provenance.ts.
-      provenance: known?.provenance ?? provenanceOf(source, known?.whyCode),
+      described: describeIntent(intent),
+      known,
+      name: decisionName,
     });
+    await addDecision(row);
     // addDecision is best-effort for observational producers. Execution needs
     // evidence that its new decision really reached the ledger before acting.
     const recorded = verifyDecisionOwner(await decisionAgent(id), active.agentId);
-    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: known?.action ?? d.action, symbol: known?.symbol ?? d.symbol, reason })) {
+    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: row.action, symbol: row.symbol, reason })) {
       reviewClock(active.agentId).noteDecision(Math.floor(Date.now() / 1000));
     }
     return recorded;
@@ -10994,36 +10991,27 @@ async function main() {
       cfg.assetMode,
       (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
     );
-    // TWO REGISTERS FROM ONE FACT, once per change, and at a level the owner
-    // sees when the fact cannot be a post — all decided in idle-notice.ts,
-    // where a test runs it. This block only writes what it decided.
-    const notice = idleNotice({ idle, modeEmptied, last: lastIdleReason });
-    lastIdleReason = notice.last;
-    if (notice.event) {
-      console.log(`[tick] idle — ${notice.event.message}`);
-      await addEvent(agentId, notice.event.level, notice.event.message);
-      // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
-      //
-      // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
-      // `decisions` can become a post, so the silence is also written as a
-      // `view` (idleViewRow). Inside the same change gate as the event —
-      // renderWhy is deterministic, so an unchanged reason would otherwise
-      // write an identical row every 240 seconds, 12,000 a day.
-      //
-      // renderWhy is the only producer of these strings — the same
-      // property that makes a deterministic strategy's trade reason safe
-      // to publish makes its SILENCE safe to publish.
-      //
-      // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
-      // account's losses, and the refusal it replaces leaves the public
-      // feed; the owner has the event above, as a WARNING, because it is
-      // the only place they will read it. See publishesIdle.
-      if (notice.view !== null) {
-        await addDecision(
-          idleViewRow({ id: newDecisionId(), agentId, strategyName: strategy.name, reason: notice.view }),
-        );
-      }
-    }
+    // THE CLASS ROUTE'S ENTRY GATE, decided before the idle write because it
+    // can be the reason: under a tripped breaker no class entry is proposed,
+    // and when that silenced a route that would have looked — and the
+    // strategy, with no legs of its own, gave no reason — the owner is told
+    // the breaker's (class-entry-gate.ts). The entries themselves are below.
+    const classGate = classEntryGate({
+      snap,
+      routeLooks: classRouteLooks({
+        paper: paperActive(),
+        assetMode: cfg.assetMode,
+        vault: grantPonsClassVault(active?.grant),
+      }),
+      idle,
+    });
+    // TWO REGISTERS FROM ONE FACT, once per change, at a level the owner sees
+    // when the fact cannot be a post, and kept on the owner's notice while it
+    // stands — decided AND written by IdleChannel (idle-notice.ts), where a
+    // test runs it. The view it writes is renderWhy's public register, the
+    // only producer of these strings, which is what makes a silence safe to
+    // publish; a tripped breaker is account state and is never a post.
+    await idleChannel.tell({ agentId, strategyName: strategy.name, idle: classGate.idle, modeEmptied });
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -11107,8 +11095,9 @@ async function main() {
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
     // Not while the breaker is tripped: every class entry is a buy the wall
-    // would refuse. The exits above are never withheld.
-    const entries: Tick = breakerTripped(snap) ? { intents: [], why: [] } : await proposeClassEntries();
+    // would refuse. The exits above are never withheld. The same gate gave the
+    // owner the reason, above.
+    const entries: Tick = classGate.propose ? await proposeClassEntries() : { intents: [], why: [] };
     for (const [at, intent] of entries.intents.entries()) {
       const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
       if (!stamped.ok) continue;

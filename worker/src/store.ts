@@ -1238,6 +1238,12 @@ export async function addDecision(row: DecisionRow): Promise<void> {
  * Null on a miss or a read failure — absent, never a placeholder. The name was
  * sanitised by coin-name.ts when it was first written, and the publication gate
  * backstops it again.
+ *
+ * A TIE IS BROKEN ON THE NAME. `at` is whole seconds, so a buy and its review
+ * routinely share one, and `ORDER BY at DESC` alone returns whichever row the
+ * engine reaches first — SQLite and Postgres need not agree, and neither
+ * promises the same row twice. The name an exit is written with must not
+ * depend on that.
  */
 export async function displayNameFor(
   agentId: string,
@@ -1253,7 +1259,7 @@ export async function displayNameFor(
       .prepare(
         `SELECT display_name FROM decisions
           WHERE agent_id = ? AND symbol = ? AND display_name IS NOT NULL AND display_name <> ''
-          ORDER BY at DESC LIMIT 1`,
+          ORDER BY at DESC, display_name LIMIT 1`,
       )
       .get(agentId, symbol)) as { display_name: string | null } | undefined;
     named = r?.display_name ?? null;
@@ -2575,6 +2581,41 @@ export async function addEvent(
       .run(agentId, level, message);
   } catch (e) {
     console.error("[store] event insert failed:", e);
+  }
+}
+
+/**
+ * How many of an agent's newest events its owner's notice is chosen from — the
+ * LIMIT web/src/app/api/feed/route.ts reads them with.
+ */
+export const OWNER_NOTICE_WINDOW = 40;
+
+/**
+ * THE NOTICE THE OWNER'S SURFACES SHOW FOR THIS AGENT, by their own rule.
+ *
+ * The desk reads the agent's newest OWNER_NOTICE_WINDOW events, newest first by
+ * (created_at, id) — api/feed/route.ts — and shows the first warn or err with a
+ * message (terminal/live.ts mineOf; android Core.kt does the same). The rail
+ * reads the same feed. So this is what the owner is reading right now, asked of
+ * the table the child writes — which the mirror copies to the desk's database
+ * row for row. Events another process writes straight into the shared one (the
+ * orchestrator's) are not here; this is the child's own view of its notice.
+ *
+ * Null when nothing shows. UNDEFINED WHEN THE READ FAILED — unread is not
+ * "nothing shows", and a caller that acts on it writes a line it did not need.
+ */
+export async function ownerNotice(agentId: string): Promise<{ message: string; atMs: number } | null | undefined> {
+  try {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT level, message, created_at FROM events
+          WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ${OWNER_NOTICE_WINDOW}`,
+      )
+      .all(agentId)) as { level: string; message: string | null; created_at: number | string }[];
+    const shown = rows.find((r) => (r.level === "warn" || r.level === "err" || r.level === "error") && !!r.message);
+    return shown ? { message: shown.message!, atMs: Number(shown.created_at) * 1000 } : null;
+  } catch {
+    return undefined;
   }
 }
 

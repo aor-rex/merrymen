@@ -30,61 +30,114 @@ import { coinDisplayName } from "./coin-name";
  * from it ("CASHCAT / WETH 1%"). And unlike the tape and the child's ledger,
  * the chain is still there after a redeploy.
  *
- * NEVER ON THE CRITICAL PATH FOR LONG. The read is raced against `timeoutMs`,
- * so a decision waits at most that long, once per coin; an answer that arrives
- * late is still kept for the next decision. A failed read is remembered for
- * `retryMs` so a dead RPC is asked once per window, not once per decision.
- * Sanitised by the same rule as the tape's label: an address-shaped or
- * unreadable answer is no name, never a placeholder.
+ * NEVER WAITED FOR. `peek` answers from what is already known and starts the
+ * read when nothing is, so the decision in hand goes out unnamed and the answer
+ * names the next one. It used to be awaited, raced against 1.5s — and a decision
+ * is what an exit waits on before its swap is sent: three stops in one tick sat
+ * 4.5s behind name reads, and the next tick waited again for a read still in
+ * flight. A name is display text; no read of one may delay a trade. `warm`
+ * starts the read before any decision needs it (discovery, for held coins).
+ *
+ * A failed read is remembered for `retryMs`, so a dead RPC is asked once per
+ * window, not once per decision. A read that has not answered in `staleMs` no
+ * longer holds the coin's slot, so one that never settles cannot stop the coin
+ * ever being asked again. Sanitised by the same rule as the tape's label: an
+ * address-shaped or unreadable answer is no name, never a placeholder.
  */
 export class ChainCoinNames {
   private readonly known = new Map<string, string | null>();
-  private readonly inflight = new Map<string, Promise<string | null>>();
+  private readonly inflight = new Map<string, number>();
   private readonly failedAt = new Map<string, number>();
-  private readonly timeoutMs: number;
   private readonly retryMs: number;
+  private readonly staleMs: number;
   private readonly now: () => number;
 
   constructor(
     private readonly readSymbol: (address: `0x${string}`) => Promise<unknown>,
-    opts: { timeoutMs?: number; retryMs?: number; now?: () => number } = {},
+    opts: { retryMs?: number; staleMs?: number; now?: () => number } = {},
   ) {
-    this.timeoutMs = opts.timeoutMs ?? 1_500;
     this.retryMs = opts.retryMs ?? 5 * 60_000;
+    this.staleMs = opts.staleMs ?? 60_000;
     this.now = opts.now ?? Date.now;
   }
 
-  async nameOf(token: StockToken): Promise<string | null> {
+  /**
+   * The coin's name if a read has already answered, else null — and a read is
+   * started so that a later decision has it. Synchronous, so no caller can
+   * await the chain through it.
+   */
+  peek(token: StockToken): string | null {
     // A stock is already named by its ticker; only an address-derived id needs
     // a word, and coinDisplayName answers null for anything else anyway.
     if (token.kind !== "memecoin") return null;
     const key = token.address.toLowerCase();
     if (this.known.has(key)) return this.known.get(key) ?? null;
+    this.start(token, key);
+    return null;
+  }
+
+  /** Start the read ahead of any decision about the coin. Never waits, never throws. */
+  warm(token: StockToken): void {
+    this.peek(token);
+  }
+
+  private start(token: StockToken, key: string): void {
+    const now = this.now();
+    const since = this.inflight.get(key);
+    if (since !== undefined && now - since < this.staleMs) return;
     const failed = this.failedAt.get(key);
-    if (failed !== undefined && this.now() - failed < this.retryMs) return null;
-    let pending = this.inflight.get(key);
-    if (!pending) {
-      pending = this.readSymbol(token.address).then(
+    if (failed !== undefined && now - failed < this.retryMs) return;
+    this.inflight.set(key, now);
+    // Called on a later microtask, so a reader that throws synchronously is a
+    // failed read like any other rather than an exception out of peek().
+    void Promise.resolve()
+      .then(() => this.readSymbol(token.address))
+      .then(
         (raw) => {
           const name = coinDisplayName({ symbol: token.symbol, name: typeof raw === "string" ? raw : "", kind: "memecoin" });
           this.known.set(key, name);
           this.failedAt.delete(key);
-          return name;
         },
         () => {
           this.failedAt.set(key, this.now());
-          return null;
         },
-      );
-      const settled = pending.finally(() => this.inflight.delete(key));
-      this.inflight.set(key, settled);
-      pending = settled;
+      )
+      .finally(() => {
+        if (this.inflight.get(key) === now) this.inflight.delete(key);
+      });
+  }
+}
+
+/**
+ * START THE NAME READS FOR WHAT THE TRENCHER HOLDS, as soon as discovery lists it.
+ *
+ * `peek` answers only what is already known, and after a redeploy the first
+ * decision about a held coin is often its exit — so, unwarmed, the one row that
+ * matters most would be the one written unnamed. Discovery lists every held coin
+ * (by its own id) before the tick can value it: the tick waits for that list,
+ * so the read has the minutes until the next tick to answer. HELD COINS ONLY:
+ * a pool the tape qualified carries the tape's own label, and a read for every
+ * coin on the tape would be a mainnet call per pool nobody bought.
+ *
+ * Never throws: it runs inside discovery's result handler, whose failure path
+ * tells the owner discovery could not verify its data — a false sentence to
+ * send over a display name.
+ */
+export function warmHeldNames(
+  names: Pick<ChainCoinNames, "warm">,
+  discovered: { tokens: readonly StockToken[]; held: readonly string[] },
+): void {
+  try {
+    const held = new Set(discovered.held.map((a) => a.toLowerCase()));
+    for (const t of discovered.tokens) {
+      try {
+        if (held.has(t.address.toLowerCase())) names.warm(t);
+      } catch {
+        // One malformed row costs its own name, not the others'.
+      }
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const late = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), this.timeoutMs);
-    });
-    return Promise.race([pending, late]).finally(() => clearTimeout(timer));
+  } catch {
+    // A name is display only.
   }
 }
 
@@ -103,7 +156,8 @@ export type LedgerName = (
  * a trade.
  *
  * The chain is asked only through the ledger step, which asks it only for an
- * address-derived id and only after its own miss — one rule, in store.ts.
+ * address-derived id and only after its own miss — one rule, in store.ts. And
+ * it is asked with `peek`: what is already known, never a wait (ChainCoinNames).
  */
 export function makeDecisionNamer(deps: {
   /** The watch set as it stands now — re-read on every call. */
@@ -114,7 +168,7 @@ export function makeDecisionNamer(deps: {
   return async (agentId, symbol) => {
     try {
       const token = deps.watchTokens().find((t) => t.symbol === symbol);
-      return await deps.ledger(agentId, symbol, coinDisplayName(token), token ? () => deps.chain.nameOf(token) : undefined);
+      return await deps.ledger(agentId, symbol, coinDisplayName(token), token ? async () => deps.chain.peek(token) : undefined);
     } catch {
       return null;
     }
