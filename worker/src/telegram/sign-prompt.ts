@@ -12,6 +12,9 @@
  *     update changed the sealed permission set, `wrong-chain`, `grant-too-wide`)
  *     — the same three `web/src/lib/live-blocker.ts` marks `resign: true`
  *   - the permission running out within a day, or already run out
+ *   - a permission signed before an update changed what permissions carry
+ *     (wall-release.ts `WALL_CHANGED_AT`) — asked every three days, because
+ *     practice mode hides `dead-policy` behind "live trading is off"
  * `no-gas`, `no-cash`, `no-executor` and `live-not-enabled` are NOT here: a
  * signature changes nothing about them, and asking for one would teach the
  * owner the button is a ritual.
@@ -33,15 +36,27 @@
  * here and tested.
  */
 
+import { WALL_CHANGED_AT } from "../../../packages/core/src/index";
 import type { InlineKeyboard } from "./api";
 
 /** Blockers a fresh signature is the fix for. */
 export const SIGN_BLOCKERS: ReadonlySet<string> = new Set(["dead-policy", "wrong-chain", "grant-too-wide"]);
 
-export type SignReason = "dead-policy" | "wrong-chain" | "grant-too-wide" | "expiring" | "expired";
+export type SignReason = "dead-policy" | "wrong-chain" | "grant-too-wide" | "expiring" | "expired" | "update";
 
-/** How long a blocker must hold, for one grant, before it is spoken. */
+/**
+ * How long a blocker must hold, for one grant, before it is spoken. A floor:
+ * the notifier passes `settleFor(tickSeconds)`, because a slow tick delays the
+ * child's first verdict about a new grant by up to two ticks.
+ */
 export const SETTLE_SEC = 6 * 60;
+/** "Signed before an update" is a nudge, not a stall: repeated every three days, not daily. */
+export const UPDATE_REPEAT_SEC = 3 * 24 * 3600;
+
+/** The settle window for a tick of `tickSeconds`: two ticks plus the grant hand-off. */
+export function settleFor(tickSeconds: number): number {
+  return Math.max(SETTLE_SEC, 2 * Math.max(0, tickSeconds) + 30);
+}
 /** How often an unresolved state is repeated. */
 export const REPEAT_SEC = 24 * 3600;
 /** "Runs out soon" means inside this window. */
@@ -55,20 +70,42 @@ export interface SignInputs {
   /** The stored grant's signing time, which identifies it. */
   grantedAt: number | null;
   now: number;
+  /** When the sealed permission set last changed (wall-release.ts). Injectable for tests. */
+  wallChangedAt?: number;
+}
+
+export interface SignNeed {
+  reason: SignReason;
+  key: string;
+  /** Wait out the settle window before speaking (blockers only). */
+  settles: boolean;
+  /** How often it is repeated while it stays true. */
+  repeatSec: number;
 }
 
 /** What needs signing right now, and the key it is remembered by — or null. */
-export function signNeed(i: SignInputs): { reason: SignReason; key: string; settles: boolean } | null {
+export function signNeed(i: SignInputs): SignNeed | null {
   if (i.grantExpiresAt === null) return null; // no grant: onboarding, not a stall
   const grant = `${i.grantedAt ?? 0}-${i.grantExpiresAt}`;
-  if (i.grantExpiresAt <= i.now) return { reason: "expired", key: `sign:expired:${grant}`, settles: false };
+  if (i.grantExpiresAt <= i.now) return { reason: "expired", key: `sign:expired:${grant}`, settles: false, repeatSec: REPEAT_SEC };
   // A blocker outranks "expiring": fixing the blocker IS a new signature, which
   // resets the expiry too, so there is one thing to ask for, not two.
   if (i.blocker && SIGN_BLOCKERS.has(i.blocker)) {
-    return { reason: i.blocker as SignReason, key: `sign:${i.blocker}:${grant}`, settles: true };
+    return { reason: i.blocker as SignReason, key: `sign:${i.blocker}:${grant}`, settles: true, repeatSec: REPEAT_SEC };
   }
   if (i.grantExpiresAt - i.now < EXPIRING_WITHIN_SEC) {
-    return { reason: "expiring", key: `sign:expiring:${grant}`, settles: false };
+    return { reason: "expiring", key: `sign:expiring:${grant}`, settles: false, repeatSec: REPEAT_SEC };
+  }
+  // SIGNED BEFORE AN UPDATE CHANGED WHAT A PERMISSION CARRIES. The owner asked
+  // for exactly this: "even when there's an update, a prompt to sign should
+  // pop". `dead-policy` only reaches the blocker when live trading is on — a
+  // practising owner's verdict is always "live-not-enabled" — so an update
+  // would otherwise go unmentioned until the day they switched live on. The
+  // marker is the date the sealed set last changed, bumped by a test whenever
+  // it does (wall-release.test.ts); a grant signed before it is out of date.
+  const changedAt = i.wallChangedAt ?? WALL_CHANGED_AT;
+  if (i.grantedAt !== null && i.grantedAt > 0 && i.grantedAt < changedAt) {
+    return { reason: "update", key: `sign:update:${changedAt}:${grant}`, settles: false, repeatSec: UPDATE_REPEAT_SEC };
   }
   return null;
 }
@@ -87,15 +124,16 @@ export interface SignWatch {
  * alerts (`firedAlerts`). Returns the watch to store either way.
  */
 export function signDecision(
-  need: { key: string; settles: boolean } | null,
+  need: { key: string; settles: boolean; repeatSec?: number } | null,
   watch: SignWatch | null,
   lastSentAt: number | undefined,
   now: number,
+  settleSec = SETTLE_SEC,
 ): { send: boolean; watch: SignWatch | null } {
   if (!need) return { send: false, watch: null };
   const w = watch && watch.key === need.key ? watch : { key: need.key, since: now };
-  if (need.settles && now - w.since < SETTLE_SEC) return { send: false, watch: w };
-  if (lastSentAt !== undefined && now - lastSentAt < REPEAT_SEC) return { send: false, watch: w };
+  if (need.settles && now - w.since < settleSec) return { send: false, watch: w };
+  if (lastSentAt !== undefined && now - lastSentAt < (need.repeatSec ?? REPEAT_SEC)) return { send: false, watch: w };
   return { send: true, watch: w };
 }
 
@@ -141,7 +179,60 @@ export function signPromptText(reason: SignReason, i: SignInputs, name: string):
         `⛔ <b>${escHtml(who)}'s trading permission ran out, so it has stopped trading.</b>\n` +
         `Sign a new one to start it again. It's free, and your funds are untouched.`
       );
+    case "update":
+      return (
+        `✍️ <b>${escHtml(who)} needs a fresh signature.</b>\n` +
+        `We updated what your agent is allowed to do, and the permission you signed is from before that update, ` +
+        `so parts of it won't work until you sign again. It's free, takes a few seconds, and your funds don't move.`
+      );
   }
+}
+
+/**
+ * Can a phone open this link from a Telegram button? Telegram refuses a URL
+ * button for localhost or a bare IP — and refuses the whole message with it.
+ */
+export function isPublicHttpsUrl(u: string): boolean {
+  try {
+    const url = new URL(u);
+    const host = url.hostname;
+    return (
+      url.protocol === "https:" &&
+      host.includes(".") &&
+      !/^localhost$|\.local$/i.test(host) &&
+      !/^\d{1,3}(\.\d{1,3}){3}$/.test(host) &&
+      !host.includes(":")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The whole message: text, and a button when a phone can open the page.
+ *
+ * Hosted, the page is public and the button opens it; the owner may be asked
+ * to sign in, and the signing form is part-way down the page, so both are said.
+ * Self-hosted the dashboard is on the owner's own machine, so the message says
+ * where to open it instead of offering a button that cannot work.
+ */
+export function signMessage(
+  reason: SignReason,
+  i: SignInputs,
+  name: string,
+  base: string,
+): { text: string; keyboard?: InlineKeyboard } {
+  const url = signUrl(base, reason);
+  const body = signPromptText(reason, i, name);
+  if (isPublicHttpsUrl(url)) {
+    return {
+      text: `${body}\n<i>If it asks, sign in with the login you set your agent up with, then press “Re-sign this key”.</i>`,
+      keyboard: signKeyboard(url),
+    };
+  }
+  return {
+    text: `${body}\nOpen <b>${escHtml(url)}</b> on the computer that runs merrymen and press “Re-sign this key”.`,
+  };
 }
 
 /**

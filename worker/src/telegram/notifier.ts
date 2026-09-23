@@ -32,7 +32,7 @@ import { narrateJournal, narrateTrade } from "./interpreter";
 import { dashboardBase, readReport, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
 import { loadGrantFile } from "../grant";
-import { signDecision, signKeyboard, signNeed, signPromptText, signUrl } from "./sign-prompt";
+import { settleFor, signDecision, signMessage, signNeed } from "./sign-prompt";
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
@@ -572,7 +572,12 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       // there was nothing to look at but the absence of a complaint. The key
       // is enough to answer that and carries no chat content into the log.
       console.log(`[notify] condition alert sent — ${key}`);
-      deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
+      // RE-READ AFTER THE SEND. `st` was read before the await, and the poll
+      // loop may have saved the offset (or a chat setting) meanwhile — writing
+      // the old copy back would undo it, and a rolled-back offset makes
+      // Telegram deliver the same messages, and run the same commands, twice.
+      const fresh = deps.stateRef.get();
+      deps.stateRef.set({ ...fresh, firedAlerts: { ...fresh.firedAlerts, [key]: now() } });
     };
 
     // ── "SIGN NOW", WITH THE BUTTON ─────────────────────────────────────────
@@ -596,14 +601,13 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       };
       const need = signNeed(signInputs);
       const st = deps.stateRef.get();
-      const d = signDecision(need, st.signWatch, need ? st.firedAlerts[need.key] : undefined, now());
+      const d = signDecision(need, st.signWatch, need ? st.firedAlerts[need.key] : undefined, now(), settleFor(cfg.tickSeconds));
       if ((d.watch?.key ?? null) !== (st.signWatch?.key ?? null) || (d.watch?.since ?? null) !== (st.signWatch?.since ?? null)) {
         deps.stateRef.set({ ...deps.stateRef.get(), signWatch: d.watch });
       }
       if (d.send && need) {
-        const sent = await sendMessage({ token }, chatId, signPromptText(need.reason, signInputs, getName()), {
-          keyboard: signKeyboard(signUrl(dashboardBase(), need.reason)),
-        });
+        const m = signMessage(need.reason, signInputs, getName(), dashboardBase());
+        const sent = await sendMessage({ token }, chatId, m.text, m.keyboard ? { keyboard: m.keyboard } : {});
         // Recorded only when it actually went out, so a transient send
         // failure retries next pass instead of going quiet for a day.
         if (sent.ok) {
@@ -731,7 +735,12 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       const st = deps.stateRef.get();
       if (st.firedAlerts[key] !== undefined) return;
       await sendMessage({ token }, chatId, message);
-      deps.stateRef.set({ ...st, firedAlerts: { ...st.firedAlerts, [key]: now() } });
+      // RE-READ AFTER THE SEND. `st` was read before the await, and the poll
+      // loop may have saved the offset (or a chat setting) meanwhile — writing
+      // the old copy back would undo it, and a rolled-back offset makes
+      // Telegram deliver the same messages, and run the same commands, twice.
+      const fresh = deps.stateRef.get();
+      deps.stateRef.set({ ...fresh, firedAlerts: { ...fresh.firedAlerts, [key]: now() } });
     };
     const rel = relationship(deps.stateRef.get().linkedAt, deps.stateRef.get().messageCount, now());
     const MILESTONES: Record<number, string> = {

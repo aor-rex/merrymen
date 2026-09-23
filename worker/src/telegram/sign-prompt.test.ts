@@ -4,8 +4,12 @@ import { describe, it } from "node:test";
 import {
   REPEAT_SEC,
   SETTLE_SEC,
+  UPDATE_REPEAT_SEC,
+  isPublicHttpsUrl,
+  settleFor,
   signDecision,
   signKeyboard,
+  signMessage,
   signNeed,
   signPromptText,
   signUrl,
@@ -13,7 +17,10 @@ import {
 
 const NOW = 1_800_000_000;
 const DAY = 86_400;
-const grant = { grantedAt: NOW - 10 * DAY, grantExpiresAt: NOW + 20 * DAY };
+// Signed AFTER the last permission-set change, so "update" stays out of the
+// way of the tests that are not about it.
+const WALL = NOW - 30 * DAY;
+const grant = { grantedAt: NOW - 10 * DAY, grantExpiresAt: NOW + 20 * DAY, wallChangedAt: WALL };
 
 describe("signNeed — when a signature is the fix", () => {
   it("asks for the three blockers only a signature clears", () => {
@@ -93,7 +100,7 @@ describe("signDecision — once, settled, then daily", () => {
 
 describe("the message and the button", () => {
   it("says free, names the agent, and never uses the internal words", () => {
-    for (const reason of ["dead-policy", "wrong-chain", "grant-too-wide", "expiring", "expired"] as const) {
+    for (const reason of ["dead-policy", "wrong-chain", "grant-too-wide", "expiring", "expired", "update"] as const) {
       const text = signPromptText(reason, { blocker: null, ...grant, grantExpiresAt: NOW + 3600 * 5, now: NOW }, "Shogun");
       assert.match(text, /Shogun/);
       assert.match(text, /free/i, reason);
@@ -109,5 +116,56 @@ describe("the message and the button", () => {
     assert.equal(signUrl("https://app.merrymen.dev/", "dead-policy"), "https://app.merrymen.dev/grant#resign");
     assert.equal(signUrl("https://app.merrymen.dev", "wrong-chain"), "https://app.merrymen.dev/grant?chain=4663#resign");
     assert.deepEqual(signKeyboard("https://x/grant#resign"), [[{ text: "✍️ Sign now", url: "https://x/grant#resign" }]]);
+  });
+});
+
+describe("an update that changed what a permission carries", () => {
+  it("asks a grant signed before the change to sign again — even with no blocker (practice mode masks one)", () => {
+    const n = signNeed({ blocker: "live-not-enabled", grantedAt: WALL - DAY, grantExpiresAt: NOW + 20 * DAY, now: NOW, wallChangedAt: WALL });
+    assert.equal(n?.reason, "update");
+    assert.equal(n?.settles, false);
+    assert.equal(n?.repeatSec, UPDATE_REPEAT_SEC, "a nudge every few days, not a daily alarm");
+  });
+
+  it("a grant signed after the change is left alone", () => {
+    assert.equal(signNeed({ blocker: null, grantedAt: WALL + 1, grantExpiresAt: NOW + 20 * DAY, now: NOW, wallChangedAt: WALL }), null);
+  });
+
+  it("a real blocker or an expiry outranks it — one thing to ask for", () => {
+    const old = { grantedAt: WALL - DAY, now: NOW, wallChangedAt: WALL };
+    assert.equal(signNeed({ ...old, blocker: "dead-policy", grantExpiresAt: NOW + 20 * DAY })?.reason, "dead-policy");
+    assert.equal(signNeed({ ...old, blocker: null, grantExpiresAt: NOW - 1 })?.reason, "expired");
+  });
+
+  it("repeats on its own cadence", () => {
+    const need = signNeed({ blocker: null, grantedAt: WALL - DAY, grantExpiresAt: NOW + 20 * DAY, now: NOW, wallChangedAt: WALL })!;
+    assert.equal(signDecision(need, null, NOW - REPEAT_SEC, NOW).send, false, "a day is too soon");
+    assert.equal(signDecision(need, null, NOW - UPDATE_REPEAT_SEC, NOW).send, true);
+  });
+});
+
+describe("timing and links", () => {
+  it("the settle window grows with a slow tick, never below the floor", () => {
+    assert.equal(settleFor(60), SETTLE_SEC);
+    assert.equal(settleFor(300), 630);
+    const blocked = { key: "k", settles: true };
+    assert.equal(signDecision(blocked, { key: "k", since: NOW - 400 }, undefined, NOW, settleFor(300)).send, false);
+  });
+
+  it("only an https link a phone can open becomes a button", () => {
+    assert.equal(isPublicHttpsUrl("https://app.merrymen.dev/grant#resign"), true);
+    for (const u of ["http://localhost:3100/grant", "https://localhost/grant", "https://192.168.1.4/grant", "http://app.merrymen.dev/grant", "https://box.local/grant", "not a url"]) {
+      assert.equal(isPublicHttpsUrl(u), false, u);
+    }
+  });
+
+  it("hosted gets a button and a sign-in hint; self-hosted gets where to open it", () => {
+    const inputs = { blocker: null, ...grant, now: NOW };
+    const hosted = signMessage("dead-policy", inputs, "Shogun", "https://app.merrymen.dev");
+    assert.ok(hosted.keyboard);
+    assert.match(hosted.text, /sign in with the login/);
+    const local = signMessage("dead-policy", inputs, "Shogun", "http://localhost:3100");
+    assert.equal(local.keyboard, undefined, "no button Telegram would refuse");
+    assert.match(local.text, /on the computer that runs merrymen/);
   });
 });
