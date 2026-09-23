@@ -9,11 +9,13 @@ import {
   commandWhereabouts,
   drainCommandResults,
   dropCommandResult,
+  expiredLine,
   isExpired,
   markRunning,
   openCommands,
   readCommandState,
   runTickCommand,
+  unlessLate,
   writeCommand,
   writeCommandResult,
 } from "./command-files";
@@ -573,6 +575,112 @@ describe("the tick's drain", () => {
       assert.deepEqual([t.ran, t.told], [[], []]);
     } finally {
       rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+/**
+ * THE DEADLINE BOUNDS WHEN AN ORDER STARTS, NOT ONLY WHEN IT IS CLAIMED.
+ *
+ * After the claim, an order waits on a curve lookup and a decision row and
+ * then joins the intent queue behind the tick's own intents, each of which
+ * can wait minutes on its receipt. Nothing re-read the deadline in there, so an
+ * order could START after it — filling into the very market the expiry exists
+ * to refuse — and still be trading after the sweep had freed the owner's slot.
+ *
+ * The gate the queue's step runs, driven through a queue of the same shape as
+ * the worker's (a promise chain) with a clock the test moves.
+ */
+describe("the order's deadline, at the front of the queue", () => {
+  const DEADLINE = 1_800_000_000_000;
+  /** A serialising chain, as index.ts keeps its intent queue. */
+  const queue = () => {
+    let chain: Promise<unknown> = Promise.resolve();
+    return <T>(step: () => Promise<T>): Promise<T> => {
+      const run = chain.then(step, step);
+      chain = run.then(
+        () => {},
+        () => {},
+      );
+      return run;
+    };
+  };
+
+  it("AN ORDER THAT REACHES THE FRONT AFTER ITS DEADLINE IS NOT RUN, and the owner is told so", async () => {
+    let clock = DEADLINE - 30_000; // claimed, and handed to the queue, in time
+    const enqueue = queue();
+    let sent = 0;
+    // The tick's own intent is ahead of it and waits out the order's window.
+    const ahead = enqueue(async () => {
+      await Promise.resolve();
+      clock = DEADLINE + 3 * 60_000;
+    });
+    const order = enqueue(() =>
+      unlessLate(DEADLINE, () => clock, async () => {
+        sent += 1;
+        return { status: "landed" as const };
+      }),
+    );
+    await ahead;
+    const r = await order;
+    assert.equal(sent, 0, "nothing was sent");
+    assert.deepEqual(Object.keys(r).sort(), ["line", "status"]);
+    assert.equal(r.status, "late");
+    assert.match((r as { line: string }).line, /^expired — this order reached the front of my trade queue 3 min after its window closed/);
+    assert.match((r as { line: string }).line, /Nothing was sent/);
+  });
+
+  it("reached in time, it runs, and its own verdict comes back untouched", async () => {
+    let clock = DEADLINE - 30_000;
+    const enqueue = queue();
+    void enqueue(async () => {
+      clock = DEADLINE - 1_000;
+    });
+    const r = await enqueue(() => unlessLate(DEADLINE, () => clock, async () => ({ status: "landed" as const })));
+    assert.deepEqual(r, { status: "landed" });
+  });
+
+  it("AT the deadline it still runs — the same edge isExpired draws at the claim", async () => {
+    let ran = false;
+    await unlessLate(DEADLINE, () => DEADLINE, async () => {
+      ran = true;
+    });
+    assert.equal(ran, true);
+    assert.equal(isExpired({ id: "o", kind: "trade", at: 1, expiresAt: DEADLINE }, DEADLINE), false);
+    const late = await unlessLate(DEADLINE, () => DEADLINE + 1, async () => "ran");
+    assert.notEqual(late, "ran");
+  });
+
+  it("with no deadline — Telegram, the Brain, a legacy command — nothing is refused, however long it queued", async () => {
+    const r = await unlessLate(undefined, () => DEADLINE + 24 * 3_600_000, async () => "ran");
+    assert.equal(r, "ran");
+  });
+
+  it("the clock is read when the queue reaches the order, not when it joined", async () => {
+    let reads = 0;
+    let clock = DEADLINE - 1;
+    const enqueue = queue();
+    const ahead = enqueue(async () => {
+      clock = DEADLINE + 1;
+    });
+    const r = enqueue(() =>
+      unlessLate(DEADLINE, () => (reads += 1, clock), async () => "ran"),
+    );
+    await ahead;
+    assert.notEqual(await r, "ran");
+    assert.ok(reads >= 1);
+  });
+});
+
+describe("the expiry sentence", () => {
+  it("says when, and says nothing was sent", () => {
+    const at = 1_800_000_000_000;
+    assert.match(expiredLine(at, at + 45_000, "claim"), /^expired — I picked this order up 45s after its window closed/);
+    assert.match(expiredLine(at, at + 50 * 60_000, "claim"), /50 min after/);
+    assert.match(expiredLine(at, at + 5 * 3_600_000, "queue"), /reached the front of my trade queue 5 h after/);
+    for (const where of ["claim", "queue"] as const) {
+      assert.match(expiredLine(at, at + 1_000, where), /I will not fill it into a different market/);
+      assert.match(expiredLine(at, at + 1_000, where), /Nothing was sent\. Ask again if you still want it\.$/);
     }
   });
 });

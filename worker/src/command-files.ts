@@ -270,6 +270,40 @@ export async function runTickCommand(
   }
 }
 
+/** An order the intent queue reached after its own deadline, and did not run. Not a ledger status: no row exists. */
+export interface LateOrder {
+  status: "late";
+  line: string;
+}
+
+/**
+ * Run an order's step only if the queue reached it by its deadline.
+ *
+ * THE CLAIM IS NOT THE LAST WAIT. After it, an order waits on a curve lookup
+ * and a decision row, then joins the intent queue behind whatever the tick has
+ * already put there — and each of those can wait minutes on a receipt. Nothing
+ * re-read the deadline in there, so an order could START after it, filling
+ * into exactly the market the expiry exists to refuse, and still be trading
+ * after the sweep had let the owner place another.
+ *
+ * So the queue's step asks here, with the clock read at the moment the queue
+ * reaches the order — never when it joined. Late, `body` is not called at all:
+ * nothing is built, signed or sent, and the answer is a sentence that says so.
+ * At the deadline itself it still runs, the edge `isExpired` draws at the
+ * claim. No deadline (Telegram, the Brain, a legacy command) is never late.
+ */
+export async function unlessLate<T>(
+  notAfterMs: number | undefined,
+  now: () => number,
+  body: () => Promise<T>,
+): Promise<T | LateOrder> {
+  if (typeof notAfterMs === "number" && Number.isFinite(notAfterMs)) {
+    const t = now();
+    if (t > notAfterMs) return { status: "late", line: expiredLine(notAfterMs, t, "queue") };
+  }
+  return body();
+}
+
 /** A lateness as an owner reads it: seconds while it is short, then minutes, then hours. */
 function howLate(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -470,12 +504,19 @@ export function commandWhereabouts(home: string, id: string): CommandWhereabouts
  * How long past its own deadline and grace a CLAIMED order may still be
  * trading, as far as the worker's own pipeline goes.
  *
- * The child claims no later than the deadline — a later claim is refused as
- * expired — and a live fill then waits on its receipt for up to three reads of
- * two minutes each (executor.ts RECEIPT_ATTEMPTS, viem's default timeout), on
- * top of the reads, the quote and the signature before it. Ten minutes covers
- * that with room. Until it has passed, nothing may say the order did not go
- * out, and nothing may free the owner's one-at-a-time slot for a second one.
+ * The deadline bounds when an order STARTS, not only when it is claimed: a
+ * later claim is refused as expired (isExpired), and so is an order the intent
+ * queue reaches after it (unlessLate). So all this has to cover is the order's
+ * own run once the queue has reached it — the reads, the quote and the
+ * signature, then up to three receipt reads of two minutes each (executor.ts
+ * RECEIPT_ATTEMPTS, viem's default timeout). Ten minutes covers that with room.
+ * Until it has passed, nothing may say the order did not go out, and nothing
+ * may free the owner's one-at-a-time slot for a second one.
+ *
+ * It was described as this bound while it was not one. The wait in the queue,
+ * behind the tick's own intents, each able to spend the same six minutes on a
+ * receipt, sat outside it — so an order could start after its deadline and
+ * still be running once the sweep had freed the slot.
  *
  * Read by the orchestrator's stale sweep. The web route's slot reads the same
  * figure from web/src/lib/order-state.ts — the two processes share no module

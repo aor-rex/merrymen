@@ -40,10 +40,12 @@ export const ORDER_STALE_GRACE_MS = 2 * 60_000;
  * How long past deadline AND grace a CLAIMED row goes on holding the slot.
  *
  * A claimed order may be waiting on its receipt well after its deadline — the
- * deadline only bounds the claim. So the slot is released only once the
- * worker's own pipeline cannot still be filling it; freeing it earlier is
- * "ask again" with the first order on chain. The orchestrator's sweep closes
- * such a row at the same moment, with a sentence that does not claim to know.
+ * deadline bounds when the order STARTS (the worker refuses a late claim, and
+ * refuses an order its intent queue reaches late), not when it finishes. So
+ * the slot is released only once the order's own run cannot still be filling
+ * it; freeing it earlier is "ask again" with the first order on chain. The
+ * orchestrator's sweep closes such a row at the same moment, with a sentence
+ * that does not claim to know.
  * Stated again in worker/src/command-files.ts for that sweep; a test holds the
  * two equal.
  */
