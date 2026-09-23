@@ -1495,6 +1495,25 @@ function receiptJson(r: FileCommandResult): string | null {
   return receiptColumn(r.receipt);
 }
 
+/**
+ * IS THIS THE ERROR A TABLE WITHOUT THE RECEIPT COLUMN GIVES — AND ONLY THAT?
+ *
+ * The one question both receipt-less fallbacks exist to answer. Anything else —
+ * a dropped connection, a lock, a timeout, some OTHER column's absence — is a
+ * failed write, and the fallback would turn it into a permanent one: the row is
+ * closed (done_at set, the result file dropped) with a NULL receipt, and no
+ * later pass revisits it. The same rule ledger-mirror.ts missingMarkColumn
+ * holds for its fallback.
+ *
+ * SQLite says `no such column: receipt`; Postgres raises undefined_column
+ * (42703) and names the column. The name is required in both.
+ */
+export function missingReceiptColumn(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (!/\breceipt\b/.test(e.message)) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
+}
+
 /** Any receipt as the column holds it, or null — the one serialisation both writers use. */
 function receiptColumn(receipt: OrderReceipt | undefined): string | null {
   if (!receipt || typeof receipt !== "object") return null;
@@ -1508,6 +1527,9 @@ function receiptColumn(receipt: OrderReceipt | undefined): string | null {
  * the receipt waits, the answer does not. `where` is the row's own guard and is
  * the same on both writes, so the fallback can never close a row the first
  * write would have left alone.
+ *
+ * ONLY ON THE MISSING COLUMN. Any other failure is thrown, so the row stays
+ * open and the next pass retries both writes (missingReceiptColumn).
  */
 async function closeWithReceipt(
   shared: Db,
@@ -1519,7 +1541,8 @@ async function closeWithReceipt(
     await shared
       .prepare(`UPDATE agent_commands SET ${set.sql}, receipt = ? WHERE ${where.sql}`)
       .run(...set.args, receiptColumn(receipt), ...where.args);
-  } catch {
+  } catch (e) {
+    if (!missingReceiptColumn(e)) throw e;
     await shared.prepare(`UPDATE agent_commands SET ${set.sql} WHERE ${where.sql}`).run(...set.args, ...where.args);
   }
 }
@@ -1548,7 +1571,10 @@ async function landResults(shared: Db, home: string, tenant: string): Promise<vo
         await shared
           .prepare("UPDATE agent_commands SET done_at = ?, result = ?, receipt = ? WHERE id = ?")
           .run(now, line, receiptJson(r), r.id);
-      } catch {
+      } catch (e) {
+        // Only the missing column: a blip here used to land the answer without
+        // its receipt and drop the file, losing the receipt for good.
+        if (!missingReceiptColumn(e)) throw e;
         await shared.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(now, line, r.id);
       }
       dropCommandResult(home, r.id);
@@ -1708,46 +1734,52 @@ export async function ferryForChild(
       const unanswered =
         "I never heard back from my worker about this order, so I cannot tell you whether it filled — it may have. Check your trades before asking again.";
       for (const r of candidates) {
-        const closesAt = orderClosesAt(r);
-        if (now <= closesAt) continue;
-        const id = String(r.id);
-        const where = commandWhereabouts(home, id);
-        if (where === "answered") continue;
-        const args = r.args ? parseArgs(r.args) : undefined;
-        // "NEVER RAN" IS C3's `expired`, whichever process noticed it: the
-        // child answers an order that expired in its queue with this same
-        // receipt, and the chat must not render one fact two ways depending on
-        // who got there first. Only here, where nothing went out — the
-        // "may have filled" closure below knows nothing, so templates nothing.
-        const expired = expiredOrderReceipt(args);
-        if (r.claimed_at === null || r.claimed_at === undefined) {
-          // Undelivered, so no file can exist yet; a replica that delivers it
-          // in the meantime wins the `claimed_at IS NULL` race and we stand down.
-          if (where !== "gone") continue;
-          await closeWithReceipt(
-            shared,
-            { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRan] },
-            expired,
-            { sql: "id = ? AND done_at IS NULL AND claimed_at IS NULL", args: [id] },
-          );
-          continue;
+        // ONE ROW AT A TIME: a write that failed leaves its own row open for
+        // the next pass, and does not cost every row after it this one.
+        try {
+          const closesAt = orderClosesAt(r);
+          if (now <= closesAt) continue;
+          const id = String(r.id);
+          const where = commandWhereabouts(home, id);
+          if (where === "answered") continue;
+          const args = r.args ? parseArgs(r.args) : undefined;
+          // "NEVER RAN" IS C3's `expired`, whichever process noticed it: the
+          // child answers an order that expired in its queue with this same
+          // receipt, and the chat must not render one fact two ways depending on
+          // who got there first. Only here, where nothing went out — the
+          // "may have filled" closure below knows nothing, so templates nothing.
+          const expired = expiredOrderReceipt(args);
+          if (r.claimed_at === null || r.claimed_at === undefined) {
+            // Undelivered, so no file can exist yet; a replica that delivers it
+            // in the meantime wins the `claimed_at IS NULL` race and we stand down.
+            if (where !== "gone") continue;
+            await closeWithReceipt(
+              shared,
+              { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRan] },
+              expired,
+              { sql: "id = ? AND done_at IS NULL AND claimed_at IS NULL", args: [id] },
+            );
+            continue;
+          }
+          const expiresAt = args?.expiresAt;
+          if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
+            await closeWithReceipt(
+              shared,
+              { sql: "done_at = ?, result = ?", args: [now, neverRan] },
+              expired,
+              { sql: "id = ? AND done_at IS NULL", args: [id] },
+            );
+            continue;
+          }
+          // Taken, or a deadline-less file the child would still run: either
+          // way it may go out, so nothing is said until it no longer can.
+          if (now <= closesAt + ORDER_IN_FLIGHT_MS) continue;
+          await shared
+            .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
+            .run(now, unanswered, id);
+        } catch {
+          /* left open (done_at NULL): the next pass retries this row whole */
         }
-        const expiresAt = args?.expiresAt;
-        if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
-          await closeWithReceipt(
-            shared,
-            { sql: "done_at = ?, result = ?", args: [now, neverRan] },
-            expired,
-            { sql: "id = ? AND done_at IS NULL", args: [id] },
-          );
-          continue;
-        }
-        // Taken, or a deadline-less file the child would still run: either
-        // way it may go out, so nothing is said until it no longer can.
-        if (now <= closesAt + ORDER_IN_FLIGHT_MS) continue;
-        await shared
-          .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
-          .run(now, unanswered, id);
       }
     } catch {
       /* best effort; the age bound in the route is the other half of this */
