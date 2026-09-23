@@ -164,8 +164,10 @@ const EARLIER = ". Also from earlier: ";
  * a Trencher notice) never say theirs again while it holds. Covered, it was
  * gone for the rest of the trip: a sell refused under the key, replaced after
  * ten minutes by a sentence ending "Selling is never blocked by this". So the
- * covered line rides after ours, and the owner still reads it for as long as
- * the desk would have shown it.
+ * covered line rides after ours — through the trip that covered it and the
+ * reset line that ends it, and no further (writeOver). That is longer than the
+ * desk alone would have kept it by up to one trip and its reset, since each of
+ * our lines is a new event; it is not longer than that.
  */
 export function withEarlier(head: string, earlier: string | null): string {
   return earlier ? `${head}${EARLIER}${earlier}` : head;
@@ -410,11 +412,17 @@ export class IdleChannel {
   /**
    * Write `head` as the notice, over what it shows now, keeping any other
    * warn that shows on it (withEarlier): the one written over ours, or the one
-   * our own line already carries.
+   * our own breaker line already carries.
+   *
+   * NEVER THROUGH A RESET LINE. What the reset carries was kept because the
+   * trip covered it, and that trip has ended. Carried on, a breaker flapping
+   * at its limit rewrote the same line on every flip, and a warn written once
+   * ("no new token authorized") stood beside "buying resumes" for as long as
+   * the flapping lasted.
    */
   private async writeOver(agentId: string, head: string, shown: ShownNotice | null): Promise<void> {
     const own = shown === null ? null : ownLine(shown.message);
-    const earlier = shown === null ? null : own ? own.earlier : shown.message;
+    const earlier = shown === null ? null : !own ? shown.message : breakerLead(own.head) >= 0 ? own.earlier : null;
     const line = withEarlier(head, earlier);
     this.sinks.log?.(`[tick] idle — ${line}`);
     await this.sinks.addEvent(agentId, "warn", line);

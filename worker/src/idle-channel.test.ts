@@ -867,6 +867,48 @@ describe("the restatement never buries another warn", () => {
     }
   });
 
+  it("R4WK-3, THE CHECKER'S PROBE: a line written once rides no further than the reset — a breaker flapping at its limit does not keep it on the desk", async () => {
+    const d = desk();
+    const ch = new IdleChannel(d.sinks);
+    const once = "Trencher: Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.";
+    d.write("warn", once);
+    let carried = 0;
+    let fills = 0;
+    let deskAlone = 0;
+    for (let i = 0; i < 400; i++) {
+      const tripped = i % 4 < 2;
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: tripped ? breaker : null, modeEmptied: null, drawdown: tripped ? TRIPPED : CLEAR });
+      if (!tripped) for (let k = 0; k < 3; k++, fills++) d.write("ok", `fill ${i}.${k}`);
+      if (d.shows().includes(once)) carried++;
+      if (fills < 40) deskAlone++;
+      d.advance(TICK_MS);
+    }
+    assert.ok(carried <= deskAlone, `on the notice ${carried} ticks; the desk alone would have shown it ${deskAlone}`);
+    assert.equal(carried, 4, "through the first trip and the reset that ended it, and no further");
+    assert.equal(d.shows(), breakerResetLine(null));
+  });
+
+  it("A LINE WRITTEN OVER OUR RESET LINE CARRIES NOTHING OF IT — the trip that covered the carried line has ended", async () => {
+    for (const idle of [breaker, undefined]) {
+      const d = desk();
+      const ch = new IdleChannel(d.sinks);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: breaker, modeEmptied: null, drawdown: TRIPPED });
+      d.write("warn", blocker);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      assert.equal(d.shows(), withEarlier(breakerResetLine(null), blocker), "the reset keeps what the trip carried");
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle, modeEmptied: null, drawdown: TRIPPED });
+      assert.equal(d.shows(), sentence, `re-tripped ${idle ? "with" : "without"} the breaker's reason`);
+      // A line somebody else wrote over our reset is theirs, and is carried as ever.
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle: null, modeEmptied: null, drawdown: CLEAR });
+      d.write("warn", "a newer line");
+      d.advance(TICK_MS);
+      await ch.tell({ agentId: AGENT, strategyName: "steady-basket", idle, modeEmptied: null, drawdown: TRIPPED });
+      assert.equal(d.shows(), withEarlier(sentence, "a newer line"));
+    }
+  });
+
   it("withEarlier: the head alone when there is nothing to carry", () => {
     assert.equal(withEarlier("head", null), "head");
     assert.equal(withEarlier("head", "tail"), "head. Also from earlier: tail");
