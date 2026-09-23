@@ -1,9 +1,50 @@
 import {money, pctPts, type LiveMine, type Thesis} from "./live";
+import type { OrderReceipt } from "@/lib/order-state";
 
+/**
+ * A QUESTION AND ITS ANSWER — the shape the chat was stored in before it had
+ * messages. Kept only so a conversation saved in that shape still loads
+ * (chat-thread.ts turnsToMessages); nothing new is written this way.
+ *
+ * It could not say what an order became: an outcome had to be forced into a
+ * fake pair with a question of "" or "✓ confirmed", and nothing the agent did
+ * on its own could enter the thread at all.
+ */
 export interface ChatTurn {
   question: string;
   answer: string;
   trade?: Thesis;
+}
+
+/** Why a reply did not arrive, as the agent says it (chat-thread.ts failureLine). */
+export type ChatFailure = "signed-out" | "no-llm" | "llm-error" | "unreadable" | "network" | "timeout" | "cut-off";
+
+/**
+ * ONE LINE OF THE CONVERSATION.
+ *
+ * `owner` is what they typed or confirmed; `agent` is the agent's words — a
+ * model's reply, or the worker's own sentence about an order it ran; `event`
+ * is something that HAPPENED, templated from ledger fields and never written
+ * by a model: one of the agent's own fills, merged in from the tape.
+ */
+export interface ChatMessage {
+  id: string;
+  role: "owner" | "agent" | "event";
+  /** Epoch ms on this browser's clock; null for a line kept from before times were. */
+  at: number | null;
+  text: string;
+  /** An event's side, for its Buy/Sell pill. */
+  side?: "buy" | "sell" | null;
+  /** The order this line is about, and — once the worker answered — its receipt (C3). */
+  order?: { id: string; receipt?: OrderReceipt | null };
+  /** Which trade this line is, so the tape can join it exactly once. */
+  tradeKey?: string;
+  /** That trade, as the tape last read it. Never stored: re-read each session. */
+  trade?: Thesis;
+  /** Set on a failure said in the agent's voice. Kept out of what the model is told it said. */
+  failed?: ChatFailure;
+  /** The question to put again, for the Retry chip. This session only. */
+  retry?: string;
 }
 
 export function dailyChange(mine: LiveMine): number | null {

@@ -25,6 +25,24 @@ import type { LiveMine, LiveToken } from "./live";
 (globalThis as unknown as { React: typeof React }).React = React;
 
 const noop = () => {};
+/** A conversation with nothing in it — this file is about the positions list beside it. */
+const idleChat = {
+  messages: [],
+  draft: "",
+  setDraft: noop,
+  sending: false,
+  streaming: null,
+  proposal: null,
+  setProposal: noop,
+  unread: false,
+  settings: null,
+  send: async () => false,
+  retry: async () => false,
+  say: noop,
+  followOrder: noop,
+  refreshSettings: noop,
+  clearThread: noop,
+};
 
 const mine = (positions: NonNullable<LiveMine["positions"]>): LiveMine => ({
   name: "Shogun",
@@ -116,10 +134,7 @@ describe("a position with a known return", () => {
         perTrade: 10,
         perDay: 50,
         stopped: false,
-        turns: [],
-        draft: "",
-        onDraft: noop,
-        onTurn: noop,
+        chat: idleChat,
         onToken: noop,
         onDeposit: noop,
         onWithdraw: noop,
@@ -143,10 +158,7 @@ describe("a position with a known return", () => {
         perTrade: 10,
         perDay: 50,
         stopped: false,
-        turns: [],
-        draft: "",
-        onDraft: noop,
-        onTurn: noop,
+        chat: idleChat,
         onToken: noop,
         onDeposit: noop,
         onWithdraw: noop,

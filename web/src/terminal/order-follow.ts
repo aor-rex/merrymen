@@ -23,13 +23,19 @@
  * (`expiresInMs`) and is counted from when the reply arrived — see
  * followWindowMs for what comparing the server's epoch with Date.now() did.
  *
- * STILL DIES WITH THE SCREEN (`alive`). Lifting the poll out of the component
- * so a tab switch does not end it is the next step, not this one.
+ * IT NO LONGER DIES WITH THE SCREEN. The poll ran inside Agent.tsx, which is
+ * mounted only while the chat is on screen, so closing the dock, switching tab
+ * or reloading ended it and the owner never heard how an order they had just
+ * placed went. The chat controller (chat-controller.ts) now runs it at App
+ * level and keeps each order's deadline — fixed once, on this browser's clock,
+ * by followDeadline — so a reload resumes the same wait through
+ * followOrderUntil rather than starting a new one. `alive` now means "this
+ * owner's chat still exists", not "this screen is open".
  */
 import { ORDER_STALE_GRACE_MS } from "@/lib/order-state";
 
 /** One poll's reading. Null is a poll that could not be read — not an answer. */
-export type OrderPoll = { state?: string; result?: string | null } | null;
+export type OrderPoll = { state?: string; result?: string | null; receipt?: unknown } | null;
 
 export interface FollowDeps {
   poll(id: string): Promise<OrderPoll>;
@@ -37,7 +43,11 @@ export interface FollowDeps {
   now(): number;
   /** False once the screen that asked has gone away. */
   alive(): boolean;
-  say(line: string): void;
+  /**
+   * The sentence, and the terminal poll it came from — null when the window
+   * ran out with no answer, so nothing unanswered can pass for a receipt.
+   */
+  say(line: string, poll?: OrderPoll): void;
 }
 
 /** How often the card asks. Unchanged from the loop this replaced. */
@@ -125,25 +135,54 @@ export function followWindowMs(body: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
+/**
+ * When to stop asking, as a moment on THIS browser's clock.
+ *
+ * Measured from `now` — when the POST's reply is in hand — so the wait can
+ * only come out longer than the server's, never shorter. Fixed ONCE and kept
+ * with the order, so a resumed follow waits out the same end instead of a
+ * fresh window from the reload.
+ */
+export function followDeadline(expiresInMs: number | null, now: number): number {
+  return (
+    now +
+    (expiresInMs !== null && Number.isFinite(expiresInMs) ? Math.max(0, expiresInMs) + ORDER_STALE_GRACE_MS : FALLBACK_WAIT_MS) +
+    FOLLOW_SLACK_MS
+  );
+}
+
 export async function followOrder(
   id: string,
   /** From followWindowMs: the order's window left at the POST, on no particular clock. */
   expiresInMs: number | null,
   deps: Partial<Pick<FollowDeps, "poll" | "sleep" | "now">> & Pick<FollowDeps, "alive" | "say">,
 ): Promise<void> {
+  const now = deps.now ?? Date.now;
+  return followOrderUntil(id, followDeadline(expiresInMs, now()), deps);
+}
+
+/**
+ * Follow an order to its answer or to `giveUpAt` — the deadline followDeadline
+ * fixed when it was placed, however long ago that was.
+ *
+ * IT ASKS AT LEAST ONCE. A follow resumed after its deadline — a chat reopened
+ * an hour later — would otherwise say "I could not get an answer" without
+ * having asked, about an order whose answer has long been on the server.
+ */
+export async function followOrderUntil(
+  id: string,
+  giveUpAt: number,
+  deps: Partial<Pick<FollowDeps, "poll" | "sleep" | "now">> & Pick<FollowDeps, "alive" | "say">,
+): Promise<void> {
   const poll = deps.poll ?? fetchOrderPoll;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? Date.now;
-  // Measured from NOW on THIS clock. Starting the count when the reply is in
-  // hand can only make the wait longer than the server's, never shorter.
-  const giveUpAt =
-    now() +
-    (expiresInMs !== null && Number.isFinite(expiresInMs) ? Math.max(0, expiresInMs) + ORDER_STALE_GRACE_MS : FALLBACK_WAIT_MS) +
-    FOLLOW_SLACK_MS;
   let last: OrderPoll = null;
-  while (now() < giveUpAt) {
+  let asked = false;
+  while (now() < giveUpAt || !asked) {
     await sleep(FOLLOW_EVERY_MS);
     if (!deps.alive()) return;
+    asked = true;
     let read: OrderPoll;
     try {
       read = await poll(id);
@@ -153,9 +192,9 @@ export async function followOrder(
     if (read) last = read;
     const answer = orderAnswer(read);
     if (answer) {
-      deps.say(answer);
+      deps.say(answer, read);
       return;
     }
   }
-  if (deps.alive()) deps.say(unansweredLine(last));
+  if (deps.alive()) deps.say(unansweredLine(last), null);
 }

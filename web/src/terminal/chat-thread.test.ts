@@ -1,0 +1,324 @@
+/**
+ * THE THREAD'S RULES, RUN: receipts templated from ledger facts, the agent's
+ * own fills merged in once each, the model told only what was said, chips that
+ * never suggest a size the wall would refuse, and failures said as the agent.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import type { ChatMessage, ChatTurn } from "./account";
+import type { Thesis } from "./live";
+import type { OrderReceipt } from "@/lib/order-state";
+import {
+  absorbFill,
+  amountCeiling,
+  capThread,
+  chatChips,
+  chatTape,
+  failureLine,
+  fillParts,
+  historyFor,
+  MAX_MESSAGES,
+  mergeFills,
+  newestAt,
+  receiptParts,
+  receiptText,
+  refocusAfterSend,
+  tradeKeyOf,
+  turnsToMessages,
+} from "./chat-thread";
+
+const receipt = (over: Partial<OrderReceipt> = {}): OrderReceipt => ({
+  status: "filled",
+  side: "buy",
+  symbol: "CASHCAT",
+  token: null,
+  usdgActual: 5,
+  txHash: null,
+  rejectRule: null,
+  ...over,
+});
+
+const move = (over: Partial<Thesis> = {}): Thesis => ({
+  name: "Robin",
+  slug: "robin",
+  handle: null,
+  action: "buy",
+  symbol: "CASHCAT",
+  sizeUsdg: 5,
+  reason: "momentum",
+  paper: false,
+  head: "trencher",
+  at: 1_800_000_000,
+  outcome: "landed",
+  ...over,
+});
+
+const msg = (over: Partial<ChatMessage>): ChatMessage => ({ id: "m", role: "agent", at: null, text: "", ...over });
+
+describe("a receipt is templated, never written", () => {
+  it('RENDERS "[Buy] $5.00 CASHCAT · Filled"', () => {
+    assert.equal(receiptText(receipt()), "[Buy] $5.00 CASHCAT · Filled");
+    assert.deepEqual(receiptParts(receipt({ side: "sell", usdgActual: 12.5 })), { side: "Sell", line: "$12.50 CASHCAT · Filled" });
+  });
+
+  it("A REFUSAL SAYS WHICH RULE, in words", () => {
+    const t = receiptText(receipt({ status: "refused", usdgActual: null, rejectRule: "no-cash" }));
+    assert.equal(t, "[Buy] CASHCAT · Refused — the account held no USDG to trade with");
+  });
+
+  it("an unknown rule is named rather than dropped", () => {
+    assert.match(receiptText(receipt({ status: "refused", usdgActual: null, rejectRule: "brand-new-rule" })), /Refused — brand-new-rule$/);
+  });
+
+  it("A FIGURE NOBODY READ IS NOT PRINTED — never $0.00, never a guessed coin", () => {
+    const t = receiptText(receipt({ usdgActual: null, symbol: null, token: null }));
+    assert.equal(t, "[Buy] Token label unavailable · Filled");
+    assert.ok(!t.includes("$"));
+    // An address the ledger did record is shown as one, not dressed as a ticker.
+    assert.equal(receiptParts(receipt({ symbol: null, token: "0x" + "ab".repeat(20) })).line, "$5.00 0xabab…abab · Filled");
+  });
+
+  it("a side nobody recorded gets no pill", () => {
+    assert.deepEqual(receiptParts(receipt({ side: null, status: "expired", usdgActual: null })), { side: null, line: "CASHCAT · Expired" });
+  });
+});
+
+describe("the agent's own fills, merged into the thread", () => {
+  const since = 1_800_000_000 - 1;
+
+  it("A NEW LANDED FILL APPEARS ONCE, keyed by the trade", () => {
+    const first = mergeFills([], [move()], since);
+    assert.equal(first.length, 1);
+    assert.equal(first[0]!.role, "event");
+    assert.equal(first[0]!.side, "buy");
+    assert.equal(first[0]!.text, "$5.00 CASHCAT · Filled");
+    assert.equal(first[0]!.trade?.symbol, "CASHCAT");
+    // The next refresh brings the same tape: nothing is added twice.
+    const again = mergeFills(first, [move()], since);
+    assert.equal(again, first, "an unchanged tape changes nothing");
+  });
+
+  it("NOTHING OLDER THAN THE WATERMARK IS DUMPED INTO THE THREAD", () => {
+    assert.deepEqual(mergeFills([], [move({ at: since - 100 }), move({ at: since })], since), []);
+  });
+
+  it("refusals, pendings, views and holds are not fills", () => {
+    const tape = [
+      move({ outcome: "refused", at: since + 1 }),
+      move({ outcome: "pending", at: since + 2 }),
+      move({ action: "hold", at: since + 3 }),
+      move({ outcome: "reverted", at: since + 4 }),
+    ];
+    assert.deepEqual(mergeFills([], tape, since), []);
+  });
+
+  it("A PAPER FILL SAYS SO", () => {
+    assert.equal(mergeFills([], [move({ paper: true })], since)[0]!.text, "$5.00 CASHCAT · Filled on paper");
+  });
+
+  it("A CHAT ORDER'S RECEIPT IS THE SAME TRADE, not a second one", () => {
+    const placed = msg({ id: "o", at: 1_800_000_000 * 1000 - 30_000, text: "bought 5.00 USDG of CASHCAT", order: { id: "abc", receipt: receipt() } });
+    const merged = mergeFills([placed], [move()], since);
+    assert.equal(merged.length, 1, "the fill joins the receipt instead of repeating it");
+    assert.equal(merged[0]!.trade?.symbol, "CASHCAT");
+    assert.ok(merged[0]!.tradeKey);
+  });
+
+  it("but a DIFFERENT fill of the same coin is its own event", () => {
+    const placed = msg({ id: "o", at: 1_800_000_000 * 1000, order: { id: "abc", receipt: receipt({ usdgActual: 20 }) } });
+    assert.equal(mergeFills([placed], [move()], since).length, 2);
+  });
+
+  it("A RELOADED THREAD GETS ITS CARDS BACK from the tape, however old", () => {
+    // `trade` is never stored — only its key — so a reload re-reads it.
+    const key = tradeKeyOf(move({ at: since - 500 }))!;
+    const kept = msg({ id: "f", role: "event", text: "$5.00 CASHCAT · Filled", tradeKey: key, side: "buy" });
+    const back = mergeFills([kept], [move({ at: since - 500 })], since);
+    assert.equal(back[0]!.trade?.at, since - 500);
+    assert.equal(back.length, 1);
+  });
+
+  it("A RECEIPT THAT ARRIVES AFTER ITS FILL ABSORBS IT, rather than repeating it", () => {
+    // The tape can show the fill before the order's poll hears back. The
+    // receipt then takes the fill's card and the fill's own line goes.
+    const merged = mergeFills([], [move()], since);
+    const answer = msg({ id: "o", at: 1_800_000_000 * 1000 + 5_000, text: "bought it", order: { id: "abc", receipt: receipt() } });
+    const after = absorbFill([...merged, answer], "o");
+    assert.equal(after.length, 1);
+    assert.equal(after[0]!.id, "o");
+    assert.equal(after[0]!.tradeKey, merged[0]!.tradeKey);
+    assert.equal(after[0]!.trade?.symbol, "CASHCAT");
+    // A receipt for a different size leaves the fill where it was.
+    const other = msg({ id: "p", at: 1_800_000_000 * 1000, order: { id: "def", receipt: receipt({ usdgActual: 9 }) } });
+    assert.equal(absorbFill([...merged, other], "p").length, 2);
+  });
+
+  it("A FILL THAT FALLS OFF THE TOP OF A FULL THREAD IS NOT NEWS AGAIN", () => {
+    // The thread keeps its newest lines, so a busy agent's oldest fill lines
+    // go first — while the tape (the newest thirty operations) still holds
+    // those trades. Trimmed and forgotten, the next refresh found them
+    // "missing" and newer than the watermark, and put them back at the BOTTOM
+    // of the thread as if they had just happened, one per refresh, pushing
+    // out the conversation as they went.
+    const tape = [move({ at: since + 1 }), move({ at: since + 2, symbol: "PEPE" })];
+    const fills = mergeFills([], tape, since);
+    const chatter = Array.from({ length: MAX_MESSAGES - 2 }, (_, i) => msg({ id: `c${i}`, role: "owner", text: `line ${i}` }));
+    const full = [...fills, ...chatter, msg({ id: "new", role: "owner", text: "one more" })];
+    const kept = capThread({ messages: full, since });
+    assert.equal(kept.messages.length, MAX_MESSAGES);
+    assert.equal(kept.messages[0]!.id, fills[1]!.id, "the oldest line went");
+    assert.equal(mergeFills(kept.messages, tape, kept.since!), kept.messages, "and the tape does not bring it back as news");
+    // A fill newer than anything trimmed is still news.
+    const later = mergeFills(kept.messages, [move({ at: since + 3, symbol: "WIF" }), ...tape], kept.since!);
+    assert.equal(later.at(-1)!.text, "$5.00 WIF · Filled");
+  });
+
+  it("a thread under the limit is returned as it was, watermark and all", () => {
+    const t = { messages: [msg({ id: "a" })], since: 7 };
+    assert.equal(capThread(t), t);
+    // A watermark the tape never set stays unset: "first sight" is still first.
+    const unset = capThread({ messages: Array.from({ length: MAX_MESSAGES + 1 }, (_, i) => msg({ id: `x${i}` })), since: null });
+    assert.equal(unset.since, null);
+  });
+
+  it("A TAPE NOBODY READ IS NOT AN EMPTY ONE", () => {
+    // Handed [] for a failed read, the thread would take "nothing" as its
+    // first sight, and the next good read would pour every fill in as news.
+    const tape = [move()];
+    assert.equal(chatTape({ agentExists: true, read: "ok", moves: tape }), tape);
+    assert.deepEqual(chatTape({ agentExists: true, read: "ok", moves: [] }), [], "read and empty is empty");
+    for (const read of ["unread", "failed", "unreadable", undefined]) {
+      assert.equal(chatTape({ agentExists: true, read, moves: [] }), null, `${read} is not a tape`);
+    }
+    assert.equal(chatTape({ agentExists: false, read: "ok", moves: tape }), null, "no agent, no tape");
+    assert.equal(chatTape({ agentExists: undefined, read: "ok", moves: tape }), null, "an account not read yet, no tape");
+    assert.equal(chatTape({ agentExists: true, read: "ok", moves: undefined }), null);
+  });
+
+  it("the watermark is the newest trade already on the tape", () => {
+    assert.equal(newestAt([move({ at: 5 }), move({ at: 9 }), move({ at: undefined })]), 9);
+    assert.equal(newestAt([]), 0);
+  });
+
+  it("the key prefers the chain hash when the tape carries one", () => {
+    const tx = "0x" + "cd".repeat(32);
+    assert.equal(tradeKeyOf({ ...move(), txHash: tx } as Thesis), `tx:${tx}`);
+    assert.equal(tradeKeyOf(move({ action: "hold" })), null);
+  });
+});
+
+describe("what the model is told was said", () => {
+  it("OWNER AND AGENT, IN ORDER; the agent's failures are ours, not its words", () => {
+    const h = historyFor([
+      msg({ id: "1", role: "owner", text: "buy tsla" }),
+      msg({ id: "2", role: "agent", text: "How much?" }),
+      msg({ id: "3", role: "owner", text: "$5" }),
+      msg({ id: "4", role: "agent", text: "I couldn't reach you", failed: "network" }),
+      msg({ id: "5", role: "event", side: "buy", text: "$5.00 TSLA · Filled" }),
+    ]);
+    assert.deepEqual(h, [
+      { role: "user", content: "buy tsla" },
+      { role: "assistant", content: "How much?" },
+      { role: "user", content: "$5" },
+      { role: "assistant", content: "[Buy] $5.00 TSLA · Filled" },
+    ]);
+  });
+
+  it("only the last eight", () => {
+    const many = Array.from({ length: 20 }, (_, i) => msg({ id: String(i), role: i % 2 ? "agent" : "owner", text: `t${i}` }));
+    const h = historyFor(many);
+    assert.equal(h.length, 8);
+    assert.equal(h.at(-1)!.content, "t19");
+  });
+
+  it("A KEPT CONVERSATION FROM BEFORE MESSAGES STILL READS", () => {
+    const turns: ChatTurn[] = [
+      { question: "hi", answer: "hello" },
+      { question: "✓ confirmed", answer: "Placed it." },
+      { question: "", answer: "bought 5.00 USDG of TSLA" },
+    ];
+    const m = turnsToMessages(turns);
+    assert.deepEqual(
+      m.map((x) => [x.role, x.text]),
+      [
+        ["owner", "hi"],
+        ["agent", "hello"],
+        ["owner", "✓ Confirmed"],
+        ["agent", "Placed it."],
+        ["agent", "bought 5.00 USDG of TSLA"],
+      ],
+    );
+    assert.ok(m.every((x) => x.at === null), "a time nobody recorded is not invented");
+  });
+});
+
+describe("chips", () => {
+  const base = { liveBlocker: null, stopped: false, latestSymbol: null, holding: [], lastAgent: null, perTrade: 10, ceiling: 25 };
+
+  it("TWO TO FOUR, and about this agent", () => {
+    const c = chatChips({ ...base, liveBlocker: "no-gas", latestSymbol: "CASHCAT", holding: ["CASHCAT"] });
+    assert.ok(c.length >= 2 && c.length <= 4);
+    assert.deepEqual(c.slice(0, 2).map((x) => x.label), ["Why can't you trade?", "Why CASHCAT?"]);
+    assert.ok(chatChips(base).length >= 2);
+  });
+
+  it("an agent that is trading is not asked why it can't", () => {
+    const c = chatChips({ ...base, latestSymbol: "TSLA" });
+    assert.ok(!c.some((x) => x.label === "Why can't you trade?"));
+  });
+
+  it("AMOUNT CHIPS ANSWER 'HOW MUCH', clamped to the smaller of the sealed cap and the chat ceiling", () => {
+    const c = chatChips({ ...base, lastAgent: "Happy to. How much should I put into CASHCAT?", perTrade: 10, ceiling: 25 });
+    assert.deepEqual(c.map((x) => x.label), ["$5.00", "$10.00 (max)"]);
+    for (const chip of c) assert.ok(Number(chip.message.replace(/[^0-9.]/g, "")) <= 10);
+    const d = chatChips({ ...base, lastAgent: "How much?", perTrade: 100, ceiling: 25 });
+    assert.deepEqual(d.map((x) => x.label), ["$5.00", "$10.00", "$25.00 (max)"]);
+  });
+
+  it("A CEILING OF ZERO IS NO CHAT CEILING, and the sealed cap still clamps", () => {
+    assert.equal(amountCeiling(40, 0), 40);
+    assert.equal(amountCeiling(40, 25), 25);
+    assert.equal(amountCeiling(3, 25), 3);
+  });
+
+  it("WITH EITHER LIMIT UNREAD THERE IS NO AMOUNT TO SUGGEST", () => {
+    assert.equal(amountCeiling(null, 25), null);
+    assert.equal(amountCeiling(10, null), null);
+    assert.equal(amountCeiling(0, 25), null);
+    const c = chatChips({ ...base, lastAgent: "How much?", perTrade: null });
+    assert.ok(!c.some((x) => x.label.startsWith("$")), "no size is offered that nobody read");
+    assert.ok(c.length >= 2);
+  });
+
+  it("a tiny cap still yields two chips, and the only amount is the cap", () => {
+    const c = chatChips({ ...base, lastAgent: "How much?", perTrade: 3, ceiling: 25 });
+    assert.equal(c[0]!.label, "$3.00 (max)");
+    assert.ok(c.length >= 2);
+  });
+});
+
+describe("failures, in the agent's voice", () => {
+  it("NEVER THE RAW ERROR TEXT, and each says what to do", () => {
+    for (const kind of ["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off"] as const) {
+      const line = failureLine(kind);
+      assert.match(line, /^(I|My)\b/, `${kind} is said as the agent, in the first person`);
+      assert.doesNotMatch(line, /DOMException|TypeError|Failed to fetch|undefined/);
+    }
+    assert.match(failureLine("no-llm"), /Settings/);
+    assert.match(failureLine("signed-out"), /[Ss]ign in/);
+  });
+
+  it("the provider's own words ride along when there are some", () => {
+    assert.match(failureLine("llm-error", "groq 429 — rate limited"), /groq 429 — rate limited/);
+  });
+});
+
+describe("refocusing the composer", () => {
+  it("ONLY WITH A FINE POINTER — a phone keyboard must not reopen over the answer", () => {
+    const win = (fine: boolean) => ({ matchMedia: (q: string) => ({ matches: q === "(pointer: fine)" && fine }) });
+    assert.equal(refocusAfterSend(win(true)), true);
+    assert.equal(refocusAfterSend(win(false)), false);
+    assert.equal(refocusAfterSend({}), false, "a browser that cannot say is not assumed to have a mouse");
+  });
+});
