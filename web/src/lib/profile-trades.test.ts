@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
-import { readProfileTrades } from "./profile-trades";
+import { readProfileTrades, readRoundTrips, readTopTrades } from "./profile-trades";
+import { averageHoldSec } from "./hold-time";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 
 test("profile history reads fills beyond the social window, keeps repeats, and respects book privacy", async () => {
@@ -102,4 +103,152 @@ test("a missing trades table reports unavailable rather than an empty history", 
   const raw = new DatabaseSync(":memory:");
   try { assert.equal((await readProfileTrades(wrapSqlite(raw), "a", 1, false)).read, false); }
   finally { raw.close(); }
+});
+
+/**
+ * The production columns a top-trades read touches, on a real sqlite ledger.
+ * Every row is a sell unless it says otherwise.
+ */
+async function sellsLedger() {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  await db.exec(`CREATE TABLE decisions(id TEXT, agent_id TEXT, action TEXT, symbol TEXT, display_name TEXT);
+    CREATE TABLE trades(id INTEGER, decision_id TEXT, agent_id TEXT, epoch INTEGER, kind TEXT, fill_side TEXT, status TEXT,
+      created_at INTEGER, amount_usdg REAL, user_op_hash TEXT, fill_symbol TEXT, buy_token TEXT, sell_token TEXT,
+      realized_pnl_usdg REAL, fill_cash_usdg REAL, basis_source TEXT, fill_qty_raw TEXT);`);
+  return { raw, db };
+}
+const sellRow = (id: number, pnl: number | null, cash: number | null, over: Record<string, unknown> = {}) => ({
+  id, decision_id: null, agent_id: "a", epoch: 1, kind: "swap", fill_side: "sell", status: "landed", created_at: id,
+  amount_usdg: 5, user_op_hash: `0xop${id}`, fill_symbol: `C${id}`, buy_token: null, sell_token: null,
+  realized_pnl_usdg: pnl, fill_cash_usdg: cash, basis_source: "receipt", fill_qty_raw: "1", ...over,
+});
+async function insert(db: ReturnType<typeof wrapSqlite>, rows: Record<string, unknown>[]) {
+  for (const r of rows) {
+    const cols = Object.keys(r);
+    await db.prepare(`INSERT INTO trades (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...(Object.values(r) as never[]));
+  }
+}
+
+test("TOP TRADES are the best evidenced sells by RETURN, not by dollars, and only five", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      // +10 on a cost of 100 = +10%: the biggest dollar win, not the best trade.
+      sellRow(1, 10, 110),
+      // +5 on a cost of 10 = +50%.
+      sellRow(2, 5, 15),
+      sellRow(3, 1, 11), // +10% on 10
+      sellRow(4, 3, 13), // +30%
+      sellRow(5, -2, 8), // -20%
+      sellRow(6, 2, 12), // +20%
+      sellRow(7, 0.5, 10.5), // +5%
+    ]);
+    const { trades, read } = await readTopTrades(db, "a", 1, false, "landed");
+    assert.equal(read, true);
+    // 1 and 3 tie at +10%; the newer one ranks first.
+    assert.deepEqual(trades.map((t) => t.id), ["2", "4", "6", "3", "1"], "ranked by bps, cut at five");
+    assert.deepEqual(trades.map((t) => t.realizedPnlBps), [5000, 3000, 2000, 1000, 1000]);
+    assert.ok(trades.every((t) => t.action === "sell"));
+    assert.ok(trades.every((t) => t.realizedPnlUsdg === null && t.sizeUsdg === null), "a private book shows no dollars");
+    const pub = await readTopTrades(db, "a", 1, true, "landed");
+    assert.equal(pub.trades[0].realizedPnlUsdg, 5, "and a public one does");
+  } finally { raw.close(); }
+});
+
+test("a top trade is EVIDENCED, in this book, after the dedupe", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      sellRow(1, 1, 11), // +10%, the only honest one
+      sellRow(2, 9, 10, { basis_source: "quote" }), // a quote is an estimate
+      sellRow(3, 9, 10, { status: "paper", basis_source: "paper" }), // the other book
+      sellRow(4, 9, 10, { kind: "transfer" }), // not a trade
+      sellRow(5, 9, 10, { agent_id: "b" }), // not this agent
+      sellRow(6, 9, 10, { epoch: 2 }), // not this period
+      sellRow(7, 9, 10, { fill_side: "buy" }), // not a sell
+      sellRow(8, null, 10), // P&L never attributed
+      sellRow(9, 9, 9), // no cost left to divide by
+      sellRow(10, 9, null), // cash leg unread
+      // A redeploy's copy of op 1, stamped later, carrying a wild figure: it
+      // collapses into op 1 and never stands as a trade of its own.
+      sellRow(11, 50, 60, { user_op_hash: "0xOP1", created_at: 999 }),
+    ]);
+    const live = await readTopTrades(db, "a", 1, false, "landed");
+    assert.deepEqual(live.trades.map((t) => t.id), ["1"]);
+    const paper = await readTopTrades(db, "a", 1, false, "paper");
+    assert.deepEqual(paper.trades.map((t) => t.id), ["3"], "a paper agent ranks its paper sells");
+    assert.equal(paper.trades[0].paper, true);
+  } finally { raw.close(); }
+});
+
+test("the ranking sees only what the page will print, so estimates cannot crowd a real trade out of the five", async () => {
+  // Filtering after the LIMIT would rank five quoted or mis-sided rows first,
+  // drop them all, and publish "No closed trades yet" over a real +10%.
+  const { raw, db } = await sellsLedger();
+  try {
+    const crowd = [1, 2, 3, 4, 5].map((i) => sellRow(i, 9, 10, { basis_source: "quote" }));
+    const buys = [6, 7, 8, 9, 10].map((i) => sellRow(i, 9, 10, { fill_side: "buy" }));
+    await insert(db, [...crowd, ...buys, sellRow(11, 1, 11)]);
+    assert.deepEqual((await readTopTrades(db, "a", 1, false, "landed")).trades.map((t) => t.id), ["11"]);
+  } finally { raw.close(); }
+});
+
+test("no closed trades is an empty list that was READ; a broken ledger is not", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    assert.deepEqual(await readTopTrades(db, "a", 1, false, "landed"), { trades: [], read: true });
+  } finally { raw.close(); }
+  const bare = new DatabaseSync(":memory:");
+  try { assert.equal((await readTopTrades(wrapSqlite(bare), "a", 1, false, "landed")).read, false); }
+  finally { bare.close(); }
+});
+
+test("round trips read every fill of the book, oldest first, keyed by coin", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      sellRow(1, null, null, { fill_side: "buy", fill_symbol: "CASH", fill_qty_raw: "10", created_at: 100 }),
+      sellRow(2, 1, 6, { fill_symbol: "CASH", fill_qty_raw: "10", created_at: 400 }),
+      // A stock fill that predates fill_side and fill_symbol: the executed pair names it.
+      sellRow(3, null, null, { fill_side: null, fill_symbol: null, buy_token: STOCK_TOKENS[0].address, fill_qty_raw: "2", created_at: 500 }),
+      sellRow(4, null, null, { status: "paper", basis_source: "paper", created_at: 50 }), // the other book
+      sellRow(5, null, null, { status: "rejected", created_at: 60 }), // filled nothing
+      // A redeploy's copy of op 2: collapses into it rather than reading as a fill with no quantity.
+      sellRow(6, null, null, { user_op_hash: "0xOP2", fill_side: null, fill_symbol: null, fill_qty_raw: null, basis_source: null, created_at: 999 }),
+    ]);
+    const r = await readRoundTrips(db, "a", 1, "landed");
+    assert.ok(r);
+    assert.equal(r.truncated, false);
+    assert.deepEqual(r.fills.map((f) => [f.side, f.coin, f.qty, f.at]), [
+      ["buy", "CASH", 10n, 100],
+      ["sell", "CASH", 10n, 400],
+      ["buy", STOCK_TOKENS[0].symbol, 2n, 500],
+    ]);
+    assert.equal(averageHoldSec(r.fills), 300);
+    // A cap the read reaches says so: the count becomes a floor, and the hold —
+    // which needs the earliest buys — is not computed from a partial tape.
+    const capped = await readRoundTrips(db, "a", 1, "landed", 2);
+    assert.equal(capped?.truncated, true);
+    assert.equal(capped?.fills.length, 2);
+  } finally { raw.close(); }
+  const bare = new DatabaseSync(":memory:");
+  try { assert.equal(await readRoundTrips(wrapSqlite(bare), "a", 1, "landed"), null, "unread is null, never an empty history"); }
+  finally { bare.close(); }
+});
+
+test("a fill whose quantity or coin was not recorded is carried as unread", async () => {
+  const { raw, db } = await sellsLedger();
+  try {
+    await insert(db, [
+      sellRow(1, null, null, { fill_side: "buy", fill_symbol: "CASH", fill_qty_raw: "10", created_at: 100 }),
+      sellRow(2, 1, 6, { fill_symbol: "CASH", fill_qty_raw: null, created_at: 400 }),
+      sellRow(3, null, null, { fill_side: "buy", fill_symbol: null, fill_qty_raw: "3", created_at: 500 }),
+      // Neither the fill, its decision nor the executed pair says which way it went.
+      sellRow(4, null, null, { fill_side: null, fill_symbol: "CASH", fill_qty_raw: "4", created_at: 600 }),
+    ]);
+    const r = await readRoundTrips(db, "a", 1, "landed");
+    assert.deepEqual(r?.fills.map((f) => [f.side, f.coin, f.qty]), [["buy", "CASH", 10n], ["sell", "CASH", null], ["buy", null, 3n], [null, "CASH", 4n]]);
+    assert.equal(averageHoldSec(r!.fills), null);
+  } finally { raw.close(); }
 });
