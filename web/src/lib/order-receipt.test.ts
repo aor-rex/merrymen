@@ -194,6 +194,6 @@ describe("GET /api/orders?id= hands the receipt back — self-hosted", () => {
   it("an older worker's result, with no receipt, still answers with its line", () => {
     const reply = selfHostedOrderReply("x", { state: "done", result: { ok: false, line: "refused: daily cap", at: T } }, T);
     assert.equal((reply as { result: string }).result, "refused: daily cap");
-    assert.equal(JSON.stringify(reply).includes("receipt"), false, "nothing about a receipt reaches the wire");
+    assert.equal("receipt" in reply, false, "nothing about a receipt reaches the wire");
   });
 });

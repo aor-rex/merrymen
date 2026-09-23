@@ -535,8 +535,25 @@ export interface FileState {
  * already filled. A file still in the queue carries its own deadline, read in
  * the same read that found it queued.
  */
-export function selfHostedOrderReply(id: string, st: FileState | null, nowMs: number) {
-  if (!st) return { state: "none" as const };
+/**
+ * GET's self-hosted body. The "none" arm names the other arm's fields as
+ * absent so a caller can read them off either; `receipt` is present only when
+ * the worker wrote one.
+ */
+export type SelfHostedReply =
+  | { state: "none"; id?: undefined; result?: undefined; ok?: undefined; at?: undefined; expiresAt?: undefined; receipt?: undefined }
+  | {
+      id: string;
+      state: OrderState;
+      result: string | null;
+      ok: boolean | null;
+      at: number | null;
+      expiresAt: number | null;
+      receipt?: OrderReceipt;
+    };
+
+export function selfHostedOrderReply(id: string, st: FileState | null, nowMs: number): SelfHostedReply {
+  if (!st) return { state: "none" };
   const expiresAt = st.state === "queued" ? (st.expiresAt ?? null) : null;
   const receipt = receiptOf(st.result?.receipt);
   return {
@@ -546,8 +563,8 @@ export function selfHostedOrderReply(id: string, st: FileState | null, nowMs: nu
     ok: st.result?.ok ?? null,
     at: st.result?.at ?? null,
     expiresAt,
-    // Undefined, not absent, so the reply keeps one inferred shape; JSON drops
-    // it, and an older worker's answer reaches the card with no receipt at all.
-    receipt: receipt ?? undefined,
+    // Only when one was written: an older worker's answer carries none, and
+    // the card renders its line exactly as before.
+    ...(receipt ? { receipt } : {}),
   };
 }
