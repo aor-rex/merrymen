@@ -143,14 +143,18 @@ export function startRefreshLoop(opts: {
   let failuresInARow = 0;
   let lastOkAt: number | null = null;
   let lastStartAt: number | null = null;
+  let lastSilent = false;
   let handle: unknown = null;
+  /** When the booked pass fires; null while none is booked. */
+  let bookedAt: number | null = null;
   let inFlight = false;
   let stopped = false;
 
   const book = (ms: number) => {
     if (handle !== null) t.clearTimeout(handle);
     handle = t.setTimeout(tick, ms);
-    return t.now() + ms;
+    bookedAt = t.now() + ms;
+    return bookedAt;
   };
 
   const run = async () => {
@@ -159,6 +163,7 @@ export function startRefreshLoop(opts: {
     lastStartAt = t.now();
     if (handle !== null) t.clearTimeout(handle);
     handle = null;
+    bookedAt = null;
     opts.onFlight?.(true);
     let ok: boolean;
     let silent = false;
@@ -173,12 +178,14 @@ export function startRefreshLoop(opts: {
     opts.onFlight?.(false);
     failuresInARow = ok ? 0 : failuresInARow + 1;
     if (ok) lastOkAt = t.now();
+    lastSilent = silent;
     const nextAt = book(nextReadIn(failuresInARow, every()));
     opts.report({ failuresInARow, nextAt, lastOkAt, silent });
   };
 
   function tick() {
     handle = null;
+    bookedAt = null;
     if (stopped) return;
     if (opts.paused?.()) {
       // No request from a hidden tab — but the loop must not die of it, or a
@@ -199,10 +206,27 @@ export function startRefreshLoop(opts: {
      * read that was due while nobody looked runs the moment somebody does —
      * but one that ran seconds ago is not asked again just because the tab was
      * switched, which from six clocks at once would be a burst per glance.
+     *
+     * AND A PASS NOT YET DUE IS BROUGHT FORWARD TO WHEN IT IS. The feed's
+     * clock books a minute ahead while the tab is hidden; without this, a tab
+     * that came back seconds after a hidden pass kept that minute, and the
+     * feed a person was now watching refreshed once a minute instead of every
+     * ten seconds until it ran out.
      */
     wake: () => {
       if (inFlight || stopped) return;
-      if (lastStartAt === null || t.now() - lastStartAt >= nextReadIn(failuresInARow, every())) void run();
+      const wait = nextReadIn(failuresInARow, every());
+      if (lastStartAt === null || t.now() - lastStartAt >= wait) {
+        void run();
+        return;
+      }
+      const dueAt = lastStartAt + wait;
+      if (bookedAt === null || bookedAt > dueAt) {
+        const nextAt = book(dueAt - t.now());
+        // A failing clock's countdown is on the outage line, so it must move
+        // with the booking; a healthy one's is nobody's business.
+        if (failuresInARow > 0) opts.report({ failuresInARow, nextAt, lastOkAt, silent: lastSilent });
+      }
     },
     stop: () => {
       stopped = true;
@@ -222,6 +246,11 @@ export interface ClockSpec {
   /** Resolves true when its read came back readable; false or a throw fails. */
   pass: () => Promise<boolean>;
   paused?: () => boolean;
+  /**
+   * False for a read the outage line does not speak for — see bannerOf.
+   * Defaults to true.
+   */
+  outageLine?: boolean;
 }
 
 /** One clock as the shell sees it. `state` is null until its first pass ends. */
@@ -230,6 +259,8 @@ export interface ClockView {
   half: Half;
   state: LoopState | null;
   inFlight: boolean;
+  /** As on the spec; absent means on the line. */
+  outageLine?: boolean;
 }
 
 /**
@@ -248,7 +279,7 @@ export function startClocks(
   timers?: LoopTimers,
 ): { retryNow(key?: string): void; wake(): void; stop(): void } {
   const views = new Map<string, ClockView>();
-  for (const s of specs) views.set(s.key, { key: s.key, half: s.half, state: null, inFlight: false });
+  for (const s of specs) views.set(s.key, { key: s.key, half: s.half, state: null, inFlight: false, outageLine: s.outageLine !== false });
   let stopped = false;
   const changed = (key: string, patch: Partial<ClockView>) => {
     if (stopped) return;
@@ -322,9 +353,17 @@ export interface Banner {
  *   - "Can't reach merrymen" needs EVERY clock that has reported to be failing
  *     with nothing answering, in both halves. One read answering — even with
  *     an error — means merrymen is there.
+ *
+ * A CLOCK OFF THE LINE (`outageLine: false`) has no say in any of it. That is
+ * the owner's book: a signed-out visitor reads it as unreadable by design, so
+ * its failures are not an outage, and its successes are not counted as
+ * evidence that the reads that ARE failing were answered. It says what it
+ * could not read on its own surface (portfolioReadOf).
  */
 export function bannerOf(views: readonly ClockView[]): Banner | null {
-  const reported = views.filter((v): v is ClockView & { state: LoopState } => v.state !== null);
+  const reported = views.filter(
+    (v): v is ClockView & { state: LoopState } => v.state !== null && v.outageLine !== false,
+  );
   const failing = reported.filter((v) => v.state.failuresInARow > 0);
   if (failing.length === 0) return null;
   const read = failing.map((v) => v.state.lastOkAt).filter((t): t is number => t !== null);

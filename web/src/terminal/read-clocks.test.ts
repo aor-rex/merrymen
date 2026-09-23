@@ -123,6 +123,31 @@ describe("a read's own schedule", () => {
     loop.stop();
   });
 
+  it("a clock slowed while hidden speeds back up when the tab returns, even when no pass is due yet", async () => {
+    const clock = fakeClock();
+    let hidden = true;
+    let calls = 0;
+    const loop = startRefreshLoop({
+      pass: async () => {
+        calls++;
+        return true;
+      },
+      report: () => {},
+      everyMs: () => (hidden ? 60_000 : 10_000),
+      timers: clock.timers,
+    });
+    await settle();
+    assert.equal(calls, 1, "the first pass books the next a hidden minute away");
+    await clock.advance(4_000);
+    hidden = false;
+    loop.wake();
+    await settle();
+    assert.equal(calls, 1, "four seconds after a pass, none is due");
+    await clock.advance(6_000);
+    assert.equal(calls, 2, "but the next runs ten seconds after the last, not sixty");
+    loop.stop();
+  });
+
   it("says whether a failure was nothing answering, or merrymen answering badly", async () => {
     const reports: LoopState[] = [];
     const results: Array<() => Promise<boolean>> = [
@@ -252,6 +277,16 @@ describe("the one line over every clock", () => {
     assert.equal(healthyBusy.inFlight, false, "the feed's ten-second read is not the retry");
     const retrying = bannerOf([view("account", "account", { failuresInARow: 1, nextAt: 5, lastOkAt: 1 }, true)])!;
     assert.equal(retrying.inFlight, true);
+  });
+
+  it("a read that is not on the line — the owner's book — neither raises it nor vouches that merrymen answered", () => {
+    const book = (state: Partial<LoopState>) => ({ ...view("feed", "account", state), outageLine: false });
+    assert.equal(bannerOf([view("theses", "market", { lastOkAt: 1 }), book({ failuresInARow: 4, nextAt: 5 })]), null);
+    const allSilent = [
+      view("theses", "market", { failuresInARow: 1, silent: true }),
+      view("account", "account", { failuresInARow: 1, silent: true }),
+    ];
+    assert.equal(bannerOf([...allSilent, book({ lastOkAt: 3 })])!.unreachable, true);
   });
 
   it("'Can't reach merrymen' only when every clock, in both halves, heard nothing", () => {
