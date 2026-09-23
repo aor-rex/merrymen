@@ -190,8 +190,12 @@ export function vouchedSells(fills: readonly BasisReplayFill[], complete: boolea
 /** Rows one COIN's replay reads before it stops and vouches for nothing it could not see. */
 export const BASIS_REPLAY_ROWS = 5_000;
 
-/** The same operation key distinct-trades.ts collapses copies on, as a column. */
-const OP_KEY = "COALESCE(LOWER(NULLIF(t.user_op_hash, '')), 'row:' || CAST(t.id AS TEXT))";
+/**
+ * The same operation key distinct-trades.ts collapses copies on, as a column
+ * of a `distinctTrades(…, "t")` read. Exported so the owner's tape can name its
+ * sells the way the replay below does (desk-trades.ts).
+ */
+export const OP_KEY = "COALESCE(LOWER(NULLIF(t.user_op_hash, '')), 'row:' || CAST(t.id AS TEXT))";
 
 /** What one book's replay of some coins found. */
 interface BasisReplay {
@@ -203,6 +207,8 @@ interface BasisReplay {
    * were estimated, and a reader must not print it as either.
    */
   cut: Set<string>;
+  /** Each replayed sell's OWN basis_source, by op — how its proceeds were read. */
+  sellSource: Map<string, string | null>;
 }
 
 /**
@@ -224,7 +230,7 @@ interface BasisReplay {
  * THROWS when the fills cannot be read; each caller says what that means.
  */
 async function replayBasis(db: Db, account: string, book: TradeBook, tokens: readonly string[]): Promise<BasisReplay> {
-  const out: BasisReplay = { vouched: new Set(), cut: new Set() };
+  const out: BasisReplay = { vouched: new Set(), cut: new Set(), sellSource: new Map() };
   const want = [...new Set(tokens.map((t) => t.toLowerCase()).filter((t) => t !== ""))];
   if (want.length === 0) return out;
   const marks = want.map(() => "?").join(", ");
@@ -258,6 +264,7 @@ async function replayBasis(db: Db, account: string, book: TradeBook, tokens: rea
     const source = typeof r.basis_source === "string" ? r.basis_source : null;
     // No side: the coin moved and the row cannot say which way or how much.
     const qty = side === null || r.fill_qty_raw === null || r.fill_qty_raw === undefined ? null : String(r.fill_qty_raw);
+    if (side === "sell") out.sellSource.set(op, source);
     const fills = byCoin.get(coin) ?? [];
     byCoin.set(coin, fills);
     fills.push({ op, side, token: coin, qty, source });
@@ -268,6 +275,30 @@ async function replayBasis(db: Db, account: string, book: TradeBook, tokens: rea
     for (const op of vouchedSells(fills, complete)) out.vouched.add(op);
   }
   return out;
+}
+
+/**
+ * THE SELLS WHOSE REALIZED P&L IS A MEASUREMENT, of those asked about.
+ *
+ * Both halves of a realized figure have to have been read: the proceeds (the
+ * sell's own basis_source is the book's evidence — a receipt, or a paper fill)
+ * and the cost it was measured against (vouchedSells: no estimate in the basis
+ * it sold against, replayed whole). The owner's desk prints realized dollars on
+ * every filled sell, so it asks this first (desk-trades.ts) — the same rule the
+ * profile ranks and lists by, applied where the owner reads the same sell.
+ *
+ * THROWS when the fills cannot be replayed; the caller then vouches for none.
+ */
+export async function readEvidencedSells(
+  db: Db,
+  account: string,
+  book: TradeBook,
+  sells: readonly { op: string; token: string }[],
+): Promise<Set<string>> {
+  if (sells.length === 0) return new Set();
+  const replay = await replayBasis(db, account, book, sells.map((s) => s.token));
+  const own = book === "paper" ? "paper" : "receipt";
+  return new Set(sells.filter((s) => replay.vouched.has(s.op) && replay.sellSource.get(s.op) === own).map((s) => s.op));
 }
 
 /** Ranked candidates read per page, and how many pages before the list settles for what it found. */

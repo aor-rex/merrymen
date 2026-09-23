@@ -127,12 +127,16 @@ it("a vault move or a transfer is not a swap of an unlabelled token, and is not 
   assert.match(table.textContent!, /\$50\.00/, "the owner still sees how much moved");
 });
 
-it("the desk names the coin and prints the owner's realized dollars on a sell", async () => {
+it("the desk names the coin and prints the owner's realized dollars on a sell whose cost was checked", async () => {
   // D3: the owner's tape already reads the coin's name and the fill's realized
-  // P&L; mineOf carries them onto each move.
+  // P&L; mineOf carries them onto each move. CP5: the dollars are printed only
+  // when the tape vouches for the cost behind them — an estimate is not shown
+  // as a result.
   await render([
-    { ...move({ at: now() - 60, action: "sell", symbol: "T3139F043B88" }), displayName: "JUGGERNAUT", realizedPnlUsdg: 1.25 } as Thesis,
-    { ...move({ at: now() - 120, action: "sell", symbol: "CASHCAT" }), realizedPnlUsdg: -0.5 } as Thesis,
+    { ...move({ at: now() - 60, action: "sell", symbol: "T3139F043B88" }), displayName: "JUGGERNAUT", realizedPnlUsdg: 1.25, realizedVouched: true } as Thesis,
+    { ...move({ at: now() - 120, action: "sell", symbol: "CASHCAT" }), realizedPnlUsdg: -0.5, realizedVouched: true } as Thesis,
+    { ...move({ at: now() - 180, action: "sell", symbol: "CHUMP" }), realizedPnlUsdg: 9, realizedVouched: false } as Thesis,
+    { ...move({ at: now() - 240, action: "sell", symbol: "OLDTAPE" }), realizedPnlUsdg: 4 } as Thesis,
   ]);
   const tab = Array.from(ui.container.querySelectorAll("button")).find((b) => /^Trades · /.test(b.textContent ?? ""))!;
   await act(async () => { tab.click(); });
@@ -141,6 +145,10 @@ it("the desk names the coin and prints the owner's realized dollars on a sell", 
   assert.equal(rows[0]!.querySelector(".swap-pnl")?.textContent, "+$1.25");
   assert.equal(rows[1]!.querySelector(".swap-pnl")?.textContent, "−$0.50");
   assert.equal(rows[1]!.querySelector(".swap-pnl")?.className, "swap-pnl down");
+  // Compared as text: a failed assert on a DOM node inspects the whole window.
+  assert.equal(rows[2]!.querySelector(".swap-pnl")?.textContent ?? null, null, "a sell on an estimated cost prints no dollars");
+  assert.equal(rows[3]!.querySelector(".swap-pnl")?.textContent ?? null, null, "nor one the tape did not vouch for");
+  assert.doesNotMatch(rows[2]!.textContent! + rows[3]!.textContent!, /\+\$(9|4)\.00/);
 });
 
 it("an empty tape says so", async () => {

@@ -105,8 +105,11 @@ export function swapRowsOfProfile(trades: readonly ProfileTrade[]): SwapRow[] {
  * them from the columns desk-trades.ts already selects. Optional, because a
  * feed from before them sends none — and absent is then "not read", never a
  * zero or an empty name.
+ *
+ * `realizedVouched` is desk-trades.ts `realized_vouched`: the realized figure
+ * rests on proceeds and a cost that were both read. Absent is not a vouch.
  */
-type DeskMove = Thesis & { displayName?: string | null; realizedPnlUsdg?: number | null; txHash?: string | null };
+type DeskMove = Thesis & { displayName?: string | null; realizedPnlUsdg?: number | null; realizedVouched?: boolean; txHash?: string | null };
 
 /**
  * From the owner's own tape (live.ts `mine.moves`, from /api/feed).
@@ -115,6 +118,13 @@ type DeskMove = Thesis & { displayName?: string | null; realizedPnlUsdg?: number
  * carries them. Not a percentage: the tape holds no cost, and the order's size
  * is what was asked for rather than what the fill cost, so a % made from it
  * would be invented — the chip shows the dollars alone (see pnlChip).
+ *
+ * AND THE DOLLARS ONLY WHEN THE TAPE VOUCHES FOR THEM. The worker books a
+ * realized figure on a sell whose proceeds came from the quote, and on one
+ * whose cost a quoted buy built; the profile refuses a return on either
+ * (profile-trades.ts), and a chip printing it here would present the same
+ * estimate to the owner as a result. So a sell's dollars travel only beside the
+ * tape's own `realizedVouched: true` — withheld, not guessed, when it is absent.
  */
 export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
   return moves.map((raw, i) => {
@@ -139,8 +149,9 @@ export function swapRowsOfDesk(moves: readonly Thesis[]): SwapRow[] {
       sizeUsdg: m.sizeUsdg,
       realizedBps: null,
       // A sell that filled is the only row that realized anything; a buy's
-      // stored zero is "nothing to realize", not a result.
-      realizedUsd: side === "sell" && status === "filled" ? realized : null,
+      // stored zero is "nothing to realize", not a result. And only a figure
+      // the tape vouches for is one.
+      realizedUsd: side === "sell" && status === "filled" && m.realizedVouched === true ? realized : null,
       reason: status === "refused" || status === "reverted" ? m.outcomeText ?? null : null,
       why: m.reason ?? null,
     };
