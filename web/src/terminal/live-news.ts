@@ -76,7 +76,7 @@ export function useSoundPref(
   // gesture, so the first click or key press on the page starts it.
   useEffect(() => {
     if (!on) return;
-    const unlock = () => unlockAudio();
+    const unlock = () => void unlockAudio();
     document.addEventListener("pointerdown", unlock, { once: true });
     document.addEventListener("keydown", unlock, { once: true });
     return () => {
@@ -88,10 +88,9 @@ export function useSoundPref(
     const next = !on;
     writeSoundOn(next, () => source.current());
     setOn(next);
-    if (next) {
-      unlockAudio();
-      playChime("buy");
-    }
+    // The click resumes the context; the tone waits until it is running,
+    // which from a click is a moment, and plays nothing if it never is.
+    if (next) void unlockAudio().then((running) => running && playChime("buy"));
   };
   return [on, toggle];
 }

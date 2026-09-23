@@ -8,8 +8,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { blip, chimeSide, readSoundOn, writeSoundOn, SOUND_KEY } from "./chime";
+import {
+  blip,
+  chimeSide,
+  forgetAudioForTest,
+  playChime,
+  readSoundOn,
+  unlockAudio,
+  writeSoundOn,
+  SOUND_KEY,
+} from "./chime";
+import { act, createElement } from "react";
+
 import type { Thesis } from "./live";
+import { useSoundPref } from "./live-news";
+import { testDom } from "./test-dom";
 
 function memoryStorage(): Storage {
   const m = new Map<string, string>();
@@ -86,6 +99,131 @@ function fakeAudio() {
   };
   return { ctx: ctx as unknown as AudioContext, log };
 }
+
+/**
+ * A browser's AudioContext, as far as the chime uses it: made suspended, and
+ * running only once `resume()` settles — which a browser allows from a click or
+ * a key press and nothing else. Every oscillator it is asked for is recorded.
+ */
+function fakeBrowserAudio() {
+  const made: FakeContext[] = [];
+  class FakeContext {
+    state: "suspended" | "running" = "suspended";
+    currentTime = 0;
+    destination = {};
+    oscillators = 0;
+    private wake: Array<() => void> = [];
+    constructor() {
+      made.push(this);
+    }
+    resume() {
+      return new Promise<void>((r) => this.wake.push(r));
+    }
+    /** The browser honouring the resume: the page's gesture reached it. */
+    allow() {
+      this.state = "running";
+      for (const r of this.wake.splice(0)) r();
+    }
+    createOscillator() {
+      this.oscillators++;
+      const param = { setValueAtTime() {}, exponentialRampToValueAtTime() {} };
+      return { type: "", frequency: param, connect() {}, start() {}, stop() {} };
+    }
+    createGain() {
+      return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} };
+    }
+  }
+  const g = globalThis as { AudioContext?: unknown };
+  const before = g.AudioContext;
+  g.AudioContext = FakeContext;
+  forgetAudioForTest();
+  return {
+    made,
+    restore() {
+      forgetAudioForTest();
+      if (before === undefined) delete g.AudioContext;
+      else g.AudioContext = before;
+    },
+  };
+}
+const tick = () => new Promise<void>((r) => setImmediate(r));
+
+describe("a tone plays when the trade lands, or not at all", () => {
+  it("a fill before the reader's first click makes no context and schedules nothing", () => {
+    const audio = fakeBrowserAudio();
+    try {
+      const played = playChime("buy");
+      assert.equal(audio.made.length, 0, "only a gesture makes the context");
+      assert.equal(played, false);
+    } finally {
+      audio.restore();
+    }
+  });
+
+  it("A FILL WHILE THE CONTEXT IS STILL SUSPENDED IS SILENT — scheduled, it would play late, at the next click", async () => {
+    // A suspended context's clock is frozen: a blip scheduled on it is queued
+    // and renders the moment the context resumes, so a trade from minutes ago
+    // sounded as if it had just landed, several at once.
+    const audio = fakeBrowserAudio();
+    try {
+      void unlockAudio();
+      const ctx = audio.made[0]!;
+      assert.equal(ctx.state, "suspended");
+      const played = playChime("sell");
+      assert.equal(ctx.oscillators, 0, "nothing queued behind the suspension");
+      assert.equal(played, false);
+      ctx.allow();
+      await tick();
+      assert.equal(ctx.oscillators, 0, "and nothing plays when it resumes");
+      assert.equal(playChime("buy"), true, "the next fill, once it is running, sounds");
+      assert.equal(ctx.oscillators, 1);
+    } finally {
+      audio.restore();
+    }
+  });
+
+  it("the switch's own click plays its tone once the context is running — not before", async () => {
+    const audio = fakeBrowserAudio();
+    try {
+      let running = false;
+      const unlocked = unlockAudio().then((r) => (running = r));
+      assert.equal(running, false);
+      audio.made[0]!.allow();
+      await unlocked;
+      assert.equal(running, true);
+      assert.equal(audio.made.length, 1, "one context, reused");
+      void unlockAudio();
+      assert.equal(audio.made.length, 1);
+    } finally {
+      audio.restore();
+    }
+  });
+
+  it("turning the sound on sounds once, when the click has started the context", async () => {
+    const audio = fakeBrowserAudio();
+    const t = testDom();
+    let toggle: () => void = () => {};
+    function Sound() {
+      const [, flip] = useSoundPref(() => null);
+      toggle = flip;
+      return null;
+    }
+    try {
+      await t.render(createElement(Sound));
+      await act(async () => toggle());
+      const ctx = audio.made[0]!;
+      assert.equal(ctx.oscillators, 0, "not onto a context that is still starting");
+      await act(async () => {
+        ctx.allow();
+        await tick();
+      });
+      assert.equal(ctx.oscillators, 1, "the reader hears what they chose");
+    } finally {
+      await t.close();
+      audio.restore();
+    }
+  });
+});
 
 describe("the blip", () => {
   it("is short, and ends in silence", () => {

@@ -68,34 +68,58 @@ export function chimeSide(news: readonly Thesis[]): "buy" | "sell" | null {
 
 let context: AudioContext | null = null;
 
-function audio(): AudioContext | null {
-  if (context) return context;
-  const Ctor =
-    (globalThis as { AudioContext?: typeof AudioContext }).AudioContext ??
-    (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!Ctor) return null;
-  try {
-    context = new Ctor();
-  } catch {
-    return null;
+/** For a test that installs its own AudioContext: forget the one already made. */
+export function forgetAudioForTest(): void {
+  context = null;
+}
+
+/**
+ * THE ONLY PLACE A CONTEXT IS MADE, and only from a click or a key press — the
+ * one moment a browser lets audio start. Resolves true once it is running.
+ *
+ * A context made anywhere else starts suspended, and its clock stands still
+ * until a gesture resumes it; see playChime for what that did to the tone.
+ */
+export function unlockAudio(): Promise<boolean> {
+  if (!context) {
+    const Ctor =
+      (globalThis as { AudioContext?: typeof AudioContext }).AudioContext ??
+      (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return Promise.resolve(false);
+    try {
+      context = new Ctor();
+    } catch {
+      return Promise.resolve(false);
+    }
   }
-  return context;
-}
-
-/** From a click or a key press — the only moment a browser lets audio start. */
-export function unlockAudio(): void {
-  const ctx = audio();
-  if (ctx && ctx.state === "suspended") void ctx.resume().catch(() => {});
-}
-
-/** Play the tone for `side`, if the browser will let us; never throws. */
-export function playChime(side: "buy" | "sell"): void {
-  const ctx = audio();
-  if (!ctx) return;
+  const ctx = context;
+  const running = () => (ctx.state as string) === "running";
+  if (running()) return Promise.resolve(true);
   try {
-    if (ctx.state === "suspended") void ctx.resume().catch(() => {});
+    return ctx.resume().then(running, () => false);
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+/**
+ * Play the tone for `side` NOW, or not at all; never throws. True when it played.
+ *
+ * NOTHING IS SCHEDULED ON A CONTEXT THAT IS NOT RUNNING. A suspended context’s
+ * clock is frozen at the moment it stopped, so a blip scheduled on it waited
+ * there and played the moment the reader next clicked — minutes after the
+ * trade, as if one had just landed, and on top of every other one queued behind
+ * it. After a reload with the sound on, a fill before the first click is
+ * therefore silent; the tab title still counts it.
+ */
+export function playChime(side: "buy" | "sell"): boolean {
+  const ctx = context;
+  if (!ctx || (ctx.state as string) !== "running") return false;
+  try {
     blip(ctx, side);
+    return true;
   } catch {
     /* A tone is a nicety; a page that stopped over one would not be. */
+    return false;
   }
 }
