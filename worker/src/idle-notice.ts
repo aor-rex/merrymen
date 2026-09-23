@@ -25,6 +25,7 @@
 import type { AssetMode } from "../../packages/core/src/index";
 import { addDecision, addEvent, newDecisionId, ownerNotice } from "./store";
 import { publishesIdle, renderWhy, type Why } from "./strategies/reasons";
+import type { Snapshot } from "./strategies/types";
 import { publicationSourceFor } from "./thesis-policy";
 
 /**
@@ -150,6 +151,99 @@ export interface ShownNotice {
  */
 export const RESTATE_AFTER_MS = 10 * 60_000;
 
+const EARLIER = ". Also from earlier: ";
+
+/**
+ * A LINE WRITTEN OVER ANOTHER WARN KEEPS IT.
+ *
+ * The notice is one line — the newest warn — and the channel writes warns over
+ * other lines on purpose: the breaker restated once something replaced it, the
+ * line that takes the breaker down, the breaker again after a tick that could
+ * not measure it. The warn they cover may still be standing, and the channels
+ * that write warns once per change (the live rail's blocker, a per-key refusal,
+ * a Trencher notice) never say theirs again while it holds. Covered, it was
+ * gone for the rest of the trip: a sell refused under the key, replaced after
+ * ten minutes by a sentence ending "Selling is never blocked by this". So the
+ * covered line rides after ours, and the owner still reads it for as long as
+ * the desk would have shown it.
+ */
+export function withEarlier(head: string, earlier: string | null): string {
+  return earlier ? `${head}${EARLIER}${earlier}` : head;
+}
+
+/**
+ * THE LINE THAT TAKES THE BREAKER DOWN.
+ *
+ * The breaker's sentence is a warn, and the notice is the newest warn — so the
+ * sentence that said "the breaker refuses buys until it recovers" stood after
+ * it had recovered, until forty newer events pushed it out, and for an agent
+ * that writes little after a reset, for good. With the restatement keeping it
+ * current right up to the reset, every long trip ended with the false line on
+ * top. So the reset is said, at the level the notice reads.
+ *
+ * NO FIGURE: a breaker also clears when a re-sign widens the limit, and "back
+ * inside the 10% limit" would then be the old limit. And "buying resumes" only
+ * when nothing else is the reason now — with a reason standing (the cash is
+ * short, the feeds are stale), the breaker is no longer what stops buying, and
+ * that reason is told as it always is.
+ */
+export function breakerResetLine(next: string | null): string {
+  return (
+    `the drawdown breaker has reset — the book is back inside the drawdown limit in the signed key, ` +
+    (next === null ? `and buying resumes` : `so it no longer stops buying`)
+  );
+}
+
+/**
+ * The breaker's owner sentence either side of its figure, read off renderWhy
+ * itself (two limits whose figures share no first or last character), so a
+ * line is recognised whatever limit it was written under. Read on first use,
+ * not at load, so no import order can matter.
+ */
+let breakerWordsRead: { head: string; tail: string } | null = null;
+function breakerWords(): { head: string; tail: string } {
+  if (breakerWordsRead) return breakerWordsRead;
+  const a = renderWhy({ code: "breaker-tripped", limitBps: 1_000 });
+  const b = renderWhy({ code: "breaker-tripped", limitBps: 2_500 });
+  let head = 0;
+  while (a[head] === b[head]) head++;
+  let tail = 0;
+  while (a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  return (breakerWordsRead = { head: a.slice(0, head), tail: a.slice(a.length - tail) });
+}
+
+/** How long the breaker's sentence is at the start of `line`, or -1 when it does not lead with one. */
+function breakerLead(line: string): number {
+  const { head, tail } = breakerWords();
+  if (!line.startsWith(head)) return -1;
+  const at = line.indexOf(tail, head.length);
+  return at > 0 && /^[0-9.]{1,8}$/.test(line.slice(head.length, at)) ? at + tail.length : -1;
+}
+
+/**
+ * IS THIS LINE ONE THE CHANNEL WROTE — the breaker, or its reset, alone or
+ * carrying another warn — and if so, what does it carry?
+ *
+ * Read from the words, not remembered: a worker restarted mid-trip starts with
+ * no memory, and the line an earlier process left on the desk must still be
+ * known as ours — or the first breaker line after the restart would carry the
+ * old one after it, the same sentence twice.
+ */
+function ownLine(line: string): { head: string; earlier: string | null } | null {
+  let lead = breakerLead(line);
+  for (const reset of [breakerResetLine(null), breakerResetLine("")]) if (lead < 0 && line.startsWith(reset)) lead = reset.length;
+  if (lead < 0) return null;
+  const head = line.slice(0, lead);
+  const rest = line.slice(lead);
+  if (rest === "") return { head, earlier: null };
+  return rest.startsWith(EARLIER) ? { head, earlier: rest.slice(EARLIER.length) } : null;
+}
+
+/** MEASURED clear — a book that could not be totalled is not a recovery. */
+function breakerClear(drawdown: Snapshot["drawdown"]): boolean {
+  return !!drawdown && Number.isFinite(drawdown.bps) && Number.isFinite(drawdown.limitBps) && drawdown.bps < drawdown.limitBps;
+}
+
 /** Where the idle channel writes, and what it reads back. idleChannelOnStore binds the store's own. */
 export interface IdleSinks {
   addEvent(agentId: string, level: "ok" | "warn", message: string): Promise<void>;
@@ -178,15 +272,28 @@ export interface IdleSinks {
  * running commentary, and the desk showed nothing while the breaker was still
  * tripped. So while such a reason stands and the notice no longer shows it,
  * it is said again: at once when nothing shows, and otherwise once the notice
- * that replaced it has had RESTATE_AFTER_MS. Still once per change for
- * everything else — a reason that posts is never restated, because its view
- * row would repeat with it.
+ * that replaced it has had RESTATE_AFTER_MS — carrying that notice after it
+ * (withEarlier), never burying it. Still once per change for everything else —
+ * a reason that posts is never restated, because its view row would repeat
+ * with it.
+ *
+ * AND THE BREAKER'S RESET IS SAID. Once the owner has been told the breaker,
+ * the first tick that measures it clear writes breakerResetLine over it, so
+ * the notice never goes on saying buys are refused after they no longer are.
  */
 export class IdleChannel {
   /** The owner sentence standing — `lastIdleReason`, as the tick knew it. */
   private last: string | null = null;
-  /** Whether the standing sentence went out as a warning, the one kind that is restated. */
-  private standingWarn = false;
+  /** The standing sentence, when it went out as a warning — the one kind that is restated. */
+  private standing: string | null = null;
+  /** The agent whose owner was told the breaker, until they are told it reset. */
+  private breakerTold: string | null = null;
+  /**
+   * Whether this process has yet to look for a breaker line an earlier one
+   * left standing. A restart forgets `breakerTold`, and a trip that cleared
+   * across it would otherwise leave "the breaker refuses buys" on the desk.
+   */
+  private leftoverUnchecked = true;
   private readonly restateAfterMs: number;
 
   constructor(
@@ -201,13 +308,44 @@ export class IdleChannel {
     strategyName: string;
     idle: Why | null | undefined;
     modeEmptied: string | null;
+    /**
+     * The breaker as this tick measured it (Snapshot.drawdown). Only a
+     * MEASURED clear is a reset; absent or null — a book that could not be
+     * totalled — says nothing either way.
+     */
+    drawdown?: Snapshot["drawdown"];
   }): Promise<void> {
     const notice = idleNotice({ idle: input.idle, modeEmptied: input.modeEmptied, last: this.last });
     this.last = notice.last;
+    if (notice.last === null) this.standing = null;
+    // THE RESET, before whatever reason follows it: the breaker was told —
+    // by this process, or by one before a restart, whose line still shows —
+    // and this tick measured it clear. Said once; an unread desk defers it to
+    // the next tick that can read one, rather than writing it on a guess.
+    const told = this.breakerTold === input.agentId;
+    if ((told || this.leftoverUnchecked) && input.idle?.code !== "breaker-tripped" && breakerClear(input.drawdown)) {
+      const shown = await this.shown(input.agentId);
+      if (shown !== undefined) {
+        this.breakerTold = null;
+        this.leftoverUnchecked = false;
+        if (told || (shown !== null && breakerLead(shown.message) >= 0)) {
+          await this.writeOver(input.agentId, breakerResetLine(notice.last), shown);
+        }
+      }
+    }
     if (notice.event) {
-      this.standingWarn = notice.event.level === "warn";
-      this.sinks.log?.(`[tick] idle — ${notice.event.message}`);
-      await this.sinks.addEvent(input.agentId, notice.event.level, notice.event.message);
+      const warn = notice.event.level === "warn";
+      this.standing = warn ? notice.event.message : null;
+      if (input.idle?.code === "breaker-tripped") this.breakerTold = input.agentId;
+      if (warn) {
+        // A warning becomes the notice — over whatever shows, and keeping it.
+        // A change is said even when the desk cannot be read: then it is
+        // written alone, as it always was.
+        await this.writeOver(input.agentId, notice.event.message, (await this.shown(input.agentId)) ?? null);
+      } else {
+        this.sinks.log?.(`[tick] idle — ${notice.event.message}`);
+        await this.sinks.addEvent(input.agentId, "ok", notice.event.message);
+      }
       // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
       // `decisions` can become a post, so the silence is also written as a
       // `view` (idleViewRow) — inside the same change gate as the event, or an
@@ -222,28 +360,48 @@ export class IdleChannel {
     }
     // Nothing new to say. A reason that still stands, and went out as a
     // warning, is said again if the owner's notice no longer shows it. (A new
-    // reason always arrives with an event above, which resets standingWarn.)
-    if (notice.last !== null && this.standingWarn && (await this.covered(input.agentId, notice.last))) {
-      this.sinks.log?.(`[tick] idle (restated) — ${notice.last}`);
-      await this.sinks.addEvent(input.agentId, "warn", notice.last);
+    // reason always arrives with an event above, which resets `standing`.)
+    if (this.standing === null) return;
+    const shown = await this.shown(input.agentId);
+    // Unread is not "nothing shows": a write on a guess is how a table fills
+    // with the same line.
+    if (shown === undefined || !this.covered(shown)) return;
+    await this.writeOver(input.agentId, this.standing, shown);
+  }
+
+  /** The owner's notice as it stands; undefined when it could not be read. */
+  private async shown(agentId: string): Promise<ShownNotice | null | undefined> {
+    try {
+      return await this.sinks.shownNotice(agentId);
+    } catch {
+      return undefined;
     }
   }
 
-  /** Is the standing warning no longer what the owner's notice shows — and past its grace? */
-  private async covered(agentId: string, standing: string): Promise<boolean> {
-    let shown: ShownNotice | null | undefined;
-    try {
-      shown = await this.sinks.shownNotice(agentId);
-    } catch {
-      shown = undefined;
-    }
-    // Unread is not "nothing shows": a write on a guess is how a table fills
-    // with the same line.
-    if (shown === undefined) return false;
+  /**
+   * Is the standing sentence no longer the notice — and has whatever replaced
+   * it had its grace? Ours by its words (ownLine), and only when it leads with
+   * the sentence that stands: our own older line — a reset, a lost write away
+   * from a new trip — is not the breaker being shown.
+   */
+  private covered(shown: ShownNotice | null): boolean {
     if (shown === null) return true;
-    if (shown.message === standing) return false;
+    if (ownLine(shown.message)?.head === this.standing) return false;
     const now = this.sinks.now?.() ?? Date.now();
     return now - shown.atMs >= this.restateAfterMs;
+  }
+
+  /**
+   * Write `head` as the notice, over what it shows now, keeping any other
+   * warn that shows on it (withEarlier): the one written over ours, or the one
+   * our own line already carries.
+   */
+  private async writeOver(agentId: string, head: string, shown: ShownNotice | null): Promise<void> {
+    const own = shown === null ? null : ownLine(shown.message);
+    const earlier = shown === null ? null : own ? own.earlier : shown.message;
+    const line = withEarlier(head, earlier);
+    this.sinks.log?.(`[tick] idle — ${line}`);
+    await this.sinks.addEvent(agentId, "warn", line);
   }
 }
 
