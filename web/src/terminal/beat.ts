@@ -539,15 +539,27 @@ export function chorusOf(beats: Beat[], keep: (b: Beat) => boolean = () => false
 }
 
 /**
- * WHAT "ALL" SHOWS: every trade and every view, with each agent's UNCHANGED
+ * HOW MANY OF ONE AGENT'S FRESH HOLDS "All" LAYS OUT AS ROWS.
+ *
+ * A Trencher reviews a pool every thirty seconds in new words each time, so
+ * none of its holds is ever a repeat and none had a "since" to fold on. With
+ * the reader no longer capping an agent's names, one Trencher put thirty-nine
+ * hold rows above every trade older than twenty minutes — the "37 of 40 rows
+ * were holds" this whole change began from. Its newest few stay rows, because
+ * a changed view is news; the rest are said once, in its watch line.
+ */
+export const FRESH_HOLDS_SHOWN = 3;
+
+/**
+ * WHAT "ALL" SHOWS: every trade and every view, with each agent's STANDING
  * holds said once.
  *
- * Only a hold that has stood unchanged — a repeat with a "since" — is folded.
- * A market review is published only when its bias flipped or a breakout
- * confirmed, so it is news by construction, and it was being folded into
- * "watching N tokens" unless it happened to be that agent's newest hold. A
- * fresh or changed hold keeps its own row; so does a liked one, for the same
- * reason a chorus does not take it.
+ * A hold that has stood unchanged — a repeat with a "since" — is folded. A
+ * fresh or changed hold is news (a market review is published only when its
+ * bias flipped or a breakout confirmed), so an agent's newest
+ * FRESH_HOLDS_SHOWN of them keep their own rows, and only its older fresh
+ * ones fold beside the standing ones. A liked hold is never folded, for the
+ * same reason a chorus does not take it.
  *
  * An agent with two or more foldable holds becomes one `watch` beat carrying
  * the latest in full. One stays a normal row — a summary of one thing is the
@@ -555,7 +567,19 @@ export function chorusOf(beats: Beat[], keep: (b: Beat) => boolean = () => false
  * out, and the count on the summary says how many there are.
  */
 export function compactHolds(beats: Beat[], keep: (b: Beat) => boolean = () => false): Beat[] {
-  const foldable = (b: Beat): b is ViewBeat => b.kind === "view" && b.hold && b.sinceMs !== null && !keep(b);
+  const hold = (b: Beat): b is ViewBeat => b.kind === "view" && b.hold && !keep(b);
+  const freshBy = new Map<string, ViewBeat[]>();
+  for (const b of beats) {
+    if (!hold(b) || b.sinceMs !== null) continue;
+    const list = freshBy.get(b.actor.slug) ?? [];
+    list.push(b);
+    freshBy.set(b.actor.slug, list);
+  }
+  const overflow = new Set<ViewBeat>();
+  for (const list of freshBy.values()) {
+    for (const b of [...list].sort((x, y) => y.atMs - x.atMs).slice(FRESH_HOLDS_SHOWN)) overflow.add(b);
+  }
+  const foldable = (b: Beat): b is ViewBeat => hold(b) && (b.sinceMs !== null || overflow.has(b));
   const holds = new Map<string, ViewBeat[]>();
   for (const b of beats) {
     if (!foldable(b)) continue;

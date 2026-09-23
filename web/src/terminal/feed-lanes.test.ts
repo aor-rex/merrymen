@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { beatsOf, chorusOf, compactHolds, lanesOf, mentionTargets, pillBeats, watchCount, whenLabel, type Beat, type FeedRow } from "./beat";
+import { beatsOf, chorusOf, compactHolds, FRESH_HOLDS_SHOWN, lanesOf, mentionTargets, pillBeats, watchCount, whenLabel, type Beat, type FeedRow } from "./beat";
 import type { LiveAgent } from "./live";
 import { alertsOf, alertsRead, emptyAlerts, RAIL_ALERTS } from "../lib/rail-alerts";
 
@@ -190,9 +190,32 @@ describe("All says each agent's unchanged holds once", () => {
     assert.ok(watch && watch.kind === "watch" && watch.count === 11);
   });
 
-  it("compactHolds alone folds only standing holds", () => {
+  it("an agent's newest fresh holds keep their rows; its older ones join the watch line", () => {
     const fresh = Array.from({ length: 5 }, (_, i) => row({ symbol: `F${i}`, head: `hold F${i}`, reason: `fresh ${i}`, at: NOW - i }));
-    assert.deepEqual(compactHolds(beatsOf(fresh, agents)).map((b) => b.kind), ["view", "view", "view", "view", "view"]);
+    const shown = compactHolds(beatsOf(fresh, agents));
+    assert.deepEqual(shown.map((b) => b.kind), ["view", "view", "view", "watch"]);
+    assert.deepEqual(shown.filter((b) => b.kind === "view").map((b) => b.symbol), ["F0", "F1", "F2"], "the newest three, as news");
+    const watch = shown.find((b) => b.kind === "watch");
+    assert.ok(watch && watch.kind === "watch" && watch.count === 2, "the two older, counted");
+    assert.equal(
+      compactHolds(beatsOf(fresh.slice(0, FRESH_HOLDS_SHOWN), agents)).every((b) => b.kind === "view"),
+      true,
+      "up to the bound nothing fresh is folded",
+    );
+  });
+
+  it("A TRENCHER REVIEWING IN NEW WORDS EVERY THIRTY SECONDS DOES NOT BURY A TRADE", () => {
+    // The fix-round review's reproduction: one agent's fresh-prose holds are
+    // never repeats, so none carried a "since" to fold on, and All put 39 of
+    // them above a landed buy three hours old.
+    const reviews = Array.from({ length: 39 }, (_, i) =>
+      row({ symbol: `T${String(i).padStart(11, "0")}`, head: `hold T${i}`, reason: `pool review ${i}: buyers ${i % 7} deep`, at: NOW - i * 30, firstAt: NOW - i * 30, unchangedSince: NOW - i * 30 }),
+    );
+    const shown = all(beatsOf([...reviews, buy({ slug: "sirsendit", name: "SirSendIt", at: NOW - 3 * 3600, firstAt: NOW - 3 * 3600 })], agents));
+    const at = shown.findIndex((b) => b.kind === "trade");
+    assert.ok(at >= 0 && at <= FRESH_HOLDS_SHOWN + 1, `the buy is row ${at + 1}, not row 40`);
+    const watch = shown.find((b) => b.kind === "watch");
+    assert.ok(watch && watch.kind === "watch" && watch.count === 39 - FRESH_HOLDS_SHOWN, "every other review is counted in the line");
   });
 });
 

@@ -127,11 +127,13 @@ export type FeedThesis = PublicThesis & {
    */
   handleVerified: boolean;
   /**
-   * Epoch SECONDS this post, as it stands, was first said with nothing else
-   * said about the same name after it — a trade or a view alike. Null when
-   * something else was — then `said` and `firstAt` still count every copy in
-   * the window, but the copies are not one unbroken stretch, and "×N · since"
-   * would hide the change.
+   * Epoch SECONDS this post, as it stands, began its current unbroken
+   * stretch: nothing else in its lane said about the same name after it and,
+   * for a view, no trade of the name inside it. A trade inside a view's
+   * stretch RESTARTS it at the next copy, and `said` then counts that stretch
+   * alone. Null when the copies are not one stretch — then `said` and
+   * `firstAt` still count every copy in the window, and "×N · since" would
+   * hide the change.
    */
   unchangedSince: number | null;
   /**
@@ -171,8 +173,12 @@ type Group = ThesisRow & {
   in_pair: number;
   /** The newest time of the next group of the same (agent, name), or null. */
   next_at: number | null;
-  /** The newest time anything in the OTHER lane was said about the same (agent, name), or null. */
+  /** Views only: the newest time a trade on the same (agent, name) could have been published, or null. */
   other_at: number | null;
+  /** Views only: this group's first copy AFTER `other_at` (its first copy when there is none), or null. */
+  resumed_at: number | null;
+  /** Views only: how many of this group's copies came after `other_at`. */
+  resumed_said: number | null;
   /** Views only: how many names this account said something about. */
   agent_names?: number;
 };
@@ -248,7 +254,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // ONE GROUPED READ, TWO LANES. The column list, the joins and the group
     // key are shared text, so the lanes cannot drift into two ideas of what a
     // post is; only the lane predicate and the budget differ.
-    const grouped = (named: boolean, lane: string) =>
+    const grouped = (named: boolean, lane: string, other?: string) =>
       `SELECT a.name AS name, a.x_handle AS x_handle, ${named ? "COALESCE(a.x_verified, 0) AS x_verified," : ""}
               d.agent_id AS agent_id, d.action AS action, d.symbol AS symbol, COALESCE(d.symbol, '') AS sym,
               ${named ? "d.display_name AS display_name," : ""}
@@ -257,9 +263,14 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
               d.hold_kind AS hold_kind,
               p.body AS post,
               t.status AS status, t.reject_rule AS reject_rule, a.mode AS mode,
-              COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at, MAX(d.id) AS last_id
+              COUNT(*) AS said, MAX(d.at) AS last_at, MIN(d.at) AS first_at, MAX(d.id) AS last_id,
+              ${other
+                ? `MAX(o.at) AS other_at, MIN(CASE WHEN o.at IS NULL OR d.at > o.at THEN d.at END) AS resumed_at,
+                   SUM(CASE WHEN o.at IS NULL OR d.at > o.at THEN 1 ELSE 0 END) AS resumed_said`
+                : "NULL AS other_at, NULL AS resumed_at, NULL AS resumed_said"}
          FROM decisions d
          JOIN agents a ON a.smart_account = d.agent_id
+         ${other ? `LEFT JOIN (${latestIn(other)}) o ON o.agent_id = d.agent_id AND o.sym = COALESCE(d.symbol, '')` : ""}
          -- The LAST trade for this decision. A correlated MAX(id) keeps this
          -- join to one row per decision on both backends.
          LEFT JOIN trades t ON t.id = (SELECT MAX(id) FROM trades WHERE decision_id = d.id)
@@ -296,25 +307,36 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // both backends: `in_pair` says whether this is the agent's latest word on
     // the name in its lane, and `next_at` says when the word before it last
     // appeared — which is what decides whether a repeat is one unbroken
-    // stretch. `other_at` is the same question asked of the OTHER lane: each
-    // lane looked only at itself, so a hold, a buy of the name, and the same
-    // hold again read as one hold standing since before the buy.
-    const placed = (named: boolean, lane: string, other: string) =>
+    // stretch.
+    //
+    // A VIEW ALSO ASKS THE TRADE LANE (`other`). Each lane looked only at
+    // itself, so a hold, a buy of the name, and the same hold again read as one
+    // hold standing since before the buy. The trade's time comes in per row,
+    // inside the grouping, so the group can say where its run RESUMED after the
+    // trade (`resumed_at`) — the hold then stands since its first copy after
+    // the buy, ranks just above it, and folds with the agent's other standing
+    // holds again. Merely clearing the "since" left it at its newest copy, the
+    // top of the feed, every tick until its pre-trade copies aged out.
+    //
+    // A TRADE DOES NOT ASK THE VIEW LANE. "×24 · since 2h · turned back" is
+    // still exactly true when a view of the name fell between two refusals, and
+    // the view is already its own row; clearing the refusal's "since" put the
+    // refusal back on top of the feed every tick, the all-day beat the "since"
+    // exists to stop.
+    const placed = (named: boolean, lane: string, other?: string) =>
       `SELECT g.*,
               ROW_NUMBER() OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS in_pair,
-              LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at,
-              o.at AS other_at
-         FROM (${grouped(named, lane)}) g
-         LEFT JOIN (${latestIn(other)}) o ON o.agent_id = g.agent_id AND o.sym = g.sym`;
+              LEAD(g.last_at) OVER (PARTITION BY g.agent_id, g.sym ORDER BY g.last_at DESC, g.last_id DESC) AS next_at
+         FROM (${grouped(named, lane, other)}) g`;
 
     const actionPage = (named: boolean, offset: number) =>
       db
         .prepare(
-          `SELECT r.* FROM (${placed(named, IS_ACTION, IS_VIEW)}) r
+          `SELECT r.* FROM (${placed(named, IS_ACTION)}) r
             ORDER BY r.last_at DESC, r.last_id DESC
             LIMIT ? OFFSET ?`,
         )
-        .all(...args, ...args, ACTION_PAGE, offset) as Promise<Group[]>;
+        .all(...args, ACTION_PAGE, offset) as Promise<Group[]>;
 
     // THE VIEW LANE IS DEALT OUT, NOT RACED FOR. Ranked by the clock, a pair
     // re-said every tick always had the freshest time, so any agent with forty
@@ -444,14 +466,14 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     // hands an aggregate of a BIGINT back as a string.
     const before = (at: number | null | undefined, first: number) => at === null || at === undefined || Number(at) < first;
 
-    // AN ACTION REPEATS FROM ITS FIRST TIME only while nothing else happened to
-    // the same name after it began: it is the newest group on the name, the
-    // group before it last appeared before this one's first copy, and no view
-    // of the name came after that first copy either.
+    // AN ACTION REPEATS FROM ITS FIRST TIME only while no other TRADE happened
+    // to the same name after it began: it is the newest group on the name, and
+    // the group before it last appeared before this one's first copy. A view
+    // in between does not break it — see `placed`.
     const actions = rows.actions
       .map((r) => {
         const first = Number(r.first_at ?? r.last_at ?? 0);
-        const unbroken = Number(r.in_pair) === 1 && before(r.next_at, first) && before(r.other_at, first);
+        const unbroken = Number(r.in_pair) === 1 && before(r.next_at, first);
         return gated(r, unbroken ? first : null);
       })
       .filter((t): t is FeedThesis => t !== null)
@@ -481,10 +503,21 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         // VIEW_DEPTH reads at least one more. Every trade that could have is on
         // each row as `other_at`, read whole in SQL rather than from the
         // bounded action scan.
+        //
+        // A trade inside the run does not end it; it RESTARTS it at the first
+        // copy after the trade. Only when the word was never said again after
+        // the trade is there no "since" at all: the trade is then the newer
+        // thing said, and the view stands at its own last copy.
         const first = Number(winner.first_at ?? winner.last_at ?? 0);
         const others = newest.filter((g) => g !== winner).map((g) => Number(g.last_at));
-        const unbroken = others.every((at) => at < first) && newest.every((g) => before(g.other_at, first));
-        const post = gated(winner, unbroken ? first : null);
+        const tradedAt = Math.max(-1, ...newest.map((g) => (g.other_at === null || g.other_at === undefined ? -1 : Number(g.other_at))));
+        const resumed = winner.resumed_at === null || winner.resumed_at === undefined ? null : Number(winner.resumed_at);
+        const inLane = others.every((at) => at < first);
+        const restarted = inLane && tradedAt >= first && resumed !== null && resumed > tradedAt;
+        const since = !inLane ? null : tradedAt < first ? first : restarted ? resumed : null;
+        // A restarted stretch counts its own copies: "×24 · since 1h" about a
+        // hold said twelve times since the buy would be a figure nobody read.
+        const post = gated(restarted ? { ...winner, said: Number(winner.resumed_said ?? 1) } : winner, since);
         if (!post) continue;
         chosen.push({ post, author: authorOf(winner) });
         break;

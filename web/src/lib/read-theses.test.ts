@@ -450,40 +450,58 @@ describe("a changed view is not held off the lane by names that only repeated", 
 describe("unchanged since means nothing else was said about the name — in either lane", () => {
   const thin = "Depth remains thin; I am holding until liquidity recovers.";
 
-  it("A HOLD, A LANDED BUY ON THE SAME NAME, THE SAME HOLD — the hold is not 'unchanged since' the first", async () => {
+  it("A HOLD, A LANDED BUY ON THE SAME NAME, THE SAME HOLD — the hold stands since the buy, not before it", async () => {
     // The reviewer's reproduction. Each lane looked only at itself, so the hold
     // printed "×2 · since 2h" and sat two hours down, about an agent that
-    // bought the name an hour ago.
+    // bought the name an hour ago. Clearing the "since" fixed that and broke
+    // the other way: the hold then sat at its newest copy, the top of the
+    // feed, every tick until its pre-buy copies left the window. The stretch
+    // RESTARTS at the first copy after the buy, and counts only its own.
     const rows: Row[] = [
       { id: "a1", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 7200 },
+      { id: "a2", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 5400 },
       { id: "b1", action: "buy", symbol: "TSLA", size: 5, source: "strategist", reason: "Taking a starter position here.", at: NOW - 3600 },
-      { id: "a2", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 60 },
+      { id: "a3", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 1800 },
+      { id: "a4", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 60 },
     ];
     const r = await read(rows, [{ decision: "b1", status: "landed" }]);
     const hold = r.theses.find((t) => t.action === "hold")!;
-    assert.equal(hold.said, 2);
-    assert.equal(hold.unchangedSince, null, "a trade on the name came in between");
+    assert.equal(hold.unchangedSince, NOW - 1800, "since its first copy after the buy");
+    assert.equal(hold.said, 2, "and ×2, the copies in that stretch — not ×4");
     const buy = r.theses.find((t) => t.action === "buy")!;
-    assert.equal(buy.unchangedSince, null, "and the buy is not the latest word on the name either");
+    assert.equal(buy.unchangedSince, NOW - 3600, "a single copy stands for itself alone");
   });
 
-  it("A REFUSAL RE-PROPOSED ACROSS A HOLD ON ITS NAME is not 'unchanged since' either", async () => {
+  it("a hold never said again after a trade on its name has no 'since' at all", async () => {
+    // The trade is the newer thing said; the hold stands at its own last copy.
+    const rows: Row[] = [
+      { id: "a1", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 7200 },
+      { id: "a2", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 5400 },
+      { id: "b1", action: "buy", symbol: "TSLA", size: 5, source: "strategist", reason: "Taking a starter position here.", at: NOW - 3600 },
+    ];
+    const hold = (await read(rows, [{ decision: "b1", status: "landed" }])).theses.find((t) => t.action === "hold")!;
+    assert.equal(hold.unchangedSince, null);
+    assert.equal(hold.said, 2, "the whole window's count, with no 'since' to attach it to");
+  });
+
+  it("A REFUSAL RE-PROPOSED ACROSS A HOLD ON ITS NAME keeps its 'since' — the hold is its own row", async () => {
+    // "×30 · since 2.5h · turned back" is still exactly true with a view of
+    // the name in between. Clearing it ranked the refusal at its newest copy,
+    // on top of the feed every tick for up to a day: the all-day refusal the
+    // "since" exists to stop.
     const legs = Array.from({ length: 30 }, (_, i): Row => ({
       id: `r${i}`, action: "buy", symbol: "TSLA", size: 8.33, source: "strategy:steady-basket",
       reason: "the schedule says buy — 8.33 USDG into TSLA, its 33% of a 3-leg basket", at: NOW - (29 - i) * 300,
     }));
     const refusals = legs.map((x) => ({ decision: x.id, status: "rejected", rule: "asset-allowlist" }));
     const between: Row = { id: "h", action: "hold", symbol: "TSLA", reason: thin, at: NOW - 3600 };
-    const broken = (await read([...legs, between], refusals)).theses.find((t) => t.outcome === "refused")!;
-    assert.equal(broken.unchangedSince, null);
-
-    // Something said about the name before the run began, or about another
-    // name during it, leaves the run unbroken.
     const before: Row = { ...between, at: NOW - 30 * 300 };
     const elsewhere: Row = { ...between, symbol: "NVDA" };
-    for (const other of [before, elsewhere]) {
-      const kept = (await read([...legs, other], refusals)).theses.find((t) => t.outcome === "refused")!;
+    for (const other of [between, before, elsewhere]) {
+      const r = await read([...legs, other], refusals);
+      const kept = r.theses.find((t) => t.outcome === "refused")!;
       assert.equal(kept.unchangedSince, NOW - 29 * 300, `${other.symbol} at ${NOW - other.at}s ago`);
+      assert.ok(r.theses.some((t) => t.action === "hold"), "and the view is published beside it");
     }
   });
 
