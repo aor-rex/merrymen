@@ -70,6 +70,19 @@ export interface SettingsView {
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
+  /**
+   * WHOSE SETTINGS THESE ARE — the signed-in tenant the values were read for,
+   * hosted; null self-hosted, where the box has one operator.
+   *
+   * The Settings form sends it back with its save, and the PUT refuses a body
+   * that names someone other than the session (409 OWNER_CHANGED_SETTING).
+   * Another tab can sign a different wallet in unseen, and without this the
+   * form open on screen — loaded for one wallet — saved its edits to the other
+   * wallet's agent: "Trade for real" turned on for an agent its owner never
+   * looked at, while this tab said "Changes saved". Carried in the same answer
+   * as the values, so the claim is exactly whose values the form shows.
+   */
+  owner: string | null;
 }
 
 const STRATEGIES_DIR = homePaths.strategies();
@@ -158,6 +171,7 @@ export async function GET(req: Request) {
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
+    owner: tenant,
   };
   return NextResponse.json(view);
 }

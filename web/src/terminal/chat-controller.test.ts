@@ -214,6 +214,7 @@ const SETTINGS_VIEW: SettingsView = {
   officialCoins: [],
   strategies: { builtin: ["steady-basket"], custom: [] },
   llmProviders: LLM_PROVIDERS,
+  owner: null,
 };
 
 const count = (method: string, path: string) => calls.filter((c) => c.method === method && c.url.split("?")[0] === path).length;
@@ -518,6 +519,32 @@ describe("chips", () => {
     await until(() => buttons("$10.00 (max)").length === 1, "the ceiling just saved, on the chips already there");
     assert.equal(buttons("$25.00 (max)").length + buttons("$25.00").length, 0);
     assert.equal(count("POST", "/api/chat"), 1, "without asking again");
+  });
+
+  it("THE SETTINGS FORM SAVES FOR THE WALLET ITS VALUES WERE READ FOR — never for one another tab signed in since", async () => {
+    // The route refuses a body that names someone other than the session
+    // (409 OWNER_CHANGED_SETTING). The form names whoever GET /api/settings
+    // said the values belong to, from the same answer; self-hosted names nobody.
+    const A = "0x00000000000000000000000000000000000000aa";
+    routes["GET /api/settings"] = () => json({ ...SETTINGS_VIEW, owner: A });
+    routes["PUT /api/settings"] = () => json({ ok: true });
+    await ui.render(h({ settingsScreen: true }));
+    await until(() => buttons("Save changes").length === 1, "the Settings screen");
+    await ui.click("Save changes");
+    await until(() => calls.some((c) => c.method === "PUT"), "the save");
+    const put = calls.find((c) => c.method === "PUT" && c.url === "/api/settings")!;
+    assert.equal(put.body?.owner, A, "the save names the wallet the form was read for");
+  });
+
+  it("a self-hosted form names nobody, and its save is judged as it always was", async () => {
+    routes["GET /api/settings"] = () => json(SETTINGS_VIEW);
+    routes["PUT /api/settings"] = () => json({ ok: true });
+    await ui.render(h({ settingsScreen: true }));
+    await until(() => buttons("Save changes").length === 1, "the Settings screen");
+    await ui.click("Save changes");
+    await until(() => calls.some((c) => c.method === "PUT"), "the save");
+    const put = calls.find((c) => c.method === "PUT" && c.url === "/api/settings")!;
+    assert.equal("owner" in (put.body ?? {}), false);
   });
 
   it("AND APP HANDS THE SETTINGS SCREEN THE CHAT'S RE-READ — the one line that joins the two", () => {

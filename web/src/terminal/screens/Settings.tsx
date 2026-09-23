@@ -382,7 +382,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        // FOR THE WALLET THESE VALUES WERE READ FOR (SettingsView.owner): a
+        // different wallet signed in by another tab since is refused by the
+        // route, not written to.
+        body: JSON.stringify(view?.owner ? { ...body, owner: view.owner } : body),
       });
       const json = (await res.json()) as { ok?: boolean; errors?: string[] };
       if (!res.ok) {
