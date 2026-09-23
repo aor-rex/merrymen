@@ -106,7 +106,8 @@ import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbo
 import { SponsorRefused } from "./paymaster";
 import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
-import { publishesIdle, renderWhy } from "./strategies/reasons";
+import { renderWhy } from "./strategies/reasons";
+import { idleNotice, idleViewRow, modeEmptiedFact } from "./idle-notice";
 import type { Why } from "./strategies/reasons";
 import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
 import { coinDisplayName } from "./coin-name";
@@ -10140,7 +10141,9 @@ async function main() {
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
-        // none was looked at. The strategy's idle reason says why instead.
+        // none was looked at. The strategy's idle reason says why instead, as
+        // a WARNING written after this one, so it is the notice the desk shows
+        // (idle-notice.ts) — not a second Trencher line saying the same thing.
         if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
@@ -10974,84 +10977,42 @@ async function main() {
     // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
     // this repo already carries the incident where 1,242 identical rows told
     // nobody anything. The same de-duplication the live-rail blocker uses.
-    /**
-     * A MODE THAT LEAVES NOTHING TO TRADE MUST SAY SO.
-     *
-     * The one way the asset mode could be worse than no feature at all: an
-     * owner picks "crypto only" with a basket of equities, every strategy
-     * resolves zero legs, and the agent goes quiet with nothing on any screen
-     * to connect the silence to the dropdown they just moved. That is the exact
-     * shape of the trencher incident this file already carries — "it didn't
-     * take any trades yet", then "I think I'm stuck in paper mode".
-     *
-     * Computed from the same inputs `makeStrategy` resolves legs from, so it
-     * cannot disagree with them, and only when the mode is actually narrowing
-     * something. It rides the once-per-change idle channel below rather than
-     * inventing a second one.
-     */
-    const modeEmptied =
-      cfg.assetMode !== "all" &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), cfg.assetMode)
-        .length === 0 &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
-        ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
-          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade`
-        : null;
-    /**
-     * TWO REGISTERS FROM ONE FACT. The owner's event log gets the remedy —
-     * they are the one person who can change the mode. The decision row is a
-     * public post, and "Change the mode in Settings" on a public feed is an
-     * instruction to a stranger about somebody else's account; it was live for
-     * weeks and is the exact texture of a worker log leaking onto a desk.
-     * `renderWhy` draws the same line for its own remedy-bearing arms.
-     */
-    const modeEmptiedRemedy = modeEmptied === null ? null : `${modeEmptied}. Change the mode in Settings, or add something it allows to your basket.`;
-    const idleNow = idle ? renderWhy(idle) : modeEmptiedRemedy;
-    const idlePublic = idle ? renderWhy(idle, "public") : modeEmptied;
-    if (idleNow !== lastIdleReason) {
-      lastIdleReason = idleNow;
-      if (idleNow) {
-        console.log(`[tick] idle — ${idleNow}`);
-        await addEvent(agentId, "ok", idleNow);
-        // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
-        //
-        // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED. A tick
-        // that proposes nothing writes its reason to `events` and nothing
-        // else — and only `decisions` can become a post. So an agent that
-        // thought about the market and concluded "not today, and here is
-        // why" was talking to a table nobody reads, while its owner watched
-        // a feed that said nothing at all. "The agents need to be social,
-        // talk a lot" is not a cadence problem; it is this.
-        //
-        // A DECISION WITH NO ACTION IS A `view`, which is a shape this
-        // product already has all the way through: thesis-policy classifies
-        // it, `outcome: "view"` exists for exactly "a decision the agent
-        // made, not a trade that failed to happen", and the feed grew a
-        // `view` arm that renders it from the publisher's own words.
-        //
-        // ONCE PER CHANGE, NOT ONCE PER TICK — the same de-duplication the
-        // event above uses, and it is load-bearing twice over. `renderWhy`
-        // is deterministic, so an unchanged reason would write an identical
-        // row every 240 seconds; read-theses would still group them into ONE
-        // post (the reason is part of its key), but the ledger would carry
-        // 12,000 rows a day saying the same sentence, and this repo already
-        // has the incident where 1,242 identical rows told nobody anything.
-        //
-        // renderWhy is the only producer of these strings — the same
-        // property that makes a deterministic strategy's trade reason safe
-        // to publish makes its SILENCE safe to publish.
-        //
-        // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
-        // account's losses, and the refusal it replaces leaves the public
-        // feed; the owner has the event above. See publishesIdle.
-        if (!idle || publishesIdle(idle)) await addDecision({
-          id: newDecisionId(),
-          agent_id: agentId,
-          source: publicationSourceFor(strategy.name),
-          // Non-null whenever idleNow is — both derive from the same Why or the
-          // same modeEmptied — but the type cannot see across the two ternaries.
-          reason: idlePublic ?? undefined,
-        });
+    //
+    // A MODE THAT LEAVES NOTHING TO TRADE rides the same channel rather than
+    // inventing a second one, counted from the same inputs `makeStrategy`
+    // resolves legs from so it cannot disagree with them (modeEmptiedFact).
+    const modeEmptied = modeEmptiedFact(
+      cfg.assetMode,
+      (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
+    );
+    // TWO REGISTERS FROM ONE FACT, once per change, and at a level the owner
+    // sees when the fact cannot be a post — all decided in idle-notice.ts,
+    // where a test runs it. This block only writes what it decided.
+    const notice = idleNotice({ idle, modeEmptied, last: lastIdleReason });
+    lastIdleReason = notice.last;
+    if (notice.event) {
+      console.log(`[tick] idle — ${notice.event.message}`);
+      await addEvent(agentId, notice.event.level, notice.event.message);
+      // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
+      //
+      // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED: only
+      // `decisions` can become a post, so the silence is also written as a
+      // `view` (idleViewRow). Inside the same change gate as the event —
+      // renderWhy is deterministic, so an unchanged reason would otherwise
+      // write an identical row every 240 seconds, 12,000 a day.
+      //
+      // renderWhy is the only producer of these strings — the same
+      // property that makes a deterministic strategy's trade reason safe
+      // to publish makes its SILENCE safe to publish.
+      //
+      // EXCEPT A SILENCE THAT IS ACCOUNT STATE. A tripped breaker is the
+      // account's losses, and the refusal it replaces leaves the public
+      // feed; the owner has the event above, as a WARNING, because it is
+      // the only place they will read it. See publishesIdle.
+      if (notice.view !== null) {
+        await addDecision(
+          idleViewRow({ id: newDecisionId(), agentId, strategyName: strategy.name, reason: notice.view }),
+        );
       }
     }
 
