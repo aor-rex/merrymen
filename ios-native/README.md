@@ -36,7 +36,7 @@ After shared-source changes, regenerate with `node ios-native/Signing/build.mjs`
 ## Configuration still needed
 
 - Public Privy App ID: `cmtnun9wn00rg0dl5txyoxpju` (configured).
-- Public **iOS Client ID**: missing from the authorized environment. Register the iOS client for **`dev.merrymen.app`**, callback scheme **`merrymen`**, and set `PRIVY_CLIENT_ID` in build settings.
+- Public **iOS Client ID** (configured): Privy client `merrymen-ios`, allowing bundle **`dev.merrymen.app`** and URL scheme **`merrymen`**, set as `PRIVY_CLIENT_ID` in `project.yml`. X is the primary sign-in, as on the web.
 - Public **Reown Project ID**: set `WALLETCONNECT_PROJECT_ID` for automatic native wallet-app connections. Register the callback `merrymen://walletconnect`; only ownership-message signing is requested.
 - Apple Developer Team: set `DEVELOPMENT_TEAM` for device builds and configure provisioning for this bundle ID.
 
@@ -47,7 +47,7 @@ Do not add app secrets, server keys, wallet private keys, signing certificates o
 - Five native tabs, menus, search, shared coin-first Buying/Held market views, token charts, watchlist, portfolio, leaderboard, public profiles, Alpha and proposals. The current striped logo is rendered from the web/site vector source for the icon, header, feed tab and onboarding; a source/hash check detects drift.
 - Shared web feed grouping/filtering, real/paper and execution labels, verified mentions, natural thesis text, following/likes/sharing. Unknown counts remain unknown.
 - Profile holdings, fills, top trades, average hold, published strategy and evidenced chart windows. Owner portfolio details preserve cost provenance and receipts; daily real usage excludes paper fills. Private-book dollar figures stay hidden.
-- Privy email/X integration; native Reown wallet-app connection and challenge/signature sign-in, with a manual signature fallback; holder proof/link/unlink; Keychain sessions; owner-bound mutations; sign-out and privacy cover.
+- Privy X-first sign-in (email and wallet under "Other ways to sign in"); native Reown wallet-app connection and challenge/signature sign-in, with a manual signature fallback; holder proof/link/unlink; Keychain sessions; owner-bound mutations; sign-out and privacy cover.
 - Streaming chat with per-owner text history, canonical command reviews and setting prefills, coin resolution and editable on-device voice drafts. Suggestions are cleared on the next message or use and are never restored as actions.
 - Group chat with history, replies, take-back, stable retry IDs, presence, mute, time zone and sleep preferences.
 - Account/AI/token/risk/discovery/Trencher settings, Telegram bot connection/test, Circle, profile uploads and X proof.
