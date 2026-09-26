@@ -9,7 +9,7 @@ enum Route: Hashable {
     case settingsProposal(String)
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
-    case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
+    case markets, search, searchFor(String), agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
     case trade(String), deposit, permissions, create, limits, withdraw, signIn, tour
 }
 
@@ -26,6 +26,8 @@ final class AppStore: ObservableObject {
     @Published var watchlist: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "watchlist") ?? [])
     @Published var likes: Set<String> = []
     @Published var following: Set<String> = []
+    /// The server's follow budget (MAX_FOLLOWS); unknown until /api/follow answers.
+    @Published var followMax: Int?
     private(set) var privy: (any Privy)?
 
     init() {
@@ -75,7 +77,7 @@ final class AppStore: ObservableObject {
             if next != nil {
                 let accountGeneration = generation
                 if let l = try? await api.request("/api/likes"), l["read"].bool == true, accountGeneration == generation { likes = Set(l["liked"].array.compactMap(\.string)) }
-                if let f = try? await api.request("/api/follow"), accountGeneration == generation { following = Set(f["wired"].array.compactMap(\.string)) }
+                if let f = try? await api.request("/api/follow"), accountGeneration == generation { following = Set(f["wired"].array.compactMap(\.string)); followMax = f["max"].number.map { Int($0) } }
             }
         } catch { sessionError = error.localizedDescription }
     }
@@ -146,6 +148,7 @@ final class AppStore: ObservableObject {
             let r = try await perform("/api/follow", body: .object(["target": .string(slug), "on": .bool(!following.contains(slug))]), expectedOwner: owner)
             guard r["read"].bool != false else { throw APIError(status: 503, message: "Could not read your follows.") }
             following = Set(r["wired"].array.compactMap(\.string))
+            if let max = r["max"].number { followMax = Int(max) }
             if let refusal = r["refused"].string { notice = refusal == "self" ? "You cannot follow your own agent." : "Your follow list is full." }
         } catch { notice = error.localizedDescription }
     }

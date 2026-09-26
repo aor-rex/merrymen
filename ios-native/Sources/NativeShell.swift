@@ -205,6 +205,7 @@ struct NativeShell: View {
                 switch route {
                 case .markets: MarketsScreen()
                 case .search: SearchScreen()
+                case .searchFor(let query): SearchScreen(initial: query)
                 case .agent(let slug): AgentScreen(slug: slug)
                 case .token(let address): TokenScreen(address: address)
                 case .settings: SettingsScreen()

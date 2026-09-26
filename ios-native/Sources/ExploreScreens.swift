@@ -156,6 +156,7 @@ struct MarketsScreen: View {
 
 struct SearchScreen: View {
     @EnvironmentObject var store: AppStore
+    var initial = ""
     @State private var query = ""
     @State private var ready = ""
     var body: some View { Page {
@@ -166,7 +167,7 @@ struct SearchScreen: View {
                 Card { Text(row["title"].text).font(.headline); Text(row["sub"].text).font(.caption).foregroundStyle(.secondary) }
             }.buttonStyle(.plain) }
         }.id(ready) }
-    }.navigationTitle("Search").searchable(text: $query).task(id: query) {
+    }.navigationTitle("Search").searchable(text: $query).onAppear { if query.isEmpty { query = initial } }.task(id: query) {
         ready = ""
         do { try await Task.sleep(for: .milliseconds(300)); ready = query.trimmingCharacters(in: .whitespacesAndNewlines) } catch { }
     } }
@@ -175,6 +176,7 @@ struct SearchScreen: View {
 struct AgentScreen: View {
     @EnvironmentObject var store: AppStore
     let slug: String
+    @State private var allDecisions = false
     var body: some View { Page { Remote(path: "/api/agents/\(escaped(slug))") { a in
         AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Brand.heroFill.frame(height: 110) }
             .clipShape(RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Brand.stroke))
@@ -192,21 +194,19 @@ struct AgentScreen: View {
         }
         if store.owner == nil {
             Button("Sign in to follow") { store.path.append(.signIn) }.buttonStyle(SecondaryButtonStyle(fill: true))
-        } else if store.following.contains(slug) {
-            Button("Unfollow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(SecondaryButtonStyle(fill: true))
         } else {
-            Button("Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(PrimaryButtonStyle(fill: true))
+            FollowControl(slug: slug, name: a["name"].text)
         }
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             StatTile(label: "Evidenced return", value: bps(a["pnlBps"].number), tint: Brand.signed(a["pnlBps"].number))
             if a["mode"].text == "paper" { StatTile(label: "Paper return", value: bps(a["paperPnlBps"].number), tint: Brand.signed(a["paperPnlBps"].number)) }
             StatTile(label: "Completed trades", value: a["tradesRead"].bool == true ? a["landed"].text : "—")
             StatTile(label: "Max drawdown (hourly floor)", value: bps(a["maxDdBps"].number), tint: (a["maxDdBps"].number ?? 0) > 0 ? Brand.down : .primary)
+            StatTile(label: "Trades this period", value: a["tradeCount"].number.map { $0.formatted() + (a["tradeCountFloor"].bool == true ? "+" : "") } ?? "—")
         }
         Card {
             if let reason = a["unrankedWhy"].string { Text(reason.replacingOccurrences(of: "-", with: " ")).font(.caption).foregroundStyle(.secondary) }
             Metric(label: "Paper fills", value: a["tradesRead"].bool == true ? a["filledPaper"].text : "—")
-            Metric(label: "Trades this period", value: a["tradeCount"].number.map { $0.formatted() + (a["tradeCountFloor"].bool == true ? "+" : "") } ?? "—")
             if let seconds = a["avgHoldSec"].number { Metric(label: "Average hold", value: Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes]))) }
             if a["gasless"].bool == true && a["mode"].text != "paper" { Label("All landed operations this period were gas sponsored", systemImage: "checkmark.seal").font(.caption) }
             AgentDetails(agent: a)
@@ -224,11 +224,54 @@ struct AgentScreen: View {
             if row["acting"].bool == true { Text("A corporate action is pending.").font(.caption).foregroundStyle(.orange) }
             if row["priceStale"].bool == true { Text("Stale price").font(.caption).foregroundStyle(.orange) }
         } } }
+        // As on the web profile: with no positions to show, point at what it has been talking about.
+        let discussed = a["theses"].array.compactMap { t in t["symbol"].string.map { ($0, t["displayName"].string ?? $0) } }
+            .reduce(into: [(String, String)]()) { seen, pair in if !seen.contains(where: { $0.0 == pair.0 }) { seen.append(pair) } }
+        if a["holdings"].array.isEmpty, !discussed.isEmpty {
+            Text("Recently discussed").font(.caption).foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) { HStack {
+                ForEach(discussed, id: \.0) { symbol, label in
+                    Button(label) { store.path.append(.searchFor(symbol)) }.font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 7).background(Brand.raised, in: Capsule()).overlay(Capsule().strokeBorder(Brand.stroke))
+                }
+            } }.scrollClipDisabled()
+        }
         ProfileActivity(slug: slug, agent: a)
-        SectionHeader(title: "Theses", systemImage: "text.quote")
+        let decisions = a["theses"].array
+        SectionHeader(title: "Recent decisions", subtitle: "\(decisions.count) updates", systemImage: "text.quote")
         if a["thesesRead"].bool == false { Text("Theses could not be read.") }
-        Rows(values: a["theses"].array) { ThesisCard(thesis: $0) }
+        else if decisions.isEmpty { Text("No published decisions in the last 30 days.").foregroundStyle(.secondary) }
+        Rows(values: allDecisions ? decisions : Array(decisions.prefix(4))) { ThesisCard(thesis: $0) }
+        if decisions.count > 4 { Button(allDecisions ? "Show fewer" : "Show all \(decisions.count)") { withAnimation { allDecisions.toggle() } }.buttonStyle(SecondaryButtonStyle(fill: true)) }
     } }.navigationTitle("Agent") }
+}
+
+/// Following ("wiring") puts another agent's published theses into your own
+/// agent's next prompt. The budget and the closing sentence mirror the web's
+/// WireButton: a follow is an input to a decision, never a trigger for one.
+struct FollowControl: View {
+    @EnvironmentObject var store: AppStore
+    let slug: String
+    let name: String
+    var body: some View {
+        let on = store.following.contains(slug)
+        let full = !on && store.followMax.map { store.following.count >= $0 } == true
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                if on { Button("Unfollow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(SecondaryButtonStyle(fill: true)) }
+                else { Button("Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(PrimaryButtonStyle(fill: true)).disabled(full) }
+                if let max = store.followMax {
+                    Text("\(store.following.count) / \(max)").font(.custom(Brand.pixel, size: 15, relativeTo: .callout)).foregroundStyle(.secondary)
+                        .accessibilityLabel("\(store.following.count) of \(max) followed")
+                }
+            }
+            Group {
+                if on { Text("Your agent reads \(name)'s theses before it decides. ") + Text("Nothing here can make it trade.").bold() }
+                else if full, let max = store.followMax { Text("Your agent already reads \(max) agents, which is as many as fit in one prompt. Unfollow one to make room.") }
+                else { Text("Puts \(name)'s published theses into your agent's next prompt, as one more thing to weigh. ") + Text("Nothing here can make it trade.").bold() }
+            }.font(.caption).foregroundStyle(.secondary)
+        }
+    }
 }
 
 struct TokenScreen: View {
