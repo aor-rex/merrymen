@@ -37,7 +37,7 @@ After shared-source changes, regenerate with `node ios-native/Signing/build.mjs`
 
 - Public Privy App ID: `cmtnun9wn00rg0dl5txyoxpju` (configured).
 - Public **iOS Client ID** (configured): Privy client `merrymen-ios`, allowing bundle **`dev.merrymen.app`** and URL scheme **`merrymen`**, set as `PRIVY_CLIENT_ID` in `project.yml`. X is the primary sign-in, as on the web.
-- Public **Reown Project ID**: set `WALLETCONNECT_PROJECT_ID` for automatic native wallet-app connections. Register the callback `merrymen://walletconnect`; only ownership-message signing is requested.
+- Public **Reown Project ID** (configured): `WALLETCONNECT_PROJECT_ID` in `project.yml` enables native wallet-app connections (callback `merrymen://walletconnect`); only ownership-message signing is requested. Its session Keychain group uses the Apple Team prefix, so device builds need `DEVELOPMENT_TEAM`.
 - Apple Developer Team: set `DEVELOPMENT_TEAM` for device builds and configure provisioning for this bundle ID.
 
 Do not add app secrets, server keys, wallet private keys, signing certificates or production database credentials. Missing client configuration explicitly disables Privy sign-in. Email/X callbacks and returning identities still need acceptance once the client exists.
