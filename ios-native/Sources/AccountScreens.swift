@@ -134,6 +134,7 @@ func rawUnits(_ raw: String?, decimals: Int) -> String {
 struct PermissionsScreen: View {
     @EnvironmentObject var store: AppStore
     @State private var stop = false
+    @State private var resetPaper = false
     @State private var busy = false
     @State private var revision = 0
     var body: some View {
@@ -156,6 +157,10 @@ struct PermissionsScreen: View {
                             NavigationLink("Add funds", value: Route.deposit)
                             NavigationLink("Withdraw", value: Route.withdraw)
                         }
+                        if status["mode"].string == "paper" {
+                            Button("Restart paper book") { resetPaper = true }.buttonStyle(SecondaryButtonStyle(fill: true)).disabled(busy)
+                            Text("Paper cash goes back to the starting stake and simulated positions are cleared. Earlier paper trades stay on file but no longer count.").font(.caption).foregroundStyle(.secondary)
+                        }
                         Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
                         Text("Stand-down removes the service's active grant. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
                     } else { Text("No active trading permission."); NavigationLink("Create agent", value: Route.create) }
@@ -171,5 +176,16 @@ struct PermissionsScreen: View {
                 } catch { store.notice = error.localizedDescription } }
             }
         } message: { Text("The agent will stop managing positions. This does not sell them or revoke permissions on-chain.") }
+        // The worker refuses this on the live rail, so it can only ever touch
+        // the paper book; the button is also shown only for paper agents.
+        .confirmationDialog("Restart the paper book?", isPresented: $resetPaper, titleVisibility: .visible) {
+            Button("Restart paper book", role: .destructive) {
+                guard !busy else { return }; busy = true; let owner = store.owner
+                Task { defer { busy = false }; do {
+                    _ = try await store.perform("/api/paper-reset", body: .object([:]), expectedOwner: owner)
+                    revision += 1; store.notice = "Paper reset queued. Your agent applies it on its next cycle."
+                } catch { store.notice = error.localizedDescription } }
+            }
+        } message: { Text("Cash returns to the starting stake and simulated positions are cleared. If your agent is trading real money, nothing is changed.") }
     }
 }
