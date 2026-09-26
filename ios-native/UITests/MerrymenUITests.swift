@@ -21,7 +21,7 @@ final class MerrymenUITests: XCTestCase {
         if skip.waitForExistence(timeout: 8) { skip.tap() }
         let profile = app.buttons["Perfil"].firstMatch
         XCTAssertTrue(profile.waitForExistence(timeout: 8)); profile.tap()
-        XCTAssertTrue(app.buttons["Iniciar sesión"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Continuar con X"].waitForExistence(timeout: 8))
         capture(app, "Spanish native navigation")
     }
     func testGuestCanNavigateNativeTabsAndReadThesis() {
@@ -38,7 +38,7 @@ final class MerrymenUITests: XCTestCase {
         app.tabBars.buttons["Chat"].tap()
         XCTAssertTrue(app.textFields["Message your agent"].waitForExistence(timeout: 5))
         app.tabBars.buttons["Profile"].tap()
-        XCTAssertTrue(app.buttons["Sign in"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Continue with X"].waitForExistence(timeout: 5))
         capture(app, "Native profile — guest")
     }
     func testTourDismissalSurvivesRelaunch() {

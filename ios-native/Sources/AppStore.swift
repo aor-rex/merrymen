@@ -10,7 +10,7 @@ enum Route: Hashable {
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
     case markets, search, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
-    case trade(String), deposit, permissions, create, limits, withdraw, signIn, siteAccess, tour
+    case trade(String), deposit, permissions, create, limits, withdraw, signIn, tour
 }
 
 @MainActor

@@ -134,10 +134,6 @@ final class API: NSObject, URLSessionTaskDelegate {
         return "\(c.name)=\(c.value)"
     }
     private func decode(_ responseData: Data, http: HTTPURLResponse, path: String) throws -> J {
-        if path == "/api/gate", http.statusCode == 303 {
-            guard http.value(forHTTPHeaderField: "Location") == "/" else { throw APIError(status: 401, message: "That site password was not accepted.") }
-            return .object(["ok": .bool(true)])
-        }
         let value = try? JSONDecoder().decode(J.self, from: responseData)
         guard (200..<300).contains(http.statusCode) else {
             let words = value?["errors"].array.compactMap(\.string).joined(separator: "\n") ?? ""
