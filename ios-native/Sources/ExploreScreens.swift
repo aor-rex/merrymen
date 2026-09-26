@@ -285,7 +285,6 @@ struct TokenScreen: View {
             Button { store.toggleWatch(address) } label: { Label(store.watchlist.contains(address) ? "Watching" : "Watch", systemImage: store.watchlist.contains(address) ? "star.fill" : "star") }
             Spacer(); ShareLink(item: API.origin.appendingPathComponent("t/\(address)"))
         }
-        Picker("Chart bars", selection: $span) { ForEach(["15m", "1h", "4h", "1d"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
         Remote(path: "/api/tokens/\(escaped(address))?window=\(span)&activity=\(activity ? "1" : "0")") { token in
             let market = token["market"]
             let m = market["stock"] == .null ? market["coin"] : market["stock"]
@@ -294,7 +293,12 @@ struct TokenScreen: View {
                 Text(tokenPrice(m["priceUsd"].number)).font(.largeTitle).monospacedDigit()
                 Text(m["name"].text).foregroundStyle(.secondary)
                 if market["read"].text != "found" { Text(market["read"].text == "unread" ? "Market data could not be read." : "Not found in the index feeds checked.").foregroundStyle(.orange) }
-                CandleChart(data: token["candles"], token: address)
+                if market["stock"] != .null, let symbol = market["stock"]["symbol"].string {
+                    StockChart(symbol: symbol, multiplier: market["stock"]["uiMultiplier"].number ?? 1)
+                } else {
+                    Picker("Chart bars", selection: $span) { ForEach(["15m", "1h", "4h", "1d"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+                    CandleChart(data: token["candles"], token: address)
+                }
                 Metric(label: "24h change", value: m["change24hPct"].number.map { "\($0)%" } ?? "—")
                 if let symbol = market["symbol"].string, market["symbolClash"].bool != true {
                     Button("Trade \(symbol)") { store.path.append(.tradeRequest(symbol, "buy", "", address)) }.buttonStyle(PrimaryButtonStyle())
@@ -381,6 +385,48 @@ struct DiscoveryCard: View {
         }
     } }
 }
+/// A listed stock's price from the site's venue proxy (/api/venue?desk=chart),
+/// as the web draws equities: same windows, same trailing cut for 1H/4H, and
+/// prices scaled by the token's uiMultiplier (shares per token).
+struct StockChart: View {
+    let symbol: String
+    let multiplier: Double
+    @State private var window = "1D"
+    private static let cuts: [String: Double] = ["1H": 3_600, "4H": 14_400]
+    private struct Bar: Identifiable { let id: Int; let date: Date; let close: Double }
+    private func bars(_ data: J) -> [Bar] {
+        let row = data["chart"]["result"].array.first ?? .null
+        let times = row["timestamp"].array.map(\.number)
+        let closes = (row["indicators"]["quote"].array.first ?? .null)["close"].array.map(\.number)
+        var out: [Bar] = []
+        for (i, t) in times.enumerated() where i < closes.count {
+            if let t, let c = closes[i], c.isFinite { out.append(Bar(id: i, date: Date(timeIntervalSince1970: t), close: c * multiplier)) }
+        }
+        if let cut = Self.cuts[window], let end = out.last?.date { out = out.filter { $0.date >= end.addingTimeInterval(-cut) } }
+        return out
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Chart window", selection: $window) { ForEach(["1H", "4H", "1D", "5D", "1M", "ALL"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+            Remote(path: "/api/venue?desk=chart&symbol=\(escaped(symbol))&window=\(window)", interval: 60) { data in
+                let rows = bars(data)
+                if rows.count < 2 { Text("No prices printed in this window.").font(.caption).foregroundStyle(.secondary) }
+                else {
+                    let up = (rows.last?.close ?? 0) >= (rows.first?.close ?? 0)
+                    let low = rows.map(\.close).min() ?? 0, high = rows.map(\.close).max() ?? 0
+                    let pad = max((high - low) * 0.08, high * 0.001)
+                    Chart(rows) { bar in
+                        AreaMark(x: .value("Time", bar.date), yStart: .value("Floor", low - pad), yEnd: .value("Price", bar.close))
+                            .foregroundStyle(LinearGradient(colors: [(up ? Brand.up : Brand.down).opacity(0.25), .clear], startPoint: .top, endPoint: .bottom))
+                        LineMark(x: .value("Time", bar.date), y: .value("Price", bar.close)).foregroundStyle(up ? Brand.up : Brand.down)
+                    }.chartYScale(domain: (low - pad)...(high + pad)).frame(height: 180).accessibilityLabel("\(symbol) USD price")
+                    Text("USD · market venue prices, may be delayed · outside market hours the last session is shown").font(.caption).foregroundStyle(.secondary)
+                }
+            }.id(window)
+        }
+    }
+}
+
 struct CandleChart: View {
     let data: J
     let token: String
