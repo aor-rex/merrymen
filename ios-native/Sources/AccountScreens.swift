@@ -164,7 +164,10 @@ struct PermissionsScreen: View {
                         }
                         Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
                         Text("Stand-down removes the service's active grant. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
-                    } else { Text("No active trading permission."); NavigationLink("Create agent", value: Route.create) }
+                    } else {
+                        InactiveWalletPanel(status: status) { revision += 1 }
+                        Text("No active trading permission."); NavigationLink("Create agent", value: Route.create)
+                    }
                 }.id(revision)
             }
         }.navigationTitle("Wallet & permissions")
