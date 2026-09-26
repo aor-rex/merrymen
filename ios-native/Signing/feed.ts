@@ -8,6 +8,7 @@ import { positionsOf, spentToday } from '../../web/src/terminal/account';
 import { telegramRow, trencherRow } from '../../web/src/terminal/agent-status';
 import { resignPromptApplies } from '../../web/src/terminal/resign-prompt-state';
 import { setupStep } from '../../web/src/lib/can-start';
+import { approvable, bookBox, headline, TERMINAL } from '../../web/src/app/connect/approve/[id]/approve-view';
 
 export function overview(json: string): string {
   const { feed, now } = JSON.parse(json);
@@ -122,4 +123,12 @@ export function resign(json: string): string {
 export function setup(json: string): string {
   const { status, paper } = JSON.parse(json);
   return JSON.stringify(status ? setupStep(status, paper === true) : null);
+}
+
+// An AI assistant's proposal, described exactly as the web approval page does:
+// the status headline, the real-money / practice box, and whether approving is
+// currently allowed. The server re-checks everything at approval regardless.
+export function approval(json: string): string {
+  const view = JSON.parse(json);
+  return JSON.stringify({ headline: headline(view), box: view.kind === 'trade' ? bookBox(view) : null, approvable: approvable(view), finished: TERMINAL.has(view.status) });
 }

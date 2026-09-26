@@ -119,6 +119,10 @@ final class API: NSObject, URLSessionTaskDelegate {
             if !ticket.isEmpty { req.setValue([sent.header, ticket].filter { !$0.isEmpty }.joined(separator: "; "), forHTTPHeaderField: "Cookie") }
         }
         if let data { req.setValue(String(data.count), forHTTPHeaderField: "Content-Length") }
+        // The same-origin header a browser on the site sends with every write.
+        // Owner routes that refuse cross-site requests (MCP approvals and
+        // connections) check it; the session cookie still decides who acts.
+        if method != "GET" { req.setValue(Self.origin.absoluteString, forHTTPHeaderField: "Origin") }
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (responseData, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: "No server response.") }

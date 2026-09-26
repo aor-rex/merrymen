@@ -9,7 +9,7 @@ enum Route: Hashable {
     case settingsProposal(String)
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
-    case markets, search, searchFor(String), agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
+    case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
     case trade(String), deposit, permissions, create, limits, withdraw, signIn, tour
 }
 
@@ -46,6 +46,10 @@ final class AppStore: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")
                 try? SecureStore.remove("dev.merrymen.orders", "pendingOrder.0x1111111111111111111111111111111111111111")
             }
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-approval-test") {
+            path = [.connectedApps]
+            UserDefaults.standard.removeObject(forKey: "uiTest.approvalDecided")
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-snipe-test") {
             path = [.snipe("NEON", "5.00")]
@@ -175,9 +179,12 @@ final class AppStore: ObservableObject {
         case "/deposit": path.append(.deposit)
         case "/withdraw": path.append(.withdraw)
         case "/tokens": path.append(.markets)
+        case "/connect/apps": path.append(.connectedApps)
         default:
             if u.path.hasPrefix("/a/") { path.append(.agent(String(u.path.dropFirst(3)))) }
             if u.path.hasPrefix("/t/") { path.append(.token(String(u.path.dropFirst(3)))) }
+            // Only opens the review screen; the policy admits the exact id shape.
+            if u.path.hasPrefix("/connect/approve/") { path.append(.approval(String(u.path.dropFirst(17)))) }
         }
     }
 }

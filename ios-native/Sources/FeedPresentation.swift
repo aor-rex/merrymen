@@ -24,6 +24,9 @@ final class FeedPresentation: ObservableObject {
     func setupStep(status: J, paper: Bool) -> String? {
         value(.object(["status": status, "paper": .bool(paper)]), function: "setup")?.string
     }
+    /// The web approval page's rules for an assistant's proposal: headline,
+    /// real-money box, approvable, finished.
+    func approval(_ view: J) -> J? { value(view, function: "approval") }
     func command(_ input: J) -> J? {
         guard let result = value(input, function: "command"), result != .null else { return nil }
         return result
