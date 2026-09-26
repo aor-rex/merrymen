@@ -5,23 +5,25 @@ import UIKit
 struct HomeScreen: View {
     @EnvironmentObject var store: AppStore
     var body: some View { Page {
-        if store.owner == nil { SignInCard() }
-        else {
-            Remote(path: "/api/feed") { OwnerOverview(feed: $0) }
+        Group {
+            if store.owner == nil { SignInCard() }
+            else { Remote(path: "/api/feed") { OwnerOverview(feed: $0) } }
+        }.tourAnchor("home-top")
+        if store.owner != nil {
             Remote(path: "/api/grants") { status in
                 ResignNotice(status: status)
                 SetupChecklist(status: status)
                 if status["exists"].bool == true { AgentConnections() }
             }
         }
-        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle(fill: true))
+        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle(fill: true)).tourAnchor("home-markets")
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             ActionTile(title: "Find a trade", systemImage: "scope") { store.path.append(.snipe("", "")) }
             ActionTile(title: "Group chat", systemImage: "bubble.left.and.bubble.right") { store.path.append(.groupchat) }
             ActionTile(title: "Coins to consider", systemImage: "sparkles") { store.path.append(.proposals) }
             ActionTile(title: "The Merry Circle", systemImage: "circle.hexagongrid") { store.path.append(.circle) }
         }
-        SectionHeader(title: "The leaderboard", subtitle: "Ranked by evidenced live return", systemImage: "trophy")
+        SectionHeader(title: "The leaderboard", subtitle: "Ranked by evidenced live return", systemImage: "trophy").tourAnchor("home-leaderboard")
         DisclosureGroup("How returns are measured") {
             Text("Only eligible live returns are ranked. Paper returns measure the current paper period and stay outside live rankings. Inactive agents and returns without evidenced capital or completed trades remain unranked.").font(.caption).foregroundStyle(.secondary)
         }.tint(.secondary).font(.subheadline)
@@ -96,7 +98,7 @@ struct FeedScreen: View {
                     .foregroundStyle(filter == id ? Color.black : Color.primary)
                     .accessibilityAddTraits(filter == id ? .isSelected : [])
             }
-        } }.scrollClipDisabled()
+        } }.scrollClipDisabled().tourAnchor("feed-filters")
         Toggle("Real money", isOn: $realOnly).tint(Brand.accent)
         Picker("Sort posts", selection: $mostLiked) { Text("Latest").tag(false); Text("Most liked").tag(true) }.pickerStyle(.segmented)
         if mostLiked && (counts.error != nil || counts.value?["read"].bool != true) { Text("Likes unavailable. Showing the latest posts; unread counts are not zero.").font(.caption).foregroundStyle(.orange) }
@@ -108,7 +110,8 @@ struct FeedScreen: View {
                     ContentUnavailableView(data["theses"].array.isEmpty ? "No theses yet" : "No posts match these filters", systemImage: "text.bubble")
                     if !data["theses"].array.isEmpty { Button("Show everything") { filter = "all"; realOnly = false; mostLiked = false } }
                 }
-                Rows(values: rows) { FeedBeatCard(beat: $0) }
+                if let first = rows.first { FeedBeatCard(beat: first).tourAnchor("feed-first") }
+                Rows(values: Array(rows.dropFirst())) { FeedBeatCard(beat: $0) }
             } else { Text("Feed presentation could not be loaded. Try reopening this screen.").foregroundStyle(.orange) }
         }
     }.task(id: phase == .active) {
@@ -329,7 +332,7 @@ struct TokenScreen: View {
 
 struct AlphaScreen: View {
     @State private var section = "Picks"
-    var body: some View { Page { SectionHeader(title: "Alpha", subtitle: "Vetted opportunities from the Scout", systemImage: "sparkles"); Remote(path: "/api/alpha") { a in
+    var body: some View { Page { SectionHeader(title: "Alpha", subtitle: "Vetted opportunities from the Scout", systemImage: "sparkles").tourAnchor("alpha-header"); Remote(path: "/api/alpha") { a in
         if a["locked"].bool != false {
             Card(hero: true) { Label("The Merry Circle", systemImage: "lock.fill").font(.headline); Text(a["why"].text == "unreachable" ? "Your eligibility could not be checked. Try again shortly." : "Sign in and meet the Circle holding requirement to read vetted opportunities."); NavigationLink("View membership", value: Route.circle) }
         } else if a["indexUnreachable"].bool == true { Text("The Alpha index could not be read.").foregroundStyle(.orange) }

@@ -167,8 +167,6 @@ struct NativeShell: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.scenePhase) var phase
     @StateObject private var tourProgress = TourProgress()
-    @State private var tour = false
-    @State private var replaying = false
     var body: some View {
         NavigationStack(path: $store.path) {
             TabView(selection: $store.tab) {
@@ -195,7 +193,7 @@ struct NativeShell: View {
                         Button("Find a trade") { store.path.append(.snipe("", "")) }
                         Button("Coins to consider") { store.path.append(.proposals) }
                         Button("The Merry Circle") { store.path.append(.circle) }
-                        Button("Replay tour") { replaying = true; tour = true }
+                        Button("Replay tour") { tourProgress.begin(store, replay: true) }
                         Button("Settings") { store.path.append(.settings) }
                     } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("More")
                 }
@@ -228,7 +226,6 @@ struct NativeShell: View {
                 case .limits: GrantScreen(creating: false)
                 case .withdraw: WithdrawScreen()
                 case .signIn: SignInScreen()
-                case .tour: TourScreen()
                 }
                 }.id(store.generation)
             }
@@ -236,13 +233,15 @@ struct NativeShell: View {
         .task { await store.refreshSession() }
         .task(id: store.generation) {
             await tourProgress.activate(store)
-            if !replaying { tour = !tourProgress.done }
+            tourProgress.settle(store)
         }
         .onChange(of: phase) { _, phase in if phase == .active { Task { await tourProgress.sync(store) } } }
         .environmentObject(tourProgress)
         .sensoryFeedback(.selection, trigger: store.likes)
         .sensoryFeedback(.selection, trigger: store.following)
-        .sheet(isPresented: $tour, onDismiss: { replaying = false }) { TourScreen().environmentObject(tourProgress) }
+        .environment(\.tourFocus, tourProgress.active ? TourStop.all[tourProgress.step].anchor : nil)
+        // Removed at once when it ends, so the next tap reaches the app.
+        .overlay { if tourProgress.active { TourOverlay().environmentObject(tourProgress) } }
         .alert("Merrymen", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("OK", role: .cancel) { store.notice = nil }
         } message: { Text(store.notice ?? "") }
@@ -257,11 +256,19 @@ struct Wordmark: View {
 }
 
 struct Page<Content: View>: View {
+    @Environment(\.tourFocus) private var tourFocus
     @ViewBuilder var content: Content
     var body: some View {
-        ScrollView { VStack(alignment: .leading, spacing: 20) { content }.padding(18).frame(maxWidth: 800) }
-            .scrollDismissesKeyboard(.interactively)
-            .background { PageBackground() }
+        ScrollViewReader { proxy in
+            ScrollView { VStack(alignment: .leading, spacing: 20) { content }.padding(18).frame(maxWidth: 800) }
+                .scrollDismissesKeyboard(.interactively)
+                .background { PageBackground() }
+                // Bring whatever the tour is describing into view.
+                .onChange(of: tourFocus) { _, focus in
+                    guard let focus else { return }
+                    Task { try? await Task.sleep(for: .milliseconds(250)); withAnimation(.spring(duration: 0.4)) { proxy.scrollTo("tour.\(focus)", anchor: .center) } }
+                }
+        }
     }
 }
 /// Near-black with a faint accent glow at the top, so screens are not a flat void.
@@ -415,44 +422,3 @@ struct CoinLogo: View {
     }
 }
 
-struct TourScreen: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var store: AppStore
-    @EnvironmentObject var progress: TourProgress
-    @AppStorage("language") private var language = "en"
-    @State private var step = 0
-    private func words(_ key: String) -> String { Language.text(key, locale: language) }
-    private func key(_ index: Int, _ part: String) -> String { "tour.stop\(String(format: "%02d", index + 1)).\(part)" }
-    var body: some View {
-        ScrollView { VStack(alignment: .leading, spacing: 24) {
-            HStack {
-                Picker(words("tour.topics"), selection: $step) { ForEach(0..<26, id: \.self) { index in Text(words(key(index, "title"))).tag(index) } }
-                    .labelsHidden().tint(.secondary)
-                Spacer()
-                Picker("Language", selection: $language) { ForEach(Language.options, id: \.0) { code, name in Text(name).tag(code) } }.labelsHidden()
-            }
-            ZStack {
-                Circle().fill(RadialGradient(colors: [Brand.accent.opacity(0.35), .clear], center: .center, startRadius: 4, endRadius: 110)).frame(width: 220, height: 220)
-                Image("Brand").resizable().scaledToFit().frame(width: 104, height: 104)
-            }.frame(maxWidth: .infinity).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 10) {
-                Text(Language.text("tour.stepOf", locale: language, vars: ["current": String(step + 1), "total": "26"]))
-                    .font(.custom(Brand.pixel, size: 13, relativeTo: .caption)).foregroundStyle(Brand.accent)
-                ProgressView(value: Double(step + 1), total: 26).tint(Brand.accent).accessibilityHidden(true)
-            }
-            Text(words(key(step, "title"))).font(.largeTitle.bold()).id("title\(step)").transition(.opacity)
-            Text(words(key(step, "copy"))).font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 12) {
-                if step > 0 { Button(words("tour.back")) { withAnimation { step -= 1 } }.buttonStyle(SecondaryButtonStyle()) }
-                Button(words(step == 25 ? "tour.finish" : "tour.next")) { if step < 25 { withAnimation { step += 1 } } else { finish() } }.buttonStyle(PrimaryButtonStyle(fill: true))
-            }
-            Button(words("tour.skip")) { finish() }.foregroundStyle(.secondary).frame(maxWidth: .infinity).accessibilityIdentifier("Skip tour")
-            if progress.syncFailed { Button(words("tour.retrySync")) { Task { await progress.sync(store) } } }
-        }.padding(26) }.background { PageBackground() }
-        .onAppear { step = progress.done ? 0 : progress.step }
-        .onChange(of: step) { _, step in progress.move(step) }
-    }
-    private func finish() {
-        progress.finish(store); dismiss()
-    }
-}

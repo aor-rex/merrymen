@@ -10,7 +10,7 @@ enum Route: Hashable {
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
     case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
-    case trade(String), deposit, permissions, create, limits, withdraw, signIn, tour
+    case trade(String), deposit, permissions, create, limits, withdraw, signIn
 }
 
 @MainActor
@@ -28,6 +28,8 @@ final class AppStore: ObservableObject {
     @Published var following: Set<String> = []
     /// The server's follow budget (MAX_FOLLOWS); unknown until /api/follow answers.
     @Published var followMax: Int?
+    /// A question the tour leaves in the chat box; used only if the box is empty.
+    @Published var chatDraft: String?
     private(set) var privy: (any Privy)?
 
     init() {

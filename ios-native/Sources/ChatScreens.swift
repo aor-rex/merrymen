@@ -14,6 +14,7 @@ struct ChatScreen: View {
     @State private var partial = ""
     @State private var clearHistory = false
     @State private var proposal: J?
+    @State private var loadedGeneration: Int?
     var body: some View {
         VStack(spacing: 0) {
             historyView
@@ -21,11 +22,20 @@ struct ChatScreen: View {
         }.background { PageBackground() }
         .sensoryFeedback(.impact(weight: .light), trigger: messages.count)
         .task(id: store.generation) {
-            voice.stop(); messages = []; proposal = nil; text = ""; partial = ""; error = nil
+            // Clear the box only when the account changes, not on first load,
+            // so a question the tour left there survives.
+            if loadedGeneration != nil { text = "" }
+            loadedGeneration = store.generation
+            voice.stop(); messages = []; proposal = nil; partial = ""; error = nil
             if let owner = store.owner {
                 do { if let data = try SecureStore.read("dev.merrymen.chat", owner.lowercased()) { messages = try JSONDecoder().decode([J].self, from: data) } }
                 catch { self.error = "Saved conversation could not be read." }
             }
+        }
+        .onChange(of: store.chatDraft, initial: true) { _, draft in
+            guard let draft else { return }
+            if text.isEmpty && store.owner != nil { text = draft }
+            store.chatDraft = nil
         }
         .onChange(of: voice.transcript) { _, transcript in text = beforeDictation + (beforeDictation.isEmpty || transcript.isEmpty ? "" : " ") + transcript }
         .onChange(of: phase) { _, phase in
@@ -67,7 +77,7 @@ struct ChatScreen: View {
             if store.owner != nil { HStack {
                 Button("Portfolio") { store.tab = .home }
                 Spacer()
-                NavigationLink("Trading limits", value: Route.limits)
+                NavigationLink("Trading limits", value: Route.limits).tourAnchor("chat-limits")
             }.font(.caption).padding(.horizontal) }
             if voice.recording { Text("Listening on this device · review the draft before sending").font(.caption).foregroundStyle(Brand.accent) }
             if let error = voice.error { Text(error).font(.caption).foregroundStyle(.orange).padding(.horizontal) }
@@ -77,7 +87,7 @@ struct ChatScreen: View {
                     else { beforeDictation = text; Task { await voice.start(locale: language) } }
                 } label: { Image(systemName: voice.recording ? "stop.circle.fill" : "mic").frame(minWidth: 44, minHeight: 44) }
                     .accessibilityLabel(voice.recording ? "Stop dictation" : "Dictate a draft").disabled(busy || voice.starting || store.owner == nil)
-                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.raised, in: RoundedRectangle(cornerRadius: 18)).overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.stroke)).disabled(voice.recording)
+                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.raised, in: RoundedRectangle(cornerRadius: 18)).overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.stroke)).disabled(voice.recording).tourAnchor("chat-input")
                 Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || voice.recording || voice.starting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
             }.padding()
         }

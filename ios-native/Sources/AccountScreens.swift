@@ -6,6 +6,7 @@ import ImageIO
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
+    @EnvironmentObject var tour: TourProgress
     @State private var signOut = false
     var body: some View {
         Page {
@@ -14,7 +15,7 @@ struct AccountScreen: View {
                 Card(hero: true) {
                     HStack(spacing: 8) { Image(systemName: "checkmark.seal.fill").foregroundStyle(Brand.accent).accessibilityHidden(true); Text("Signed in").font(.headline) }
                     Text(owner).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                }
+                }.tourAnchor("profile-top")
                 Remote(path: "/api/grants") { status in
                     ResignNotice(status: status)
                     if status["exists"].bool == true {
@@ -44,10 +45,10 @@ struct AccountScreen: View {
                     MenuRow(title: "Telegram", systemImage: "paperplane", route: .telegram)
                     MenuRow(title: "The Merry Circle", systemImage: "circle.hexagongrid", route: .circle)
                 }
-            } else { SignInCard() }
+            } else { SignInCard().tourAnchor("profile-top") }
             Card {
                 if store.owner == nil { MenuRow(title: "Recover an existing account", systemImage: "arrow.counterclockwise", route: .withdraw) }
-                MenuRow(title: "Replay tour", systemImage: "play.circle", route: .tour)
+                MenuRow(title: "Replay tour", systemImage: "play.circle") { tour.begin(store, replay: true) }
             }
             LanguagePicker()
             if store.owner != nil { Button("Sign out", role: .destructive) { signOut = true }.buttonStyle(SecondaryButtonStyle(fill: true)) }
