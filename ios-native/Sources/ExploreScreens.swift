@@ -9,6 +9,7 @@ struct HomeScreen: View {
         else {
             Remote(path: "/api/feed") { OwnerOverview(feed: $0) }
             Remote(path: "/api/grants") { status in
+                ResignNotice(status: status)
                 if status["exists"].bool == true { AgentConnections() }
                 else { NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle(fill: true)) }
             }

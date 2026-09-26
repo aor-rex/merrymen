@@ -83,3 +83,11 @@ assert.equal(connections({ hasToken: true, enabled: false }, null).telegram.kind
 assert.equal(connections({ hasToken: true, enabled: true, connected: true, ownerId: null, linkCode: 'CODE', botUsername: 'bot' }, null).telegram.kind, 'unlinked');
 assert.equal(connections(null, { values: { strategy: 'trencher', assetMode: 'stocks', trencherLiveEnabled: true } }).trencher.kind, 'no-crypto');
 console.log('Native owner views withhold estimated/stale returns, count only landed usage, and distinguish unread connections from disabled ones.');
+const resign = input => JSON.parse(context.NativeFeed.resign(JSON.stringify(input)));
+assert.equal(resign({ exists: true, grantedAt: 1, canSign: true }), true);
+assert.equal(resign({ exists: true, grantedAt: 4_000_000_000, canSign: true }), false);
+assert.equal(resign({ exists: true, grantedAt: null, canSign: true }), false);
+assert.equal(resign({ exists: null, grantedAt: 1, canSign: true }), false);
+assert.equal(resign({ exists: false, grantedAt: 1, canSign: true }), false);
+assert.equal(resign({ exists: true, grantedAt: 1, canSign: false }), false);
+console.log('Native re-sign notice fires only for a read, signable grant that predates the bundled wall release.');

@@ -16,6 +16,7 @@ struct AccountScreen: View {
                     Text(owner).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Remote(path: "/api/grants") { status in
+                    ResignNotice(status: status)
                     if status["exists"].bool == true {
                         Card {
                             HStack { Text("Your Merryman").font(.title2.bold()); Spacer(); Pill(text: status["mode"].string ?? "Unknown", tint: status["mode"].string == "paper" ? .orange : Brand.accent) }

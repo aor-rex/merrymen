@@ -6,6 +6,7 @@ import { commandFor, commandPayload, isComplete, type CommandArg } from '../../w
 import { seedSources, withRead, liveOf, mineOf } from '../../web/src/terminal/live';
 import { positionsOf, spentToday } from '../../web/src/terminal/account';
 import { telegramRow, trencherRow } from '../../web/src/terminal/agent-status';
+import { resignPromptApplies } from '../../web/src/terminal/resign-prompt-state';
 
 export function overview(json: string): string {
   const { feed, now } = JSON.parse(json);
@@ -106,4 +107,12 @@ export function render(json: string): string {
     };
   }
   return JSON.stringify(rows.map(row));
+}
+
+// The web's "trading permission is out of date" decision. The wall release it
+// compares against is compiled into this bundle, which is built alongside the
+// wallet bundle the app signs with, so "stale" means stale for this app.
+export function resign(json: string): string {
+  const { exists, grantedAt, canSign } = JSON.parse(json);
+  return JSON.stringify(resignPromptApplies({ exists: exists ?? null, grantedAt: grantedAt ?? null, canSign: canSign === true }));
 }

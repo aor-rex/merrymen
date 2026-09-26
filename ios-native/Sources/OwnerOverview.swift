@@ -61,3 +61,31 @@ struct DailyUsage: View {
         }
     }
 }
+
+/// "Your trading permission is out of date" — the web's ResignPrompt strip.
+///
+/// A grant signed before the current wall release keeps the old wall; the agent
+/// looks armed but may refuse trades. This only navigates: the one signing
+/// control stays on the trading-limits screen, which shows the change first.
+struct ResignNotice: View {
+    @EnvironmentObject var store: AppStore
+    @StateObject private var presentation = FeedPresentation()
+    let status: J
+    /// Exactly the renew screen's own guard (GrantScreen), so this never sends
+    /// someone to a re-sign this app cannot perform.
+    private var canSign: Bool {
+        let grant = status["grant"]
+        return store.privy != nil && grant["owner"].text.lowercased() == store.owner?.lowercased()
+            && grant["chainId"].number == 4663 && grant["binding"]["version"].text == "privy-did-owner-v1"
+    }
+    var body: some View {
+        if presentation.resignApplies(exists: status["exists"].bool, grantedAt: status["grant"]["grantedAt"].number, canSign: canSign) {
+            Card {
+                Label("Trading permission is out of date", systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
+                Text("Signed before the last update. Your agent may refuse trades it looks able to make.")
+                Text("Re-signing is free, takes one signature and moves nothing on-chain. You will see what changes before you sign.").font(.caption).foregroundStyle(.secondary)
+                Button("Re-sign — free, one signature") { store.path.append(.limits) }.buttonStyle(PrimaryButtonStyle(fill: true))
+            }.overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.orange.opacity(0.5)))
+        }
+    }
+}

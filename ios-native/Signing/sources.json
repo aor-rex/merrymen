@@ -1,5 +1,5 @@
 {
-  "ios-native/Resources/FeedEngine.js": "2cb43d717ba745183259546dd00b8f8dd1e82e3154e11b65a3206ec9f0f1dedf",
+  "ios-native/Resources/FeedEngine.js": "f24e85a818e13c8f469b8488323890051c24765887fa3f150bb9beabe777a718",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
   "ios-native/Resources/WalletEngine.js": "0618f3c66523d7b7fa6e59e12246a1e2baeef33ddef5424e91ab520b672baaff",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
@@ -7,7 +7,7 @@
   "ios-native/Signing/crypto-platform.js": "508224e9cb61498f7680f0321d4f003b9135fb1032cb881b09c22fe8b8f1659d",
   "ios-native/Signing/crypto.ts": "1e1c1f0e0de3caeccdff3c58cc9370c2c8cb11adc702d03e3f3078ab936a6528",
   "ios-native/Signing/engine.ts": "8149ea001e17eb9da42d771c589c0c582e83bf337175dbb51fc14a4144d8babc",
-  "ios-native/Signing/feed.ts": "563b0f90aa89a22196794869f913e7c5db0a6b7d002a3b7033da725fc4c190ec",
+  "ios-native/Signing/feed.ts": "904bf74d2647cefee05c4f6f3cc0270239b6ac660c5e93a372a8b74130928f33",
   "ios-native/Signing/public-config.json": "a51e98f7c28774ae8575fd7f27ef71672760f808c04e96481a1c00cf9b79e91e",
   "package-lock.json": "4ef0520273dc2857ee3f0dac8376521c4767e26a98a9a8a456a6fec33caa19c2",
   "packages/core/src/abis.ts": "58167f3ac700682e23b99b060167a4d28fbab1044934aafdb44584583b37b2d5",
@@ -62,6 +62,7 @@
   "web/src/terminal/profile-view.ts": "9c63a40b6f7c2bbc38d4bc2ba92daa1ceb81bcf57722721877140757698186a0",
   "web/src/terminal/quotes.ts": "7a9d3e06f1ff88f7d004244db0185fe68e97aa20f3272fa3de716230d252b0af",
   "web/src/terminal/request-json.ts": "020e6271218f7683c59ffed5cdb16bf95e2c8dac722cfcb5db5519f87085a044",
+  "web/src/terminal/resign-prompt-state.ts": "8150e2c3c7d71f0104b87ff00b93109a1c323eb8cdf483a6a4072e59f53496d5",
   "web/src/terminal/strategy.ts": "0b8e7b921c91a4ed631760fb8cd8458a4085a67a52bd9921f73de004f46f1ab5",
   "web/src/terminal/why.ts": "86fb9a4a2645ad6cd87947bdc14e90a8a775a0bdf176550ad9c33ea1ce54a5e5",
   "worker/src/class-recovery.ts": "87e2a987769677dfa28ea1fa5d64e540076625c99ad2291af00df7a9f5646818",

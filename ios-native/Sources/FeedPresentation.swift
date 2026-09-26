@@ -15,6 +15,11 @@ final class FeedPresentation: ObservableObject {
     func markets(_ input: J) -> J? { value(input, function: "markets") }
     func overview(_ feed: J) -> J? { value(.object(["feed": feed, "now": .number(Date().timeIntervalSince1970 * 1000)]), function: "overview") }
     func connections(telegram: J?, settings: J?) -> J? { value(.object(["telegram": telegram ?? .null, "settings": settings ?? .null]), function: "connections") }
+    /// True only when the server says an agent exists, its grant was read, and
+    /// that grant predates the wall release bundled with this app.
+    func resignApplies(exists: Bool?, grantedAt: Double?, canSign: Bool) -> Bool {
+        value(.object(["exists": exists.map(J.bool) ?? .null, "grantedAt": grantedAt.map(J.number) ?? .null, "canSign": .bool(canSign)]), function: "resign")?.bool == true
+    }
     func command(_ input: J) -> J? {
         guard let result = value(input, function: "command"), result != .null else { return nil }
         return result
