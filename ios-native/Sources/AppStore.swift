@@ -59,12 +59,17 @@ final class AppStore: ObservableObject {
             if Language.options.contains(where: { $0.0 == locale }) { UserDefaults.standard.set(locale, forKey: "language") }
         }
         #endif
+        privy = Self.sharedPrivy
+    }
+
+    /// PrivySdk.initialize may run once per process; a second call is a fatal
+    /// error inside the SDK. Any extra AppStore (tests, previews) shares it.
+    private static let sharedPrivy: (any Privy)? = {
         let app = Bundle.main.object(forInfoDictionaryKey: "PrivyAppID") as? String ?? ""
         let client = Bundle.main.object(forInfoDictionaryKey: "PrivyClientID") as? String ?? ""
-        if !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") {
-            privy = PrivySdk.initialize(config: PrivyConfig(appId: app, appClientId: client))
-        }
-    }
+        guard !app.isEmpty, !client.isEmpty, !app.contains("$("), !client.contains("$(") else { return nil }
+        return PrivySdk.initialize(config: PrivyConfig(appId: app, appClientId: client))
+    }()
 
     func refreshSession() async {
         let initialGeneration = generation
