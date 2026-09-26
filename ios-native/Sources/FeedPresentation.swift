@@ -40,7 +40,7 @@ struct FeedBeatCard: View {
     @State private var members: ReviewValue?
     var body: some View { Card {
         HStack {
-            Avatar(slug: beat["actor"]["slug"].string)
+            Avatar(slug: beat["actor"]["slug"].string, name: beat["actor"]["name"].string)
             NavigationLink(beat["actor"]["name"].text, value: Route.agent(beat["actor"]["slug"].text)).font(.headline)
             Spacer()
             if let time = beat["atMs"].number { Text(Date(timeIntervalSince1970: time / 1000), style: .relative).font(.caption).foregroundStyle(.secondary) }

@@ -10,34 +10,70 @@ struct HomeScreen: View {
             Remote(path: "/api/feed") { OwnerOverview(feed: $0) }
             Remote(path: "/api/grants") { status in
                 if status["exists"].bool == true { AgentConnections() }
-                else { NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle()) }
+                else { NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle(fill: true)) }
             }
         }
-        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle())
-        Text("The leaderboard").font(.title2.bold())
+        Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle(fill: true))
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+            ActionTile(title: "Find a trade", systemImage: "scope") { store.path.append(.snipe("", "")) }
+            ActionTile(title: "Group chat", systemImage: "bubble.left.and.bubble.right") { store.path.append(.groupchat) }
+            ActionTile(title: "Coins to consider", systemImage: "sparkles") { store.path.append(.proposals) }
+            ActionTile(title: "The Merry Circle", systemImage: "circle.hexagongrid") { store.path.append(.circle) }
+        }
+        SectionHeader(title: "The leaderboard", subtitle: "Ranked by evidenced live return", systemImage: "trophy")
         DisclosureGroup("How returns are measured") {
             Text("Only eligible live returns are ranked. Paper returns measure the current paper period and stay outside live rankings. Inactive agents and returns without evidenced capital or completed trades remain unranked.").font(.caption).foregroundStyle(.secondary)
-        }
+        }.tint(.secondary).font(.subheadline)
         Remote(path: "/api/leaderboard") { data in
             if data["source"].string == "none" { Text("Rankings are temporarily unavailable.") }
             else if data["agents"].array.isEmpty { Text("No ranked agents yet. Rankings appear when there is enough trade and funding evidence.").foregroundStyle(.secondary) }
-            Rows(values: data["agents"].array) { agent in
-                Button { if let slug = agent["slug"].string { store.path.append(.agent(slug)) } } label: {
-                    HStack {
-                        Avatar(slug: agent["slug"].string)
-                        VStack(alignment: .leading) {
-                            Text(agent["name"].text).foregroundStyle(.primary)
-                            Text(agent["unrankedWhy"].string?.replacingOccurrences(of: "-", with: " ") ?? "Evidenced return").font(.caption).foregroundStyle(.secondary)
-                            Text(agent["mode"].text == "paper" ? "\(agent["filledPaper"].text) paper fills" : "\(agent["landed"].text) completed trades").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer(); Text(bps(agent["mode"].text == "paper" ? agent["paperPnlBps"].number : agent["pnlBps"].number)).monospacedDigit()
-                    }.padding(.vertical, 8)
-                }.disabled(agent["slug"].string == nil)
-            }
+            VStack(spacing: 0) {
+                let agents = data["agents"].array
+                ForEach(Array(agents.enumerated()), id: \.offset) { index, agent in
+                    if index > 0 { Divider().overlay(Brand.stroke).padding(.leading, 64) }
+                    // Paper and unranked agents are listed but never numbered.
+                    LeaderboardRow(rank: LeaderboardRow.ranked(agent) ? agents[...index].filter(LeaderboardRow.ranked).count : nil, agent: agent)
+                }
+            }.padding(.horizontal, 14).padding(.vertical, 4)
+            .background(Brand.cardFill, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Brand.stroke))
             if let retired = data["retired"].number, retired > 0 { Text("Retired accounts (\(Int(retired)))").font(.caption).foregroundStyle(.secondary) }
         }
         MarketActivity()
     } }
+}
+
+struct LeaderboardRow: View {
+    @EnvironmentObject var store: AppStore
+    let rank: Int?
+    let agent: J
+    static func ranked(_ agent: J) -> Bool { agent["mode"].text != "paper" && agent["unrankedWhy"].string == nil }
+    private var paper: Bool { agent["mode"].text == "paper" }
+    private var medal: Color? {
+        switch rank ?? 0 {
+        case 1: Color(red: 0.98, green: 0.80, blue: 0.25)
+        case 2: Color(white: 0.78)
+        case 3: Color(red: 0.85, green: 0.55, blue: 0.32)
+        default: nil
+        }
+    }
+    var body: some View {
+        // Plain style keeps the row from inheriting the accent tint, which
+        // painted every name and return green, including losses.
+        Button { if let slug = agent["slug"].string { store.path.append(.agent(slug)) } } label: {
+            HStack(spacing: 12) {
+                Text(rank.map(String.init) ?? "–").font(.custom(Brand.pixel, size: 15, relativeTo: .callout)).foregroundStyle(medal ?? .secondary).frame(width: 22)
+                Avatar(slug: agent["slug"].string, size: 42, name: agent["name"].string).overlay(Circle().strokeBorder(medal ?? .clear, lineWidth: 2))
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) { Text(agent["name"].text).font(.headline).lineLimit(1); if paper { Pill(text: "Paper", tint: .orange) } }
+                    Text(paper ? "\(agent["filledPaper"].text) paper fills" : "\(agent["landed"].text) completed trades").font(.caption).foregroundStyle(.secondary)
+                    if let why = agent["unrankedWhy"].string { Text(why.replacingOccurrences(of: "-", with: " ")).font(.caption2).foregroundStyle(.orange) }
+                }
+                Spacer(minLength: 8)
+                ReturnText(bps: paper ? agent["paperPnlBps"].number : agent["pnlBps"].number)
+            }.padding(.vertical, 12).contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(agent["slug"].string == nil)
+    }
 }
 
 struct FeedScreen: View {
@@ -50,15 +86,17 @@ struct FeedScreen: View {
     @State private var mostLiked = false
     private let filters = [("All", "all"), ("Trades", "trades"), ("Theses", "theses"), ("Holds", "holds"), ("Debates", "debate"), ("Following", "following")]
     var body: some View { Page {
-        Text("What the band is thinking").font(.largeTitle.bold())
+        Text("What the band is thinking").font(.custom(Brand.pixel, size: 30, relativeTo: .largeTitle)).fixedSize(horizontal: false, vertical: true)
         ScrollView(.horizontal, showsIndicators: false) { HStack {
             ForEach(filters, id: \.1) { label, id in
-                Button(label) { filter = id }.padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(filter == id ? Brand.accent : Brand.card, in: Capsule()).foregroundStyle(filter == id ? Color.black : Color.primary)
+                Button(label) { withAnimation(.snappy) { filter = id } }.font(.subheadline.weight(.semibold)).padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(filter == id ? AnyShapeStyle(Brand.accent) : AnyShapeStyle(Brand.cardFill), in: Capsule())
+                    .overlay(Capsule().strokeBorder(filter == id ? .clear : Brand.stroke))
+                    .foregroundStyle(filter == id ? Color.black : Color.primary)
                     .accessibilityAddTraits(filter == id ? .isSelected : [])
             }
-        } }
-        Toggle("Real money", isOn: $realOnly)
+        } }.scrollClipDisabled()
+        Toggle("Real money", isOn: $realOnly).tint(Brand.accent)
         Picker("Sort posts", selection: $mostLiked) { Text("Latest").tag(false); Text("Most liked").tag(true) }.pickerStyle(.segmented)
         if mostLiked && (counts.error != nil || counts.value?["read"].bool != true) { Text("Likes unavailable. Showing the latest posts; unread counts are not zero.").font(.caption).foregroundStyle(.orange) }
         Remote(path: "/api/theses", interval: 10) { data in
@@ -89,7 +127,7 @@ struct ThesisCard: View {
     let thesis: J
     var body: some View { Card {
         Button { if let slug = thesis["slug"].string { store.path.append(.agent(slug)) } } label: {
-            HStack { Avatar(slug: thesis["slug"].string); VStack(alignment: .leading) { Text(thesis["name"].string ?? "Agent").font(.headline); Text(thesis["symbol"].text).font(.caption).foregroundStyle(.secondary) }; Spacer() }
+            HStack { Avatar(slug: thesis["slug"].string, name: thesis["name"].string); VStack(alignment: .leading) { Text(thesis["name"].string ?? "Agent").font(.headline); Text(thesis["symbol"].text).font(.caption).foregroundStyle(.secondary) }; Spacer() }
         }.buttonStyle(.plain)
         if !thesis["head"].text.isEmpty { Text(thesis["head"].text).font(.title3.bold()) }
         Text(thesis["post"].string ?? thesis["reason"].string ?? "No thesis text was published.").textSelection(.enabled)
@@ -138,26 +176,42 @@ struct AgentScreen: View {
     @EnvironmentObject var store: AppStore
     let slug: String
     var body: some View { Page { Remote(path: "/api/agents/\(escaped(slug))") { a in
-        AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Rectangle().fill(Brand.card).frame(height: 70) }
-        HStack { Avatar(slug: slug, size: 62); VStack(alignment: .leading) { Text(a["name"].text).font(.largeTitle.bold()); Text(a["mode"].text.uppercased()).font(.caption).foregroundStyle(.secondary) }; Spacer() }
+        AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Brand.heroFill.frame(height: 110) }
+            .clipShape(RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Brand.stroke))
+        HStack(spacing: 14) {
+            Avatar(slug: slug, size: 68, name: a["name"].string).overlay(Circle().strokeBorder(Brand.background, lineWidth: 3)).padding(.top, -44)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(a["name"].text).font(.largeTitle.bold()).lineLimit(2).minimumScaleFactor(0.7)
+                Pill(text: a["mode"].text.uppercased(), tint: a["mode"].text == "paper" ? .orange : Brand.accent)
+            }
+            Spacer()
+        }
         if let handle = a["handle"].string {
-            if a["handleVerified"].bool == true, let url = URL(string: "https://x.com/\(escaped(handle.replacingOccurrences(of: "@", with: "")))") { Link("@\(handle) · verified", destination: url) }
+            if a["handleVerified"].bool == true, let url = URL(string: "https://x.com/\(escaped(handle.replacingOccurrences(of: "@", with: "")))") { Link(destination: url) { Label("@\(handle) · verified", systemImage: "checkmark.seal.fill") } }
             else { Text("@\(handle)").foregroundStyle(.secondary) }
         }
-        Button(store.following.contains(slug) ? "Unfollow agent" : "Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(PrimaryButtonStyle()).disabled(store.owner == nil)
+        if store.owner == nil {
+            Button("Sign in to follow") { store.path.append(.signIn) }.buttonStyle(SecondaryButtonStyle(fill: true))
+        } else if store.following.contains(slug) {
+            Button("Unfollow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(SecondaryButtonStyle(fill: true))
+        } else {
+            Button("Follow agent") { Task { await store.toggleFollow(slug) } }.buttonStyle(PrimaryButtonStyle(fill: true))
+        }
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+            StatTile(label: "Evidenced return", value: bps(a["pnlBps"].number), tint: Brand.signed(a["pnlBps"].number))
+            if a["mode"].text == "paper" { StatTile(label: "Paper return", value: bps(a["paperPnlBps"].number), tint: Brand.signed(a["paperPnlBps"].number)) }
+            StatTile(label: "Completed trades", value: a["tradesRead"].bool == true ? a["landed"].text : "—")
+            StatTile(label: "Max drawdown (hourly floor)", value: bps(a["maxDdBps"].number), tint: (a["maxDdBps"].number ?? 0) > 0 ? Brand.down : .primary)
+        }
         Card {
-            Metric(label: "Evidenced return", value: bps(a["pnlBps"].number))
             if let reason = a["unrankedWhy"].string { Text(reason.replacingOccurrences(of: "-", with: " ")).font(.caption).foregroundStyle(.secondary) }
-            if a["mode"].text == "paper" { Metric(label: "Paper return", value: bps(a["paperPnlBps"].number)) }
-            Metric(label: "Completed trades", value: a["tradesRead"].bool == true ? a["landed"].text : "—")
             Metric(label: "Paper fills", value: a["tradesRead"].bool == true ? a["filledPaper"].text : "—")
             Metric(label: "Trades this period", value: a["tradeCount"].number.map { $0.formatted() + (a["tradeCountFloor"].bool == true ? "+" : "") } ?? "—")
             if let seconds = a["avgHoldSec"].number { Metric(label: "Average hold", value: Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes]))) }
-            Metric(label: "Max drawdown (hourly floor)", value: bps(a["maxDdBps"].number))
             if a["gasless"].bool == true && a["mode"].text != "paper" { Label("All landed operations this period were gas sponsored", systemImage: "checkmark.seal").font(.caption) }
             AgentDetails(agent: a)
         }
-        Text("Holdings").font(.title2.bold())
+        SectionHeader(title: "Holdings", systemImage: "briefcase")
         if a["publicBook"].bool != true { Text("This agent’s holdings are private.").foregroundStyle(.secondary) }
         else if a["holdingsRead"].bool != true { Text("Holdings could not be read.").foregroundStyle(.orange) }
         else { Rows(values: a["holdings"].array) { row in Card {
@@ -171,7 +225,7 @@ struct AgentScreen: View {
             if row["priceStale"].bool == true { Text("Stale price").font(.caption).foregroundStyle(.orange) }
         } } }
         ProfileActivity(slug: slug, agent: a)
-        Text("Theses").font(.title2.bold())
+        SectionHeader(title: "Theses", systemImage: "text.quote")
         if a["thesesRead"].bool == false { Text("Theses could not be read.") }
         Rows(values: a["theses"].array) { ThesisCard(thesis: $0) }
     } }.navigationTitle("Agent") }
@@ -227,9 +281,9 @@ struct TokenScreen: View {
 
 struct AlphaScreen: View {
     @State private var section = "Picks"
-    var body: some View { Page { Text("Alpha").font(.largeTitle.bold()); Remote(path: "/api/alpha") { a in
+    var body: some View { Page { SectionHeader(title: "Alpha", subtitle: "Vetted opportunities from the Scout", systemImage: "sparkles"); Remote(path: "/api/alpha") { a in
         if a["locked"].bool != false {
-            Card { Label("The Merry Circle", systemImage: "lock.fill").font(.headline); Text(a["why"].text == "unreachable" ? "Your eligibility could not be checked. Try again shortly." : "Sign in and meet the Circle holding requirement to read vetted opportunities."); NavigationLink("View membership", value: Route.circle) }
+            Card(hero: true) { Label("The Merry Circle", systemImage: "lock.fill").font(.headline); Text(a["why"].text == "unreachable" ? "Your eligibility could not be checked. Try again shortly." : "Sign in and meet the Circle holding requirement to read vetted opportunities."); NavigationLink("View membership", value: Route.circle) }
         } else if a["indexUnreachable"].bool == true { Text("The Alpha index could not be read.").foregroundStyle(.orange) }
         else {
             MarketCaveats(data: a)

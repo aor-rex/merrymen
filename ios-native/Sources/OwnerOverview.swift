@@ -6,14 +6,17 @@ struct OwnerOverview: View {
     let feed: J
     var body: some View {
         if let view = presentation.overview(feed), view != .null {
-            Card {
+            Card(hero: true) {
                 Text(view["name"].text).font(.headline)
                 Text("Portfolio balance").font(.caption).foregroundStyle(.secondary)
                 Text(usd(view["equity"].number)).font(.custom("GeistPixel-Regular", size: 42, relativeTo: .largeTitle)).minimumScaleFactor(0.6).lineLimit(1)
                 if let change = view["chg24"].number { Text("\(usd(change)) over 24 hours").foregroundStyle(change < 0 ? Brand.down : Brand.up) }
                 TrendChart(values: view["history"].array.compactMap(\.number))
                 Text("Recorded portfolio value includes deposits and withdrawals. Individual trades identify real and paper activity.").font(.caption).foregroundStyle(.secondary)
-                HStack { Button("Add funds") { store.path.append(.deposit) }; Spacer(); Button("Withdraw") { store.path.append(.withdraw) } }
+                HStack(spacing: 12) {
+                    Button("Add funds") { store.path.append(.deposit) }.buttonStyle(PrimaryButtonStyle(fill: true))
+                    Button("Withdraw") { store.path.append(.withdraw) }.buttonStyle(SecondaryButtonStyle(fill: true))
+                }
                 if let notice = view["notice"]["message"].string { Text(notice).font(.caption).foregroundStyle(.orange) }
             }
             DisclosureGroup("Positions · \(view["positions"].array.count)") {
