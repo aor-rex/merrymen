@@ -20,6 +20,10 @@ final class FeedPresentation: ObservableObject {
     func resignApplies(exists: Bool?, grantedAt: Double?, canSign: Bool) -> Bool {
         value(.object(["exists": exists.map(J.bool) ?? .null, "grantedAt": grantedAt.map(J.number) ?? .null, "canSign": .bool(canSign)]), function: "resign")?.bool == true
     }
+    /// "create", "fund", "unread" or "done" (web lib/can-start setupStep).
+    func setupStep(status: J, paper: Bool) -> String? {
+        value(.object(["status": status, "paper": .bool(paper)]), function: "setup")?.string
+    }
     func command(_ input: J) -> J? {
         guard let result = value(input, function: "command"), result != .null else { return nil }
         return result

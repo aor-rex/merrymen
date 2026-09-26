@@ -10,8 +10,8 @@ struct HomeScreen: View {
             Remote(path: "/api/feed") { OwnerOverview(feed: $0) }
             Remote(path: "/api/grants") { status in
                 ResignNotice(status: status)
+                SetupChecklist(status: status)
                 if status["exists"].bool == true { AgentConnections() }
-                else { NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle(fill: true)) }
             }
         }
         Button { store.path.append(.markets) } label: { Label("Explore markets", systemImage: "chart.bar.xaxis") }.buttonStyle(PrimaryButtonStyle(fill: true))

@@ -89,3 +89,33 @@ struct ResignNotice: View {
         }
     }
 }
+
+/// "Finish setting up" — the web's SetupChecklist, from the same status read.
+struct SetupChecklist: View {
+    @EnvironmentObject var store: AppStore
+    @StateObject private var presentation = FeedPresentation()
+    let status: J
+    var body: some View {
+        let paper = status["mode"].string == "paper"
+        if let step = presentation.setupStep(status: status, paper: paper), step != "done" {
+            let created = status["exists"].bool == true
+            Card {
+                HStack { Text("Finish setting up").font(.headline); Spacer(); Text("\(created ? 1 : 0) of \(paper ? 1 : 2)").font(.custom(Brand.pixel, size: 14, relativeTo: .caption)).foregroundStyle(.secondary) }
+                row(done: created, title: "Create your agent", detail: "A strategy and signed trading limits.", action: created ? nil : ("Create agent", .create))
+                if !paper {
+                    row(done: false, title: "Add trading funds",
+                        detail: step == "unread" ? "We couldn't read your balance just now, so we can't say whether this is done." : "Fund your agent when you're ready.",
+                        action: step == "fund" ? ("Add funds", .deposit) : nil)
+                }
+            }
+        }
+    }
+    private func row(done: Bool, title: String, detail: String, action: (String, Route)?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle").foregroundStyle(done ? Brand.accent : .secondary).font(.title3).accessibilityLabel(done ? "Done" : "Not done")
+            VStack(alignment: .leading, spacing: 2) { Text(LocalizedStringKey(title)).font(.subheadline.weight(.semibold)); Text(LocalizedStringKey(detail)).font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            if let action { Button(LocalizedStringKey(action.0)) { store.path.append(action.1) }.font(.subheadline.weight(.semibold)) }
+        }
+    }
+}

@@ -91,3 +91,8 @@ assert.equal(resign({ exists: null, grantedAt: 1, canSign: true }), false);
 assert.equal(resign({ exists: false, grantedAt: 1, canSign: true }), false);
 assert.equal(resign({ exists: true, grantedAt: 1, canSign: false }), false);
 console.log('Native re-sign notice fires only for a read, signable grant that predates the bundled wall release.');
+const setup = (status, paper = false) => JSON.parse(context.NativeFeed.setup(JSON.stringify({ status, paper })));
+assert.equal(setup({ exists: false }), 'create');
+assert.equal(setup({ exists: true }, true), 'done');
+assert.equal(setup({ exists: true, balances: { ethWei: null } }), 'unread');
+console.log('Native setup checklist follows the web setup step, and an unread balance is never shown as unfunded.');

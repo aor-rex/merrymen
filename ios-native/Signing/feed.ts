@@ -7,6 +7,7 @@ import { seedSources, withRead, liveOf, mineOf } from '../../web/src/terminal/li
 import { positionsOf, spentToday } from '../../web/src/terminal/account';
 import { telegramRow, trencherRow } from '../../web/src/terminal/agent-status';
 import { resignPromptApplies } from '../../web/src/terminal/resign-prompt-state';
+import { setupStep } from '../../web/src/lib/can-start';
 
 export function overview(json: string): string {
   const { feed, now } = JSON.parse(json);
@@ -115,4 +116,10 @@ export function render(json: string): string {
 export function resign(json: string): string {
   const { exists, grantedAt, canSign } = JSON.parse(json);
   return JSON.stringify(resignPromptApplies({ exists: exists ?? null, grantedAt: grantedAt ?? null, canSign: canSign === true }));
+}
+
+// The web's "Finish setting up" step, from the same /api/grants status.
+export function setup(json: string): string {
+  const { status, paper } = JSON.parse(json);
+  return JSON.stringify(status ? setupStep(status, paper === true) : null);
 }
