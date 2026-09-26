@@ -216,60 +216,163 @@ struct GroupChatScreen: View {
     @State private var failedReply: J = .null
     @State private var busy = false
     @State private var timeZone = TimeZone.current.identifier
+    @State private var info = false
+    @FocusState private var composing: Bool
+    private var mySlug: String? { model.me["slug"].string }
+    private func mine(_ row: J) -> Bool { row["author"].text == "owner" && row["slug"].string != nil && row["slug"].string == mySlug }
+
     var body: some View {
-        Page {
-            Text("The band, together.").font(.largeTitle.bold())
-            if model.room != .null {
-                Text("\(model.room["awake"].text) awake · \(model.room["asleep"].text) asleep").font(.caption).foregroundStyle(.secondary)
-                DisclosureGroup("Who's here") { Rows(values: model.room["presence"].array) { row in Metric(label: row["name"].text, value: row["state"].text) } }
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    if let error = model.error { Text(model.unavailable ? "Group chat is not enabled on this deployment." : error).font(.caption).foregroundStyle(.orange).padding(8).background(.black.opacity(0.4), in: Capsule()).padding(.vertical, 8) }
+                    if !model.reachedStart && !model.messages.isEmpty {
+                        Button("Load earlier messages") { Task { await model.load(store.api, older: true) } }.font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12).padding(.vertical, 6).background(.black.opacity(0.45), in: Capsule()).padding(.vertical, 8)
+                    }
+                    ForEach(Array(model.messages.enumerated()), id: \.offset) { index, row in
+                        let previous = index > 0 ? model.messages[index - 1] : nil
+                        let next = index + 1 < model.messages.count ? model.messages[index + 1] : nil
+                        if let day = dayLabel(row, after: previous) { DayChip(text: day) }
+                        RoomBubble(row: row, quoted: quoted(row), mine: mine(row),
+                                   firstInRun: !sameRun(previous, row) || dayLabel(row, after: previous) != nil,
+                                   lastInRun: !sameRun(row, next) || (next.map { dayLabel($0, after: row) != nil } ?? false),
+                                   canReply: model.me["member"].bool == true,
+                                   onReply: { reply = row; composing = true }, onTakeBack: { hide(row) })
+                            .id(row["id"].number ?? Double(index))
+                    }
+                }.padding(.horizontal, 10).padding(.vertical, 8)
             }
-            if let error = model.error { Text(model.unavailable ? "Group chat is not enabled on this deployment." : error).foregroundStyle(.orange) }
-            if !model.reachedStart && !model.messages.isEmpty { Button("Load earlier messages") { Task { await model.load(store.api, older: true) } } }
-            Rows(values: model.messages) { row in Card {
-                HStack {
-                    if let slug = row["slug"].string { NavigationLink(row["name"].text, value: Route.agent(slug)).font(.headline) } else { Text(row["name"].text).font(.headline) }
-                    Spacer(); Text(row["author"].text).font(.caption).foregroundStyle(.secondary)
-                }
-                if let target = row["replyTo"].number { Text("Reply to #\(Int(target))").font(.caption).foregroundStyle(.secondary) }
-                Text(row["body"].text).textSelection(.enabled)
-                if row["call"] != .null {
-                    HStack {
-                        if row["call"]["paper"].bool == true { Text("PAPER").foregroundStyle(.orange) }
-                        Text("\(row["call"]["side"].text) \(row["call"]["symbol"].text)")
-                        if let token = row["call"]["token"].string { NavigationLink("Token", value: Route.token(token)) }
-                    }.font(.caption)
-                }
-                HStack {
-                    if model.me["member"].bool == true { Button("Reply") { reply = row } }
-                    if row["author"].text == "owner", row["slug"].string != nil, row["slug"] == model.me["slug"] {
-                        Button("Take back", role: .destructive) { hide(row) }
+            .scrollDismissesKeyboard(.interactively)
+            .defaultScrollAnchor(.bottom)
+            .background { ChatWallpaper() }
+            .onChange(of: model.messages.last?["id"].number) { _, last in
+                guard let last else { return }
+                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(last, anchor: .bottom) }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Button { info = true } label: {
+                    HStack(spacing: 10) {
+                        Image("Brand").resizable().scaledToFit().padding(6).frame(width: 36, height: 36).background(Brand.raised, in: Circle()).overlay(Circle().strokeBorder(Brand.accent.opacity(0.4)))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("The band").font(.headline).foregroundStyle(.primary)
+                            Text(model.room == .null ? "connecting…" : "\(model.room["members"].text) members · \(model.room["awake"].text) awake").font(.caption2).foregroundStyle(Brand.accent)
+                        }
                     }
-                }.font(.caption)
-            } }
-            if model.me["member"].bool == true {
-                Card {
-                    if let reply { HStack { Text("Replying to \(reply["name"].text)"); Spacer(); Button("Cancel") { self.reply = nil } }.font(.caption) }
-                    TextField("Say something to the band", text: $text, axis: .vertical).lineLimit(2...6).disabled(busy)
-                    Text("\(text.count)/500 · public conversation").font(.caption).foregroundStyle(.secondary)
-                    Button("Post") { send() }.disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text.count > 500)
-                    Toggle("Mute my agent in the room", isOn: Binding(get: { model.me["muted"].bool == true }, set: { savePreferences(["muted": .bool($0)]) })).disabled(busy)
-                    Text("Muting the room does not pause trading.").font(.caption).foregroundStyle(.secondary)
-                    if let zone = model.me["tz"].string { Text("\(zone) · sleeps \(model.me["sleep"]["from"].text)–\(model.me["sleep"]["to"].text)").font(.caption) }
-                    Button("Use this device's time zone") { savePreferences(["tz": .string(TimeZone.current.identifier), "source": .string("owner")]) }.disabled(busy)
-                    DisclosureGroup("Sleep schedule") {
-                        Text("Your agent's sleep window is calculated by the room in the selected time zone. Sleep and mute apply to room conversation, not trading.").font(.caption).foregroundStyle(.secondary)
-                        Picker("Time zone", selection: $timeZone) { ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { Text($0.replacingOccurrences(of: "_", with: " ")).tag($0) } }
-                        Button("Set this time zone") { savePreferences(["tz": .string(timeZone), "source": .string("owner")]) }.disabled(busy)
-                        Button("Keep my agent awake in the room") { savePreferences(["tz": .null, "source": .string("owner")]) }.disabled(busy)
-                    }
-                }
-            } else if store.owner == nil { SignInCard() }
-        }.navigationTitle("Group chat").task(id: "\(store.generation)|\(phase == .active)") {
+                }.buttonStyle(.plain).accessibilityLabel("Room info")
+            }
+            ToolbarItem(placement: .topBarTrailing) { Button { info = true } label: { Image(systemName: "info.circle") }.accessibilityLabel("Room info") }
+        }
+        .sheet(isPresented: $info) { NavigationStack { roomInfo }.presentationDetents([.medium, .large]) }
+        .task(id: "\(store.generation)|\(phase == .active)") {
             guard phase == .active else { return }
             do { model.me = try await store.api.request("/api/groupchat/me") } catch { model.error = error.localizedDescription }
             repeat { await model.load(store.api); do { try await Task.sleep(for: .seconds(3)) } catch { return } } while !Task.isCancelled && !model.unavailable
         }
     }
+
+    // MARK: Composer
+
+    @ViewBuilder private var composer: some View {
+        VStack(spacing: 0) {
+            Divider().overlay(Brand.stroke)
+            if model.me["member"].bool == true {
+                if let reply {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrowshape.turn.up.left.fill").foregroundStyle(Brand.accent).accessibilityHidden(true)
+                        RoundedRectangle(cornerRadius: 1).fill(Brand.accent).frame(width: 2, height: 32)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Reply to \(reply["name"].text)").font(.caption.weight(.semibold)).foregroundStyle(Brand.accent)
+                            Text(reply["body"].text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Button { self.reply = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.accessibilityLabel("Cancel reply")
+                    }.padding(.horizontal, 14).padding(.top, 8)
+                }
+                HStack(alignment: .bottom, spacing: 8) {
+                    TextField("Message the band", text: $text, axis: .vertical).lineLimit(1...6).focused($composing).disabled(busy)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(Brand.raised, in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Brand.stroke))
+                    let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button { send() } label: {
+                        Image(systemName: busy ? "ellipsis" : "arrow.up").font(.body.weight(.bold)).foregroundStyle(.black)
+                            .frame(width: 40, height: 40).background(empty || text.count > 500 ? Brand.accent.opacity(0.35) : Brand.accent, in: Circle())
+                    }.disabled(busy || empty || text.count > 500).accessibilityLabel("Post")
+                }.padding(.horizontal, 10).padding(.vertical, 8)
+                if text.count > 400 { Text("\(text.count)/500 · public conversation").font(.caption2).foregroundStyle(text.count > 500 ? Brand.down : .secondary).padding(.bottom, 4) }
+            } else if store.owner == nil {
+                Button("Sign in to join the conversation") { store.path.append(.signIn) }.buttonStyle(PrimaryButtonStyle(fill: true)).padding(12)
+            } else if model.me != .null {
+                Text("Your agent joins the room once it is created.").font(.subheadline).foregroundStyle(.secondary).padding(14)
+            }
+        }.background(.bar)
+    }
+
+    // MARK: Room info
+
+    private var roomInfo: some View {
+        List {
+            Section {
+                HStack(spacing: 14) {
+                    Image("Brand").resizable().scaledToFit().padding(10).frame(width: 60, height: 60).background(Brand.raised, in: Circle())
+                    VStack(alignment: .leading) {
+                        Text("The band").font(.title3.bold())
+                        Text("\(model.room["awake"].text) awake · \(model.room["asleep"].text) asleep").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                Text("A public room where agents talk between trades. Nothing said here places a trade.").font(.caption).foregroundStyle(.secondary)
+            }
+            if model.me["member"].bool == true {
+                Section {
+                    Toggle("Mute my agent in the room", isOn: Binding(get: { model.me["muted"].bool == true }, set: { savePreferences(["muted": .bool($0)]) })).tint(Brand.accent).disabled(busy)
+                    if let zone = model.me["tz"].string { Text("\(zone) · sleeps \(model.me["sleep"]["from"].text)–\(model.me["sleep"]["to"].text)").font(.subheadline) }
+                    else { Text("Always awake in the room").font(.subheadline) }
+                    Button("Use this device's time zone") { savePreferences(["tz": .string(TimeZone.current.identifier), "source": .string("owner")]) }.disabled(busy)
+                    Picker("Time zone", selection: $timeZone) { ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { Text($0.replacingOccurrences(of: "_", with: " ")).tag($0) } }
+                    Button("Set this time zone") { savePreferences(["tz": .string(timeZone), "source": .string("owner")]) }.disabled(busy)
+                    Button("Keep my agent awake in the room") { savePreferences(["tz": .null, "source": .string("owner")]) }.disabled(busy)
+                } header: { Text("Your agent") } footer: { Text("Muting and sleep apply to room conversation only. They do not pause trading.") }
+            }
+            Section("Members") {
+                ForEach(Array(model.room["presence"].array.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 12) {
+                        Avatar(slug: row["slug"].string, size: 34, name: row["name"].string)
+                        Text(row["name"].text)
+                        Spacer()
+                        Circle().fill(row["state"].text == "awake" ? Brand.up : Color.secondary).frame(width: 8, height: 8).accessibilityHidden(true)
+                        Text(row["state"].text).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden).background(Brand.background)
+        .navigationTitle("Room info").navigationBarTitleDisplayMode(.inline)
+        .toolbar { Button("Done") { info = false } }
+    }
+
+    // MARK: Layout helpers
+
+    private func sameRun(_ a: J?, _ b: J?) -> Bool {
+        guard let a, let b else { return false }
+        return a["slug"] == b["slug"] && a["author"] == b["author"] && abs((b["at"].number ?? 0) - (a["at"].number ?? 0)) < 5 * 60_000
+    }
+    private func dayLabel(_ row: J, after previous: J?) -> String? {
+        guard let at = row["at"].number else { return nil }
+        let date = Date(timeIntervalSince1970: at / 1000)
+        if let before = previous?["at"].number, Calendar.current.isDate(Date(timeIntervalSince1970: before / 1000), inSameDayAs: date) { return nil }
+        if Calendar.current.isDateInToday(date) { return String(localized: "Today") }
+        if Calendar.current.isDateInYesterday(date) { return String(localized: "Yesterday") }
+        return date.formatted(.dateTime.month(.wide).day())
+    }
+    private func quoted(_ row: J) -> J? {
+        guard let target = row["replyTo"].number else { return nil }
+        return model.messages.first { $0["id"].number == target } ?? .object(["name": .string(""), "body": .string("An earlier message")])
+    }
+
     private func send() {
         guard !busy else { return }; busy = true; let owner = store.owner; let body = text
         let target = reply?["id"] ?? .null
@@ -291,5 +394,126 @@ struct GroupChatScreen: View {
     private func savePreferences(_ changes: [String: J]) {
         guard !busy else { return }; busy = true; let owner = store.owner
         Task { defer { busy = false }; do { model.me = try await store.perform("/api/groupchat/me", body: .object(changes), expectedOwner: owner) } catch { store.notice = error.localizedDescription } }
+    }
+}
+
+private struct DayChip: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, 12).padding(.vertical, 5).background(.black.opacity(0.45), in: Capsule())
+            .frame(maxWidth: .infinity).padding(.vertical, 10)
+    }
+}
+
+/// One Telegram-style message: sender avatar and coloured name at the edges of
+/// a run, quoted reply inside the bubble, time in its corner.
+private struct RoomBubble: View {
+    let row: J
+    let quoted: J?
+    let mine: Bool
+    let firstInRun: Bool
+    let lastInRun: Bool
+    let canReply: Bool
+    let onReply: () -> Void
+    let onTakeBack: () -> Void
+    private var senderColor: Color { AgentFace.color(AgentFace.seed(name: row["name"].text, slug: row["slug"].string)) }
+    private var time: String { row["at"].number.map { Date(timeIntervalSince1970: $0 / 1000).formatted(date: .omitted, time: .shortened) } ?? "" }
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            if mine { Spacer(minLength: 56) }
+            else {
+                Group { if lastInRun { Avatar(slug: row["slug"].string, size: 32, name: row["name"].string) } else { Color.clear } }.frame(width: 32, height: 32)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                if !mine && firstInRun {
+                    HStack(spacing: 6) {
+                        Text(row["name"].text).font(.subheadline.weight(.semibold)).foregroundStyle(senderColor)
+                        if row["author"].text == "owner" { Text("owner").font(.caption2.weight(.semibold)).foregroundStyle(.secondary) }
+                    }
+                }
+                if let quoted {
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1).fill(mine ? Color.black.opacity(0.6) : senderColorOf(quoted)).frame(width: 3)
+                        VStack(alignment: .leading, spacing: 1) {
+                            if !quoted["name"].text.isEmpty { Text(quoted["name"].text).font(.caption.weight(.semibold)).foregroundStyle(mine ? Color.black.opacity(0.75) : senderColorOf(quoted)) }
+                            Text(quoted["body"].text).font(.caption).lineLimit(2).foregroundStyle(mine ? Color.black.opacity(0.7) : .secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }.padding(6).fixedSize(horizontal: false, vertical: true)
+                    .background((mine ? Color.black : senderColorOf(quoted)).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                }
+                if row["call"] != .null {
+                    HStack(spacing: 6) {
+                        Image(systemName: row["call"]["side"].text == "sell" ? "arrow.down.right" : "arrow.up.right").accessibilityHidden(true)
+                        Text("\(row["call"]["side"].text.capitalized) \(row["call"]["symbol"].text)").font(.caption.weight(.bold))
+                        if row["call"]["paper"].bool == true { Text("PAPER").font(.caption2.weight(.bold)).foregroundStyle(.orange) }
+                    }
+                    .foregroundStyle(mine ? Color.black : (row["call"]["side"].text == "sell" ? Brand.down : Brand.up))
+                    .padding(.horizontal, 8).padding(.vertical, 4).background((mine ? Color.black : Color.white).opacity(0.08), in: Capsule())
+                }
+                // Time sits in the bubble's corner, after the text, as in Telegram.
+                (Text(row["body"].text) + Text("   " + time).font(.caption2).foregroundColor(.clear))
+                    .foregroundStyle(mine ? Color.black : Color.primary)
+                    .overlay(alignment: .bottomTrailing) { Text(time).font(.caption2).foregroundStyle(mine ? Color.black.opacity(0.55) : Color.secondary) }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(mine ? AnyShapeStyle(Brand.accent) : AnyShapeStyle(Brand.raised), in: BubbleShape(mine: mine, tail: lastInRun))
+            .overlay { if !mine { BubbleShape(mine: false, tail: lastInRun).stroke(Brand.stroke) } }
+            .contextMenu {
+                if canReply { Button { onReply() } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") } }
+                Button { UIPasteboard.general.string = row["body"].text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                if let token = row["call"]["token"].string { NavigationLink(value: Route.token(token)) { Label("Open token", systemImage: "chart.line.uptrend.xyaxis") } }
+                if let slug = row["slug"].string { NavigationLink(value: Route.agent(slug)) { Label("View \(row["name"].text)", systemImage: "person.crop.circle") } }
+                if mine { Button(role: .destructive) { onTakeBack() } label: { Label("Take back", systemImage: "trash") } }
+            }
+            if !mine { Spacer(minLength: 40) }
+        }
+        .padding(.top, firstInRun ? 6 : 0)
+        .accessibilityElement(children: .combine)
+    }
+    private func senderColorOf(_ message: J) -> Color { AgentFace.color(AgentFace.seed(name: message["name"].text, slug: message["slug"].string)) }
+}
+
+/// Rounded bubble with a small tail on the last message of a run.
+private struct BubbleShape: Shape {
+    let mine: Bool
+    let tail: Bool
+    func path(in rect: CGRect) -> Path {
+        let r: CGFloat = 16, small: CGFloat = 5
+        var path = Path(roundedRect: rect, cornerRadii: RectangleCornerRadii(
+            topLeading: r, bottomLeading: !mine && tail ? small : r, bottomTrailing: mine && tail ? small : r, topTrailing: r))
+        if tail {
+            let x = mine ? rect.maxX : rect.minX, dir: CGFloat = mine ? 1 : -1
+            path.move(to: CGPoint(x: x, y: rect.maxY - 12))
+            path.addQuadCurve(to: CGPoint(x: x + 6 * dir, y: rect.maxY), control: CGPoint(x: x, y: rect.maxY - 2))
+            path.addLine(to: CGPoint(x: x - 8 * dir, y: rect.maxY))
+            path.closeSubpath()
+        }
+        return path
+    }
+}
+
+/// A dark Merrymen wallpaper: the accent glow and a faint tiled logo mark.
+private struct ChatWallpaper: View {
+    var body: some View {
+        ZStack {
+            Brand.background
+            LinearGradient(colors: [Brand.accent.opacity(0.10), .clear, Brand.up.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Canvas { context, size in
+                guard let mark = context.resolveSymbol(id: 0) else { return }
+                let step: CGFloat = 74
+                var row = 0
+                for y in stride(from: 0, through: size.height + step, by: step) {
+                    for x in stride(from: row % 2 == 0 ? 0 : step / 2, through: size.width + step, by: step) {
+                        context.draw(mark, at: CGPoint(x: x, y: y))
+                    }
+                    row += 1
+                }
+            } symbols: {
+                Image("Brand").resizable().scaledToFit().frame(width: 26, height: 18).opacity(0.06).rotationEffect(.degrees(-18)).tag(0)
+            }
+        }.ignoresSafeArea()
     }
 }

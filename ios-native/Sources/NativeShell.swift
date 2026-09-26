@@ -370,6 +370,8 @@ enum AgentFace {
         return name
     }
     /// Matches hueOf: JavaScript string char codes are UTF-16 units.
+    /// A readable name colour for dark bubbles, from the same seed as the face.
+    static func color(_ seed: String) -> Color { hsl(Double(hue(seed)), 0.7, 0.66) }
     static func hue(_ seed: String) -> Int { seed.utf16.reduce(0) { ($0 * 31 + Int($1)) % 360 } }
     static func initials(_ name: String) -> String {
         let words = name.split(whereSeparator: \.isWhitespace)
