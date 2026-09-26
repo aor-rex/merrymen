@@ -331,19 +331,82 @@ struct TrendChart: View {
         } else { Text("History is not available yet.").font(.caption).foregroundStyle(.secondary) }
     }
 }
+/// An agent's face, drawn with the web terminal's recipe (web/src/lib/agent-avatar.ts):
+/// a gradient seeded on the slug, the name's initials, and any uploaded image on top.
+/// A rounded square, so it never reads as a coin logo (a circle) beside one.
 struct Avatar: View {
     @EnvironmentObject var store: AppStore
     let slug: String?
     var size: CGFloat = 40
     var name: String? = nil
     var body: some View {
-        AsyncImage(url: slug.flatMap { URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped($0))/avatar?v=\(store.imageRevision.uuidString)") }) { image in image.resizable().scaledToFill() } placeholder: {
-            ZStack {
-                Circle().fill(LinearGradient(colors: [Brand.accent.opacity(0.45), Brand.raised], startPoint: .topLeading, endPoint: .bottomTrailing))
-                Text((name ?? slug)?.first.map { String($0).uppercased() } ?? "?").font(.custom(Brand.pixel, size: size * 0.42, relativeTo: .headline)).foregroundStyle(.white)
-            }
+        let shape = RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+        ZStack {
+            AgentFace.gradient(AgentFace.seed(name: name ?? "", slug: slug))
+            Text(AgentFace.initials(name ?? slug ?? "")).font(.system(size: size * 0.34, weight: .bold)).foregroundStyle(.white)
+            AsyncImage(url: slug.flatMap { URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped($0))/avatar?v=\(store.imageRevision.uuidString)") }) { image in image.resizable().scaledToFill() } placeholder: { Color.clear }
         }
-            .frame(width: size, height: size).clipShape(Circle()).accessibilityHidden(true)
+        .frame(width: size, height: size).clipShape(shape).accessibilityHidden(true)
+    }
+}
+
+enum AgentFace {
+    private static let publicSlug = try! Regex("^[0-9a-hjkmnp-tv-z]{16}$")
+    /// The slug when it is a real public id (stable across renames), else the name.
+    static func seed(name: String, slug: String?) -> String {
+        if let slug, slug.wholeMatch(of: publicSlug) != nil { return slug }
+        return name
+    }
+    /// Matches hueOf: JavaScript string char codes are UTF-16 units.
+    static func hue(_ seed: String) -> Int { seed.utf16.reduce(0) { ($0 * 31 + Int($1)) % 360 } }
+    static func initials(_ name: String) -> String {
+        let words = name.split(whereSeparator: \.isWhitespace)
+        guard let first = words.first else { return "??" }
+        if words.count == 1 { return String(first.prefix(2)).uppercased() }
+        return (String(first.prefix(1)) + String(words[1].prefix(1))).uppercased()
+    }
+    static func gradient(_ seed: String) -> LinearGradient {
+        let h = Double(hue(seed))
+        return LinearGradient(colors: [hsl(h, 0.62, 0.62), hsl((h + 42).truncatingRemainder(dividingBy: 360), 0.58, 0.44)], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+    private static func hsl(_ h: Double, _ s: Double, _ l: Double) -> Color {
+        let c = (1 - abs(2 * l - 1)) * s, x = c * (1 - abs((h / 60).truncatingRemainder(dividingBy: 2) - 1)), m = l - c / 2
+        let (r, g, b): (Double, Double, Double) = switch h {
+        case ..<60: (c, x, 0)
+        case ..<120: (x, c, 0)
+        case ..<180: (0, c, x)
+        case ..<240: (0, x, c)
+        case ..<300: (x, 0, c)
+        default: (c, 0, x)
+        }
+        return Color(red: r + m, green: g + m, blue: b + m)
+    }
+}
+
+/// A token's logo, falling back to the ticker. Takes the shared market rows'
+/// `logo` as-is (an https mark, or a site-relative /api/coin-image path); a raw
+/// launcher URI must go through `CoinLogo.proxied` first, as the web does,
+/// because public IPFS gateways refuse phone user agents.
+struct CoinLogo: View {
+    let logo: String?
+    let symbol: String
+    var size: CGFloat = 36
+    static func proxied(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return "/api/coin-image?uri=\(escaped(raw))"
+    }
+    private var url: URL? {
+        guard let logo, !logo.isEmpty else { return nil }
+        if logo.hasPrefix("/") { return URL(string: logo, relativeTo: API.origin)?.absoluteURL }
+        return logo.hasPrefix("https://") ? URL(string: logo) : nil
+    }
+    var body: some View {
+        ZStack {
+            Circle().fill(Brand.raised)
+            Text(String(symbol.prefix(3)).uppercased()).font(.system(size: size * 0.28, weight: .bold)).foregroundStyle(.secondary).minimumScaleFactor(0.5)
+            AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.clear }
+        }
+        .frame(width: size, height: size).clipShape(Circle()).overlay(Circle().strokeBorder(Brand.stroke)).accessibilityHidden(true)
     }
 }
 

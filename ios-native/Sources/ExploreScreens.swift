@@ -63,11 +63,11 @@ struct LeaderboardRow: View {
         Button { if let slug = agent["slug"].string { store.path.append(.agent(slug)) } } label: {
             HStack(spacing: 12) {
                 Text(rank.map(String.init) ?? "–").font(.custom(Brand.pixel, size: 15, relativeTo: .callout)).foregroundStyle(medal ?? .secondary).frame(width: 22)
-                Avatar(slug: agent["slug"].string, size: 42, name: agent["name"].string).overlay(Circle().strokeBorder(medal ?? .clear, lineWidth: 2))
+                Avatar(slug: agent["slug"].string, size: 42, name: agent["name"].string).overlay(RoundedRectangle(cornerRadius: 42 * 0.3, style: .continuous).strokeBorder(medal ?? .clear, lineWidth: 2))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) { Text(agent["name"].text).font(.headline).lineLimit(1); if paper { Pill(text: "Paper", tint: .orange) } }
                     Text(paper ? "\(agent["filledPaper"].text) paper fills" : "\(agent["landed"].text) completed trades").font(.caption).foregroundStyle(.secondary)
-                    if let why = agent["unrankedWhy"].string { Text(why.replacingOccurrences(of: "-", with: " ")).font(.caption2).foregroundStyle(.orange) }
+                    if let why = agent["unrankedWhy"].string, !(paper && why == "paper") { Text(why.replacingOccurrences(of: "-", with: " ")).font(.caption2).foregroundStyle(.orange) }
                 }
                 Spacer(minLength: 8)
                 ReturnText(bps: paper ? agent["paperPnlBps"].number : agent["pnlBps"].number)
@@ -179,7 +179,7 @@ struct AgentScreen: View {
         AsyncImage(url: URL(string: "https://app.merrymen.dev/api/agent-image/\(escaped(slug))/banner?v=\(store.imageRevision.uuidString)")) { image in image.resizable().scaledToFill().frame(height: 140).clipped() } placeholder: { Brand.heroFill.frame(height: 110) }
             .clipShape(RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Brand.stroke))
         HStack(spacing: 14) {
-            Avatar(slug: slug, size: 68, name: a["name"].string).overlay(Circle().strokeBorder(Brand.background, lineWidth: 3)).padding(.top, -44)
+            Avatar(slug: slug, size: 68, name: a["name"].string).overlay(RoundedRectangle(cornerRadius: 68 * 0.3, style: .continuous).strokeBorder(Brand.background, lineWidth: 3)).padding(.top, -44)
             VStack(alignment: .leading, spacing: 6) {
                 Text(a["name"].text).font(.largeTitle.bold()).lineLimit(2).minimumScaleFactor(0.7)
                 Pill(text: a["mode"].text.uppercased(), tint: a["mode"].text == "paper" ? .orange : Brand.accent)
@@ -310,7 +310,10 @@ struct DiscoveryCard: View {
     let row: J
     var research = false
     var body: some View { Card {
-        NavigationLink(row["name"].text, value: Route.token(row["token"].text)).font(.headline)
+        HStack(spacing: 12) {
+            CoinLogo(logo: CoinLogo.proxied(row["logo"].string), symbol: row["symbol"].string ?? row["name"].text)
+            NavigationLink(row["name"].text, value: Route.token(row["token"].text)).font(.headline)
+        }
         Metric(label: "Price", value: tokenPrice(row["priceUsd"].number))
         Metric(label: "24h volume (index)", value: usd(row["volume24hUsd"].number))
         Metric(label: "24h buyers", value: row["buyers24h"].number.map { $0.formatted() } ?? "—")
