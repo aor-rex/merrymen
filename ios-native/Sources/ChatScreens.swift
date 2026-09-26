@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ChatScreen: View {
     @EnvironmentObject var store: AppStore
@@ -17,7 +18,8 @@ struct ChatScreen: View {
         VStack(spacing: 0) {
             historyView
             composerView
-        }.background(Brand.background)
+        }.background { PageBackground() }
+        .sensoryFeedback(.impact(weight: .light), trigger: messages.count)
         .task(id: store.generation) {
             voice.stop(); messages = []; proposal = nil; text = ""; partial = ""; error = nil
             if let owner = store.owner {
@@ -45,15 +47,16 @@ struct ChatScreen: View {
             ScrollViewReader { scroll in
                 ScrollView { LazyVStack(alignment: .leading, spacing: 16) {
                     if store.owner == nil { SignInCard() }
-                    else if messages.isEmpty { Text("Ask your Merryman").font(.largeTitle.bold()); Text("Discuss its thesis, portfolio, or next decision.").foregroundStyle(.secondary) }
+                    else if messages.isEmpty {
+                        Image("Brand").resizable().scaledToFit().frame(width: 56, height: 56).accessibilityHidden(true)
+                        Text("Ask your Merryman").font(.custom(Brand.pixel, size: 30, relativeTo: .largeTitle))
+                        Text("Discuss its thesis, portfolio, or next decision.").foregroundStyle(.secondary)
+                    }
                     ForEach(Array(messages.enumerated()), id: \.offset) { index, message in
-                        Card {
-                            Text(message["role"].text == "user" ? "You" : "Your agent").font(.caption.bold()).foregroundStyle(Brand.accent)
-                            Text(message["content"].text).textSelection(.enabled)
-                        }.id(index)
+                        ChatBubble(mine: message["role"].text == "user", text: message["content"].text).id(index)
                     }
                     if let proposal { CommandCard(command: proposal) { self.proposal = nil } }
-                    if busy { if partial.isEmpty { ProgressView("Thinking…") } else { Card { Text("Reply in progress").font(.caption).foregroundStyle(.secondary); Text(partial) } } }
+                    if busy { if partial.isEmpty { ProgressView("Thinking…") } else { ChatBubble(mine: false, text: partial, streaming: true) } }
                     if let error { Text(error).foregroundStyle(Brand.down) }
                 }.padding(18) }
                 .onChange(of: messages.count) { _, count in if count > 0 { withAnimation { scroll.scrollTo(count - 1, anchor: .bottom) } } }
@@ -74,7 +77,7 @@ struct ChatScreen: View {
                     else { beforeDictation = text; Task { await voice.start(locale: language) } }
                 } label: { Image(systemName: voice.recording ? "stop.circle.fill" : "mic").frame(minWidth: 44, minHeight: 44) }
                     .accessibilityLabel(voice.recording ? "Stop dictation" : "Dictate a draft").disabled(busy || voice.starting || store.owner == nil)
-                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 12)).disabled(voice.recording)
+                TextField("Message your agent", text: $text, axis: .vertical).lineLimit(1...5).padding(12).background(Brand.raised, in: RoundedRectangle(cornerRadius: 18)).overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.stroke)).disabled(voice.recording)
                 Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }.accessibilityLabel("Send message").disabled(busy || voice.recording || voice.starting || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.owner == nil)
             }.padding()
         }
@@ -100,6 +103,31 @@ struct ChatScreen: View {
                 try SecureStore.write("dev.merrymen.chat", owner.lowercased(), JSONEncoder().encode(transcript))
             }
         } catch { if generation == store.generation { self.error = error.localizedDescription } } }
+    }
+}
+
+struct ChatBubble: View {
+    let mine: Bool
+    let text: String
+    var streaming = false
+    @State private var copied = false
+    var body: some View {
+        HStack(alignment: .bottom) {
+            if mine { Spacer(minLength: 48) }
+            VStack(alignment: mine ? .trailing : .leading, spacing: 6) {
+                if !mine { Text(streaming ? "Reply in progress" : "Your agent").font(.caption.bold()).foregroundStyle(Brand.accent) }
+                Text(text).textSelection(.enabled).foregroundStyle(mine ? Color.black : Color.primary)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(mine ? AnyShapeStyle(Brand.accent) : AnyShapeStyle(Brand.cardFill), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(mine ? .clear : Brand.stroke))
+                if !mine && !streaming {
+                    Button { UIPasteboard.general.string = text; copied = true } label: {
+                        Label(copied ? "Copied" : "Copy message", systemImage: copied ? "checkmark" : "doc.on.doc").font(.caption)
+                    }.foregroundStyle(.secondary).sensoryFeedback(.success, trigger: copied)
+                }
+            }
+            if !mine { Spacer(minLength: 48) }
+        }
     }
 }
 

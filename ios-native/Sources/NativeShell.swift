@@ -238,6 +238,8 @@ struct NativeShell: View {
         }
         .onChange(of: phase) { _, phase in if phase == .active { Task { await tourProgress.sync(store) } } }
         .environmentObject(tourProgress)
+        .sensoryFeedback(.selection, trigger: store.likes)
+        .sensoryFeedback(.selection, trigger: store.following)
         .sheet(isPresented: $tour, onDismiss: { replaying = false }) { TourScreen().environmentObject(tourProgress) }
         .alert("Merrymen", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("OK", role: .cancel) { store.notice = nil }
