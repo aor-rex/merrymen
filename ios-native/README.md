@@ -15,7 +15,9 @@ xcodebuild test -project Merrymen.xcodeproj -scheme Merrymen \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 ```
 
-Simulator ad-hoc signing enables Keychain tests without an Apple account. `.github/workflows/ios-native.yml` records build, test and screenshot evidence. Generated projects, build products and downloaded review evidence are ignored.
+Simulator ad-hoc signing enables Keychain tests without an Apple account.
+
+To try it on your own iPhone before the paid Apple team is active, add your Apple ID in Xcode (Settings → Accounts), connect the phone with Developer Mode on, and run `./run-on-device.sh <TEAM_ID>`. It builds as `dev.merrymen.app.dev` (also allowed on the `merrymen-ios` Privy client) so the real `dev.merrymen.app` stays free for the paid team, and it commits nothing. Free-team installs expire after 7 days and cannot use Associated Domains. `.github/workflows/ios-native.yml` records build, test and screenshot evidence. Generated projects, build products and downloaded review evidence are ignored.
 
 From the repository root, verify the shared bundles:
 
