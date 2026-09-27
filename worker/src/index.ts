@@ -182,7 +182,7 @@ import {
   type ResolvedConfig,
 } from "./settings";
 import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
-import { NOT_WATCHED, TRENCHER_DEFAULTS, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
+import { NOT_WATCHED, TRENCHER_DEFAULTS, buysOntoDust, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
@@ -668,6 +668,7 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
+  trenchBrain.onDrop = (why) => console.log(`[trencher] ${why}`);
   let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
   let autoTrenchContext = "";
   let autoTrenchPending = false;
@@ -734,7 +735,8 @@ async function main() {
       armed: !!active,
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
-      cashUsdg: lastCashUsdg,
+      // The reconciler's reading once it exists; before that, the rail's own.
+      cashUsdg: lastCashUsdg ?? railCashUsdg,
       // Read on BOTH rails now — see the note at the assignment. Live-only made
       // this a latch, and a latch on a leg of the rail predicate is an agent
       // that can never come back.
@@ -2798,7 +2800,7 @@ async function main() {
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
+    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
     settledOps = await getOpsToday(agentId, rail);
   };
 
@@ -3768,6 +3770,39 @@ async function main() {
   /** When the paper rail last looked at the account's REAL ETH. See the note at the assignment. */
   let lastRealGasReadAt = 0;
   /**
+   * The account's USDG as read for the RAIL DECISION only, before the flow
+   * reconciler has made its first observation (`lastCashUsdg`).
+   *
+   * Without it, every restart of an agent with live consent and paper enabled
+   * ran its first tick LIVE — unknown is not unfunded — valued an empty live
+   * book at 0, wrote a `live` equity row, and fell back to paper a tick later.
+   * readPaperReturn restarts the paper period after any non-paper row, so the
+   * paper P&L of such an agent restarted at every redeploy: Seafish201, 16
+   * redeploys in two days, showing exactly 0 (live tick 2026-09-27 00:38:28,
+   * back to paper at 00:42:28). Kept apart from `lastCashUsdg` on purpose —
+   * that variable's first non-null value is how the reconciler books a
+   * first-seen contribution, and nothing here may touch flow accounting.
+   * Still null when the read fails, which keeps today's behaviour: a funded
+   * agent is never pushed to paper by a read that did not happen.
+   */
+  let railCashUsdg: bigint | null = null;
+  let railCashReadAt = 0;
+  const observeRailCash = async (): Promise<void> => {
+    if (!active || lastCashUsdg !== null) return;
+    if (railCashUsdg !== null && Date.now() - railCashReadAt < REAL_GAS_READ_EVERY_MS) return;
+    railCashReadAt = Date.now();
+    try {
+      railCashUsdg = (await active.client.readContract({
+        address: CASH.USDG as `0x${string}`,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [active.grant.smartAccount as `0x${string}`],
+      })) as bigint;
+    } catch {
+      // A refused read is not a zero balance.
+    }
+  };
+  /**
    * THIS TICK'S CURVE RESERVES, from the pricing pass that already read them.
    *
    * Never carried across ticks. curve-prices.ts forbids caching reserves and
@@ -4190,6 +4225,8 @@ async function main() {
    */
   // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
   let trencherRailAnnounced = false;
+  /** Coins the fast Trencher skipped because the key cannot sell them — said once each. */
+  const noExitAnnounced = new Set<string>();
   /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
   let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
@@ -4267,6 +4304,13 @@ async function main() {
         } catch { autonomousBudget = false; }
       }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
+      // THE SAME `no-exit` LINE THE WALL DRAWS (policy.ts), drawn before the
+      // Brain is paid to review a coin it could never be allowed to buy.
+      // Measured 2026-09-25 → 27 on 0x8249ad: 501+ `no-exit` refusals, CASHCAT
+      // alone ~every 45s, each one after a paid review that said BUY. This
+      // only removes what the wall refuses anyway; the owner is told once per
+      // coin, since the refusal used to be where they learned to re-sign.
+      const sellable = active?.limits.sellableAssets ? new Set(active.limits.sellableAssets.map(a => a.toLowerCase())) : null;
       // Do not require a historical discovery row: trending records used to
       // carry firstSeen=0, so that age-window query silently excluded them all.
       const freshTape = freshTrenchTape();
@@ -4278,6 +4322,15 @@ async function main() {
         const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
         if (autonomous && !autonomousBudget) continue;
         if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        if (!autonomous && sellable && !sellable.has(t.address.toLowerCase())) {
+          if (!noExitAnnounced.has(t.address.toLowerCase()) && active) {
+            noExitAnnounced.add(t.address.toLowerCase());
+            void addEvent(active.agentId, "warn",
+              `trencher: skipping ${t.symbol} — this key can't approve it for a sell, so a buy would be refused ` +
+                `(no-exit). Re-sign the grant at /grant to cover it.`);
+          }
+          continue;
+        }
         const quote = lastPrices.get(t.symbol);
         out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
           ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),
@@ -4349,6 +4402,12 @@ async function main() {
    * ledger already tracks exactly what was paid per raw unit and survives
    * partial fills, so a second copy could only ever disagree with it.
    */
+  /** A basket, custom or official token — never routed through Trencher custody. */
+  function baseTokenAddress(address: string): boolean {
+    const a = address.toLowerCase();
+    return watchTokensFor(cfg.basketSymbols, cfg.customTokens, officialCoins()).some((t) => t.address.toLowerCase() === a);
+  }
+
   async function trenchOpen(): Promise<OpenPosition[]> {
     if (!active) return [];
     const mode: BasisMode = paperActive() ? "paper" : "live";
@@ -4390,6 +4449,15 @@ async function main() {
         costUsdg: basis.costUsdg,
         qtyRaw: basis.qtyRaw,
         ...(mode === "live" && autoTrenchBalances.get(t.address.toLowerCase()) ? {custodyVault:autoTrench!.custody.vault,qtyRaw:autoTrenchBalances.get(t.address.toLowerCase())!} : {}),
+        // THE EXIT TAKES THE ROUTE THE ENTRY TOOK. A paper Trencher entry is
+        // autonomous (custody target, checked against knownTrencherAssets), but
+        // its exit was built without the custody target and so hit the router
+        // allowlist, which never lists a discovered coin: lilbot's sells of
+        // T57F813C4571 and TA151B4A9E1B were refused `asset-allowlist` 418 times
+        // in 7 hours (2026-09-26 17:07 → 27 00:00). Sells only — the 5 USDG
+        // entry bound in policy.ts applies to buys and is untouched.
+        ...(mode === "paper" && autoTrench && grantTrencher(active.grant) && !baseTokenAddress(t.address) &&
+          active.limits.knownTrencherAssets?.some(a=>a.toLowerCase()===t.address.toLowerCase()) ? {custodyVault:autoTrench.custody.vault} : {}),
       });
     }
     return out;
@@ -5896,6 +5964,12 @@ async function main() {
    * One function so the next venue is added in one place rather than seven, and
    * so a kind that has legs cannot quietly keep failing to name them.
    */
+  /** A swap or curve trade whose proceeds are cash: an exit, which spends no budget. */
+  function returnsCash(intent: TradeIntent): boolean {
+    const out = tokenLegs(intent).buy_token;
+    return out !== undefined && out.toLowerCase() === (CASH.USDG as string).toLowerCase();
+  }
+
   function tokenLegs(intent: TradeIntent): { sell_token?: string; buy_token?: string } {
     if (intent.kind === "swap") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     if (intent.kind === "curve-trade") return { sell_token: intent.assetIn, buy_token: intent.assetOut };
@@ -6297,6 +6371,10 @@ async function main() {
         // The row goes in with 0 when depth is unknown, which the drain guard
         // already reads as "no baseline, this check is off" — and
         // upgradeTrenchEntry fills it in the first tick a real reading arrives.
+        // A buy onto a dust remainder is a fresh entry (buysOntoDust), not a
+        // top-up: forget the old baseline first, or the new position inherits
+        // the old clock and is sold next tick as past its window.
+        if (buysOntoDust(prev.qtyRaw, f.qtyRaw, f.cashUsdg)) await clearTrenchEntry(agentId, mode, f.symbol);
         await setTrenchEntry(agentId, mode, f.symbol, depth ?? 0);
         if (depth === undefined) {
           console.log(`[trench] no depth reading for ${f.symbol} — baseline stamped unknown, will fill in later`);
@@ -6917,7 +6995,7 @@ async function main() {
       // idempotent, so on the normal path recordTrade has already released and
       // this is a no-op.
       try {
-        reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
+        reserveBudget(intent.kind === "vault-withdraw" || returnsCash(intent) ? 0n : notional);
         console.log(`[paper] ${fill.receipt}`);
         await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
         // Book the fill against the running cost basis. Paper fills are EXACT (we
@@ -7021,7 +7099,9 @@ async function main() {
     // same stale spend figure and overshoot the daily cap by one action.
     // The reservation is released when the trade row lands (recordTrade) or
     // when execution throws (below) — never both, never neither.
-    const countsSpend = intent.kind !== "vault-withdraw";
+    // A sell into cash spends nothing (getSpentTodayUsdg says why), so it holds
+    // an op but no spend while in flight — the same thing its settled row counts.
+    const countsSpend = intent.kind !== "vault-withdraw" && !returnsCash(intent);
     reserveBudget(countsSpend ? notional : 0n);
 
     // Declared OUTSIDE the try so the revert path can still record it — the
@@ -8882,6 +8962,7 @@ async function main() {
 
     await refreshConfig();
     const armed = await syncGrant();
+    await observeRailCash();
 
     if (active && grantTrencher(active.grant)) {
       refreshTrenchTape(); refreshAutoTrench();
@@ -8892,8 +8973,23 @@ async function main() {
       const base = watchTokensFor(cfg.basketSymbols,cfg.customTokens,officialCoins());
       const addresses = new Set(base.map(t=>t.address.toLowerCase()));
       const symbols = new Set(base.map(t=>t.symbol));
-      watchTokens=[...base,...autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol))];
-      active.limits.knownTrencherAssets=autoTrench.tokens.map(t=>t.address);
+      const discovered = autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol));
+      // A PAPER POSITION OUTLIVES THE TAPE THAT FOUND IT. Live keeps a held coin
+      // in the universe through the vault's own `tokens()`; paper holds nothing
+      // in the vault, so a coin that left the qualified tape vanished from
+      // watchTokens and its position was orphaned — never valued, never exited.
+      // Carried only while the paper book still holds it. Entry-neutral: buys
+      // still need tape qualification, and a held symbol is never re-entered.
+      if (paperActive()) {
+        const seen = new Set(discovered.map(t=>t.address.toLowerCase()));
+        for (const t of watchTokens) {
+          const a = t.address.toLowerCase();
+          if (addresses.has(a) || symbols.has(t.symbol) || seen.has(a) || t.kind !== "memecoin") continue;
+          if ((await getBasis(active.agentId, "paper", t.symbol)).qtyRaw > 0n) { discovered.push(t); seen.add(a); }
+        }
+      }
+      watchTokens=[...base,...discovered];
+      active.limits.knownTrencherAssets=[...new Set([...autoTrench.tokens.map(t=>t.address), ...discovered.map(t=>t.address)])];
     } else { autoTrench=null; autoTrenchBalances.clear(); }
 
     const market = await readMarketSafety();
@@ -10690,6 +10786,14 @@ async function main() {
               brainOrderAccepted = tradeConsumesSnapshot(r.executionStatus);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
+          } else if (!fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
+            // SAID, NOT SILENT. A Brain BUY on an agent outside the live
+            // allowlist (or paused) is a thought by design, but it used to leave
+            // no line at all — Gary logged 8 of 8 `[brain] BUY NVDA` on
+            // 2026-09-26 with nothing after them, which reads exactly like a
+            // decision the executor lost.
+            const why = isPaused() ? "the agent is paused" : "Brain orders are not enabled for this agent (shadow only)";
+            console.log(`[${short(agentId)}] [brain] not acting — ${why}`);
           }
         }
       } catch (e) {
