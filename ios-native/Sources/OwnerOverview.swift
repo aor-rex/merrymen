@@ -17,7 +17,7 @@ struct OwnerOverview: View {
                     Button("Add funds") { store.path.append(.deposit) }.buttonStyle(PrimaryButtonStyle(fill: true))
                     Button("Withdraw") { store.path.append(.withdraw) }.buttonStyle(SecondaryButtonStyle(fill: true))
                 }
-                if let notice = view["notice"]["message"].string { Text(notice).font(.caption).foregroundStyle(.orange) }
+                if let notice = view["notice"]["message"].string { AgentNotice(message: notice) }
             }
             DisclosureGroup("Positions · \(view["positions"].array.count)") {
                 if view["positions"].array.isEmpty { Text("No positions in this book.").foregroundStyle(.secondary) }
@@ -117,5 +117,32 @@ struct SetupChecklist: View {
             Spacer()
             if let action { Button(LocalizedStringKey(action.0)) { store.path.append(action.1) }.font(.subheadline.weight(.semibold)) }
         }
+    }
+}
+
+/// A note the agent's worker left for its owner (for example, holdings it
+/// refuses to price). Summarised in one line, with the agent's words behind a tap.
+struct AgentNotice: View {
+    let message: String
+    @State private var open = false
+    private var summary: String {
+        message.hasPrefix("won't put a price on") ? "Some holdings are left unpriced, so this balance excludes them." : message.prefix(1).uppercased() + message.dropFirst()
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(.snappy) { open.toggle() } } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).accessibilityHidden(true)
+                    Text(summary).font(.caption.weight(.semibold)).foregroundStyle(.primary).multilineTextAlignment(.leading).lineLimit(open ? nil : 2)
+                    Spacer(minLength: 4)
+                    Image(systemName: open ? "chevron.up" : "chevron.down").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+            }.buttonStyle(.plain)
+            if open {
+                Text(message.prefix(1).uppercased() + message.dropFirst()).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        }
+        .padding(12).background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.orange.opacity(0.3)))
     }
 }
