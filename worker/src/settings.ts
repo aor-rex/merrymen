@@ -6,7 +6,7 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
   SETTINGS_DEFAULTS,
@@ -18,6 +18,7 @@ import {
   type MerrymenSettings,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
+import { writeFileAtomicSync } from "./atomic-write";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
 import { energyModeOf, type EnergyMode } from "./energy";
 
@@ -499,33 +500,41 @@ export function resolveConfig(): ResolvedConfig {
   return mergeSettings(file ?? {}, process.env);
 }
 
-/** Read the raw settings file (unresolved), tolerating BOM/missing. */
-export function readSettingsFile(): MerrymenSettings {
-  const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
-  try {
-    return JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as MerrymenSettings;
-  } catch {
-    return {};
-  }
-}
-
 /**
  * Merge a patch into settings.json and write it back — used by the Telegram
  * control commands to change strategy/cap/allowlist. The worker re-reads the
  * file on its next tick, so the change applies without a restart. Returns the
  * merged object.
+ *
+ * A FILE THAT IS THERE BUT DOES NOT PARSE IS REFUSED, NOT REPLACED. The merge
+ * used to read that file as `{}` (as resolveConfig does) — so the write-back
+ * held the patch and nothing else, and every other key (strategy, keys, the
+ * holder wallet) was gone. A torn read of a concurrent write did exactly that,
+ * and self-hosted so does a hand edit with a stray comma; there it is the only
+ * copy. Throws instead, and the Telegram command says it failed.
  */
 export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSettings {
   const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
-  const next = { ...readSettingsFile(), ...patch };
-  ensureHome();
-  // settings.json holds plaintext API keys — owner-only perms (0600).
-  writeFileSync(file, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+  let raw: string | null = null;
   try {
-    chmodSync(file, 0o600);
-  } catch {
-    /* non-POSIX / already tight — best effort */
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
+  let current: MerrymenSettings = {};
+  if (raw !== null) {
+    try {
+      current = JSON.parse(raw.replace(/^\ufeff/, "")) as MerrymenSettings;
+    } catch {
+      throw new Error("settings.json is not valid JSON — not overwriting it; fix or remove it first");
+    }
+  }
+  const next = { ...current, ...patch };
+  ensureHome();
+  // settings.json holds plaintext API keys — owner-only perms (0600), set on the
+  // temp file before it is renamed into place. Atomic: the worker re-reads this
+  // file every tick, and a truncate-then-write would hand it the defaults.
+  writeFileAtomicSync(file, JSON.stringify(next, null, 2), 0o600);
   return next;
 }
 

@@ -67,6 +67,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
+import { writeFileAtomicSync } from "./atomic-write";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
@@ -836,7 +837,20 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
 function writeChildSettings(tenant: `0x${string}`, forChild: MerrymenSettings): void {
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true });
-  writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
+  const file = path.join(home, "settings.json");
+  const next = JSON.stringify(forChild, null, 2);
+  // UNCHANGED IS NOT REWRITTEN. Every write is now a temp file, an fsync and a
+  // rename, and this runs for every child on every pass.
+  try {
+    if (readFileSync(file, "utf8") === next) return;
+  } catch {
+    // No file, or unreadable — writing it is the right answer either way.
+  }
+  // ATOMIC. The child re-reads this file every tick, and a plain writeFileSync
+  // truncates before it writes: a read in between parsed as nothing, and the
+  // child ran that tick on the defaults — paper, the default strategy, an
+  // empty Telegram allowlist.
+  writeFileAtomicSync(file, next, 0o600);
 }
 
 /** wallet → the account holding its claim; null when the claims could not be read. */
@@ -1692,7 +1706,7 @@ export async function reconcile(): Promise<void> {
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
-  // file per tenant, and unchanged content is a harmless rewrite. The shared
+  // file per tenant, replaced atomically and only when it changed. The shared
   // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
   // in writeSettingsForChild).
   const seenBotTokens = new Set<string>();
