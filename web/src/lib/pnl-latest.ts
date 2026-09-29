@@ -30,6 +30,13 @@ function nameOf(row: LatestTradeRow): string | null {
   return null;
 }
 
+/** USDG float (as stored) to base units — same conversion pnl-card.ts uses. */
+const USDG_DECIMALS = 6;
+const toBase = (n: number): bigint => BigInt(Math.round(n * 10 ** USDG_DECIMALS));
+
+/** One cent, in USDG base units — below this invested prints as 0.00, so no card. */
+const DUST_USDG = 10_000n;
+
 export function findLatestCardable(rows: readonly LatestTradeRow[]): LatestCardable | null {
   for (const row of rows) {
     if (row.fill_side !== "sell") continue;
@@ -40,9 +47,59 @@ export function findLatestCardable(rows: readonly LatestTradeRow[]): LatestCarda
     const proceeds = Number(row.fill_cash_usdg);
     const realised = Number(row.realized_pnl_usdg);
     if (!Number.isFinite(proceeds) || !Number.isFinite(realised)) continue;
-    if (proceeds - realised < 0.01) continue; // dust close — no card, like pnlCardFromFill
+    // Dust gate in integer base units, mirroring pnlCardFromFill (worker/src/pnl-card.ts):
+    // a close with under a cent INVESTED (proceeds − realised) gets no card.
+    // Float `< 0.01` can round either side of exactly one cent and disagree with
+    // the renderer, which answers 409 while the lookup said cardable.
+    if (toBase(proceeds) - toBase(realised) < DUST_USDG) continue;
     if (!Number.isInteger(row.id) || row.id <= 0) continue;
     return { tradeId: row.id, symbol, status: row.status ?? null, realizedPnlUsdg: realised };
+  }
+  return null;
+}
+
+/** Minimal Db surface the lookup needs (worker/src/db.ts Db, minus the writes). */
+export interface CardableDb {
+  prepare(sql: string): { all(...params: unknown[]): Promise<unknown[]> };
+}
+
+const LOOKUP_COLUMNS = `t.id, t.target, t.fill_side, t.fill_cash_usdg, t.realized_pnl_usdg, t.status,
+                 COALESCE(t.fill_symbol, d.symbol) AS coin_symbol`;
+const LOOKUP_JOIN = `FROM trades t LEFT JOIN decisions d ON d.id = t.decision_id AND d.agent_id = t.agent_id`;
+
+/**
+ * The owner's latest cardable closed trade, straight from the ledger.
+ *
+ * The sell predicate lives in SQL, not in memory: the query only ever sees
+ * sells, so a valid close is never truncated away by newer buys/refusals.
+ * Keyset pagination (`id < ?`) walks back past uncardable sells (dust,
+ * unbacked, unnameable) until a cardable one or exhaustion — bounded by
+ * maxPages so a pathological ledger cannot page forever.
+ */
+export async function findLatestCardableInDb(
+  db: CardableDb,
+  agent: string,
+  pageSize = 50,
+  maxPages = 10,
+): Promise<LatestCardable | null> {
+  let cursor: number | null = null;
+  for (let page = 0; page < maxPages; page++) {
+    const rows = (await db
+      .prepare(
+        `SELECT ${LOOKUP_COLUMNS}
+           ${LOOKUP_JOIN}
+          WHERE t.agent_id = ? AND t.fill_side = 'sell'` +
+          (cursor === null ? `` : ` AND t.id < ?`) +
+          `
+          ORDER BY t.id DESC LIMIT ?`,
+      )
+      .all(...(cursor === null ? [agent, pageSize] : [agent, cursor, pageSize]))) as unknown as LatestTradeRow[];
+    const found = findLatestCardable(rows);
+    if (found) return found;
+    if (rows.length < pageSize) return null;
+    const last = rows[rows.length - 1]!;
+    if (!Number.isInteger(last.id)) return null;
+    cursor = last.id;
   }
   return null;
 }

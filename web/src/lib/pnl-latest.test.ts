@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
-import { findLatestCardable, type LatestTradeRow } from "./pnl-latest";
+import { wrapSqlite } from "../../../worker/src/db";
+import { findLatestCardable, findLatestCardableInDb, type LatestTradeRow } from "./pnl-latest";
 
 const sell = (over: Partial<LatestTradeRow> = {}): LatestTradeRow => ({
   id: 7,
@@ -48,5 +50,72 @@ describe("findLatestCardable — which trade the chat card shows", () => {
     assert.equal(findLatestCardable([]), null);
     assert.equal(findLatestCardable([{ id: -1 } as never]), null);
     assert.equal(findLatestCardable([{ id: 3, fill_side: "sell" } as never]), null);
+  });
+});
+
+describe("findLatestCardableInDb — the sell predicate lives in SQL", () => {
+  /** Minimal ledger: only the columns the lookup query touches. */
+  function memoryLedger() {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(`
+      CREATE TABLE decisions (id INTEGER PRIMARY KEY, agent_id TEXT, symbol TEXT);
+      CREATE TABLE trades (id INTEGER PRIMARY KEY, target TEXT, fill_side TEXT,
+        fill_cash_usdg REAL, realized_pnl_usdg REAL, status TEXT,
+        fill_symbol TEXT, decision_id INTEGER, agent_id TEXT);
+    `);
+    return { raw, db: wrapSqlite(raw) };
+  }
+
+  function insertTrade(
+    raw: DatabaseSync,
+    id: number,
+    over: { side?: string; cash?: number | null; realized?: number | null; symbol?: string | null } = {},
+  ) {
+    const side = over.side ?? "buy";
+    raw
+      .prepare(
+        `INSERT INTO trades (id, target, fill_side, fill_cash_usdg, realized_pnl_usdg, status, fill_symbol, decision_id, agent_id)
+         VALUES (?, '0xrouter', ?, ?, ?, 'landed', ?, NULL, 'agent-1')`,
+      )
+      .run(id, side, over.cash ?? null, over.realized ?? null, over.symbol ?? "NEON");
+  }
+
+  it("a valid close behind 25 newer buys is still found (the old LIMIT-20 truncation)", async () => {
+    const { raw, db } = memoryLedger();
+    try {
+      insertTrade(raw, 1, { side: "sell", cash: 120, realized: 20 });
+      for (let id = 2; id <= 26; id++) insertTrade(raw, id, { side: "buy" });
+      const found = await findLatestCardableInDb(db, "agent-1");
+      assert.equal(found?.tradeId, 1);
+      assert.equal(found?.symbol, "NEON");
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("walks past dust and unbacked sells across page boundaries", async () => {
+    const { raw, db } = memoryLedger();
+    try {
+      insertTrade(raw, 1, { side: "sell", cash: 120, realized: 20 });
+      insertTrade(raw, 2, { side: "sell", cash: 0.005, realized: -0.001 });
+      insertTrade(raw, 3, { side: "sell", cash: null, realized: null });
+      // Small pages force the cursor path after only two rows.
+      const found = await findLatestCardableInDb(db, "agent-1", 2);
+      assert.equal(found?.tradeId, 1);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("returns null when no sell is cardable, and scopes to the agent", async () => {
+    const { raw, db } = memoryLedger();
+    try {
+      insertTrade(raw, 1, { side: "buy" });
+      insertTrade(raw, 2, { side: "sell", cash: 0.005, realized: -0.001 });
+      assert.equal(await findLatestCardableInDb(db, "agent-1"), null);
+      assert.equal(await findLatestCardableInDb(db, "agent-2"), null);
+    } finally {
+      raw.close();
+    }
   });
 });
