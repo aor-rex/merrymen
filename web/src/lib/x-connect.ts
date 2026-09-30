@@ -309,8 +309,12 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
   }
   const handle = normaliseXHandle(account.username);
   const mine = posts.filter((p) => p.xUserId === account.xUserId);
+  // A kind the owner turned off is not coming up, even a draft planned in the
+  // instant they changed it: the send-time check cancels it (planner.ts
+  // sendDecision `kind-off`), so it never goes out.
+  const allowed = (k: XPostKind) => (k === "buy" ? account.prefs.buys : k === "casual" ? account.prefs.casual : true);
   const upcoming = mine
-    .filter((p) => p.status === "scheduled")
+    .filter((p) => p.status === "scheduled" && allowed(p.kind))
     .sort((a, b) => a.dueAtMs - b.dueAtMs || a.id - b.id)
     .slice(0, UPCOMING_MAX)
     .map((p) => ({ id: p.id, kind: p.kind, body: p.body, dueAt: p.dueAtMs }));

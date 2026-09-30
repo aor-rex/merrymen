@@ -106,17 +106,19 @@ CREATE TABLE IF NOT EXISTS xpost_meta (
 
 /**
  * The columns a table made by an earlier CREATE lacks: CREATE TABLE IF NOT
- * EXISTS adds none to a table that is there. On Postgres db.ts translateSchema
- * spells each ADD COLUMN IF NOT EXISTS; on sqlite a column already there is
- * the one error swallowed (ensureXpostSchema). The defaults are what every
+ * EXISTS adds none to a table that is there. The defaults are what every
  * owner had before the choices existed: buys and passing thoughts both on, and
- * the server's number of posts a day.
+ * the server's number of posts a day. How they are run is ensureXpostSchema's
+ * business (Postgres: only the missing ones, in a transaction of their own).
  */
 export const XPOST_ALTERS: readonly string[] = [
   "ALTER TABLE xpost_accounts ADD COLUMN post_buys INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE xpost_accounts ADD COLUMN post_casual INTEGER NOT NULL DEFAULT 1",
   "ALTER TABLE xpost_accounts ADD COLUMN per_day INTEGER",
 ];
+
+/** The column an XPOST_ALTERS statement adds. */
+const addedColumn = (ddl: string): string => /ADD COLUMN (\w+)/.exec(ddl)?.[1] ?? "";
 
 /** Distinct from every other advisory key in the repo (the room's is 1_297_692_090). */
 const SCHEMA_LOCK = 1_297_692_110;
@@ -128,6 +130,16 @@ const schemaReady = new WeakMap<Db, Promise<void>>();
  * Db and dropped on failure so a briefly unreachable database is retried. On
  * Postgres the DDL runs under an advisory lock because web and orchestrator
  * boot together and two concurrent CREATE TABLE IF NOT EXISTS can collide.
+ *
+ * THE ADDED COLUMNS, APART, AND ONLY WHEN MISSING. An ALTER TABLE takes an
+ * ACCESS EXCLUSIVE lock on xpost_accounts even when IF NOT EXISTS makes it a
+ * no-op, and the schema transaction already holds xpost_posts (its CREATE
+ * INDEX IF NOT EXISTS locks the table it would index). Every other writer
+ * takes accounts first, then posts — an owner's Off, a Disconnect — so the
+ * two in one transaction deadlocked the owner's Off on a process's first
+ * query. They run in a second transaction under the same advisory lock, and
+ * only for a column information_schema says is missing: a normal restart
+ * takes no exclusive lock at all.
  */
 export function ensureXpostSchema(db: Db, dialect: XpostDialect): Promise<void> {
   const existing = schemaReady.get(db);
@@ -137,7 +149,16 @@ export function ensureXpostSchema(db: Db, dialect: XpostDialect): Promise<void> 
       await db.tx(async (tx) => {
         await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(SCHEMA_LOCK);
         await tx.exec(XPOST_SCHEMA);
-        for (const ddl of XPOST_ALTERS) await tx.exec(ddl);
+      });
+      await db.tx(async (tx) => {
+        await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(SCHEMA_LOCK);
+        const rows = (await tx
+          .prepare(
+            `SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'xpost_accounts'`,
+          )
+          .all()) as { column_name: unknown }[];
+        const have = new Set(rows.map((r) => String(r.column_name)));
+        for (const ddl of XPOST_ALTERS) if (!have.has(addedColumn(ddl))) await tx.exec(ddl);
       });
     } else {
       await db.exec(XPOST_SCHEMA);
@@ -239,9 +260,10 @@ export async function prunePending(db: Db, nowMs: number): Promise<number> {
 export type AccountStatus = "ok" | "revoked";
 
 /**
- * The most posts a day an owner may choose: the planner's own default
- * (planner.ts DEFAULT_PER_DAY), which the fleet's MERRYMEN_XPOST_PER_DAY can
- * only lower. An owner can post less, never more.
+ * The most posts a day an owner may choose (the planner's own default,
+ * planner.ts DEFAULT_PER_DAY). With no choice, the server's number applies
+ * (MERRYMEN_XPOST_PER_DAY, which may be higher or lower); with one, whichever
+ * of the two is smaller. An owner can post less, never more.
  */
 export const OWNER_PER_DAY_MAX = 3;
 
@@ -479,21 +501,30 @@ export async function setPosting(
  * right before it is sent (orchestrator-xpost.ts), so no more than the new
  * number goes out. Returns the choices now stored, or null when this owner
  * has no connection.
+ *
+ * ONE UPDATE, ONLY THE FIELDS GIVEN. A read then a write of all three would
+ * let two saves at once (two tabs, or a tab and the app) put back the field
+ * the other one just changed: "coins it buys" shown off, and stored on.
  */
 export async function setPrefs(db: Db, tenant: string, change: Partial<XPostPrefs>, nowMs: number): Promise<XPostPrefs | null> {
   const key = tenantKey(tenant);
+  const buys = typeof change.buys === "boolean" ? (change.buys ? 1 : 0) : null;
+  const casual = typeof change.casual === "boolean" ? (change.casual ? 1 : 0) : null;
+  const setDay = change.perDay === null || ownerPerDay(change.perDay) !== null;
   return db.tx(async (tx) => {
-    const row = (await tx.prepare(`SELECT post_buys, post_casual, per_day FROM xpost_accounts WHERE tenant = ?`).get(key)) as
+    const row = (await tx
+      .prepare(
+        `UPDATE xpost_accounts
+            SET post_buys = COALESCE(?, post_buys), post_casual = COALESCE(?, post_casual),
+                per_day = CASE WHEN ? = 1 THEN ? ELSE per_day END, updated_at_ms = ?
+          WHERE tenant = ?
+        RETURNING post_buys, post_casual, per_day`,
+      )
+      .get(buys, casual, setDay ? 1 : 0, setDay ? ownerPerDay(change.perDay) : null, int(nowMs), key)) as
       | Pick<AccountRow, "post_buys" | "post_casual" | "per_day">
       | undefined;
     if (!row) return null;
     const next = prefsOf(row);
-    if (typeof change.buys === "boolean") next.buys = change.buys;
-    if (typeof change.casual === "boolean") next.casual = change.casual;
-    if (change.perDay === null || ownerPerDay(change.perDay) !== null) next.perDay = change.perDay === null ? null : ownerPerDay(change.perDay);
-    await tx
-      .prepare(`UPDATE xpost_accounts SET post_buys = ?, post_casual = ?, per_day = ?, updated_at_ms = ? WHERE tenant = ?`)
-      .run(next.buys ? 1 : 0, next.casual ? 1 : 0, next.perDay, int(nowMs), key);
     for (const kind of [...(next.buys ? [] : ["buy"]), ...(next.casual ? [] : ["casual"])]) {
       await tx
         .prepare(

@@ -271,7 +271,7 @@ none of them adds a kind of post or relaxes a rule.
 |---|---|---|
 | Coins it buys, and why | on | off: no buy post is planned, every buy draft waiting under Coming up is cancelled (`kind-off`), and a passing thought on a trade-talk day is offered no coin to name |
 | The odd passing thought | on | off: no casual post is planned, and waiting casual drafts are cancelled (`kind-off`) |
-| Posts a day, at most | the server's number | 1, 2 or 3 (`OWNER_PER_DAY_MAX`). The smaller of this and `MERRYMEN_XPOST_PER_DAY` is used, both when planning and in the account's day allowance at send time. Lowering it leaves drafts alone; each one still has to take a place in the day's count before it is sent |
+| Posts a day, at most | Usual: the server's number | Usual, 1, 2 or 3 (`OWNER_PER_DAY_MAX`). Usual is `MERRYMEN_XPOST_PER_DAY`; a number is used when smaller than it, both when planning and in the account's day allowance at send time. Lowering it leaves drafts alone; each one still has to take a place in the day's count before it is sent. On an X account two owners post on, the day's count is the account's, and each owner's number holds back only their own posts |
 
 - **Coin posts are only ever about coins it bought** (rule 3): a real fill,
   never a coin it is only watching or considering. The section says so, and
@@ -290,7 +290,12 @@ none of them adds a kind of post or relaxes a rule.
   needs a connection. On screen, a choice moves only when the server confirmed
   it. Chat, Telegram and MCP cannot change them.
 - The send-time check (`sendDecision`) cancels a draft of a kind turned off
-  since it was planned, so a plan racing the owner's change never posts it.
+  since it was planned, so a plan racing the owner's change never posts it;
+  Coming up does not list such a draft.
+- `setPrefs` is one UPDATE of only the fields given, so two saves at once (two
+  tabs, or a tab and the app) never put back each other's field. On Postgres
+  the added columns are created in a transaction of their own, and only when
+  missing (`ensureXpostSchema`).
 - iOS does not show the choices yet (ios-native/PARITY.md). An owner who set
   them on the web keeps them in the app, which reads the same account.
 

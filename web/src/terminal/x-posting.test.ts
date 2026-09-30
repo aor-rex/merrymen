@@ -250,15 +250,15 @@ describe("the switch and the warning", () => {
 describe("what it posts: the owner's choices beside the switch", () => {
   const switches = () => Array.from(ui.container.querySelectorAll<HTMLButtonElement>('button[role="switch"]'));
   const switchNamed = (label: string) => switches().find((b) => b.getAttribute("aria-label") === label) ?? null;
-  const radios = () => Array.from(ui.container.querySelectorAll<HTMLButtonElement>('button[role="radio"]'));
+  const dayButtons = () => Array.from(ui.container.querySelectorAll<HTMLButtonElement>('[aria-label="Posts a day, at most"] button'));
 
-  it("shows the hello note, the two kinds and the number a day, with the server's number chosen when the owner picked none", async () => {
+  it("shows the hello note, the two kinds and the number a day, with Usual chosen when the owner picked none", async () => {
     await shown();
     assert.match(text(), /What it posts/);
     assert.match(text(), /A hello first, so people know an AI agent posts here\. You can skip it under Coming up\./);
     assert.equal(switchNamed("Coins it buys, and why")?.getAttribute("aria-checked"), "true");
     assert.equal(switchNamed("The odd passing thought")?.getAttribute("aria-checked"), "true");
-    assert.deepEqual(radios().map((r) => [r.textContent, r.getAttribute("aria-checked")]), [["1", "false"], ["2", "false"], ["3", "true"]]);
+    assert.deepEqual(dayButtons().map((r) => [r.textContent, r.getAttribute("aria-pressed")]), [["Usual", "true"], ["1", "false"], ["2", "false"], ["3", "false"]]);
   });
 
   it("says coin posts are only coins it bought, and points at Trencher mode to hunt memecoins", async () => {
@@ -291,7 +291,7 @@ describe("what it posts: the owner's choices beside the switch", () => {
     assert.match(text(), /Connect an X account first\./);
   });
 
-  it("a number a day is a radio: pressing another writes perDay, and pressing the chosen one writes nothing", async () => {
+  it("a number a day: pressing another writes perDay, Usual writes null, and pressing the chosen one writes nothing", async () => {
     let perDay: number | null = null;
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, prefs: { buys: true, casual: true, perDay } });
     routes["POST /api/x/account"] = (_u, init) => {
@@ -299,11 +299,14 @@ describe("what it posts: the owner's choices beside the switch", () => {
       return json({ ok: true, prefs: { buys: true, casual: true, perDay } });
     };
     await shown();
-    await press(radios()[2], "3, already chosen");
+    await press(dayButtons()[0], "Usual, already chosen");
     assert.deepEqual(writes(), []);
-    await press(radios()[0], "1");
-    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, perDay: 1 } }]);
-    await until(() => radios()[0]?.getAttribute("aria-checked") === "true", "1 chosen");
+    await press(dayButtons()[3], "3");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, perDay: 3 } }]);
+    await until(() => dayButtons()[3]?.getAttribute("aria-pressed") === "true", "3 chosen");
+    await press(dayButtons()[0], "Usual");
+    assert.deepEqual(writes().at(-1), { method: "POST", url: "/api/x/account", body: { action: "prefs", owner: OWNER, perDay: null } });
+    await until(() => dayButtons()[0]?.getAttribute("aria-pressed") === "true", "Usual chosen again");
   });
 
   it("turning a kind off reads Coming up again: its drafts are gone", async () => {

@@ -594,6 +594,39 @@ test("an older table without the owner's choices gets them: both kinds on, the s
   assert.deepEqual((await getAccount(db, OWNER_B))?.prefs, DEFAULT_PREFS);
 });
 
+test("on Postgres the added columns run in a transaction of their own, after the schema's, and only the missing ones", async () => {
+  // A fake Postgres Db that records transactions: the real ALTER takes an
+  // ACCESS EXCLUSIVE lock on xpost_accounts even as a no-op, and the schema
+  // transaction already holds xpost_posts, so the two together deadlocked an
+  // owner's Off (accounts, then posts) on a process's first query.
+  const run = async (have: string[]) => {
+    const log: string[] = [];
+    let n = 0;
+    const db = (tx: number | null): Db => ({
+      prepare: (sql: string) => ({
+        run: async () => ({ changes: 0, lastInsertRowid: 0 }) as never,
+        get: async () => undefined,
+        all: async () => (/information_schema/.test(sql) ? have.map((c) => ({ column_name: c })) : []),
+      }),
+      exec: async (sql: string) => {
+        log.push(`${tx}: ${/CREATE TABLE/.test(sql) ? "schema" : sql}`);
+      },
+      tx: async <T>(fn: (d: Db) => Promise<T>): Promise<T> => {
+        const id = ++n;
+        log.push(`begin ${id}`);
+        const out = await fn(db(id));
+        log.push(`commit ${id}`);
+        return out;
+      },
+    });
+    await ensureXpostSchema(db(null), "postgres");
+    return log;
+  };
+  assert.deepEqual(await run([]), ["begin 1", "1: schema", "commit 1", "begin 2", ...XPOST_ALTERS.map((d) => `2: ${d}`), "commit 2"]);
+  assert.deepEqual(await run(["post_buys", "post_casual", "per_day"]), ["begin 1", "1: schema", "commit 1", "begin 2", "commit 2"], "a restart takes no exclusive lock");
+  assert.deepEqual(await run(["post_buys"]), ["begin 1", "1: schema", "commit 1", "begin 2", ...XPOST_ALTERS.slice(1).map((d) => `2: ${d}`), "commit 2"]);
+});
+
 test("the added columns translate to Postgres as ADD COLUMN IF NOT EXISTS", () => {
   for (const ddl of XPOST_ALTERS) {
     assert.match(translateSchema(ddl), /^ALTER TABLE xpost_accounts ADD COLUMN IF NOT EXISTS \w+ BIGINT/);
@@ -617,6 +650,10 @@ test("the owner's choices: only what is given changes, a kind turned off leaves 
   assert.equal(status(casual).status, "scheduled");
   assert.equal(status(intro).status, "scheduled", "the hello is not a kind");
   assert.equal(status(theirs).status, "scheduled", "another owner's draft");
+  // A save of one field leaves the others as stored, whatever the caller last read.
+  await db.prepare("UPDATE xpost_accounts SET post_casual = 0 WHERE tenant = ?").run(OWNER_A.toLowerCase());
+  assert.deepEqual(await setPrefs(db, OWNER_A, { perDay: 1 }, 2), { buys: false, casual: false, perDay: 1 }, "the other save's casual=off stays");
+  await db.prepare("UPDATE xpost_accounts SET post_casual = 1, per_day = NULL WHERE tenant = ?").run(OWNER_A.toLowerCase());
 
   assert.deepEqual(await setPrefs(db, OWNER_A, { perDay: 2 }, 3), { buys: false, casual: true, perDay: 2 });
   assert.deepEqual(await setPrefs(db, OWNER_A, { casual: false, perDay: null }, 4), { buys: false, casual: false, perDay: null });

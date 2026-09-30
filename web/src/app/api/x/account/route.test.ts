@@ -349,6 +349,17 @@ describe("prefs — what it posts", () => {
     assert.equal((await getAccount(w.db, OWNER_A))?.posting, true, "posting itself stays on");
   });
 
+  it("Coming up never lists a kind turned off, even a draft planned as it changed", async () => {
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+    await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
+    // Planned by a pass that read the account before the change landed.
+    await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d9", body: "grabbed some frog on paper" });
+    await draft(OWNER_A, { body: "a thought that stays" });
+    const body = await read<XAccountBody>(await get(OWNER_A));
+    assert.deepEqual(body.upcoming.map((p) => p.body), ["a thought that stays"]);
+  });
+
   it("works without the X app, like the off switch", async () => {
     await connect(OWNER_A);
     delete w.env.MERRYMEN_X_CLIENT_ID;

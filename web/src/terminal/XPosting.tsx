@@ -106,7 +106,8 @@ const COPY = {
   casual: "The odd passing thought",
   casualHint: "A short line in its own words, most days.",
   perDay: "Posts a day, at most",
-  perDayHint: "The hello counts. merrymen may allow fewer.",
+  perDayUsual: "Usual",
+  perDayHint: "The hello counts. Usual is merrymen's own number, and merrymen may allow fewer than you pick.",
   notSaved: "merrymen didn't confirm that, so nothing changed.",
 } as const;
 
@@ -624,23 +625,22 @@ export function XPosting({
             </div>
             <Switch on={account.prefs.casual} onChange={(next) => void savePrefs({ casual: next })} label={COPY.casual} />
           </div>
-          <div className="xpost-row" role="radiogroup" aria-label={COPY.perDay}>
+          <div className="xpost-row" role="group" aria-label={COPY.perDay}>
             <span>{COPY.perDay}</span>
-            {Array.from({ length: account.perDayMax }, (_, i) => i + 1).map((n) => {
-              const chosen = (account.prefs?.perDay ?? account.perDayMax) === n;
+            {[null, ...Array.from({ length: account.perDayMax }, (_, i) => i + 1)].map((n) => {
+              const chosen = (account.prefs?.perDay ?? null) === n;
               return (
                 <button
-                  key={n}
+                  key={n ?? "usual"}
                   type="button"
-                  role="radio"
-                  aria-checked={chosen}
+                  aria-pressed={chosen}
                   className={chosen ? "mm-btn primary" : "mm-btn"}
                   disabled={busy}
                   onClick={() => {
                     if (!chosen) void savePrefs({ perDay: n });
                   }}
                 >
-                  {n}
+                  {n ?? COPY.perDayUsual}
                 </button>
               );
             })}
