@@ -371,6 +371,98 @@ describe("meta", () => {
   ]);
 });
 
+describe("dodge: hiding behind rules instead of having a take", () => {
+  refuses("dodge", [
+    // What it said in a group to "wdyt about this shogun", word for word.
+    ["answer", "my owner's rules say i don't do 'should you buy this' talks"],
+    ["answer", "my owner’s rules say i don’t do “should you buy this” talks"],
+    ["answer", "cant give ya advice lol"],
+    ["answer", "no advice from me lol"],
+    ["answer", "i don't do advice"],
+    ["answer", "that's against my rules"],
+    ["answer", "my rules say no coin talk"],
+    ["answer", "owner's rules lol"],
+    ["answer", "i'm not allowed to talk about that"],
+    ["answer", "not allowed to say tbh"],
+    ["answer", "i'm not supposed to say"],
+    ["answer", "my owner won't let me talk coins"],
+    ["answer", "i don't give opinions on coins"],
+    ["answer", "can't share my take on that one"],
+    ["answer", "i can't talk about coins"],
+    ["answer", "i don't do coin talk"],
+    ["answer", "i can't recommend anything"],
+    ["answer", "i'm not sharing my take"],
+    ["answer", "i keep my opinions to myself"],
+    ["answer", "i'm not able to discuss coins here"],
+    ["answer", "i can't tell you whether to buy"],
+    ["answer", "i can't comment on that one"],
+    ["banter", "lol the rules say no"],
+    ["coin", "should you buy it? can't say"],
+  ]);
+  passes([
+    // Its own view, always allowed.
+    ["answer", "i like it tbh, might grab a bit"],
+    ["answer", "not for me ngl"],
+    ["answer", "haven't looked at it yet"],
+    ["answer", "i'd pass on that one"],
+    ["answer", "honestly no clue"],
+    ["answer", "thin pool, i'd sit this one out"],
+    ["answer", "looks fun ngl, i'd take a small bite"],
+    ["answer", "can't say i know"],
+    ["answer", "hard to say tbh"],
+    ["banter", "rules are made to be broken lol"],
+    // Its own take with no advice in it, and ordinary banter that shares a word.
+    ["answer", "won't tell you what to do, but i'd pass"],
+    ["answer", "not gonna tell anyone to ape, but i like it"],
+    ["answer", "can't tell you when it moons lol, nobody can"],
+    ["answer", "can't comment on the chart but the name is fun"],
+    ["answer", "i don't do calls, i just vibe with what i like"],
+    ["banter", "don't let me down now"],
+    ["banter", "they won't let me forget that one lol"],
+    ["banter", "worst advice lol"],
+    ["banter", "never take advice from a frog"],
+    ["banter", "golden rule says stop fading"],
+    ["roast", "you're not allowed to leave lol"],
+    ["kind", "you're not supposed to carry that alone"],
+    ["answer", "my rule: never chase green candles"],
+    ["answer", "my one rule is no chasing pumps, so nah"],
+    ["banter", "let me see 👀"],
+    ["coin", "can't pull that one up rn 🤷"],
+  ]);
+});
+
+describe("claim: a trade it never made, in chatter", () => {
+  refuses("claim", [
+    ["answer", "i bought some earlier"],
+    ["answer", "aped in ngl"],
+    ["answer", "i'm in"],
+    ["answer", "already holding it"],
+    ["answer", "looks like a winner, i'm buying"],
+    ["banter", "just grabbed some lol"],
+    ["roast", "i sold that one before you even woke up"],
+    ["answer", "i've got a bag of it"],
+    ["answer", "I hold this one"],
+    ["answer", "I own this coin"],
+    ["banter", "i still hold it"],
+    ["banter", "i already own some"],
+    ["roast", "i do hold that token"],
+    ["roast", "i own a bag of it"],
+  ]);
+  passes([
+    ["answer", "i'd take a small bite tbh"],
+    ["answer", "would ape if the pool was deeper"],
+    ["answer", "haven't looked at it yet"],
+    ["banter", "in this economy? lol"],
+    ["answer", "i would hold off for now"],
+    ["answer", "i don't own it"],
+    ["banter", "i own my mistakes"],
+    ["buy", "grabbed a little on paper, liked the buyers", { paper: true }],
+    ["fade", "got out of that one, it ran out of steam"],
+    ["coin", "already got some 🤝"],
+    ["coin", "i hold this one"],
+  ]);
+});
+
 describe("too-long", () => {
   refuses("too-long", [
     ["banter", "a".repeat(TG_LINE_MAX + 1)],

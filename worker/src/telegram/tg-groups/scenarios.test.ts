@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { resolveConfig, type ResolvedConfig } from "../../settings";
 import type { FetchLike, TgCallback, TgMemberUpdate, TgMessage, TgServiceMessage } from "../api";
 import { startTelegram } from "../service";
@@ -904,7 +904,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.ok(!everything.some((x) => /not authorized|\/link|code/i.test(x)), JSON.stringify(everything));
   });
 
-  it("The owner chats, posts a bare Robinhood CA while every read hangs, then '@bot didnt you see' and '@bot ??' → every addressed line is answered, promptly; the failed look is silence", async () => {
+  it("The owner chats, posts a bare Robinhood CA while every read hangs, then '@bot didnt you see' and '@bot ??' → every addressed line is answered, promptly; the failed look tells her so", async () => {
     // The live failure, replayed. The owner had a normal back-and-forth, then
     // posted a Pons bonding-curve coin's address while the fleet's RPC reads
     // were declined and GeckoTerminal was timing out. The look was awaited on
@@ -985,14 +985,19 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.ok(sentAt.has(byName.messageId!), "its name calls it too");
     assert.equal(waits.length, 1, "all the while, the look was out");
 
-    // The look's bound passes: unknown. Unaddressed, that is silence — no
-    // line, no 👀, nothing remembered — and nothing else answers the CA.
+    // The look's bound passes: unknown. The CA was not said to it, but her
+    // "didnt you see" asked about it while the look was out, so she hears
+    // "can't pull that one up rn" on the post, tagged — once — and nothing
+    // is remembered or nominated.
     waits[0]!();
     await groups.drain();
     assert.deepEqual(
       tg.sends(CHAT).map(replyOf),
-      [...asked, didnt, nudge, byName].map((m) => m.messageId),
+      [...asked, didnt, nudge, byName, post].map((m) => m.messageId),
     );
+    const cant = String(tg.sends(CHAT).at(-1)?.body.text);
+    assert.match(cant, new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
+    assert.match(plain(cant), /can't|won't|not loading|blank/);
     assert.deepEqual(tg.reactions(CHAT), []);
     assert.deepEqual(store.room(CHAT)?.coins, []);
     assert.equal(port.nominations.length, 0);
@@ -1024,6 +1029,275 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.match(String(s[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
     assert.match(plain(String(s[0]?.body.text)), /can't|won't|not loading|blank/);
     assert.ok(!/\d/.test(plain(String(s[0]?.body.text))));
+  });
+
+  it("A reply to a coin post, said to it ('wdyt about this pine') → asks about THAT coin: looked at afresh, tags them, thinks out loud, nominated under the reply", async () => {
+    // The owner's coin post got nothing (its look failed, and nobody asked),
+    // then "wdyt about this shogun" as a reply to it was answered by its words
+    // alone: no look, and a dodge. The reply names no coin; the post it
+    // answers does.
+    const logs: string[] = [];
+    make({ log: (l) => logs.push(l) });
+    approve();
+    port.looks.set(CA1, { kind: "unknown" });
+    const post = msg(CA1, { fromId: OWNER, fromFirstName: "Milla" });
+    await said(post);
+    assert.equal(tg.sends(CHAT).length, 0, "a look that could not be made, not asked: silence");
+    assert.ok(logs.includes("[tg-groups] coin post (not to me): nothing (coin-unknown); look: unknown"), logs.join("\n"));
+
+    port.looks.set(CA1, { kind: "candidate", name: "Vrax" });
+    const wdyt = msg("wdyt about this pine", { fromId: OWNER, fromFirstName: "Milla", replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
+    await said(wdyt);
+    assert.deepEqual(port.lookCalls, [CA1, CA1], "the reply's coin is looked at again");
+    assert.deepEqual(port.nominations, [{ address: CA1, chatId: CHAT, messageId: wdyt.messageId, senderId: OWNER, atMs: wdyt.dateSec! * 1000 }]);
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 1);
+    assert.equal(replyOf(s[0]), wdyt.messageId, "an answer to the question, as a reply to it");
+    assert.match(String(s[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
+    assert.doesNotMatch(plain(String(s[0]?.body.text)), /rules|allowed|advice/);
+    assert.ok(logs.includes("[tg-groups] coin post (reply to a coin post): answered; look: candidate"), logs.join("\n"));
+    assert.ok(!logs.join("\n").includes(CA1.slice(2, 12)), "never the address in a log");
+  });
+
+  it("…not ready → the owner ask; the look failing → 'can't pull that one up rn', tagging them; the reply of someone who did not call it → chatter, nothing looked at", async () => {
+    make();
+    approve();
+    port.looks.set(CA1, { kind: "unknown" });
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    await said(post);
+    const under = (text: string, over: Partial<TgMessage> = {}) => msg(text, { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false }, ...over });
+
+    await said(under("lol this again"));
+    assert.deepEqual(port.lookCalls, [CA1], "not said to it: chatter between people, no look");
+
+    const failed = under("@pinebot thoughts?");
+    await said(failed);
+    assert.deepEqual(port.lookCalls, [CA1, CA1]);
+    const cant = tg.sends(CHAT).at(-1);
+    assert.equal(replyOf(cant), failed.messageId);
+    assert.match(String(cant?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann</a> `));
+    assert.match(plain(String(cant?.body.text)), /can't|won't|not loading|blank/);
+
+    port.ready = { kind: "off", ownerReason: "Trencher mode is off." };
+    port.looks.set(CA1, { kind: "candidate", name: "Vrax" });
+    const notReady = under("pine wdyt", { fromId: CAT, fromFirstName: "Cat" });
+    await said(notReady);
+    assert.equal(port.nominations.length, 0);
+    const ask = tg.sends(CHAT).at(-1);
+    assert.equal(replyOf(ask), notReady.messageId);
+    assert.match(String(ask?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">`), "the owner is tagged");
+    assert.match(plain(String(ask?.body.text)), /trencher mode/);
+    assert.match(tg.texts(OWNER).at(-1) ?? "", /Trencher mode is off/, "and told why in their DM");
+  });
+
+  it("…a coin it already looked at → answered from memory, no new look, and everyone who asks gets the answer, not only the first", async () => {
+    make();
+    approve();
+    port.ready = { kind: "off", ownerReason: "off" };
+    port.looks.set(CA1, { kind: "too-thin", name: "Vrax" });
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    await said(post);
+    assert.equal(tg.sends(CHAT).length, 1, "its grounded fade");
+    const under = (text: string, from: number, name: string) =>
+      msg(text, { fromId: from, fromFirstName: name, replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+    const first = under("@pinebot wdyt", ANN, "Ann");
+    const second = under("pine is it any good", CAT, "Cat");
+    const third = under("@pinebot this?", OWNER, "Milla");
+    for (const m of [first, second, third]) await said(m);
+    assert.deepEqual(port.lookCalls, [CA1], "no new look: the memo answers");
+    assert.deepEqual(tg.sends(CHAT).slice(1).map(replyOf), [first, second, third].map((m) => m.messageId), "each one who asked, answered");
+    // A bare repost inside the hour is still a repost: one 👀, not a fourth line.
+    await said(msg(CA1, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 4);
+    assert.deepEqual(tg.reactions(CHAT), ["👀"]);
+  });
+
+  it("…a reply to someone in distress who mentioned a CA → never a coin: no look, no nomination", async () => {
+    make();
+    approve();
+    const low = msg(`lost everything on ${CA1} i want to die`, { fromId: BOB, fromFirstName: "Bob" });
+    await said(low);
+    await said(msg("@pinebot thoughts?", { replyTo: { messageId: low.messageId!, fromId: BOB, fromIsBot: false } }));
+    assert.deepEqual(port.lookCalls, []);
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("…a post it never remembered (sent before it joined): the text Telegram quoted with the reply carries the coin", async () => {
+    make();
+    approve();
+    const ask = msg("@pinebot wdyt", { replyTo: { messageId: 42, fromId: BOB, fromIsBot: false, text: `new one ${CA2} 🚀` } });
+    await said(ask);
+    assert.deepEqual(port.lookCalls, [CA2]);
+    assert.deepEqual(port.nominations.map((n) => [n.address, n.messageId, n.senderId]), [[CA2, ask.messageId, ANN]]);
+  });
+
+  it("…only a reply that ASKS: 'pine don't touch this one pls', '@pinebot gm gm' or another question under a coin post → chatter, no look, no nomination", async () => {
+    make();
+    approve();
+    port.looks.set(CA1, { kind: "unknown" });
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    await said(post);
+    const under = (text: string, over: Partial<TgMessage> = {}) => msg(text, { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false }, ...over });
+    const lines = [
+      under("pine don't touch this one pls", { fromId: OWNER, fromFirstName: "Milla" }),
+      under("@pinebot gm gm"),
+      under("@pinebot how's your day going", { fromId: CAT, fromFirstName: "Cat" }),
+      under("@pinebot who won?", { fromId: OWNER, fromFirstName: "Milla" }),
+      under("@pinebot where next?", { fromId: OWNER, fromFirstName: "Milla" }),
+    ];
+    for (const m of lines) await said(m);
+    assert.deepEqual(port.lookCalls, [CA1], "none of them looked at the coin again");
+    assert.equal(port.nominations.length, 0);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), lines.map((m) => m.messageId), "each answered as chatter");
+  });
+
+  it("…a long post whose CA comes after the 400 characters it remembers: the whole text Telegram quoted is read", async () => {
+    make();
+    approve();
+    const text = `${"this one is about to send, dev is based, community is strong, chart looks clean ".repeat(6)}ca: ${CA2}`;
+    port.looks.set(CA2, { kind: "unknown" });
+    const post = msg(text, { fromId: BOB, fromFirstName: "Bob" });
+    await said(post);
+    assert.deepEqual(port.lookCalls, [CA2], "the post itself, read whole");
+    assert.ok(!store.room(CHAT)!.lines.find((l) => l.messageId === post.messageId)!.text.includes(CA2), "remembered clipped");
+    port.looks.set(CA2, { kind: "candidate", name: "Vrax" });
+    const ask = msg("@pinebot wdyt", { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false, text } });
+    await said(ask);
+    assert.deepEqual(port.lookCalls, [CA2, CA2], "the reply found the coin in the quote");
+    assert.deepEqual(port.nominations.map((n) => [n.address, n.messageId]), [[CA2, ask.messageId]]);
+  });
+
+  it("…a raid of people asking about one coin: the owner and three others get the answer, then one 👀, then nothing", async () => {
+    make();
+    approve();
+    port.ready = { kind: "off", ownerReason: "off" };
+    port.looks.set(CA1, { kind: "too-thin", name: "Vrax" });
+    await said(msg(CA1, { fromId: BOB, fromFirstName: "Bob" }));
+    const askers = [11, 12, 13, 14, 15].map((id) => msg(`@pinebot ${CA1} wdyt`, { fromId: id, fromFirstName: `P${id}` }));
+    for (const m of askers) await said(m);
+    const owners = msg(`@pinebot ${CA1}?`, { fromId: OWNER, fromFirstName: "Milla" });
+    await said(owners);
+    assert.deepEqual(port.lookCalls, [CA1]);
+    assert.deepEqual(tg.sends(CHAT).slice(1).map(replyOf), [...askers.slice(0, 3), owners].map((m) => m.messageId));
+    assert.deepEqual(tg.reactions(CHAT), ["👀"], "the fourth one asking gets a 👀, the fifth nothing");
+  });
+
+  it("…a reply asking while the post's own look is still out → answered now, as chatter; and when that look fails, 'can't pull that one up rn' tags the one who asked", async () => {
+    const waits: Array<() => void> = [];
+    make({
+      timer: (ms) =>
+        new Promise<void>((fire) => {
+          waits.push(() => {
+            clock += ms;
+            fire();
+          });
+        }),
+    });
+    approve();
+    port.look = (address: string) => {
+      port.lookCalls.push(address);
+      return new Promise<CoinLook>(() => {});
+    };
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(post);
+    for (let i = 0; i < 200 && port.lookCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
+    const wdyt = msg("wdyt about this pine", { fromId: OWNER, fromFirstName: "Milla", replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+    groups.onMessage(wdyt);
+    for (let i = 0; i < 200 && tg.sends(CHAT).length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [wdyt.messageId], "answered now, not queued behind the look");
+    assert.deepEqual(port.lookCalls, [CA1], "one look, the post's");
+    waits[0]!();
+    await groups.drain();
+    const s = tg.sends(CHAT);
+    assert.deepEqual(s.map(replyOf), [wdyt.messageId, post.messageId]);
+    assert.match(String(s[1]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `), "tagging who asked, not who posted");
+    assert.match(plain(String(s[1]?.body.text)), /can't|won't|not loading|blank/);
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("…a different ticker in a reply never nominates the quoted coin; the matching ticker can use its quoted CA", async () => {
+    make();
+    approve();
+    const replyTo = { messageId: 42, fromId: BOB, fromIsBot: false, text: `$VRAX ${CA1}` };
+    await said(msg("@pinebot wdyt about $OTHER", { replyTo }));
+    assert.deepEqual(port.lookCalls, [], "an explicit different coin needs its own CA");
+    assert.equal(port.nominations.length, 0);
+    await said(msg("@pinebot wdyt about $VRAX", { replyTo }));
+    assert.deepEqual(port.lookCalls, [CA1], "the quote explicitly associates this ticker with its CA");
+    assert.deepEqual(port.nominations.map((n) => n.address), [CA1]);
+  });
+
+  it("…the asker runs /forgetme while the failed-look response is typing under someone else's post: no tag or line is sent", async () => {
+    let releaseLook!: (look: CoinLook) => void;
+    let sawLook!: () => void;
+    const lookStarted = new Promise<void>((resolve) => { sawLook = resolve; });
+    let sawReply!: () => void;
+    const replySent = new Promise<void>((resolve) => { sawReply = resolve; });
+    let sawTyping!: () => void;
+    const typingStarted = new Promise<void>((resolve) => { sawTyping = resolve; });
+    let releaseTyping!: () => void;
+    const typingHeld = new Promise<void>((resolve) => { releaseTyping = resolve; });
+    let holdTyping = false;
+    const fetchTg = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      const result = await fetchTg(url, init);
+      if (url.endsWith("/sendMessage")) sawReply();
+      return result;
+    };
+    make({
+      timer: () => new Promise<void>(() => {}),
+      sleep: async (ms) => {
+        if (holdTyping) {
+          holdTyping = false;
+          sawTyping();
+          await typingHeld;
+        }
+        clock += Math.max(0, ms);
+      },
+    });
+    approve();
+    port.look = (address) => {
+      port.lookCalls.push(address);
+      sawLook();
+      return new Promise<CoinLook>((resolve) => { releaseLook = resolve; });
+    };
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(post);
+    await lookStarted;
+    const ask = msg("wdyt about this pine", { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+    groups.onMessage(ask);
+    await replySent;
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the immediate chatter already answered the asker");
+    holdTyping = true;
+    releaseLook({ kind: "unknown" });
+    await typingStarted;
+    await groups.forgetMe(CHAT, ANN, undefined, { late: true });
+    releaseTyping();
+    await groups.drain();
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the later response cannot publish the forgotten asker's tag");
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.ok(!store.room(CHAT)!.lines.some((line) => line.fromId === ANN));
+    assert.deepEqual(port.nominations, []);
+  });
+
+  it("every coin post has its log line, and the heartbeat counts coin posts", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    try {
+      const logs: string[] = [];
+      make({ log: (l) => logs.push(l) });
+      approve();
+      port.looks.set(CA1, { kind: "wallet" });
+      await said(msg(CA1));
+      await said(msg(`@pinebot ${CA2}`, { fromId: BOB, fromFirstName: "Bob" }));
+      assert.ok(logs.includes("[tg-groups] coin post (not to me): nothing (coin-not-here); look: wallet"), logs.join("\n"));
+      assert.ok(logs.includes("[tg-groups] coin post (to me): answered; look: candidate"), logs.join("\n"));
+      mock.timers.tick(5 * MIN);
+      const beat = logs.find((l) => l.startsWith("[tg-groups] last 5 min:"));
+      assert.match(beat ?? "", /; 2 coin posts \(1 answered\); /, beat);
+      assert.ok(!logs.join("\n").includes(CA1.slice(2, 12)) && !logs.join("\n").includes(CA2.slice(2, 12)), "never an address");
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it("'when I sent a ca she stopped responding': the owner in a Pons group posts bonding-curve CA after CA, chatting and calling it by name between → every CA its curve line, every line its answer", async () => {

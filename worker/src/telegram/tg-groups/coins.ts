@@ -69,6 +69,7 @@ import type { TgGroupsStore } from "./store";
 import type {
   CoinKind,
   CoinLook,
+  CoinLookSource,
   CoinOutcome,
   CoinVerdict,
   NominateRefusal,
@@ -108,9 +109,19 @@ export const COIN_FLOW = {
    * Not in the contract: an answer from memory ("already looked at that
    * one…") at most once per coin per chat this often. A CA reposted eight
    * times in three minutes is not eight things to say; later reposts get one
-   * 👀 inside the window, then nothing.
+   * 👀 inside the window, then nothing. A post that ASKED it (addressed, or a
+   * reply to the coin's post said to it) is counted per person instead: the
+   * second person to ask about a coin is owed the answer the first one got.
    */
   seenLineMs: HOUR,
+  /**
+   * Not in the contract: of those per-person answers, at most this many per
+   * coin per chat per seenLineMs go to people other than the owner. Eight
+   * people asking about one coin in a minute is a raid, not eight
+   * conversations: past this they are counted as reposts (one 👀, then
+   * nothing). The owner is always answered.
+   */
+  seenAskedMax: 3,
   /** An `expired` outcome is said only when a human spoke in the chat this recently. */
   expiredLiveMs: 30 * MIN,
   /**
@@ -183,6 +194,8 @@ export interface CoinSpeakOpts {
   trigger?: TgLine;
   /** The coin's casual display name, never address-shaped. */
   coinName?: string;
+  /** Rechecked through typing and send waits when the tagged asker is not the trigger's author. */
+  stillWanted?: () => boolean;
 }
 
 export interface CoinFlowDeps {
@@ -252,6 +265,12 @@ export interface CoinPostEnd {
   acted: boolean;
   /** Why nothing went out, when nothing did. */
   quiet?: CoinQuiet;
+  /**
+   * What each look made for it came back as, in order, with the read that
+   * answered: "candidate via dexscreener", "unknown". For the handler's one
+   * log line per coin post; kinds and source names only, never an address.
+   */
+  looks?: string[];
 }
 
 /**
@@ -263,6 +282,18 @@ export interface CoinPostEnd {
 export interface CoinPostStart {
   owned: "handled" | "none";
   done: Promise<CoinPostEnd>;
+}
+
+/**
+ * Someone who asked about a post's coin while its work was still on the coin
+ * lane (CoinFlow.askedWhileWorking): who to tag if the look comes back
+ * `unknown`. Never their words.
+ */
+export interface CoinAsk {
+  senderId: number;
+  senderName: string;
+  /** True once they have run /forgetme since asking. */
+  forgotten?: () => boolean;
 }
 
 /** What the handler read off one message, for `onPost`. */
@@ -316,6 +347,8 @@ export interface CoinPostInfo {
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 
 const READY: ReadonlySet<string> = new Set(["ready-paper", "ready-live"]);
+
+const SOURCES: ReadonlySet<string> = new Set<CoinLookSource>(["free", "cache", "chain", "geckoterminal", "dexscreener"]);
 
 const KINDS: ReadonlySet<string> = new Set<CoinKind>([
   "own",
@@ -387,6 +420,8 @@ interface PostCtx {
   unknown: boolean;
   /** Why nothing went out, the latest reason. */
   quiet?: CoinQuiet;
+  /** Each look's kind and source, in order (CoinPostEnd.looks). */
+  looks: string[];
 }
 
 /** One post's work waiting on its chat's coin lane. */
@@ -404,7 +439,7 @@ interface Lane {
 }
 
 /** True once the sender asked to be forgotten. A predicate that throws reads as forgotten. */
-function goneOf(m: CoinPostInfo): boolean {
+function goneOf(m: { forgotten?: () => boolean }): boolean {
   try {
     return typeof m.forgotten === "function" && m.forgotten() === true;
   } catch {
@@ -545,6 +580,16 @@ export class CoinFlow {
   private readonly acks = new Map<string, Promise<unknown>>();
   /** stop() was called: work still on a lane does nothing more. */
   private halted = false;
+  /** Posts (`${chatId}:${messageId}`) whose work is on a coin lane, waiting or being worked (working()). */
+  private readonly onLanes = new Set<string>();
+  /** Who asked about each of those posts meanwhile (askedWhileWorking), first asker first. */
+  private readonly askers = new Map<string, CoinAsk[]>();
+  /**
+   * When each answer from memory to someone other than the owner who asked
+   * went out, per `${chatId}:${address}` (COIN_FLOW.seenAskedMax). In memory,
+   * like seenSaidAt.
+   */
+  private readonly askedSaidAt = new Map<string, number[]>();
   /** Outcomes heard through the port and still being said, so drain() can wait for them. */
   private readonly hearing = new Set<Promise<void>>();
 
@@ -622,7 +667,13 @@ export class CoinFlow {
         for (const address of cas) this.d.store.claim(chatId, line.messageId, address);
         return { owned: "handled", done: Promise.resolve({ acted: false, quiet: "coin-busy" }) };
       }
-      return { owned: "handled", done: this.onLane(chatId, rank, () => this.work(chatId, line, m, cas)) };
+      const key = `${chatId}:${line.messageId}`;
+      this.onLanes.add(key);
+      const done = this.onLane(chatId, rank, () => this.work(chatId, line, m, cas)).finally(() => {
+        this.onLanes.delete(key);
+        this.askers.delete(key);
+      });
+      return { owned: "handled", done };
     } catch (e) {
       this.fail("post", e);
       return owned ? { owned: "handled", done: Promise.resolve({ acted: false, quiet: "send-failed" }) } : none;
@@ -641,9 +692,37 @@ export class CoinFlow {
     return this.lanes.size === 0 && this.hearing.size === 0;
   }
 
+  /**
+   * True while this post's CAs are still on its chat's coin lane: waiting, or
+   * being looked at. Its answer (or its silence) is still coming, so a reply
+   * to it is not a new question about its coin (the handler's repliedCoin).
+   */
+  working(chatId: number, messageId: number): boolean {
+    return this.onLanes.has(`${chatId}:${messageId}`);
+  }
+
+  /**
+   * SOMEONE ASKED ABOUT A POST'S COIN WHILE ITS LOOK WAS STILL OUT ("wdyt
+   * about this pine" seconds after the CA). The handler answers them now, as
+   * chatter; this makes sure they also hear how the look went: a post nobody
+   * addressed whose look comes back `unknown` gets "can't pull that one up
+   * rn" tagging the first of them (still at most once per chat per
+   * COIN_FLOW.unknownLineMs), where it would otherwise be silence. A verdict
+   * is said on the post as ever. False, and nothing kept, when the post is
+   * not on the lane.
+   */
+  askedWhileWorking(chatId: number, messageId: number, ask: CoinAsk): boolean {
+    const key = `${chatId}:${messageId}`;
+    if (!this.onLanes.has(key) || !ask || !isInt(ask.senderId)) return false;
+    const list = this.askers.get(key) ?? [];
+    if (list.length < 8) list.push(ask);
+    this.askers.set(key, list);
+    return true;
+  }
+
   /** One post's CAs, in order, on its chat's lane. */
   private async work(chatId: number, line: TgLine, m: CoinPostInfo, cas: readonly string[]): Promise<CoinPostEnd> {
-    const ctx: PostCtx = { reacted: false, askedOwner: false, acted: false, unknown: false };
+    const ctx: PostCtx = { reacted: false, askedOwner: false, acted: false, unknown: false, looks: [] };
     for (const address of cas) {
       if (this.halted) break;
       // The first CA's look may have taken seconds, and this post may have
@@ -668,8 +747,13 @@ export class CoinFlow {
         this.fail("post", e);
       }
     }
-    if (!this.halted && !ctx.acted && ctx.unknown && m.addressed === true) await this.cannotLook(chatId, line, m, ctx);
-    return ctx.acted ? { acted: true } : { acted: false, ...(ctx.quiet ? { quiet: ctx.quiet } : {}) };
+    if (!this.halted && !ctx.acted && ctx.unknown) {
+      // Asked in the post itself, or by someone replying to it while its look was out.
+      const asker = m.addressed === true ? m : this.askers.get(`${chatId}:${line.messageId}`)?.find((a) => !goneOf(a));
+      if (asker) await this.cannotLook(chatId, line, asker, ctx);
+    }
+    const looks = ctx.looks.length > 0 ? { looks: ctx.looks } : {};
+    return ctx.acted ? { acted: true, ...looks } : { acted: false, ...(ctx.quiet ? { quiet: ctx.quiet } : {}), ...looks };
   }
 
   /**
@@ -740,7 +824,7 @@ export class CoinFlow {
    * per chat per COIN_FLOW.unknownLineMs; nothing is remembered, so a repost
    * gets a fresh look.
    */
-  private async cannotLook(chatId: number, line: TgLine, m: CoinPostInfo, ctx: PostCtx): Promise<void> {
+  private async cannotLook(chatId: number, line: TgLine, m: CoinAsk, ctx: PostCtx): Promise<void> {
     ctx.quiet = "coin-unknown";
     if (goneOf(m) || !this.approvedRoom(chatId) || !this.coinsOn()) return;
     const tag = isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
@@ -748,7 +832,7 @@ export class CoinFlow {
       chatId,
       "lastCoinUnknownAtMs",
       (r, t) => elapsed(r.lastCoinUnknownAtMs, t, COIN_FLOW.unknownLineMs),
-      () => this.say(chatId, { kind: "coin-unknown" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}) }, ctx),
+      () => this.say(chatId, { kind: "coin-unknown" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), stillWanted: () => !goneOf(m) }, ctx),
     );
   }
 
@@ -944,7 +1028,7 @@ export class CoinFlow {
     // will look for.
     const prior = d.store.coin(chatId, address, COIN_FLOW.seenMs);
     if (prior && !NOT_ANSWERED.has(prior.verdict)) {
-      await this.fromMemory(chatId, address, line, prior, say, eyes, ctx);
+      await this.fromMemory(chatId, address, line, m, prior, say, eyes, ctx);
       return;
     }
 
@@ -959,6 +1043,7 @@ export class CoinFlow {
     const lookMs = Math.min(COIN_FLOW.lookMs, this.windowLeft(m) - COIN_FLOW.lineMs);
     if (lookMs < COIN_FLOW.lookMinMs) return hush("coin-stale");
     const look = await this.lookAt(port, address, lookMs);
+    ctx.looks.push(look.source ? `${look.kind} via ${look.source}` : look.kind);
     // The look took a while: the room may have been left, or coins switched off.
     if (!this.approvedRoom(chatId)) return hush("room-not-approved");
     if (!this.coinsOn()) return hush("coin-off");
@@ -984,7 +1069,7 @@ export class CoinFlow {
       if (!d.store.claim(chatId, line.messageId, coin)) return hush("coin-replay");
       const seen = d.store.coin(chatId, coin, COIN_FLOW.seenMs);
       if (seen && !NOT_ANSWERED.has(seen.verdict)) {
-        await this.fromMemory(chatId, coin, line, seen, say, eyes, ctx);
+        await this.fromMemory(chatId, coin, line, m, seen, say, eyes, ctx);
         return;
       }
     }
@@ -1063,7 +1148,7 @@ export class CoinFlow {
       // Recent in the book. Answered from memory only when the memory is this
       // chat's: a coin another group nominated is never mentioned here.
       const mine = d.store.coin(chatId, coin);
-      if (mine && !NOT_ANSWERED.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes, ctx);
+      if (mine && !NOT_ANSWERED.has(mine.verdict)) await this.fromMemory(chatId, coin, line, m, mine, say, eyes, ctx);
       else hush("coin-refused");
       return;
     }
@@ -1077,18 +1162,32 @@ export class CoinFlow {
    * such repost) and then nothing: a shill reposting a CA every twenty
    * seconds is not a conversation. Reserved before the send and given back
    * when it did not go out, like every rate-limited line here.
+   *
+   * A POST THAT ASKED IT is counted per person, not per coin: the owner
+   * asking about a coin somebody else already asked about gets the answer
+   * too, not a 👀. Its answer still stamps the coin's window, so the
+   * unaddressed reposts after it stay quiet; the flood rule still bounds how
+   * often one person is answered at all, and past COIN_FLOW.seenAskedMax
+   * people other than the owner in the window, the next one asking is
+   * counted as a repost.
    */
   private async fromMemory(
     chatId: number,
     address: string,
     line: TgLine,
+    m: CoinPostInfo,
     memo: TgCoinMemo,
     say: (intent: CoinIntent, o: CoinSpeakOpts) => Promise<boolean>,
     eyes: () => Promise<void>,
     ctx: PostCtx,
   ): Promise<void> {
-    const k = `${chatId}:${address}`;
+    const coinKey = `${chatId}:${address}`;
     const t = this.d.now();
+    const owner = this.ownerIdNow();
+    const byOwner = owner !== null && m.senderId === owner;
+    const askedBefore = (this.askedSaidAt.get(coinKey) ?? []).filter((at) => !elapsed(at, t, COIN_FLOW.seenLineMs));
+    const asked = m.addressed === true && isInt(m.senderId) && (byOwner || askedBefore.length < COIN_FLOW.seenAskedMax);
+    const k = asked ? `${coinKey}:by:${m.senderId}` : coinKey;
     const prev = this.seenSaidAt.get(k);
     if (prev && !elapsed(prev.at, t, COIN_FLOW.seenLineMs)) {
       if (!prev.eyed) {
@@ -1100,17 +1199,37 @@ export class CoinFlow {
     }
     const mine = { at: t, eyed: false };
     this.seenSaidAt.set(k, mine);
+    // The coin's own window too: an unaddressed repost after an asked answer is a repost.
+    const prevCoin = asked ? this.seenSaidAt.get(coinKey) : undefined;
+    const coinMine = asked ? { at: t, eyed: prevCoin?.eyed ?? false } : undefined;
+    if (coinMine) this.seenSaidAt.set(coinKey, coinMine);
+    // Counted toward the cap before the send, given back if it did not go out.
+    const counted = asked && !byOwner ? [...askedBefore, t] : undefined;
+    if (counted) this.askedSaidAt.set(coinKey, counted);
     const ok = await say(
       { kind: "coin-seen", verdict: this.seenVerdict(memo) },
       { replyTo: line.messageId, trigger: line, ...(memo.name ? { coinName: memo.name } : {}) },
     );
-    if (!ok && this.seenSaidAt.get(k) === mine) {
-      if (prev) this.seenSaidAt.set(k, prev);
-      else this.seenSaidAt.delete(k);
+    if (!ok) {
+      if (this.seenSaidAt.get(k) === mine) {
+        if (prev) this.seenSaidAt.set(k, prev);
+        else this.seenSaidAt.delete(k);
+      }
+      if (coinMine && this.seenSaidAt.get(coinKey) === coinMine) {
+        if (prevCoin) this.seenSaidAt.set(coinKey, prevCoin);
+        else this.seenSaidAt.delete(coinKey);
+      }
+      if (counted && this.askedSaidAt.get(coinKey) === counted) {
+        if (askedBefore.length > 0) this.askedSaidAt.set(coinKey, askedBefore);
+        else this.askedSaidAt.delete(coinKey);
+      }
     }
     // Bounded like the store's 30 chats of 60 coins: old stamps decide nothing.
     if (this.seenSaidAt.size > 512) {
       for (const [key, v] of this.seenSaidAt) if (elapsed(v.at, t, COIN_FLOW.seenLineMs)) this.seenSaidAt.delete(key);
+    }
+    if (this.askedSaidAt.size > 512) {
+      for (const [key, v] of this.askedSaidAt) if (v.every((at) => elapsed(at, t, COIN_FLOW.seenLineMs))) this.askedSaidAt.delete(key);
     }
   }
 
@@ -1298,6 +1417,7 @@ export class CoinFlow {
         kind: l.kind,
         ...(name ? { name } : {}),
         ...(ADDRESS.test(coin) && coin !== address ? { address: coin } : {}),
+        ...(typeof l.source === "string" && SOURCES.has(l.source) ? { source: l.source } : {}),
       };
     } catch (e) {
       this.fail("look", e);
