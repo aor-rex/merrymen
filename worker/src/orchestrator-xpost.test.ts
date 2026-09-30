@@ -809,6 +809,46 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(v.db, "buy:pepe-b"), "skipped");
   });
 
+  it("the owner's choices reach the pass: coins it buys off plans no buy post and cancels one waiting; their number a day holds at send time", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    const waiting = await store.schedulePost(w.db, {
+      tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:d-old", body: BUY, coin: "pepe", decisionId: "d-old", dueAtMs: T0 + HOUR, nowMs: T0 - 30 * MIN,
+    });
+    // Planned by a pass that read the account before the owner's change landed.
+    await store.setPrefs(w.db, TENANT, { buys: false }, T0 - 10 * MIN);
+    await w.db.prepare("UPDATE xpost_posts SET status = 'scheduled', reason = NULL WHERE id = ?").run(waiting!);
+    const p = poster(w, { calls: [call({ decisionId: "d-new", atSec: (T0 - 5 * MIN) / 1000 })] });
+    const log = (await p.step(w.db, ROSTER, new Map(), T0 + HOUR)).log;
+    assert.equal(await store.keyStatus(w.db, "buy:d-new"), null, "a fresh buy is not posted about");
+    assert.equal(await store.keyStatus(w.db, "buy:d-old"), "cancelled", "the waiting one is cancelled at send time, never sent");
+    assert.equal(w.tweets.length, 0);
+    assert.match(log ?? "", /cancelled 1/);
+
+    // One post a day chosen, three allowed by the server: the second casual post of the day is held.
+    const v = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(v);
+    await store.setPrefs(v.db, TENANT, { perDay: 1, casual: true }, T0 - 10 * MIN);
+    await dueCasual(v, "casual:morning");
+    await dueCasual(v, "casual:later", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0);
+    const second = (await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(v.tweets.length, 1, "the owner's one post today");
+    assert.match(second ?? "", /account-day-cap 1/);
+  });
+
+  it("an owner can choose fewer posts a day than the server allows, never more", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await store.setPrefs(w.db, TENANT, { perDay: 3 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:morning");
+    await dueCasual(w, "casual:later", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(w, { perDay: 1 }).step(w.db, ROSTER, new Map(), T0);
+    const second = (await poster(w, { perDay: 1 }).step(w.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(w.tweets.length, 1, "the server's one a day holds over the owner's three");
+    assert.match(second ?? "", /account-day-cap 1/);
+  });
+
   it("a send X surely refused gives the account's gap, day and fold back", async (t) => {
     const w = await world(t, T0 - 3 * HOUR);
     await introDealtWith(w);
@@ -1112,6 +1152,25 @@ describe("what a casual post starts from", () => {
     assert.ok(seen.trade > 0 && seen.other > 0, JSON.stringify(seen));
   });
 
+  it("with posts about the coins it buys turned off, a passing thought never names one, trade-talk day or not", async (t) => {
+    const START = Date.UTC(2026, 8, 1);
+    const w = await world(t, START);
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: "hello", dueAtMs: START, nowMs: START });
+    await store.ownerCancel(w.db, TENANT, hello!, START);
+    await store.setPrefs(w.db, TENANT, { buys: false }, START);
+    const p = poster(w, { calls: [call({ decisionId: "d-old", atSec: (START - HOUR) / 1000 })] });
+    let talkDays = 0;
+    for (let d = 0; d < 30; d++) {
+      const day = START + d * 24 * HOUR;
+      const before = w.prompts.length;
+      for (let m = 14 * 60; m < 22 * 60 && w.prompts.length === before; m += 30) await p.step(w.db, ROSTER, new Map(), day + m * MIN);
+      if (w.prompts.length === before) continue;
+      if (tradeTalkDay(TENANT, new Date(day).toISOString().slice(0, 10))) talkDays++;
+      assert.doesNotMatch(w.prompts.at(-1)!, /\bPepe\b/);
+    }
+    assert.ok(talkDays > 0, "a trade-talk day was among them");
+  });
+
   it("a trade-talk day is how it trades and its coins, and no seed; any other day the seed, and no coin — decided here", () => {
     const agent = (mode: AgentFacts["mode"], over: Partial<AgentFacts> = {}): AgentFacts => ({
       tenant: TENANT,
@@ -1141,6 +1200,9 @@ describe("what a casual post starts from", () => {
       }
       // An agent that is not trading never has one; nor one with nothing to say about it.
       assert.equal(casualInputs(agent("idle"), day).tradeTalk, false);
+      // Posts about the coins it buys turned off: a trade-talk day offers none, and names none to the gate.
+      const noCoins = casualInputs(agent("paper"), day, { coins: false });
+      assert.deepEqual(noCoins.recentCoins, []);
       assert.equal(casualInputs(agent("live", { strategy: null, traits: [], calls: [] }), day).tradeTalk, false);
     }
     assert.ok(talk > 0);

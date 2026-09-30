@@ -455,6 +455,61 @@ describe("one casual post at the account's own afternoon slot, most days", () =>
 
 // ── sending ─────────────────────────────────────────────────────────────────
 
+describe("what the owner lets it post", () => {
+  const fresh = (nowMs: number) => [call({ atSec: Math.floor((nowMs - 20 * MIN) / 1000) })];
+  /** A moment inside this account's own casual slot today, found by asking the planner. */
+  function slotNow(tenant: string): number | null {
+    for (let m = 14 * 60; m < 22 * 60; m++) {
+      const nowMs = DAY0 + m * MIN;
+      if (planPosts(input({ tenant, nowMs })).some((p) => p.kind === "casual")) return nowMs;
+    }
+    return null;
+  }
+
+  it("coins it buys turned off: no buy post, and the rest as before", () => {
+    const nowMs = DAY0 + 10 * HOUR;
+    assert.equal(planPosts(input({ nowMs, calls: fresh(nowMs) })).filter((p) => p.kind === "buy").length, 1, "on: planned");
+    assert.deepEqual(planPosts(input({ nowMs, calls: fresh(nowMs), kinds: { buys: false } })), []);
+  });
+
+  it("passing thoughts turned off: no casual post at its slot", () => {
+    let tenant = "";
+    let at: number | null = null;
+    for (let i = 0; i < 20 && at === null; i++) {
+      tenant = `0x${(i + 1).toString(16).padStart(40, "0")}`;
+      at = slotNow(tenant);
+    }
+    assert.ok(at !== null, "some account posts a casual line today");
+    assert.equal(planPosts(input({ tenant, nowMs: at, kinds: { casual: false } })).filter((p) => p.kind === "casual").length, 0);
+    assert.equal(planPosts(input({ tenant, nowMs: at, kinds: { casual: true } })).filter((p) => p.kind === "casual").length, 1);
+  });
+
+  it("the hello is not a kind they can turn off", () => {
+    const plan = planPosts(input({ intros: [], kinds: { buys: false, casual: false } }));
+    assert.deepEqual(plan.map((p) => p.kind), ["intro"]);
+  });
+
+  it("one post a day: the second buy of the day waits for tomorrow", () => {
+    const nowMs = DAY0 + 10 * HOUR;
+    const calls = [call({ atSec: Math.floor((nowMs - 30 * MIN) / 1000), name: "Pepe" }), call({ atSec: Math.floor((nowMs - 20 * MIN) / 1000), name: "Frog" })];
+    assert.equal(planPosts(input({ nowMs, calls, perDay: 3 })).filter((p) => p.kind === "buy").length, 2);
+    assert.equal(planPosts(input({ nowMs, calls, perDay: 1 })).filter((p) => p.kind === "buy").length, 1);
+  });
+
+  it("a draft of a kind turned off since it was planned is cancelled at send time, never sent", () => {
+    const now = DAY0 + 12 * HOUR;
+    const on = { xUserId: "111", posting: true };
+    const buy = { kind: "buy" as const, xUserId: "111", createdAtMs: now - HOUR, dueAtMs: now - MIN };
+    const casual = { ...buy, kind: "casual" as const };
+    const intro = { ...buy, kind: "intro" as const };
+    assert.deepEqual(sendDecision(buy, { ...on, prefs: { buys: false, casual: true } }, now, false), { action: "cancel", reason: "kind-off" });
+    assert.deepEqual(sendDecision(casual, { ...on, prefs: { buys: true, casual: false } }, now, false), { action: "cancel", reason: "kind-off" });
+    assert.deepEqual(sendDecision(intro, { ...on, prefs: { buys: false, casual: false } }, now, false), { action: "send" });
+    assert.deepEqual(sendDecision(buy, { ...on, prefs: { buys: true, casual: false } }, now, false), { action: "send" });
+    assert.deepEqual(sendDecision(buy, on, now, false), { action: "send" }, "no choices given: every kind is on");
+  });
+});
+
 describe("sendDecision", () => {
   const now = DAY0 + 12 * HOUR;
   const p = { kind: "buy" as const, xUserId: "111", createdAtMs: now - HOUR, dueAtMs: now - MIN };

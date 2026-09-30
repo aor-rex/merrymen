@@ -72,7 +72,7 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   strategy: ["playbook"],
   // Posting on X is dashboard-only (DASHBOARD_ONLY.xPosting): these words
   // reach the refusal and its Settings button, never a change.
-  xPosting: ["post on x", "posting on x", "x posting", "posts on x", "post on twitter", "twitter", "tweets", "tweeting", "x account"],
+  xPosting: ["post on x", "posting on x", "x posting", "posts on x", "post on twitter", "twitter", "tweets", "tweeting", "x account", "x settings"],
   // Telegram groups are dashboard-only (DASHBOARD_ONLY.telegramGroups). "group
   // chats" is how owners say it even though the product never does — the
   // public web room owns that name — so it has to reach the refusal too. The

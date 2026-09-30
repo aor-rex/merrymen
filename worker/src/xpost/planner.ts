@@ -28,9 +28,12 @@
  *     skipped by the gate, or refused by X is drafted AGAIN under a new key,
  *     at most three times per consent (introState);
  *   - use a coin label that could be derived from an address. A ticker like
- *     "T7631DACC21B" is an id, not a name anybody would tweet.
+ *     "T7631DACC21B" is an id, not a name anybody would tweet;
+ *   - plan a kind the owner turned off (PlanInput.kinds), or more a day than
+ *     the owner chose (the glue hands in the smaller of theirs and the
+ *     server's). The hello is not a kind they can turn off.
  */
-import type { XAccount, XPost, XPostStatus } from "./store";
+import type { XAccount, XPost, XPostPrefs, XPostStatus } from "./store";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -121,6 +124,8 @@ export interface PlanInput {
   perDay?: number;
   /** Whether posts that need a model (buy, casual) may be planned at all. */
   model?: boolean;
+  /** The kinds the owner lets it post (XPostPrefs). Absent, or a field absent, is on. */
+  kinds?: Partial<Pick<XPostPrefs, "buys" | "casual">>;
 }
 
 // ── keys and dice ───────────────────────────────────────────────────────────
@@ -301,8 +306,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
   const out: PlanIntent[] = [];
 
-  // BUYS: fresh, after consent, one per coin in three days, two a day at most.
-  const buys = input.calls
+  // BUYS: fresh, after consent, one per coin in three days, two a day at most —
+  // and none at all when the owner turned them off.
+  const buys = input.kinds?.buys === false ? [] : input.calls
     .filter((c) => c.side === "buy" && Number.isFinite(c.atSec) && typeof c.decisionId === "string" && c.decisionId !== "")
     .filter((c) => c.atSec * 1000 > account.consentAtMs! && now - c.atSec * 1000 <= BUY_FRESH_MS && c.atSec * 1000 <= now)
     .sort((a, b) => a.atSec - b.atSec);
@@ -331,7 +337,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const today = dayOf(now);
   const cKey = casualKey(tenant, today);
   const minutes = clock.localMinutes(tz, now);
-  if (!used.has(cKey) && onDay(today, "casual") === 0 && minutes !== null) {
+  if (input.kinds?.casual !== false && !used.has(cKey) && onDay(today, "casual") === 0 && minutes !== null) {
     const [start, end] = tz ? CASUAL_WINDOW_LOCAL : CASUAL_WINDOW_UTC;
     const h = hash32(`casual|${key(tenant)}|${today}`);
     const quiet = h % 10 < CASUAL_QUIET_DAYS_IN_TEN;
@@ -356,15 +362,16 @@ export type SendDecision =
   | { action: "send" }
   | { action: "wait" }
   | { action: "skip"; reason: "stale" }
-  | { action: "cancel"; reason: "account-gone" | "account-changed" | "account-off" };
+  | { action: "cancel"; reason: "account-gone" | "account-changed" | "account-off" | "kind-off" };
 
 /**
  * MAY THIS DUE POST GO OUT NOW?
  *
  *   cancel — the account it was written for is gone, is a different X
- *            account now, or no longer posts (switched off, revoked). The
- *            web cancels drafts on each of those already; this is the
- *            backstop for a draft planned in the same instant.
+ *            account now, or no longer posts (switched off, revoked), or
+ *            the owner turned this kind of post off. The web cancels
+ *            drafts on each of those already; this is the backstop for a
+ *            draft planned in the same instant.
  *   skip   — a buy post still waiting eight hours after it was drafted is
  *            news nobody asked for any more; a casual post held past the
  *            owner-local day it was due on, or more than six hours past due
@@ -380,7 +387,7 @@ export type SendDecision =
  */
 export function sendDecision(
   post: Pick<XPost, "kind" | "xUserId" | "createdAtMs" | "dueAtMs">,
-  account: Pick<XAccount, "xUserId" | "posting"> | null,
+  account: (Pick<XAccount, "xUserId" | "posting"> & { prefs?: Pick<XPostPrefs, "buys" | "casual"> }) | null,
   nowMs: number,
   asleep: boolean,
   dayOf?: (ms: number) => string,
@@ -388,6 +395,9 @@ export function sendDecision(
   if (!account) return { action: "cancel", reason: "account-gone" };
   if (account.xUserId !== post.xUserId) return { action: "cancel", reason: "account-changed" };
   if (!account.posting) return { action: "cancel", reason: "account-off" };
+  if ((post.kind === "buy" && account.prefs?.buys === false) || (post.kind === "casual" && account.prefs?.casual === false)) {
+    return { action: "cancel", reason: "kind-off" };
+  }
   if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };

@@ -35,7 +35,15 @@ import type { Db } from "../../../worker/src/db";
 import { canonicalTz } from "../../../worker/src/groupchat/clock";
 import { storeDek } from "../../../worker/src/store-crypto";
 import { xAppFromEnv, type FetchLike, type XApp } from "../../../worker/src/xpost/client";
-import { ensureXpostSchema, type XAccount, type XPost, type XPostKind } from "../../../worker/src/xpost/store";
+import {
+  DEFAULT_PREFS,
+  OWNER_PER_DAY_MAX,
+  ensureXpostSchema,
+  type XAccount,
+  type XPost,
+  type XPostKind,
+  type XPostPrefs,
+} from "../../../worker/src/xpost/store";
 
 // ── the test seam ───────────────────────────────────────────────────────────
 
@@ -142,6 +150,7 @@ export const X_COPY = {
   xFailed: "X didn't accept the connection — try again.",
   accountChanged: "The connected X account changed — check which account is connected and try again.",
   alreadySending: "That post is already on its way.",
+  notConnected: "Connect an X account first.",
   signedOut: "Sign in to change this.",
   noOwner: "Say which merrymen account this is for.",
   tooLarge: "That request is too large.",
@@ -227,6 +236,8 @@ export function xpostTz(raw: unknown): string | null {
 
 // ── what an owner reads back ────────────────────────────────────────────────
 
+export type { XPostPrefs };
+
 export interface XUpcomingPost {
   id: number;
   kind: XPostKind;
@@ -250,6 +261,14 @@ export interface XAccountBody {
   xUserId: string | null;
   status: "ok" | "revoked" | null;
   postingEnabled: boolean;
+  /**
+   * What the owner lets it post beside the switch: coins it bought, passing
+   * thoughts, and how many a day (null: the server's number). The defaults
+   * when nothing is connected.
+   */
+  prefs: XPostPrefs;
+  /** The most posts a day an owner may choose (store.ts OWNER_PER_DAY_MAX). */
+  perDayMax: number;
   upcoming: XUpcomingPost[];
   recent: XRecentPost[];
 }
@@ -282,6 +301,8 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
       xUserId: null,
       status: null,
       postingEnabled: false,
+      prefs: { ...DEFAULT_PREFS },
+      perDayMax: OWNER_PER_DAY_MAX,
       upcoming: [],
       recent: [],
     };
@@ -313,6 +334,8 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
     xUserId: account.xUserId || null,
     status: account.status,
     postingEnabled: account.posting,
+    prefs: { ...account.prefs },
+    perDayMax: OWNER_PER_DAY_MAX,
     upcoming,
     recent,
   };

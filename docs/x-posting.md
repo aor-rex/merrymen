@@ -207,8 +207,9 @@ gap, its day's count and a buy's coin fold are also RESERVED ATOMICALLY in
 `fold:<xUserId>:<coin>`) and handed back when X surely made nothing. Two
 orchestrator replicas holding two owners of one X account can therefore both
 plan a post, but only one can send inside the gap:
-- at most `MERRYMEN_XPOST_PER_DAY` posts per local day (default 3), of which at
-  most two are buy posts, whatever that knob allows;
+- at most `MERRYMEN_XPOST_PER_DAY` posts per local day (default 3), or the
+  owner's own smaller number, of which at most two are buy posts, whatever
+  that knob allows;
 - at least three hours between two posts, by pushing the later one's due time
   when it is planned, and again at send time (a post inside the gap is
   deferred, never sent next to another). The intro is exempt both ways. A buy
@@ -260,11 +261,44 @@ Fleet guards:
   after five minutes, and pages past posts that are only waiting (for a
   sleeping owner) so they never hide a post that can go.
 
+## What the owner chooses
+
+Beside the switch, Settings → Posting on X (web) lets the owner choose what
+their Merryman posts. These choices only narrow what the rules above allow;
+none of them adds a kind of post or relaxes a rule.
+
+| Choice | Default | Effect |
+|---|---|---|
+| Coins it buys, and why | on | off: no buy post is planned, every buy draft waiting under Coming up is cancelled (`kind-off`), and a passing thought on a trade-talk day is offered no coin to name |
+| The odd passing thought | on | off: no casual post is planned, and waiting casual drafts are cancelled (`kind-off`) |
+| Posts a day, at most | the server's number | 1, 2 or 3 (`OWNER_PER_DAY_MAX`). The smaller of this and `MERRYMEN_XPOST_PER_DAY` is used, both when planning and in the account's day allowance at send time. Lowering it leaves drafts alone; each one still has to take a place in the day's count before it is sent |
+
+- **Coin posts are only ever about coins it bought** (rule 3): a real fill,
+  never a coin it is only watching or considering. The section says so, and
+  points an owner who wants their Merryman to hunt memecoins at Trencher mode
+  (`/settings#trencher-mode`), whose buys then get their posts.
+- **The hello is not a choice.** It is the post that says an AI trading agent
+  posts here, so it still comes first. The owner can Skip it under Coming up,
+  which counts as dealt with.
+- The choices are stored on the owner's `xpost_accounts` row (`post_buys`,
+  `post_casual`, `per_day`, added to older tables by `XPOST_ALTERS`). A
+  reconnect keeps them, because they are the owner's; a disconnect forgets
+  them with the row.
+- They are changed like the switch: only in Settings, through
+  `POST /api/x/account {action:"prefs", owner, buys?, casual?, perDay?}`
+  (`perDay: null` is the server's number). This works without the X app and
+  needs a connection. On screen, a choice moves only when the server confirmed
+  it. Chat, Telegram and MCP cannot change them.
+- The send-time check (`sendDecision`) cancels a draft of a kind turned off
+  since it was planned, so a plan racing the owner's change never posts it.
+- iOS does not show the choices yet (ios-native/PARITY.md). An owner who set
+  them on the web keeps them in the app, which reads the same account.
+
 ## Tables (shared Postgres, sqlite in tests)
 
 | Table | Writer | Holds |
 |---|---|---|
-| `xpost_accounts` | web (connect, consent, disconnect); orchestrator (refresh, revoked) | the connection, sealed tokens, consent, the zone the owner consented from |
+| `xpost_accounts` | web (connect, consent, choices, disconnect); orchestrator (refresh, revoked) | the connection, sealed tokens, consent, the zone the owner consented from, what the owner lets it post |
 | `xpost_pending` | web | in-flight connects (15 min) |
 | `xpost_posts` | orchestrator (draft, send); web (owner skip, cancel on disconnect or off) | every post: scheduled, sending, posted, skipped, cancelled or failed |
 | `xpost_meta` | orchestrator | the day's post and model allowances, the credits and app pauses |

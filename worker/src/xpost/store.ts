@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS xpost_accounts (
   consent_x_user_id TEXT,                  -- the account named in the warning the owner confirmed
   tz TEXT,                                 -- the zone the owner consented from, for quiet hours
   status TEXT NOT NULL DEFAULT 'ok',       -- ok or revoked
-  updated_at_ms INTEGER NOT NULL
+  updated_at_ms INTEGER NOT NULL,
+  post_buys INTEGER NOT NULL DEFAULT 1,    -- owner choice: post about the coins it buys
+  post_casual INTEGER NOT NULL DEFAULT 1,  -- owner choice: post the odd passing thought
+  per_day INTEGER                          -- owner choice: posts per local day, null for the server number
 );
 CREATE TABLE IF NOT EXISTS xpost_pending (
   state_hash TEXT PRIMARY KEY,
@@ -101,6 +104,20 @@ CREATE TABLE IF NOT EXISTS xpost_meta (
 );
 `;
 
+/**
+ * The columns a table made by an earlier CREATE lacks: CREATE TABLE IF NOT
+ * EXISTS adds none to a table that is there. On Postgres db.ts translateSchema
+ * spells each ADD COLUMN IF NOT EXISTS; on sqlite a column already there is
+ * the one error swallowed (ensureXpostSchema). The defaults are what every
+ * owner had before the choices existed: buys and passing thoughts both on, and
+ * the server's number of posts a day.
+ */
+export const XPOST_ALTERS: readonly string[] = [
+  "ALTER TABLE xpost_accounts ADD COLUMN post_buys INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE xpost_accounts ADD COLUMN post_casual INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE xpost_accounts ADD COLUMN per_day INTEGER",
+];
+
 /** Distinct from every other advisory key in the repo (the room's is 1_297_692_090). */
 const SCHEMA_LOCK = 1_297_692_110;
 
@@ -120,9 +137,17 @@ export function ensureXpostSchema(db: Db, dialect: XpostDialect): Promise<void> 
       await db.tx(async (tx) => {
         await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(SCHEMA_LOCK);
         await tx.exec(XPOST_SCHEMA);
+        for (const ddl of XPOST_ALTERS) await tx.exec(ddl);
       });
     } else {
       await db.exec(XPOST_SCHEMA);
+      for (const ddl of XPOST_ALTERS) {
+        try {
+          await db.exec(ddl);
+        } catch (e) {
+          if (!/duplicate column/i.test(e instanceof Error ? e.message : String(e))) throw e;
+        }
+      }
     }
   })().catch((error: unknown) => {
     if (schemaReady.get(db) === started) schemaReady.delete(db);
@@ -213,6 +238,36 @@ export async function prunePending(db: Db, nowMs: number): Promise<number> {
 
 export type AccountStatus = "ok" | "revoked";
 
+/**
+ * The most posts a day an owner may choose: the planner's own default
+ * (planner.ts DEFAULT_PER_DAY), which the fleet's MERRYMEN_XPOST_PER_DAY can
+ * only lower. An owner can post less, never more.
+ */
+export const OWNER_PER_DAY_MAX = 3;
+
+/**
+ * WHAT THE OWNER LETS IT POST, beside the switch (docs/x-posting.md "What the
+ * owner chooses"). The hello is not a choice: it is the post that says an AI
+ * agent posts here, and it always comes first (the owner can still Skip it).
+ */
+export interface XPostPrefs {
+  /** Post about a coin it bought, and why. Only real fills: never one it is watching. */
+  buys: boolean;
+  /** Post the odd passing thought. */
+  casual: boolean;
+  /** Posts per owner-local day, 1..OWNER_PER_DAY_MAX; null for the server's number. */
+  perDay: number | null;
+}
+
+/** What every owner had before the choices existed. */
+export const DEFAULT_PREFS: Readonly<XPostPrefs> = Object.freeze({ buys: true, casual: true, perDay: null });
+
+/** A stored or requested per-day choice, or null when it is not one. */
+export function ownerPerDay(v: unknown): number | null {
+  const n = typeof v === "bigint" ? Number(v) : typeof v === "number" ? v : Number.NaN;
+  return Number.isSafeInteger(n) && n >= 1 && n <= OWNER_PER_DAY_MAX ? n : null;
+}
+
 export interface XAccount {
   tenant: string;
   xUserId: string;
@@ -232,6 +287,8 @@ export interface XAccount {
   tz: string | null;
   status: AccountStatus;
   updatedAtMs: number;
+  /** What the owner lets it post (XPostPrefs). */
+  prefs: XPostPrefs;
   /**
    * POSTING IS ON FOR THE ACCOUNT CONNECTED NOW: the switch, AND a consent that
    * names this exact X user id, AND a connection X still honours. Every reader
@@ -243,7 +300,7 @@ export interface XAccount {
 
 const ACCOUNT_COLUMNS =
   "tenant, x_user_id, username, access_expires_at_ms, scope, version, connected_at_ms, posting_enabled, " +
-  "consent_at_ms, consent_x_user_id, tz, status, updated_at_ms";
+  "consent_at_ms, consent_x_user_id, tz, status, updated_at_ms, post_buys, post_casual, per_day";
 
 interface AccountRow {
   tenant: unknown;
@@ -259,6 +316,15 @@ interface AccountRow {
   tz: unknown;
   status: unknown;
   updated_at_ms: unknown;
+  post_buys: unknown;
+  post_casual: unknown;
+  per_day: unknown;
+}
+
+/** A stored choice. Anything but a clear 0 is on: the column's default, and what every owner had before. */
+function prefsOf(r: Pick<AccountRow, "post_buys" | "post_casual" | "per_day">): XPostPrefs {
+  const on = (v: unknown) => v === null || v === undefined || num(v) !== 0;
+  return { buys: on(r.post_buys), casual: on(r.post_casual), perDay: ownerPerDay(r.per_day) };
 }
 
 function accountOf(r: AccountRow): XAccount {
@@ -279,6 +345,7 @@ function accountOf(r: AccountRow): XAccount {
     tz: strOrNull(r.tz),
     status,
     updatedAtMs: num(r.updated_at_ms),
+    prefs: prefsOf(r),
     posting: enabled && status === "ok" && xUserId !== "" && consentXUserId === xUserId,
   };
 }
@@ -401,6 +468,41 @@ export async function setPosting(
       .run(int(nowMs), key);
     await cancelScheduledIn(tx, key, nowMs, "turned-off");
     return r.changes === 1;
+  });
+}
+
+/**
+ * WHAT THE OWNER LETS IT POST (XPostPrefs). Only the fields given change. A
+ * kind turned off takes its drafts out of Coming up at once (cancelled
+ * `kind-off`): the owner just said not to post them. A lower number a day
+ * leaves the drafts alone — each post still takes a place in the day's count
+ * right before it is sent (orchestrator-xpost.ts), so no more than the new
+ * number goes out. Returns the choices now stored, or null when this owner
+ * has no connection.
+ */
+export async function setPrefs(db: Db, tenant: string, change: Partial<XPostPrefs>, nowMs: number): Promise<XPostPrefs | null> {
+  const key = tenantKey(tenant);
+  return db.tx(async (tx) => {
+    const row = (await tx.prepare(`SELECT post_buys, post_casual, per_day FROM xpost_accounts WHERE tenant = ?`).get(key)) as
+      | Pick<AccountRow, "post_buys" | "post_casual" | "per_day">
+      | undefined;
+    if (!row) return null;
+    const next = prefsOf(row);
+    if (typeof change.buys === "boolean") next.buys = change.buys;
+    if (typeof change.casual === "boolean") next.casual = change.casual;
+    if (change.perDay === null || ownerPerDay(change.perDay) !== null) next.perDay = change.perDay === null ? null : ownerPerDay(change.perDay);
+    await tx
+      .prepare(`UPDATE xpost_accounts SET post_buys = ?, post_casual = ?, per_day = ?, updated_at_ms = ? WHERE tenant = ?`)
+      .run(next.buys ? 1 : 0, next.casual ? 1 : 0, next.perDay, int(nowMs), key);
+    for (const kind of [...(next.buys ? [] : ["buy"]), ...(next.casual ? [] : ["casual"])]) {
+      await tx
+        .prepare(
+          `UPDATE xpost_posts SET status = 'cancelled', reason = 'kind-off', updated_at_ms = ?
+            WHERE tenant = ? AND kind = ? AND status = 'scheduled'`,
+        )
+        .run(int(nowMs), key, kind);
+    }
+    return next;
   });
 }
 

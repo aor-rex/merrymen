@@ -476,14 +476,17 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
  * is the seed, and no coin. An agent that is not trading, or has nothing to
  * say about how it trades (no strategy, no habit, no coin), never has a
  * trade-talk day. `habitSeed` draws which habit that day is handed, so the
- * same line does not come back every trade-talk day. Exported for tests.
+ * same line does not come back every trade-talk day. An owner who turned off
+ * posts about the coins it buys (`coins: false`) is never offered a coin here
+ * either: a trade-talk day is then only how it trades. Exported for tests.
  */
 export function casualInputs(
   f: AgentFacts,
   day: string,
+  o: { coins?: boolean } = {},
 ): { subject: string; seed: string; tradeTalk: boolean; recentCoins: { label: string; paper: boolean }[]; habitSeed: string } {
   const habitSeed = `${f.tenant}|${day}`;
-  const coins = recentCoins(f);
+  const coins = o.coins === false ? [] : recentCoins(f);
   const own = writerFacts(f, day, []);
   const something = own.strategy !== null || own.flavour !== null || own.traits.length > 0 || coins.length > 0;
   if (f.mode !== "idle" && something && tradeTalkDay(f.tenant, day)) {
@@ -688,8 +691,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
             }
             // The day is the owner's own, as the planner counts it; the hello counts too.
+            // So is the number: theirs when they chose fewer than the server's.
             const accountDayKey = `xday:${post.xUserId}:${dayOf ? dayOf(t) : utcDay(t)}`;
-            if (!(await takeAllowance(shared, accountDayKey, perDay, t))) {
+            if (!(await takeAllowance(shared, accountDayKey, Math.min(perDay, account?.prefs.perDay ?? perDay), t))) {
               await giveBack();
               bump("account-day-cap");
               continue;
@@ -819,8 +823,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           intros,
           posts,
           calls: f.calls,
-          perDay,
+          // The owner's own number a day and kinds, never more than the server's.
+          perDay: Math.min(perDay, account.prefs.perDay ?? perDay),
           model,
+          kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
         if (intents.length === 0) continue;
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
@@ -932,7 +938,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
-      const casual = casualInputs(f, intent.day);
+      const casual = casualInputs(f, intent.day, { coins: account.prefs.buys });
       gate.coins = casual.recentCoins.map((c) => c.label);
       gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = casual.seed ? [casual.seed] : [];
