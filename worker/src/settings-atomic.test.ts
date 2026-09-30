@@ -127,6 +127,62 @@ describe("writeFileAtomicSync", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  for (const absolute of [false, true]) {
+    it(`creates a dangling ${absolute ? "absolute" : "relative"} symlink's destination without replacing the link`, { skip: !posix }, () => {
+      const dir = tmpDir();
+      try {
+        mkdirSync(path.join(dir, "real"));
+        mkdirSync(path.join(dir, "home"));
+        const real = path.join(dir, "real", "settings.json");
+        const link = path.join(dir, "home", "settings.json");
+        symlinkSync(absolute ? real : "../real/settings.json", link);
+        writeFileAtomicSync(link, '{"a":1}');
+        assert.ok(lstatSync(link).isSymbolicLink());
+        assert.equal(readFileSync(real, "utf8"), '{"a":1}');
+        assert.equal(statSync(real).mode & 0o777, 0o600);
+        assert.deepEqual(leftovers(path.dirname(real)), []);
+        assert.deepEqual(leftovers(path.dirname(link)), []);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("follows a dangling chain through a linked directory using the real link parent", { skip: !posix }, () => {
+    const dir = tmpDir();
+    try {
+      mkdirSync(path.join(dir, "real", "home"), { recursive: true });
+      symlinkSync("real/home", path.join(dir, "home"));
+      const link = path.join(dir, "home", "settings.json");
+      const next = path.join(dir, "real", "next.json");
+      symlinkSync("../next.json", link);
+      symlinkSync("settings.json", next);
+      writeFileAtomicSync(link, '{"a":1}');
+      assert.ok(lstatSync(link).isSymbolicLink());
+      assert.ok(lstatSync(next).isSymbolicLink());
+      assert.equal(readFileSync(path.join(dir, "real", "settings.json"), "utf8"), '{"a":1}');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves links untouched when their destination directory is missing or they form a loop", { skip: !posix }, () => {
+    const dir = tmpDir();
+    try {
+      const missing = path.join(dir, "missing.json");
+      const loop = path.join(dir, "loop.json");
+      symlinkSync("absent/settings.json", missing);
+      symlinkSync("loop.json", loop);
+      assert.throws(() => writeFileAtomicSync(missing, "{}"), { code: "ENOENT" });
+      assert.throws(() => writeFileAtomicSync(loop, "{}"), { code: "ELOOP" });
+      assert.ok(lstatSync(missing).isSymbolicLink());
+      assert.ok(lstatSync(loop).isSymbolicLink());
+      assert.deepEqual(leftovers(dir), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("patchSettingsFile", () => {
