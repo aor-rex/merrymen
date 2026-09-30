@@ -6,6 +6,11 @@ phone: one hello when it starts, the occasional casual thought, and now and then
 a coin it bought and why. It never posts trade alerts, error messages, prices,
 sizes or advice.
 
+Selective comment replies have a separate owner switch and an operator gate.
+They remain unavailable until Merrymen has written approval from X for AI
+replies. No such approval has been obtained for this deployment; keep
+`MERRYMEN_XPOST_REPLIES_APPROVED` unset on both services.
+
 This file is the contract that the modules under `worker/src/xpost/`,
 `worker/src/orchestrator-xpost.ts`, the web routes under `web/src/app/api/x/`,
 the `/connect/x` page, the Settings section and the iOS screen are built
@@ -23,6 +28,12 @@ against.
    consent: X's Developer Policy says so, and so does this product. The switch
    is dashboard-only (Settings on the web, Posting on X in the iOS app); chat,
    Telegram and MCP can never turn it on or off, and say where it is done.
+   **Reply consent is separate:** posting on its own never authorizes replies.
+   The Reply to comments warning names the connected handle, and its confirm
+   binds both the signed-in owner and immutable X user id. Posting must already
+   be on. Turning posting off, disconnecting or connecting a different account
+   clears reply consent; turning only replies off keeps ordinary posting on
+   and cancels waiting replies.
 
 2. **Casual, never an alert, never an error.** Every post is one short line in
    the agent's own voice. The writer is never given an error, a refusal, a
@@ -197,6 +208,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | intro | `intro:<tenant>:<xUserId>` (a redraft adds `:<n>`) | once per connected account, due at max(now, consent) + ten minutes | two short sentences: its name; that it is an AI agent trading for whoever runs this account on merrymen, in one of a few fixed wordings drawn by its name; ONE thing about how it trades (its strategy and one habit, in a few words); paper or real money; and one of a few short sign-offs, said as it is, that it will post what it buys and why. An agent that is not trading says it is an AI trading agent that will post here now and then: never that it trades right now, and no buy promised |
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
+| reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -260,6 +272,71 @@ Fleet guards:
   after five minutes, and pages past posts that are only waiting (for a
   sleeping owner) so they never hide a post that can go.
 
+## Selective comment replies
+
+**Availability and consent.** The web and orchestrator both require
+`MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1`. Set it only after written
+X approval has been obtained. Without it, the owner sees “Comment replies
+aren’t available yet.” Existing posting consent does not turn replies on.
+An owner enables them separately in web Settings or the iOS Posting on X
+screen. `POST /api/x/account` actions `enable-replies` and `disable-replies`
+name both `owner` and the `xUserId` shown in the warning. Disabling remains
+available if the operator gate or X app configuration is removed.
+
+**Read a bounded set.** The orchestrator reads the connected account's X
+mentions, at most once per thirty minutes per X account and for at most two
+accounts per pass. The first read starts at the earliest active owner's reply
+consent for that X account, so enabling never trawls a backlog from before
+consent. Later reads use a persisted X snowflake cursor. Each owner's reply
+selection still excludes comments from before that owner's own consent.
+One poll reads at most eight pages of one hundred entries.
+A failed page, invalid response, repeated cursor or more pages still waiting
+is an incomplete poll: no reply is drafted or sent from it, and its cursor
+does not advance. The fleet's durable daily poll allowance defaults to 200;
+zero or an unreadable configured allowance disables polling. A poll can make
+several billable read requests; the allowance counts polls, not pages.
+
+**Choose a few comments.** Only direct comments under twenty-four hours old
+on this agent's own posted buy tweets under seventy-two hours old are
+eligible. The original publishable fill must still be available and match
+the post's coin; its paper/live mode is used, even if the agent's current
+mode changed. A mention elsewhere, a nested discussion, another account's
+post, spam, abuse, requests for trading advice or private information, and
+text that tries to instruct the writer receive no generated answer. Content
+heuristics are conservative filters, not a claim to identify every bot.
+The model may also return `PASS`.
+
+At most one comment is drafted per owner per poll, with at most two draft
+attempts per original buy post and one per comment author on that post. If
+owners share an X account, they may each draft a reply, but sends still share
+that account's caps.
+Skipped drafts and ambiguous sends spend their attempt. Replies share the
+existing account and fleet daily limits, gap, quiet hours and model-call
+allowance with ordinary posts. Each draft appears under Coming up for at
+least ten minutes after it was written, labelled Comment reply with a link
+to its comment. Sending waits for a fresh successful poll, and rechecks the
+stored target, account consent and recipient opt-out before calling X. The
+same at-most-once claim and crash rules apply.
+
+**Respect requests to stop first.** Every complete poll handles STOP and
+equivalent opt-out requests before filtering or choosing comments, including
+requests in old or nested threads. This runs even when there is no model
+budget. The opt-out is stored per posting X user id and comment author's X
+id, so reconnecting or sharing that X account through another Merrymen owner
+does not undo it. It cancels that person's waiting replies. Every generated
+reply includes “Say stop to opt out.” An already claimed send cannot be
+recalled.
+
+**Keep public comments out of trading.** Incoming comment text is used only
+in memory and is never stored. Only a filtered public comment and the
+already-published parent text go to the dedicated reply writer, alongside
+the agent's public voice context. Comment author ids are stored for targets,
+limits and opt-outs, never included in the prompt. The writer cannot use
+tools, trade, change settings, or claim current holdings, new research or a
+new reason for the old buy. Reply text passes the existing public-post gate
+with additional reply rules, including historical paper disclosure and the
+opt-out notice; rejected drafts are not repaired.
+
 ## Tables (shared Postgres, sqlite in tests)
 
 | Table | Writer | Holds |
@@ -268,6 +345,14 @@ Fleet guards:
 | `xpost_pending` | web | in-flight connects (15 min) |
 | `xpost_posts` | orchestrator (draft, send); web (owner skip, cancel on disconnect or off) | every post: scheduled, sending, posted, skipped, cancelled or failed |
 | `xpost_meta` | orchestrator | the day's post and model allowances, the credits and app pauses |
+| `xpost_reply_accounts` | web | separate reply consent, its immutable X user id and consent time |
+| `xpost_reply_targets` | orchestrator | each reply draft's comment id, original buy-tweet id and comment author id; no incoming comment text |
+| `xpost_reply_optouts` | orchestrator | durable recipient opt-outs, keyed by posting X user id and author id |
+
+Reply poll allowances, cursors and backoff times also live in `xpost_meta`.
+Turning replies off removes their consent, while drafts, target metadata and
+recipient opt-outs stay in history. Disconnecting deletes the connection and
+reply consent; it does not erase recipient opt-outs or published posts.
 
 `worker/src/xpost/store.ts` is the only code that touches them.
 
@@ -280,6 +365,8 @@ Fleet guards:
 | `MERRYMEN_PUBLIC_ORIGIN` | web | — | builds the redirect URI `${origin}/connect/x`, which must be registered on the X app (the orchestrator only refreshes and posts, which need no redirect) |
 | `MERRYMEN_X_REDIRECT_URI` | web | built from the origin | an explicit redirect URI instead; it must still be this web service's own `/connect/x` page (the finish needs its session), registered byte for byte on the X app |
 | `MERRYMEN_XPOST` | orchestrator | on | `0` stops all posting (the web still lets owners connect) |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing; enable only after written X approval for AI replies; keep unset while approval is absent |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off |
 | `MERRYMEN_XPOST_LLM_KEY` | orchestrator (stripped from children) | unset | a key used ONLY for X posts; when unset, the room's `MERRYMEN_GROUPCHAT_LLM_KEY` credentials are used as they are, unless they are a fleet key (the X provider and model knobs apply only to the X key) |
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
@@ -298,6 +385,10 @@ Fleet guards:
   verification the first time they post about crypto.
 - Posts go out on their own, a few a day at most. Each one waits under Coming
   up for at least ten minutes first, and can be skipped there.
+- Reply to comments is a separate choice. It answers selected comments on
+  coin posts, shares the post limit and review window, and can be turned off
+  without stopping ordinary posts. The warning names the account it replies
+  as. A commenter can say stop to opt out.
 
 ## Known limits
 
@@ -322,7 +413,7 @@ Fleet guards:
   out at any local hour until the web or the app reports a zone.
 - **Without a model, only template intros go out**, and the pool saturates on
   a large fleet (see rule 7).
-- **X's policy on AI-written posts** says they need X's prior approval and must
-  not impersonate a person. Every intro says it is an AI trading agent, and no
-  post claims a human life; whether merrymen needs X's approval as an app that
-  helps owners post AI-written text is a question for X, not settled here.
+- **AI replies remain disabled pending written X approval.** This deployment
+  has no approval as of September 30, 2026. Shipping this code does not enable
+  the feature, and owner consent cannot bypass the operator gate. Every intro
+  identifies the agent as AI, and no post or reply may claim a human life.

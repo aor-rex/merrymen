@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { admitXPost, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
 function standIn(seen: BaseGateCtx[] = []): BaseGate {
@@ -26,6 +27,48 @@ const reason = (text: string, over: Partial<XGateCtx> = {}) => {
   const v = admit(text, over);
   return v.ok ? "ok" : v.reason;
 };
+
+describe("public replies preserve the X safeguards and require an opt-out", () => {
+  const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["pepe"] };
+  it("allows a conversational reference back only in an actual reply", () => {
+    const body = "fair point, the pool was the reason i mentioned. Say stop to opt out.";
+    assert.equal(reason(body, reply), "ok");
+    assert.equal(reason(body, { ...reply, kind: "casual" }), "points-back");
+  });
+  it("requires useful content and the clear footer inside the ordinary length ceiling", () => {
+    assert.equal(reason("the pool was the reason i mentioned", reply), "opt-out-unsaid");
+    assert.equal(reason("Say stop to opt out.", reply), "too-short");
+    assert.equal(reason("fair point. Say stop to opt out.", reply), "too-short");
+    assert.equal(reason(`${"quiet ".repeat(35)}Say stop to opt out.`, reply), "too-long");
+  });
+  it("requires paper disclosure even without naming the paper coin again", () => {
+    assert.equal(reason("the pool was the reason i mentioned. Say stop to opt out.", { ...reply, mode: "paper" }), "paper-unsaid");
+    assert.equal(reason("the pool was why i tried it on paper. Say stop to opt out.", { ...reply, mode: "paper" }), "ok");
+  });
+  it("refuses advice using pronouns, invented current holdings, private figures and status details", () => {
+    const lines = ["trust me, it is worth a look", "i am still holding it because i liked the pool", "i own pepe because i liked the pool", "i will buy more because i liked the pool", "my balance has 100 dollars in it", "my wallet was broken when i tried it", "go buy some pepe while it is early"];
+    for (const line of lines) assert.notEqual(reason(`${line}. Say stop to opt out.`, reply), "ok", line);
+  });
+  it("does not mistake the required footer for repeated content, but still rejects copied replies", () => {
+    const body = "the pool was the reason i mentioned. Say stop to opt out.";
+    assert.equal(reason(body, { ...reply, recentFleet: ["i liked the early activity when i picked it. Say stop to opt out."] }), "ok");
+    assert.equal(reason(body, { ...reply, recentFleet: [body] }), "fleet-repeat");
+  });
+  it("uses symmetric body comparison for own repeats while still checking the full reply", () => {
+    const body = "the pool was the reason i mentioned. Say stop to opt out.";
+    const seen: string[] = [];
+    const gate: BaseGate = (raw, c) => {
+      seen.push(raw);
+      if (/secret/.test(raw)) return { ok: false, reason: "secret" };
+      if (c.recentOwn.some((old) => similarity(raw, old) >= REPEAT_LIMIT)) return { ok: false, reason: "repeat" };
+      return { ok: true, text: raw };
+    };
+    assert.deepEqual(admitXPost(body, ctx({ ...reply, recentOwn: [body] }), gate), { ok: false, reason: "repeat" });
+    assert.equal(seen[0], body, "full posted text passes privacy first");
+    assert.equal(seen[1], "the pool was the reason i mentioned.");
+    assert.deepEqual(admitXPost("the secret was the reason i mentioned. Say stop to opt out.", ctx(reply), gate), { ok: false, reason: "secret" });
+  });
+});
 
 describe("tidy undoes a model's wrapping and nothing else", () => {
   it("quotes, labels, line breaks", () => {

@@ -3,6 +3,29 @@ import XCTest
 
 /// Posting on X copy and answers the screen builds from the server's words.
 final class XPostingTests: XCTestCase {
+    func testReplyConsentNamesTheAccountAndPromisesSelectiveReplies() {
+        let identity = XPostingAccount.Identity(handle: "robin_trades", xUserId: "2244994945")
+        XCTAssertEqual(XPostingAccount.replyFields(identity, enabled: true), ["action": .string("enable-replies"), "xUserId": .string("2244994945")])
+        XCTAssertEqual(XPostingAccount.replyFields(identity, enabled: false)["action"], .string("disable-replies"))
+        let warning = XPostingAccount.replyWarning(identity.handle)
+        XCTAssertTrue(warning.contains("reply as @robin_trades to selected comments"))
+        XCTAssertTrue(warning.contains("same daily limit as posts"))
+        XCTAssertTrue(warning.contains("at least ten minutes"))
+    }
+
+    func testOlderAccountRepliesDefaultOffAndCommentLinksAreValidated() throws {
+        let old = try JSONDecoder().decode(J.self, from: Data(#"{"available":true,"connected":true,"postingEnabled":true,"username":"robin_trades","xUserId":"123","upcoming":[],"recent":[]}"#.utf8))
+        let account = try XCTUnwrap(XPostingAccount(old))
+        XCTAssertFalse(account.replyEnabled)
+        XCTAssertFalse(account.repliesAvailable)
+        let current = try JSONDecoder().decode(J.self, from: Data(#"{"available":true,"connected":true,"postingEnabled":true,"replyEnabled":true,"repliesAvailable":true,"username":"robin_trades","xUserId":"123","upcoming":[{"id":1,"kind":"reply","body":"An answer","dueAt":1800000000000,"replyToTweetId":"456"},{"id":2,"kind":"reply","body":"Another answer","dueAt":1800000000000,"replyToTweetId":"javascript:alert(1)"}],"recent":[]}"#.utf8))
+        let updated = try XCTUnwrap(XPostingAccount(current))
+        XCTAssertTrue(updated.replyEnabled)
+        XCTAssertTrue(updated.upcoming[0].isReply)
+        XCTAssertEqual(updated.upcoming[0].commentLink?.absoluteString, "https://x.com/i/status/456")
+        XCTAssertNil(updated.upcoming[1].commentLink)
+    }
+
     /// The warning the owner confirms, word for word as the web shows it
     /// (web/src/terminal/XPosting.tsx). Paragraph three promises only the
     /// review window the planner keeps: at least ten minutes under Coming up.

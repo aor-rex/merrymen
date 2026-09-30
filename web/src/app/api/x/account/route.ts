@@ -13,6 +13,10 @@
  *           room has none (lib/x-connect.ts xpostTz); a missing, unknown or
  *           placeless one never refuses the consent.
  *           {action:"disable", owner} — always works, cancels every draft.
+ *           {action:"enable-replies"|"disable-replies", xUserId, owner} —
+ *           separate consent for selected comment replies, bound to the shown
+ *           X account. Enabling also requires posting and operator approval;
+ *           disabling cancels waiting replies even while unavailable.
  *           {action:"skip", id, owner} — the owner's Skip on one draft; only
  *           their own, only while it is still scheduled (a post already
  *           claimed for sending cannot be half-skipped).
@@ -46,13 +50,14 @@ import {
   withXpostDb,
   xpostApp,
   xpostAvailable,
+  xpostRepliesAvailable,
   xpostDek,
   xpostFetch,
   xpostNow,
   xpostTz,
 } from "@/lib/x-connect";
 import { revokeToken } from "../../../../../../worker/src/xpost/client";
-import { deleteAccount, getAccount, ownerCancel, postsOf, setPosting } from "../../../../../../worker/src/xpost/store";
+import { deleteAccount, getAccount, ownerCancel, postsOf, repliesEnabledFor, setPosting, setReplying } from "../../../../../../worker/src/xpost/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,7 +81,8 @@ export async function GET(req: Request) {
       if (!db) return accountBody(false, null, []);
       const account = await getAccount(db, tenant);
       const posts = account ? await postsOf(db, tenant, xpostNow() - X_POSTS_WINDOW_MS, 200) : [];
-      return accountBody(available, account, posts);
+      const enabled = account ? await repliesEnabledFor(db, tenant, account.xUserId) : false;
+      return accountBody(available, account, posts, { enabled, available: xpostRepliesAvailable(isHostedMode()) });
     });
     return json(body);
   } catch {
@@ -107,6 +113,23 @@ export async function POST(req: Request) {
   const now = xpostNow();
 
   try {
+    if (input.action === "enable-replies" || input.action === "disable-replies") {
+      const enabled = input.action === "enable-replies";
+      const xUserId = input.xUserId;
+      if (typeof xUserId !== "string" || !X_USER_ID.test(xUserId)) return refuse(400, "Say which X account the warning named.");
+      if (enabled && !xpostRepliesAvailable(isHostedMode())) return refuse(503, X_COPY.repliesUnavailable);
+      const result = await withXpostDb(async (db) => {
+        if (!db) return null;
+        const account = await getAccount(db, tenant);
+        if (!account || account.xUserId !== xUserId) return "changed";
+        if (enabled && !account.posting) return "posting-off";
+        return await setReplying(db, tenant, enabled, xUserId, now) ? "saved" : "changed";
+      });
+      if (result === null) return refuse(503, X_COPY.storeDown);
+      if (result === "changed") return refuse(409, X_COPY.accountChanged);
+      if (result === "posting-off") return refuse(409, X_COPY.repliesNeedPosting);
+      return json({ ok: true, replyEnabled: enabled });
+    }
     if (input.action === "enable") {
       const xUserId = input.xUserId;
       if (typeof xUserId !== "string" || !X_USER_ID.test(xUserId)) {

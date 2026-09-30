@@ -13,12 +13,15 @@ import {
   GAP_MS,
   INTRO_DELAY_MS,
   MIN_LEAD_MS,
+  REPLY_ROOT_MAX_AGE_MS,
+  REPLY_STALE_MS,
   buyKey,
   casualKey,
   coinOf,
   hash32,
   introKey,
   planPosts,
+  replyDueAt,
   sendDecision,
   type IntroRow,
   type PlanCall,
@@ -454,6 +457,97 @@ describe("one casual post at the account's own afternoon slot, most days", () =>
 });
 
 // ── sending ─────────────────────────────────────────────────────────────────
+
+describe("selective replies share the account cadence and cannot restart a spent thread", () => {
+  const now = DAY0 + 12 * HOUR;
+  type ReplyInput = Parameters<typeof replyDueAt>[0];
+  function replyInput(over: Partial<ReplyInput> = {}): ReplyInput {
+    const parent = over.parent ?? post({ kind: "buy", status: "posted", tweetId: "700", sentAtMs: now - 6 * HOUR });
+    return { parent, authorId: "333", commentAtMs: now - MIN, posts: [parent], tenant: TENANT,
+      xUserId: "111", nowMs: now, tz: "UTC", clock, perDay: 3, ...over };
+  }
+  const attempt = (status: XPost["status"], over: Partial<XPost> = {}) => post({ kind: "reply", status,
+    replyRootTweetId: "700", replyAuthorId: "333", sentAtMs: null, dueAtMs: now - 4 * HOUR, ...over });
+
+  it("leaves the full minimum preview window and does not draft during the owner's night", () => {
+    assert.equal(replyDueAt(replyInput()), now + MIN_LEAD_MS);
+    const night = now + 12 * HOUR;
+    assert.equal(replyDueAt(replyInput({ nowMs: night, commentAtMs: night - MIN })), null);
+    const morning = now + 19 * HOUR;
+    assert.equal(replyDueAt(replyInput({ nowMs: morning, commentAtMs: morning - MIN })), morning + MIN_LEAD_MS);
+  });
+
+  it("waits for other owners' posts on the same X account and for already queued posts", () => {
+    const base = replyInput();
+    const shared = post({ tenant: "another-owner", kind: "casual", sentAtMs: now - HOUR });
+    assert.equal(replyDueAt({ ...base, posts: [base.parent, shared] }), shared.sentAtMs! + GAP_MS);
+    const queued = post({ kind: "buy", status: "scheduled", dueAtMs: now + HOUR });
+    assert.equal(replyDueAt({ ...base, posts: [base.parent, queued] }), queued.dueAtMs + GAP_MS);
+  });
+
+  it("counts ambiguous sends against the gap and daily allowance, even after a restart", () => {
+    const base = replyInput();
+    for (const reason of ["uncertain", "interrupted", "fault"]) {
+      const maybeSent = post({ kind: "casual", status: "failed", reason, dueAtMs: now - HOUR });
+      assert.equal(replyDueAt({ ...base, posts: [base.parent, maybeSent] }), maybeSent.dueAtMs + GAP_MS, reason);
+      assert.equal(replyDueAt({ ...base, perDay: 2, posts: [base.parent, maybeSent] }), null, reason);
+    }
+    const definitelyUnsent = post({ kind: "casual", status: "failed", reason: "forbidden", dueAtMs: now - HOUR });
+    assert.equal(replyDueAt({ ...base, perDay: 2, posts: [base.parent, definitelyUnsent] }), now + MIN_LEAD_MS);
+  });
+
+  it("uses the owner's local day for the shared cap, counting intros too", () => {
+    const later = DAY0 + 20 * HOUR;
+    const parent = post({ kind: "buy", tweetId: "700", sentAtMs: later - 6 * HOUR });
+    const previousLocalDay = post({ kind: "intro", sentAtMs: DAY0 + 4 * HOUR });
+    const base = replyInput({ nowMs: later, commentAtMs: later - MIN, parent, posts: [parent, previousLocalDay], perDay: 2 });
+    assert.equal(replyDueAt({ ...base, tz: "Test/Minus5" }), later + MIN_LEAD_MS, "yesterday locally does not spend today's slot");
+    assert.equal(replyDueAt({ ...base, tz: "UTC" }), null, "both posts count on the UTC day");
+    const today = post({ kind: "intro", sentAtMs: later - HOUR });
+    assert.equal(replyDueAt({ ...base, tz: "Test/Minus5", posts: [parent, today] }), null, "an intro still spends the account's daily allowance");
+  });
+
+  it("every attempted reply spends its author and thread slot regardless of status", () => {
+    for (const status of ["scheduled", "sending", "posted", "skipped", "cancelled", "failed"] as const) {
+      const base = replyInput({ perDay: 10 });
+      const first = attempt(status);
+      assert.equal(replyDueAt({ ...base, posts: [base.parent, first] }), null, `${status}: never answer the same author twice`);
+      assert.notEqual(replyDueAt({ ...base, authorId: "444", posts: [base.parent, first] }), null, `${status}: another person may take the second slot`);
+      const second = attempt(status, { replyAuthorId: "555" });
+      assert.equal(replyDueAt({ ...base, authorId: "444", posts: [base.parent, first, second] }), null, `${status}: no third thread reply`);
+    }
+    const other = attempt("skipped", { replyRootTweetId: "999" });
+    assert.notEqual(replyDueAt(replyInput({ posts: [other] })), null, "a skipped reply in a different thread does not spend this thread's author slot");
+  });
+
+  it("skips stale parents, stale comments, future comments and comments from before the parent was published", () => {
+    const base = replyInput();
+    assert.equal(replyDueAt({ ...base, parent: { ...base.parent, sentAtMs: now - REPLY_ROOT_MAX_AGE_MS - 1 } }), null);
+    assert.equal(replyDueAt({ ...base, parent: { ...base.parent, sentAtMs: now - REPLY_ROOT_MAX_AGE_MS } }), now + MIN_LEAD_MS);
+    const oldParent = { ...base.parent, sentAtMs: now - REPLY_ROOT_MAX_AGE_MS };
+    assert.equal(replyDueAt({ ...base, parent: oldParent, commentAtMs: now - REPLY_STALE_MS - 1 }), null);
+    assert.equal(replyDueAt({ ...base, commentAtMs: now + 1 }), null);
+    assert.equal(replyDueAt({ ...base, commentAtMs: base.parent.sentAtMs! - 1 }), null);
+    assert.equal(replyDueAt({ ...base, parent: oldParent, commentAtMs: now - REPLY_STALE_MS + MIN_LEAD_MS }), now + MIN_LEAD_MS);
+    assert.equal(replyDueAt({ ...base, parent: oldParent, commentAtMs: now - REPLY_STALE_MS + MIN_LEAD_MS - 1 }), null,
+      "even a fresh-enough comment is skipped if the preview would make the reply stale");
+  });
+
+  it("does not push a reply beyond its comment's lifetime to fit the shared gap", () => {
+    const base = replyInput();
+    const queued = post({ kind: "casual", status: "scheduled", dueAtMs: now + HOUR });
+    const parent = { ...base.parent, sentAtMs: now - 2 * 24 * HOUR };
+    assert.equal(replyDueAt({ ...base, parent, commentAtMs: now - 22 * HOUR, posts: [parent, queued] }), null);
+  });
+
+  it("never treats a foreign, unpublished or non-buy post as a reply root", () => {
+    const base = replyInput();
+    for (const over of [{ tenant: "another-owner" }, { xUserId: "222" }, { kind: "casual" as const },
+      { status: "scheduled" as const }, { tweetId: null }, { sentAtMs: null }]) {
+      assert.equal(replyDueAt({ ...base, parent: { ...base.parent, ...over } }), null, JSON.stringify(over));
+    }
+  });
+});
 
 describe("sendDecision", () => {
   const now = DAY0 + 12 * HOUR;

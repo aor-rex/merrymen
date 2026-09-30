@@ -44,6 +44,8 @@ const CONNECTED: XAccountBody = {
   xUserId: X_ID,
   status: "ok",
   postingEnabled: false,
+  replyEnabled: false,
+  repliesAvailable: false,
   upcoming: [],
   recent: [],
 };
@@ -132,6 +134,75 @@ async function settleFor(ms: number) {
 const FAST = { pollMs: 25, afterEnableMs: 60 };
 /** A draft as the planner writes one now: at least ten minutes before it is due. */
 const DUE_SOON = () => Date.now() + 20 * 60_000;
+
+describe("comment reply consent", () => {
+  const replySwitch = () => ui.container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Reply to comments"]');
+  it("sends nothing until the separate warning is confirmed for the named X account", async () => {
+    let enabled = false;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true, replyEnabled: enabled });
+    routes["POST /api/x/account"] = () => { enabled = true; return json({ ok: true, replyEnabled: true }); };
+    await shown();
+    await press(replySwitch(), "reply switch");
+    assert.equal(writes().length, 0);
+    assert.match(text(), new RegExp(`Reply to comments as @${HANDLE}`));
+    assert.match(text(), /selected comments on its coin posts/);
+    assert.match(text(), /same daily limit/);
+    assert.match(text(), /at least ten minutes/);
+    await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
+    assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
+    assert.equal(replySwitch()?.getAttribute("aria-checked"), "true");
+  });
+
+  it("keeps replies off when the server refuses the named account", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true });
+    routes["POST /api/x/account"] = () => json({ error: X_COPY.accountChanged }, 409);
+    await shown();
+    await press(replySwitch(), "reply switch");
+    await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
+    assert.equal(replySwitch()?.getAttribute("aria-checked"), "false");
+    assert.match(text(), /connected X account changed/);
+  });
+
+  it("the confirmation keeps the owner who read it when another wallet signs in", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true });
+    routes["POST /api/x/account"] = () => json({ error: "Your account changed." }, 409);
+    await shown();
+    await press(replySwitch(), "reply switch");
+    await ui.render(section({ owner: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }));
+    await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
+    assert.equal(writes()[0]?.body?.owner, OWNER, "the server must compare the session to the owner who saw the warning");
+  });
+
+  it("defaults unavailable on older responses and says so without offering enable", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, replyEnabled: undefined, repliesAvailable: undefined });
+    await shown();
+    assert.match(text(), /Comment replies aren’t available yet/);
+    assert.equal(replySwitch(), null);
+  });
+
+  it("turns enabled replies off immediately even when availability disappears", async () => {
+    let enabled = true;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, replyEnabled: enabled });
+    routes["POST /api/x/account"] = () => { enabled = false; return json({ ok: true, replyEnabled: false }); };
+    await shown();
+    await press(replySwitch(), "stop replies");
+    assert.deepEqual(writes()[0]?.body, { action: "disable-replies", owner: OWNER, xUserId: X_ID });
+    assert.equal(ui.container.querySelector("dialog"), null);
+  });
+
+  it("labels replies and links only numeric comment IDs in queue and history", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true,
+      upcoming: [{ id: 1, kind: "reply", body: "A thoughtful answer", dueAt: DUE_SOON(), replyToTweetId: "123" },
+        { id: 2, kind: "reply", body: "A second answer", dueAt: DUE_SOON(), replyToTweetId: "javascript:alert(1)" }],
+      recent: [{ id: 3, kind: "reply", body: "Already answered", sentAt: Date.now(), url: `https://x.com/${HANDLE}/status/456`, replyToTweetId: "789" }],
+    });
+    await shown();
+    const links = Array.from(ui.container.querySelectorAll("a")).filter((a) => a.textContent === "View comment").map((a) => a.getAttribute("href"));
+    assert.deepEqual(links, ["https://x.com/i/status/123", "https://x.com/i/status/789"]);
+    assert.match(text(), /Comment reply/);
+    assert.ok(!ui.container.innerHTML.includes('href="javascript:'));
+  });
+});
 
 describe("the switch and the warning", () => {
   it("PRESSING THE SWITCH ON SENDS NOTHING: the warning names the account, and only its button writes", async () => {
@@ -576,7 +647,7 @@ describe("the warning keeps its words", () => {
   });
 
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {
-    assert.match(SRC, /<strong>\{warningLead\(asking\.handle\)\}<\/strong>/);
+    assert.match(SRC, /<strong>\{asking\.replies \? replyWarningLead\(asking\.handle\) : warningLead\(asking\.handle\)\}<\/strong>/);
     assert.equal(SRC.split('action: "enable"').length - 1, 1, "one write turns posting on");
     const at = SRC.indexOf('action: "enable"');
     // Bounded by the next declaration at the component's own indentation, so

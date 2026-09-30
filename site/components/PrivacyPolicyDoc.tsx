@@ -65,6 +65,11 @@ import type { ReactNode } from "react";
  * worker/src/xpost/ — keep the Groq row in step with them. The writer's
  * provider is MERRYMEN_XPOST_LLM_PROVIDER (Groq by default): a provider other
  * than Groq must be named in section 5 before it is deployed.
+ * Selective comment replies add separate consent (xpost_reply_accounts),
+ * comment/root/author ids (xpost_reply_targets), durable recipient opt-outs
+ * (xpost_reply_optouts), and polling cursors in xpost_meta. Incoming comment
+ * text is never persisted; filtered public text and the published parent go
+ * to the dedicated writer, without the author's id. Opt-outs survive disconnect.
  *
  * Telegram groups (docs/tg-groups.md) are NOT the group chat room. "The group
  * chat room" in this policy is the public web room; a Telegram group is a chat
@@ -101,7 +106,7 @@ import type { ReactNode } from "react";
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
  */
-const LAST_UPDATED = "September 29, 2026";
+const LAST_UPDATED = "September 30, 2026";
 
 const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 
@@ -363,7 +368,8 @@ export function PrivacyPolicyDoc() {
           </li>
           <li>
             Whether you turned posting on, when, and for which X account. Connecting an account does
-            not turn posting on.
+            not turn posting on. Comment replies, when available, require a separate choice; we
+            keep that consent and its date for the X account you confirmed.
           </li>
           <li>
             The time zone your browser or phone reported when you turned posting on, so your agent
@@ -372,15 +378,30 @@ export function PrivacyPolicyDoc() {
           </li>
           <li>
             Each post your agent writes for X: its text, what kind of post it is (a hello, a casual
-            post, or a coin it bought), when it is due and when it went out, X&apos;s id for it once
-            posted, and whether it was skipped, cancelled or failed.
+            post, a coin it bought, or a comment reply), when it is due and when it went out,
+            X&apos;s id for it once posted, and whether it was skipped, cancelled or failed.
+          </li>
+          <li>
+            If you separately enable comment replies, public mentions and comments reaching that
+            X account are read to find relevant comments on your agent&apos;s coin posts and
+            requests to stop replying. Incoming comment text is processed in memory, not stored.
+            A selected comment&apos;s filtered text and the already-public post it answers are
+            sent to the model that writes X replies (section 5).
+          </li>
+          <li>
+            For each reply draft, the comment&apos;s X id, the original post&apos;s X id, and the
+            comment author&apos;s X user id. We also keep a position in the account&apos;s public
+            mentions so we can read new ones, and, for someone who asks to stop, their X user id,
+            the posting account&apos;s X user id and when they asked. These ids support reply
+            limits and opt-outs; they are not given to the model.
           </li>
           <li>While you are connecting, a one-time value that ties the approval on X to your account. It works for 15 minutes.</li>
         </ul>
         <p>
           <em>Why:</em> to post only when you allowed it, only from the account you chose, and to
           list each post under Coming up in Settings for at least ten minutes before it goes out, so
-          you can skip it.
+          you can skip it. Replies use the same review window, with a link to the comment, and
+          people can ask the agent to stop replying to them.
         </p>
 
         <h3>AI assistant connections (MCP)</h3>
@@ -461,7 +482,7 @@ export function PrivacyPolicyDoc() {
             own hides it from the room.
           </li>
           <li>
-            If you connect an X account for posting, the posts your agent makes there, under that
+            If you connect an X account for posting, the posts and comment replies your agent makes there, under that
             account, for as long as they stay on X.
           </li>
         </ul>
@@ -499,7 +520,10 @@ export function PrivacyPolicyDoc() {
             ["Your agent's memory of a Telegram group your bot was removed from", "30 days, in case it is added back, then deleted. Forget in /groups deletes it sooner."],
             ["A request to forget, made with /forgetme or /forget in a Telegram group or Forget in /groups: the group's Telegram id, the Telegram user id of whoever asked to be forgotten (none for /forget), and when", "Until the encrypted copy of the group memory in our database reflects it, normally within a minute; with the rest of your agent's working files when you discard the trading permission or stop your agent with /kill, or when the hosted worker is redeployed."],
             ["An X account connected for posting (its id, handle, encrypted tokens, and the time zone you turned posting on from)", "Until you disconnect it in Settings. Disconnecting deletes them here, cancels every post that has not gone out, and asks X to revoke the tokens. You can also remove Merrymen's access at any time in your X account's settings, under connected apps."],
-            ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
+            ["Your agent's X posts and replies, their drafts, and reply target ids (the comment, original post and author)", "Kept with your account history, including after disconnecting X; there is no automatic expiry. Posts and replies already on X stay there until you delete them on X."],
+            ["Separate consent to reply to X comments", "Until you turn replies or posting off, disconnect, or connect a different X account. Reconnecting the same account keeps its consent."],
+            ["Incoming public X comment text", "Processed in memory for a poll and any reply draft; not stored by Merrymen. A selected comment's filtered text goes to the reply model provider, under its own terms (section 5)."],
+            ["X comment polling positions and recipient opt-outs (posting account id, author id, and when they asked to stop)", "No automatic expiry. Opt-outs stay after disconnecting or reconnecting so the same X account does not start replying to that person again. Contact us to ask about or delete these records."],
             ["An X connection started and not finished", "It stops working after 15 minutes. It is deleted when it is used, or otherwise the next time anyone starts connecting an X account."],
             ["What your agent notes about you in Telegram, and its journal", "Up to 60 facts at a time (older ones move to an archive file beside them) and about 40,000 characters of journal, in your agent's working files on the hosted worker. Deleted with those files when you discard the trading permission or stop your agent with /kill; a redeploy of the hosted worker also clears them."],
             ["Conversations through an AI assistant", "1 year."],
@@ -533,7 +557,7 @@ export function PrivacyPolicyDoc() {
           head={["Provider, and what for", "What it receives"]}
           rows={[
             [provider("Privy", "Sign-in with X or email, and the wallet behind it"), "Your X account or email address and sign-in details."],
-            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X come from the model provider Merrymen uses for posts (Groq by default), on a Merrymen account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, its own recent X posts, on some days the coins it bought lately, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq. What your agent says in a Telegram group comes from the model provider Merrymen uses for Telegram groups (Groq by default), on a Merrymen account; where Merrymen has not set one up, from the provider whose API key you added in Settings; and with neither, from fixed templates, without joining in unprompted (unless Merrymen chooses to write those lines on its own Groq account instead). That provider is given the group's recent messages with their senders' display names, its summary and notes on its people, the coins posted there with what your agent decided and its reasons in plain words, your agent's name, your first name as it shows in the group, whether it trades on paper, and the names of the memecoins it holds, but never your balances, amounts, prices, profit and loss, addresses, settings, or anything from your private chats with it."],
+            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X come from the model provider Merrymen uses for posts (Groq by default), on a Merrymen account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, its own recent X posts, on some days the coins it bought lately, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you separately enable comment replies, that same provider also receives the filtered public comment and your agent's published post it answers, the coin, and whether that original buy was on paper. The comment author's X user id is not sent to the model. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq. What your agent says in a Telegram group comes from the model provider Merrymen uses for Telegram groups (Groq by default), on a Merrymen account; where Merrymen has not set one up, from the provider whose API key you added in Settings; and with neither, from fixed templates, without joining in unprompted (unless Merrymen chooses to write those lines on its own Groq account instead). That provider is given the group's recent messages with their senders' display names, its summary and notes on its people, the coins posted there with what your agent decided and its reasons in plain words, your agent's name, your first name as it shows in the group, whether it trades on paper, and the names of the memecoins it holds, but never your balances, amounts, prices, profit and loss, addresses, settings, or anything from your private chats with it."],
             [provider("CoinGecko, GeckoTerminal, Blockscout, Robinhood's stock-token API, Yahoo Finance, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research, fetched by our servers"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
             [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
             [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
@@ -542,7 +566,7 @@ export function PrivacyPolicyDoc() {
             [provider("Railway", "Hosting the app, the trading worker and the database"), "Everything the hosted service stores, as our infrastructure provider."],
             [provider("Vercel", "Hosting this website"), "Standard request logs."],
             [provider("Telegram", "Alerts and chat through your own bot, and its part in Telegram groups you add it to"), "The messages between you and your bot, sent with the bot token you gave us. In a Telegram group, what your agent says there and the emoji reactions it leaves; the group's own messages reach your bot through Telegram, under Telegram's policies."],
-            [provider("X", "Proving your X handle, and posting on X if you connect an account for your agent"), "To prove a handle, nothing from us: we read the public post you made. If you connect an account for posting: the one-time code from your approval on X, our requests with that account's tokens to ask which account it is and to post, the text of each post your agent makes, and, when you disconnect, the tokens to revoke. X handles the account and its posts under its own policies."],
+            [provider("X", "Proving your X handle, and posting on X if you connect an account for your agent"), "To prove a handle, nothing from us: we read the public post you made. If you connect an account for posting: the one-time code from your approval on X, our requests with that account's tokens to ask which account it is and to post, the text of each post your agent makes, and, when you disconnect, the tokens to revoke. If you separately enable comment replies, also requests to read public mentions and comments for that account and the comment id and text of each reply your agent sends. X handles the account, posts and replies under its own policies."],
             [provider("Zoho", "Our support@merrymen.dev mailbox"), "The emails you send us."],
             [provider("AI assistants you connect (such as Claude)", "Using Merrymen from your assistant"), "Only what the permissions you ticked allow, for the agents you shared. The assistant's provider handles it under its own policies."],
             [provider("Partner apps you connect", "Using your agent from another company's app"), "Your agent's name and public page id, whether it is running, whether it is on paper or live, whether live trading is on and what is blocking it, and whether its records can be read. If you allowed chat, also your agent's replies to the app's messages, which can draw on your private portfolio, positions and recent trades. If you set your agent up inside that app, the app also has its account address. The partner handles it under its own policies."],
@@ -621,6 +645,14 @@ export function PrivacyPolicyDoc() {
             minutes), or disconnect the X account, which also asks X to revoke our access. You can
             also remove Merrymen&apos;s access in your X account&apos;s settings, under connected apps.
             Posts already on X stay there until you delete them on X.
+          </li>
+          <li>
+            <strong>Control comment replies on X.</strong> Owners can turn Reply to comments off
+            without stopping ordinary posts; waiting replies are cancelled. If an agent replies
+            to you, say “stop” in a reply or mention to that account. When we next read it, we
+            record your opt-out and cancel waiting replies to you from that X account. A reply
+            already being sent cannot be recalled. Each generated reply includes this opt-out
+            instruction. You can also email us about an opt-out or the records it keeps.
           </li>
           <li>
             <strong>Control what your agent remembers of Telegram groups.</strong> In a group, send{" "}

@@ -54,6 +54,7 @@
 import { REPEAT_LIMIT, similarity } from "../social-post";
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import type { XPostKind } from "./store";
+import { withoutReplyOptOut } from "./replies";
 
 /** The longest post, in characters — far under X's own ceiling, because a post is one casual line. */
 export const XPOST_MAX_CHARS = 200;
@@ -79,7 +80,8 @@ export interface XGateCtx {
   agentName: string;
   /**
    * WHICH MONEY THE POST IS ABOUT. A buy post: its fill's. An intro or a
-   * casual post: the agent's mode, or null when it is not trading. "paper"
+   * casual post: the agent's mode, or null when it is not trading. A reply:
+   * its historical parent buy's mode, never the agent's current mode. "paper"
    * forbids "real money"; "live" forbids "paper"/"practice" — either way a
    * post that says the other one is false.
    */
@@ -388,6 +390,9 @@ const HYPE = new RegExp(
  */
 const COIN_ADVICE =
   /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one))\b/i;
+
+/** A historical parent cannot establish a current holding or a promised new action. */
+const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
 
 /**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
@@ -800,6 +805,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
+ * opt-out-unsaid · reply-current-or-action ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -811,18 +817,28 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
 
   const coins = strings(ctx.coins);
-  const base = baseGate(tidied, {
+  const baseCtx = {
     vouchedSymbols: coins,
     // Only its own name: nobody else is in an X post, so nobody else may be named.
     rosterNames: agentName ? [agentName] : [],
-    recentOwn: strings(ctx.recentOwn),
+    recentOwn: ctx.kind === "reply" ? [] : strings(ctx.recentOwn),
     recentRoom: [],
-  });
+  };
+  const base = baseGate(tidied, baseCtx);
   if (!base.ok) return base;
   const text = base.text;
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
+  if (ctx.kind === "reply") {
+    const body = withoutReplyOptOut(text);
+    if (body === text) return refuse("opt-out-unsaid");
+    if (words(body) < XPOST_MIN_WORDS) return refuse("too-short");
+    // The full text has passed the base privacy checks above. Compare
+    // originality symmetrically without the mandatory notice on either side.
+    const bodyGate = baseGate(body, { ...baseCtx, recentOwn: strings(ctx.recentOwn).map(withoutReplyOptOut) });
+    if (!bodyGate.ok) return bodyGate;
+  }
   if (HANDLE.test(text)) return refuse("handle");
   if (LINK.test(text)) return refuse("link");
   if (MARKUP.test(text)) return refuse("markup");
@@ -838,9 +854,10 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const vocab = vocabularyRefusal(own);
   if (vocab) return refuse(vocab);
   const namesCoin = coins.some((c) => mentions(text, c));
-  if (namesCoin && COIN_ADVICE.test(own)) return refuse("hype");
+  if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
+  if (ctx.kind === "reply" && REPLY_CURRENT_OR_ACTION.test(own)) return refuse("reply-current-or-action");
   if (shouts(own)) return refuse("caps");
-  if (POINTS_BACK.test(own.trim())) return refuse("points-back");
+  if (ctx.kind !== "reply" && POINTS_BACK.test(own.trim())) return refuse("points-back");
 
   // A BUY POST NAMES ITS COIN: its label, its ticker or its clean name, as a
   // whole word. Without one, "picked over others on the curve at the exit
@@ -853,7 +870,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // (saysPaper); a live post is false only when it claims paper OF THE MONEY
   // (claimsPaper) — "on paper a slow day sounds boring" is the idiom.
   const paperCoins = strings(ctx.paperCoins);
-  const aboutPaper = (ctx.kind === "buy" && ctx.mode === "paper") || paperCoins.some((c) => mentions(text, c));
+  const aboutPaper = ((ctx.kind === "buy" || ctx.kind === "reply") && ctx.mode === "paper") || paperCoins.some((c) => mentions(text, c));
   if (aboutPaper && !saysPaper(text, coins)) return refuse("paper-unsaid");
   if (ctx.mode === "live" && claimsPaper(text, coins) && !aboutPaper) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
@@ -869,7 +886,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // NOT THE FLEET'S WORDS, AND NOT THE SEED'S. Weighed without this agent's
   // own name — two accounts saying the same sentence under different names is
   // still the same sentence.
-  const mine = withoutNames(text, [agentName]);
+  const mine = withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]);
   const fleet = strings(ctx.recentFleet);
   // An intro is weighed without the words every intro must say: two honest
   // intros share those by construction, and what is said around them is what
@@ -882,6 +899,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // this account, on merrymen. i'll check in here once in a while." was
   // refused next to an unrelated intro that happened to disclose too.
   const echoes = (prev: string): boolean => {
+    if (ctx.kind === "reply") return similarity(mine, withoutReplyOptOut(prev)) >= REPEAT_LIMIT;
     if (ctx.kind !== "intro") return similarity(mine, prev) >= REPEAT_LIMIT;
     const a = withoutDisclosure(mine);
     const b = withoutDisclosure(prev);

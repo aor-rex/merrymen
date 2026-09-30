@@ -51,6 +51,10 @@ export const X_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.acc
 const TIMEOUT_MS = 10_000;
 /** No legitimate X answer here is near this; a bigger one is not read. */
 const MAX_BODY_BYTES = 64 * 1024;
+/** A hundred bounded mention texts plus their metadata, including multibyte text. */
+const MAX_MENTIONS_BODY_BYTES = 2 * 1024 * 1024;
+/** X and the host may disagree slightly about wall-clock time. */
+const MENTION_CLOCK_SKEW_MS = 30_000;
 
 export interface XApp {
   clientId: string;
@@ -179,9 +183,9 @@ async function call(fetchImpl: FetchLike, url: string, init: Parameters<FetchLik
   }
 }
 
-async function jsonOf(res: Response): Promise<Record<string, unknown> | null> {
+async function jsonOf(res: Response, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown> | null> {
   try {
-    const r = await readBounded(res, MAX_BODY_BYTES);
+    const r = await readBounded(res, maxBytes);
     if (!r.ok) return null;
     const v: unknown = JSON.parse(r.text);
     return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -327,18 +331,19 @@ export async function fetchMe(accessToken: string, opts: { fetch?: FetchLike; no
 
 /**
  * POST ONE TEXT. The caller has CLAIMED the post first (xpost/store.ts
- * claimPost) and treats `uncertain` as final. Text only: no media, no reply,
- * no quote — a link would also cost thirteen times as much.
+ * claimPost) and treats `uncertain` as final. A reply target comes only from
+ * the durable, owner-bound reply record checked by the sender.
  */
 export async function createPost(
   accessToken: string,
   text: string,
-  opts: { fetch?: FetchLike; nowMs?: number } = {},
+  opts: { fetch?: FetchLike; nowMs?: number; replyToTweetId?: string } = {},
 ): Promise<XResult<{ id: string }>> {
+  if (opts.replyToTweetId !== undefined && !ID.test(opts.replyToTweetId)) return fail("invalid", null);
   const res = await call(opts.fetch ?? realFetch, X_POSTS_URL, {
     method: "POST",
     headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, ...(opts.replyToTweetId ? { reply: { in_reply_to_tweet_id: opts.replyToTweetId } } : {}) }),
   });
   if (!res) return fail("uncertain", null);
   const read = await classify(res, opts.nowMs ?? Date.now());
@@ -350,14 +355,103 @@ export async function createPost(
   return { ok: true, value: { id } };
 }
 
+/** A comment in a known conversation. No author profile or private data enters a prompt. */
+export interface XReply {
+  id: string;
+  text: string;
+  authorId: string;
+  conversationId: string;
+  inReplyToTweetId: string;
+  createdAtMs: number;
+}
+
+export interface XReplyBatch { replies: XReply[]; newestId: string | null }
+
+function parsedReply(item: unknown, now: number, excludeAuthorId: string): XReply | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const d = item as Record<string, unknown>;
+  const refs = Array.isArray(d.referenced_tweets) ? d.referenced_tweets : [];
+  const parents = refs.filter((r) => r !== null && typeof r === "object" && r.type === "replied_to");
+  const createdAtMs = typeof d.created_at === "string" ? Date.parse(d.created_at) : NaN;
+  if (typeof d.id !== "string" || !ID.test(d.id) ||
+      typeof d.author_id !== "string" || !ID.test(d.author_id) || d.author_id === excludeAuthorId ||
+      (d.conversation_id !== undefined && (typeof d.conversation_id !== "string" || !ID.test(d.conversation_id))) ||
+      parents.length > 1 || (parents.length === 1 && (typeof parents[0]!.id !== "string" || !ID.test(parents[0]!.id))) ||
+      typeof d.text !== "string" || !d.text.trim() || d.text.length > 4000 ||
+      !Number.isFinite(createdAtMs) || createdAtMs <= 0 || createdAtMs > now) return null;
+  if (parents.length && (typeof d.conversation_id !== "string" || d.id === d.conversation_id)) return null;
+  return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
+    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs };
+}
+
+/**
+ * Read the authenticated account's mentions, including replies in old threads,
+ * so a STOP on a previous bot reply is seen before choosing any new reply.
+ * A partial batch is never success: a failed page, repeated cursor, malformed
+ * reply or more than the endpoint's eight hundred mentions fails closed.
+ */
+export async function readMentions(
+  accessToken: string,
+  xUserId: string,
+  opts: { fetch?: FetchLike; nowMs?: number; sinceId?: string; startTimeMs?: number } = {},
+): Promise<XResult<XReplyBatch>> {
+  if (!ID.test(xUserId) || (opts.sinceId !== undefined && !ID.test(opts.sinceId))) return fail("invalid", null);
+  const now = opts.nowMs ?? Date.now();
+  if (opts.startTimeMs !== undefined && (!Number.isFinite(opts.startTimeMs) || opts.startTimeMs <= 0 || opts.startTimeMs > now)) return fail("invalid", null);
+  const started = performance.now();
+  const replies: XReply[] = [];
+  const seen = new Set<string>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let newestId: string | null = null;
+  for (let page = 0; page < 8; page++) {
+    const query = new URLSearchParams({ max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at" });
+    if (opts.sinceId) query.set("since_id", opts.sinceId);
+    else if (opts.startTimeMs !== undefined) query.set("start_time", new Date(Math.floor(opts.startTimeMs / 1000) * 1000).toISOString());
+    if (cursor) query.set("pagination_token", cursor);
+    const res = await call(opts.fetch ?? realFetch, `https://api.x.com/2/users/${xUserId}/mentions?${query}`, {
+      method: "GET", headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    });
+    if (!res) return fail("uncertain", null);
+    const read = await classify(res, now, MAX_MENTIONS_BODY_BYTES);
+    if (!read.ok) return read;
+    const meta = read.value.meta;
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return fail("invalid", res.status);
+    const m = meta as Record<string, unknown>;
+    const data = read.value.data === undefined && m.result_count === 0 ? [] : read.value.data;
+    if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length || Array.isArray(read.value.errors)) return fail("invalid", res.status);
+    for (const item of data) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return fail("invalid", res.status);
+      const d = item as Record<string, unknown>;
+      if (typeof d.id !== "string" || !ID.test(d.id)) return fail("invalid", res.status);
+      if (!newestId || BigInt(d.id) > BigInt(newestId)) newestId = d.id;
+      if (seen.has(d.id)) continue;
+      seen.add(d.id);
+      // Plain mentions and quotes remain visible for opt-outs. An empty reply
+      // target makes them ineligible for a generated response in the planner.
+      if (d.author_id === xUserId) continue;
+      const arrivedAtMs = now + Math.max(0, performance.now() - started) + MENTION_CLOCK_SKEW_MS;
+      const reply = parsedReply(d, arrivedAtMs, xUserId);
+      if (!reply) return fail("invalid", res.status);
+      replies.push(reply);
+    }
+    if (seen.size >= 800) return fail("invalid", res.status);
+    if (m.next_token === undefined) return { ok: true, value: { replies, newestId } };
+    if (typeof m.next_token !== "string" || !m.next_token || m.next_token.length > 2048 || cursors.has(m.next_token)) return fail("invalid", res.status);
+    cursors.add(m.next_token);
+    cursor = m.next_token;
+  }
+  return fail("invalid", null);
+}
+
 /**
  * An API answer, sorted. A 2xx hands back its JSON (or `uncertain` if there is
  * none to read). Every refusal is sorted by what X did — nothing — except a
  * 5xx, which is `uncertain` because a gateway error can follow a write.
  */
-async function classify(res: Response, nowMs: number): Promise<XResult<Record<string, unknown>>> {
+async function classify(res: Response, nowMs: number, maxBytes = MAX_BODY_BYTES): Promise<XResult<Record<string, unknown>>> {
   if (res.status >= 200 && res.status < 300) {
-    const body = await jsonOf(res);
+    const body = await jsonOf(res, maxBytes);
     return body ? { ok: true, value: body } : fail("uncertain", res.status);
   }
   if (res.status === 401) return fail("auth", 401);
