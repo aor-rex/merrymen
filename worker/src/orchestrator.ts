@@ -5123,17 +5123,17 @@ async function runBrainDatasetIfAsked(): Promise<void> {
  * This exists because an operator away from their machine has no shell — and
  * Railway's own dashboard, which sets these variables, works from a phone.
  *
- * TWO KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
+ * THREE KEYS, DELIBERATELY. `MERRYMEN_ANNOUNCE_ID` arms a DRY RUN, which resolves
  * every recipient, builds every message and contacts Telegram zero times.
  * Sending additionally requires `MERRYMEN_ANNOUNCE_CONFIRM` to equal that same
- * id, so the difference between a rehearsal and messaging every beta tester is
- * never one variable set by muscle memory.
+ * id AND `MERRYMEN_ANNOUNCE_BODY_SHA256` to equal the dry-run payload digest.
+ * A changed file cannot turn an earlier approval into a different message.
  *
  * SAFE TO LEAVE SET. This runs on the reconcile loop and Railway restarts
- * services freely, so it must be harmless to re-enter: `runAnnouncement` skips
- * anyone already recorded in `announcements`, per recipient, so a redeploy
- * re-runs and sends nothing new. The body ships in the repo because there is no
- * other way to hand this process a file.
+ * services freely. `runAnnouncement` claims each recipient durably before
+ * sending, so a redeploy cannot replay a send whose result was uncertain.
+ * The body ships in the repo because there is no other way to hand this
+ * process a file.
  */
 /**
  * GRANT LIVE INTENT TO THE PEOPLE WHO ALREADY HAD IT, ONCE, BEFORE ENFORCEMENT.
@@ -6790,7 +6790,7 @@ async function runAnnouncementIfAsked(): Promise<void> {
   }
   try {
     const { readFileSync, existsSync, readdirSync } = await import("node:fs");
-    const { illegalTags, runAnnouncement } = await import("./announce");
+    const { announcementConfirmation, illegalTags, RECOVERY_ANNOUNCE_ID, runAnnouncement } = await import("./announce");
     // ── A PER-AGENT CAMPAIGN IS A DIRECTORY, A BROADCAST IS A FILE ─────────
     //
     // `docs/announcements/<id>.html`            one body for everyone
@@ -6841,12 +6841,18 @@ async function runAnnouncementIfAsked(): Promise<void> {
     const client = new pg.Client({ connectionString: url });
     await client.connect();
     try {
-      const confirmed = (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim() === id;
+      const payload = perAgent ? JSON.stringify(Object.entries(bodies).sort(([a], [b]) => a.localeCompare(b))) : body;
+      const { confirmed, bodySha256 } = announcementConfirmation(
+        id, payload, (process.env.MERRYMEN_ANNOUNCE_CONFIRM ?? "").trim(),
+        (process.env.MERRYMEN_ANNOUNCE_BODY_SHA256 ?? "").trim(),
+      );
+      log(`announcement ${id}: payload SHA-256 ${bodySha256} — confirm this exact digest before sending`);
       const out = await runAnnouncement({
         client,
         announceId: id,
         body,
         confirmed,
+        appendPersonalLine: id !== RECOVERY_ANNOUNCE_ID,
         ...(perAgent ? { bodies, tenants: Object.keys(bodies) } : {}),
       });
       // THE DRY RUN HAS TO SHOW THE TEXT, not a count. An operator approving a
@@ -6866,7 +6872,8 @@ async function runAnnouncementIfAsked(): Promise<void> {
           `${out.personalised} with their own reason · ` +
           `${out.withAllowlist} have linked at some point, ${out.withBotToken} hold a bot token · ` +
           `skipped: ${out.skippedNoChat} no chat, ${out.skippedNoToken} no bot, ${out.skippedDisabled} tg off, ${out.skippedNotifyOff} pushes off, ` +
-          `${out.skippedAlreadySent} already had it · ${out.failed.length} failed`,
+          `${out.skippedNotAllowed} no longer linked, ${out.skippedNoClaim} bot unclaimed/moved, ` +
+          `${out.skippedAlreadySent} already delivered, ${out.skippedAlreadyAttempted} already attempted, ${out.skippedChanged} changed before send · ${out.failed.length} failed`,
       );
       // "Nobody is blocked" and "the join broke" are the same empty map and
       // opposite facts. Only one of them is safe to send on.
@@ -6878,7 +6885,7 @@ async function runAnnouncementIfAsked(): Promise<void> {
       // Reasons without recipients: enough to act on, never enough to identify
       // anyone or reconstruct a credential.
       for (const [reason, n] of tally) log(`announcement ${id}:   ${n}× ${reason}`);
-      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id}`);
+      if (out.dryRun) log(`announcement ${id}: to send, set MERRYMEN_ANNOUNCE_CONFIRM=${id} and MERRYMEN_ANNOUNCE_BODY_SHA256=${bodySha256}`);
     } finally {
       await client.end();
     }
