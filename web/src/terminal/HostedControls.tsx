@@ -46,7 +46,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";
@@ -106,16 +106,16 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
  * succeeds, so without it "We couldn't load your account" stood unchanged
  * through the retry the reader had just asked for, and Try again looked broken.
  */
-export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void}) {
+export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh,onSignedIn}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void}) {
   if(account?.status.exists) {
     if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
     if(portfolio==="unreadable") return <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your portfolio again…" : <>We couldn&apos;t load your portfolio. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     return <section className="hosted-entry"><h2>Your agent</h2><p>Your portfolio data is not available yet.</p><button className="flow-primary" onClick={onRefresh}>Refresh portfolio</button></section>;
   }
-  if(!account) return accountFailed
+  if(!account || (accountFailed && !account.status.exists)) return accountFailed
     ? <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="hosted-entry"><SkeletonRows rows={2} label="Loading your account"/></section>;
-  return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onRefresh}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
+  return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onSignedIn}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
 }
 export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";account:AccountState;onClose:()=>void}) {
   const [copied,setCopied]=useState(false);

@@ -4,6 +4,7 @@ import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { WALL_TOO_WIDE, type StoredGrant } from "@merrymen/core";
+import type { SavedWallet } from "@/lib/session";
 import { deferred, json, testDom } from "./test-dom";
 
 const address = `0x${"1".repeat(40)}` as const;
@@ -23,6 +24,7 @@ const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas
 let renew: (options: { onStatus: (status: string) => void }) => Promise<unknown>;
 let Wallet: typeof import("./screens/Wallet").default;
 let ui: ReturnType<typeof testDom>;
+let savedWallets: SavedWallet[] = [];
 const originalFetch = globalThis.fetch;
 
 before(() => {
@@ -38,7 +40,7 @@ before(() => {
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
       if (id === "@/lib/session") return {
         loadGrant: () => grant,
-        listSavedWallets: () => [],
+        listSavedWallets: () => savedWallets,
         isPrivyOwned: () => false,
         readFunding: async () => ({ gasWei: 1n, usdgUnits: 71_580_000n, usdg: 71.58 }),
         restoreAgentWallet: (_key: unknown, options: Parameters<typeof renew>[0]) => renew(options),
@@ -55,6 +57,7 @@ before(() => {
 
 beforeEach(() => {
   ui = testDom();
+  savedWallets = [];
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
   globalThis.fetch = async (input) => {
     const path = String(input);
@@ -71,6 +74,60 @@ afterEach(async () => {
 });
 
 describe("the funded wallet's re-sign control", () => {
+  it("does not call a 500 response a discarded wallet, and recovers on retry", async () => {
+    let unavailable = true;
+    savedWallets = [{ smartAccount: address, owner: address, chainId: 4663,
+      ownerKey: grant.demoOwnerPrivateKey as `0x${string}`, current: true }];
+    globalThis.fetch = async (input) => {
+      const path = String(input);
+      if (path === "/api/grants") return unavailable ? json({ error: "grant store unavailable" }, 500) : json({ exists: true, grant, gasSponsored: true });
+      if (path === "/api/auth/session") return json({ hosted: false, address: null });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    assert.match(ui.container.textContent!, /Couldn.t check your agent/);
+    assert.doesNotMatch(ui.container.textContent!, /this wallet isn't active|re-sign this key/);
+    assert.match(ui.container.textContent!, /Wallets saved in this browser/);
+    await ui.click("show recovery key");
+    assert.ok(ui.container.textContent!.includes(grant.demoOwnerPrivateKey!), "local recovery remains available during a server outage");
+    unavailable = false;
+    await ui.click("Try again");
+    assert.ok(ui.container.querySelector("#resign"), "the trusted wallet returns after a successful bound read");
+  });
+
+  it("rejects a hosted grant belonging to a different signed-in tenant", async () => {
+    const a = `0x${"a".repeat(40)}`;
+    const b = `0x${"b".repeat(40)}`;
+    globalThis.fetch = async (input) => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: true, tenant: b, grant });
+      if (path === "/api/auth/session") return json({ hosted: true, address: a });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    assert.match(ui.container.textContent!, /Couldn.t check your agent/);
+    assert.doesNotMatch(ui.container.textContent!, /re-sign this key|this wallet isn't active/);
+  });
+
+  it("does not let an older account response restore signing controls after tab revalidation", async () => {
+    const oldGrant = deferred<Response>();
+    let reads = 0;
+    globalThis.fetch = async (input) => {
+      const path = String(input);
+      if (path === "/api/grants") return ++reads === 1 ? oldGrant.promise : json({ exists: false });
+      if (path === "/api/auth/session") return json({ hosted: false, address: null });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    assert.match(ui.container.textContent!, /this wallet isn't active/);
+    await act(async () => { oldGrant.resolve(json({ exists: true, grant })); });
+    assert.match(ui.container.textContent!, /this wallet isn't active/);
+  });
+
   it("shows a refused renewal beside the pressed button, with the exact smaller-permission remedy", async () => {
     renew = async () => { throw new Error(tooWide); };
     await ui.render(React.createElement(Wallet));

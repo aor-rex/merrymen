@@ -74,7 +74,7 @@ import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -600,15 +600,18 @@ function flagStuckSpawn(tenant: string): void {
 
 /**
  * Test seam: count a child as running without spawning a worker, so a test
- * can drive the real reconcile() over it. The fake needs only `kill`.
+ * can drive the real reconcile() over it. A supplied lease lets a test drive
+ * the immediate socket-loss path without a live database.
  */
 export function adoptChildForTest(
   tenant: `0x${string}`,
   smartAccount: `0x${string}`,
   proc: Pick<ChildProcess, "kill">,
+  lease?: TenantLease,
 ): void {
   const lc = tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
+  if (lease) leases.set(lc, lease);
 }
 
 /**
@@ -789,9 +792,34 @@ export function hasLeaseForTest(tenant: string): boolean {
  */
 const leases = new Map<string, TenantLease>();
 let stopping = false;
+/** A lease-lost child must exit before THIS replica may arm the tenant again. */
+const leaseLossDraining = new Set<string>();
+/** Includes children already removed by the watchdog or another stand-down. */
+const exitingChildren = new Map<string, Set<ChildProcess>>();
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
+}
+
+function trackExitingChild(tenant: string, proc: ChildProcess): void {
+  // adoptChildForTest also accepts a kill-only fake for older integration
+  // tests; real ChildProcess instances always emit exit.
+  if (typeof proc.once !== "function") return;
+  let pending = exitingChildren.get(tenant);
+  if (!pending) {
+    pending = new Set();
+    exitingChildren.set(tenant, pending);
+  }
+  if (pending.has(proc)) return;
+  pending.add(proc);
+  proc.once("exit", () => {
+    const current = exitingChildren.get(tenant);
+    current?.delete(proc);
+    if (current?.size === 0) {
+      exitingChildren.delete(tenant);
+      leaseLossDraining.delete(tenant);
+    }
+  });
 }
 
 /** Release and forget a tenant's lease. Best-effort; safe if none is held. */
@@ -2323,6 +2351,7 @@ export async function writeBootstrapForChild(
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
   if (haltRequested()) return "FLEET_HALT is present";
+  if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
   if (leases.get(tenant) !== lease || !lease.healthy()) return "its lease was lost";
   if (killRequested(childHome(tenant))) return "a Telegram kill is pending";
   if (children.has(tenant)) return "a child is already running";
@@ -2884,7 +2913,12 @@ function standDownHolder(tenant: string): void {
     held.leaving = proc;
     held.leftAt = Date.now();
     held.leftBot = homeBotKey(tenant);
-    proc.kill("SIGTERM");
+    try {
+      proc.kill("SIGTERM");
+    } catch (error) {
+      log(`${tenant}: hold SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
+      try { proc.kill("SIGKILL"); } catch { /* retried below and by pressLeaving */ }
+    }
     setTimeout(() => {
       try {
         proc.kill("SIGKILL");
@@ -3271,8 +3305,14 @@ function envTickSeconds(): number {
 function killChild(tenant: string): void {
   const child = children.get(tenant);
   if (!child) return;
+  trackExitingChild(tenant, child.proc);
   children.delete(tenant); // delete first so the exit handler treats it as intentional
-  child.proc.kill("SIGTERM");
+  try {
+    child.proc.kill("SIGTERM");
+  } catch (error) {
+    log(`${tenant}: child SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
+    try { child.proc.kill("SIGKILL"); } catch { /* retried below */ }
+  }
   setTimeout(() => {
     try {
       child.proc.kill("SIGKILL");
@@ -3281,6 +3321,37 @@ function killChild(tenant: string): void {
     }
   }, 3_000);
 }
+
+/**
+ * A shard session losing its socket releases all its Postgres locks at once.
+ * Signal every affected process in the same event turn, not up to one reconcile
+ * interval later. A local child that has not exited remains a spawn barrier even
+ * if a fresh DB session can already take a new lock. Another replica cannot see
+ * that barrier; execution-side fencing is needed to eliminate that last gap.
+ */
+function standDownLostLeasesNow(): void {
+  for (const [tenant, lease] of [...leases]) {
+    if (lease.healthy()) continue;
+    log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
+    const child = children.get(tenant);
+    if (child || exitingChildren.has(tenant)) leaseLossDraining.add(tenant);
+    try {
+      if (child) killChild(tenant);
+      standDownHolder(tenant);
+      cancelRestart(tenant);
+      void releaseLease(tenant);
+    } catch (error) {
+      // One process refusing a signal must not leave the other tenants on this
+      // lost shard running. Keep this lease unhealthy for reconcile to retry.
+      log(`${tenant}: lease-loss stand-down failed — ${error instanceof Error ? error.message : String(error)}`);
+      try { child?.proc.kill("SIGKILL"); } catch { /* retry on reconcile */ }
+      try { holders.get(tenant)?.leaving?.kill("SIGKILL"); } catch { /* retry on reconcile */ }
+    }
+  }
+}
+
+/** Test seam for the same handler registered on the production lease socket. */
+export { standDownLostLeasesNow as standDownLostLeasesForTest };
 
 /**
  * Tell the owner a Telegram kill is DONE: the stored grant is deleted. Sent
@@ -3407,16 +3478,7 @@ export async function reconcile(): Promise<void> {
   // and drop the lease; the acquire below will try to re-take it (or find the
   // other replica now owns it). This is what makes the lock a live guarantee and
   // not just a start-time check.
-  for (const [tenant, lease] of [...leases]) {
-    if (!lease.healthy()) {
-      log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
-      if (children.has(tenant)) killChild(tenant);
-      // A held tenant's bot is not ours to answer either once the lease is
-      // gone: the replica that takes it will hold it, or start it.
-      standDownHolder(tenant);
-      await releaseLease(tenant);
-    }
-  }
+  standDownLostLeasesNow();
 
   // Spawn any wanted tenant that isn't running — but only behind a lease. Acquire
   // one first (unless we already hold it from a previous reconcile / across a
@@ -3424,6 +3486,7 @@ export async function reconcile(): Promise<void> {
   // next reconcile.
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
+    if (leaseLossDraining.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
     // restart already scheduled is the timer's to make, on its rung, not this
@@ -4288,6 +4351,9 @@ export async function ferryForChild(
  * Cheap and best-effort: one grouped count against a table the mirror has just
  * written, and a failure here must never take the fleet loop down.
  */
+export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
+  FROM trades WHERE created_at >= ? GROUP BY status, rule`;
+
 async function fleetHealth(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) return;
@@ -4362,10 +4428,7 @@ async function fleetHealth(): Promise<void> {
     try {
       const since = Math.floor(Date.now() / 1000) - 3600;
       const t = (await shared
-        .prepare(
-          `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
-             FROM trades WHERE at >= ? GROUP BY status, rule`,
-        )
+        .prepare(AUTONOMY_TRADE_FUNNEL_SQL)
         .all(since)) as { status: string; rule: string; n: number | string }[];
       const h = (await shared
         .prepare(
@@ -7741,6 +7804,7 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
       // a little slower each time, and nine weeks on be stood down as "keeps
       // dying right after start".
       const rung = nextRung(child, beat === null ? child.startedAt : beat * 1000);
+      trackExitingChild(tenant, child.proc);
       children.delete(tenant);
       try {
         child.proc.kill("SIGKILL");
@@ -7891,6 +7955,7 @@ export async function runOrchestrator(): Promise<void> {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
   await runReconstructionDryRunIfAsked();
