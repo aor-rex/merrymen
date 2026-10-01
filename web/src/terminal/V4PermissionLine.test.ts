@@ -35,7 +35,9 @@ it("distinguishes a saved address from one sealed into the current signature", (
 it("warns when Settings changed to a different adapter after signing", () => {
   const html = line([GRANT_V4_ADAPTER], ADAPTER, "0x0000000000000000000000000000000000000def");
   assert.match(html, /Settings now names a different adapter/);
-  assert.match(html, /cannot use v4/);
+  assert.match(html, /still uses the adapter sealed in this signed key if it is deployed/);
+  assert.match(html, /re-sign to switch adapters/);
+  assert.doesNotMatch(html, /cannot use v4/);
   assert.doesNotMatch(line([GRANT_V4_ADAPTER], ADAPTER, ADAPTER.toUpperCase()), /different adapter/);
 });
 
