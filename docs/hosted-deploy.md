@@ -276,6 +276,8 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_PUBLIC_ORIGIN` | web (already set above) | builds the callback `${origin}/connect/x`; the orchestrator does not need it for X |
 | `MERRYMEN_X_REDIRECT_URI` *(optional)* | web | an explicit callback instead of the one built from the origin (https, or http on loopback for local testing). It must still be this web service's own `/connect/x` page — the finish needs its session — and be registered on the X app byte for byte |
 | `MERRYMEN_XPOST` *(optional)* | orchestrator | `0` stops all posting. Owners can still connect and see their drafts; drafts stay pending while posting is off, and a casual one past its day is skipped as stale when it comes back |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional; leave unset)* | **web + orchestrator** | exactly `1` permits selective comment replies after written X approval. No approval has been obtained for this deployment, so leave this unset on both services. Owners must also enable replies separately for their connected X account |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`; `0` or an invalid value disables polling. Each poll may read up to eight pages of one hundred mentions and consume several X read requests |
 | `MERRYMEN_XPOST_LLM_KEY` *(optional)* | **orchestrator only** | a key used **only** for X posts. Unset: the room's `MERRYMEN_GROUPCHAT_LLM_KEY` is used as it is — unless it is a fleet key, which X refuses. Neither: only intros are posted, from templates |
 | `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
 | `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
@@ -306,6 +308,28 @@ routes answer 404 and the section does not render.
 > `xpost writer: …` line naming the provider and model (never the key). Each
 > pass that did something logs counts only — `xpost: sent 1, drafted-buy 1` —
 > never a post's text and never a token.
+
+**Selective replies are implemented but remain disabled.** Do not set the
+approval variable while written X approval is absent. Once approval exists,
+configure the gate on both web and orchestrator; this only makes a separate
+Reply to comments consent available to owners whose posting is already on.
+The warning names the connected X account. Disabling replies cancels waiting
+replies, and posting off, disconnect or an account switch clears reply consent.
+
+Polling is limited to one read per thirty minutes per X account, two accounts
+per orchestrator pass and the durable fleet allowance above. The first read
+starts at the earliest active owner’s reply consent for that X account; later
+reads use a stored cursor. Each owner’s selection excludes comments from
+before their own consent. At most one reply is drafted per owner per poll;
+owners sharing an X account still share its send limits. Incomplete or
+over-limit batches produce no replies and do not advance the cursor. STOP
+requests are processed before selection, including when the model budget is
+empty. Replies require a fresh successful poll before sending and share the
+existing posting, quiet-hour and model budgets, with at least ten minutes
+under Coming up. There is no incoming-comment archive: only consent, reply
+target metadata, cursors and recipient opt-outs are persisted alongside the
+outgoing drafts. See [Posting on X](x-posting.md#selective-comment-replies) for
+selection, freshness and durable delivery rules.
 
 ### Telegram groups (on by default per owner; works without a key)
 

@@ -46,6 +46,7 @@ struct XPostingScreen: View {
     @State private var skipping: Int?
     /// The account the open warning names; enabling sends exactly this id.
     @State private var consent: XPostingAccount.Identity?
+    @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String)?
     @State private var confirmDisconnect = false
     private let policy = NavigationPolicy()
 
@@ -75,6 +76,10 @@ struct XPostingScreen: View {
             Button { enable(identity) } label: { Text(verbatim: "Let it post as @\(identity.handle)") }
             Button("Not now", role: .cancel) {}
         } message: { identity in Text(verbatim: XPostingAccount.warning(identity.handle)) }
+        .alert(Text(verbatim: "Reply to comments as @\(replyConsent?.identity.handle ?? "")?"), isPresented: Binding(get: { replyConsent != nil }, set: { if !$0 { replyConsent = nil } }), presenting: replyConsent) { consent in
+            Button { write(XPostingAccount.replyFields(consent.identity, enabled: true), confirmedOwner: consent.owner) } label: { Text(verbatim: "Let it reply as @\(consent.identity.handle)") }
+            Button("Not now", role: .cancel) {}
+        } message: { consent in Text(verbatim: XPostingAccount.replyWarning(consent.identity.handle)) }
         .confirmationDialog(Text(verbatim: account?.identity.map { "Disconnect @\($0.handle)?" } ?? "Disconnect X?"), isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { write([:], method: "DELETE") }
         } message: { Text("Your Merryman stops posting and anything waiting to go out is cancelled.") }
@@ -109,6 +114,18 @@ struct XPostingScreen: View {
                 if account.postingEnabled, let identity = account.identity {
                     Text(verbatim: "Posting from @\(identity.handle) — whichever X account is connected.").font(.caption).foregroundStyle(.orange)
                 }
+                if account.repliesAvailable || account.replyEnabled {
+                    Toggle("Reply to comments", isOn: Binding(get: { account.replyEnabled }, set: { on in
+                        guard !busy, let identity = account.identity, let owner = store.owner else { return }
+                        if on { replyConsent = (identity, owner) }
+                        else { write(XPostingAccount.replyFields(identity, enabled: false)) }
+                    }))
+                    .disabled(busy || account.identity == nil || (!account.replyEnabled && (!account.repliesAvailable || !account.postingEnabled || account.revoked)))
+                    if let identity = account.identity {
+                        Text(verbatim: "Selected comments on your Merryman’s coin posts, answered as @\(identity.handle). Replies share the post limit and ten-minute review window.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if !account.repliesAvailable { Text("Comment replies aren’t available yet.").font(.caption).foregroundStyle(.secondary) }
                 if paper { Text("While your Merryman trades on paper, its buy posts say so.").font(.caption).foregroundStyle(.secondary) }
                 Button("Disconnect", role: .destructive) { confirmDisconnect = true }.buttonStyle(SecondaryButtonStyle(fill: true)).disabled(busy)
             }
@@ -116,7 +133,9 @@ struct XPostingScreen: View {
             if account.upcoming.isEmpty { Text("Nothing waiting to go out.").font(.subheadline).foregroundStyle(.secondary) }
             ForEach(account.upcoming) { post in
                 Card {
+                    if post.isReply { Text("Comment reply").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
                     Text(verbatim: post.body).textSelection(.enabled)
+                    if let comment = post.commentLink { Link("View comment", destination: comment).font(.caption).foregroundStyle(Brand.accent) }
                     HStack {
                         Text(verbatim: post.at > .now ? "Goes out \(post.at.formatted(.relative(presentation: .named)))" : "Going out soon").font(.caption).foregroundStyle(.secondary)
                         Spacer()
@@ -132,7 +151,9 @@ struct XPostingScreen: View {
             SectionHeader(title: "Posted")
             ForEach(account.recent) { post in
                 Card {
+                    if post.isReply { Text("Comment reply").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
                     Text(verbatim: post.body).textSelection(.enabled)
+                    if let comment = post.commentLink { Link("View comment", destination: comment).font(.caption).foregroundStyle(Brand.accent) }
                     HStack {
                         Text(verbatim: "Posted \(post.at.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(.secondary)
                         Spacer()
@@ -198,8 +219,12 @@ struct XPostingScreen: View {
     /// One owner-bound write to /api/x/account, then a fresh read either way.
     /// A refusal (a changed account, a post already on its way) is shown in the
     /// server's own words.
-    private func write(_ fields: [String: J], method: String = "POST") {
+    private func write(_ fields: [String: J], method: String = "POST", confirmedOwner: String? = nil) {
         guard !busy, let owner = store.owner else { skipping = nil; return }
+        if let confirmedOwner, confirmedOwner != owner {
+            store.notice = "Your account changed. Check the connected X account and try again."
+            return
+        }
         busy = true
         var body = fields
         body["owner"] = .string(owner)
@@ -272,6 +297,8 @@ struct XPostingAccount: Equatable {
         let at: Date
         /// Only ever one post on x.com (NavigationPolicy.isXPostLink).
         let link: URL?
+        let isReply: Bool
+        let commentLink: URL?
     }
     let available: Bool
     let connected: Bool
@@ -280,6 +307,8 @@ struct XPostingAccount: Equatable {
     let identity: Identity?
     let revoked: Bool
     let postingEnabled: Bool
+    let replyEnabled: Bool
+    let repliesAvailable: Bool
     let upcoming: [Post]
     let recent: [Post]
 
@@ -290,6 +319,8 @@ struct XPostingAccount: Equatable {
         self.available = available
         self.connected = connected
         postingEnabled = connected && posting == true
+        replyEnabled = postingEnabled && v["replyEnabled"].bool == true
+        repliesAvailable = v["repliesAvailable"].bool == true
         revoked = connected && v["status"].string == "revoked"
         if connected, let handle = v["username"].string, handle.wholeMatch(of: #/[A-Za-z0-9_]{1,15}/#) != nil,
            let id = v["xUserId"].string, id.wholeMatch(of: #/[0-9]{1,25}/#) != nil {
@@ -318,10 +349,25 @@ struct XPostingAccount: Equatable {
         ["action": .string("enable"), "xUserId": .string(identity.xUserId), "tz": .string(zone.identifier)]
     }
 
+    static func replyFields(_ identity: Identity, enabled: Bool) -> [String: J] {
+        ["action": .string(enabled ? "enable-replies" : "disable-replies"), "xUserId": .string(identity.xUserId)]
+    }
+
+    static func replyWarning(_ handle: String) -> String {
+        [
+            "Your Merryman will reply as @\(handle) to selected comments on its coin posts.",
+            "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
+            "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies."
+        ].joined(separator: "\n\n")
+    }
+
     private static func post(_ row: J, time: String, link: URL?) -> Post? {
         guard let id = row["id"].number, id.rounded() == id, id > 0, id < 9_007_199_254_740_992,
               let body = row["body"].string, !body.isEmpty, let ms = row[time].number, ms > 0 else { return nil }
-        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link)
+        let comment = row["replyToTweetId"].string.flatMap { id in
+            id.wholeMatch(of: #/[0-9]{1,25}/#) != nil ? URL(string: "https://x.com/i/status/\(id)") : nil
+        }
+        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: row["kind"].string == "reply", commentLink: comment)
     }
 
     /// The warning the owner confirms, in the words the web uses. It names the

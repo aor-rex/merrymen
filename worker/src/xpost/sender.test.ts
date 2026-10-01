@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { wrapSqlite, type Db } from "../db";
 import type { FetchLike, XApp } from "./client";
-import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne } from "./sender";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne, readReplyComments } from "./sender";
 import {
   ensureXpostSchema,
   getAccount,
@@ -20,6 +20,8 @@ import {
   readTokens,
   schedulePost,
   setPosting,
+  setReplying,
+  optOutReplies,
   swapTokens,
   upsertAccount,
   type TokenSetPlain,
@@ -388,4 +390,88 @@ test("the outcome is a short code: never a token, never the body", async (t) => 
     assert.match(o, /^[a-z]+$/);
     for (const secret of ["access-", "refresh-", "pepe", "client-secret"]) assert.ok(!o.includes(secret));
   }
+});
+
+
+async function setupReply(t: { after(fn: () => void): void }): Promise<{ db: Db; post: XPost }> {
+  const { db, post: root } = await setup(t);
+  assert.equal(await sendOne(db, DEK, APP, root, { fetch: scripted([created("700")]), nowMs: NOW }), "posted");
+  await setReplying(db, OWNER, true, "111", NOW + 1);
+  await schedulePost(db, { tenant: OWNER, xUserId: "111", kind: "reply", dedupeKey: "reply:111:701", body: "the pool looked healthy to me", nowMs: NOW + 2,
+    dueAtMs: NOW + 3, replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "222" });
+  return { db, post: (await postsOf(db, OWNER, 0))[0]! };
+}
+
+test("a reply uses the stored target on both attempts and does not resend after an ambiguous result", async (t) => {
+  const { db, post } = await setupReply(t);
+  const seen: Seen[] = [];
+  const out = await sendOne(db, DEK, APP, { ...post, replyToTweetId: "999" }, { nowMs: NOW + 10,
+    fetch: scripted([{ status: 401 }, token("access-fresh", "refresh-fresh"), "throw"], seen) });
+  assert.equal(out, "uncertain");
+  assert.equal(seen.length, 3);
+  for (const request of [seen[0]!, seen[2]!]) assert.deepEqual(JSON.parse(request.body!).reply, { in_reply_to_tweet_id: "701" });
+  assert.equal(await sendOne(db, DEK, APP, post, { nowMs: NOW + 11, fetch: scripted([], seen) }), "lost");
+  assert.equal(seen.length, 3);
+});
+
+test("a recipient or owner opt-out during token refresh prevents the reply POST", async (t) => {
+  for (const disable of ["owner", "recipient"] as const) {
+    const { db, post } = await setupReply(t);
+    const seen: Seen[] = [];
+    const out = await sendOne(db, DEK, APP, post, { nowMs: NOW + 10, fetch: scripted([
+      { status: 401 },
+      async () => {
+        if (disable === "owner") await setReplying(db, OWNER, false, "111", NOW + 11);
+        else await optOutReplies(db, "111", "222", NOW + 11);
+        return token("access-fresh", "refresh-fresh");
+      },
+    ], seen) });
+    assert.equal(out, "cancelled", disable);
+    assert.equal(seen.length, 2, "only refused POST and token refresh, no second POST");
+    assert.equal((await row(db)).reason, "reply-ineligible");
+  }
+});
+
+test("a persisted reply with its target missing is never sent as a top-level post", async (t) => {
+  const { db, post } = await setupReply(t);
+  await db.prepare("DELETE FROM xpost_reply_targets WHERE post_id = ?").run(post.id);
+  const seen: Seen[] = [];
+  assert.equal(await sendOne(db, DEK, APP, post, { nowMs: NOW + 10, fetch: scripted([], seen) }), "cancelled");
+  assert.equal(seen.length, 0);
+});
+
+test("comment reads require reply consent, rotate tokens before polling, and retain old-thread opt-outs", async (t) => {
+  const { db } = await setup(t, EXPIRING);
+  const account = { tenant: OWNER, xUserId: "111" };
+  const seen: Seen[] = [];
+  assert.equal((await readReplyComments(db, DEK, APP, account, { nowMs: NOW, fetch: scripted([], seen) })).ok, false);
+  assert.equal(seen.length, 0);
+  await setReplying(db, OWNER, true, "111", NOW);
+  const r = await readReplyComments(db, DEK, APP, account, { nowMs: NOW + 1, sinceId: "300", fetch: scripted([
+    token("access-fresh", "refresh-fresh"),
+    async (request) => {
+      assert.equal((await readTokens(db, DEK, OWNER))?.accessToken, "access-fresh");
+      assert.equal(request.auth, "Bearer access-fresh");
+      assert.equal(new URL(request.url).searchParams.get("since_id"), "300");
+      return { status: 200, body: { data: [{ id: "400", text: "STOP", author_id: "222", conversation_id: "200", referenced_tweets: [{ type: "replied_to", id: "201" }], created_at: new Date(NOW - 30 * 86_400_000).toISOString() }], meta: { result_count: 1 } } };
+    },
+  ], seen) });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.replies[0]?.text, "STOP");
+  assert.equal(seen.length, 2);
+  assert.equal((await readReplyComments(db, DEK, APP, { ...account, xUserId: "999" }, { nowMs: NOW, fetch: scripted([], seen) })).ok, false);
+  assert.equal(seen.length, 2);
+});
+
+test("a revoked mentions token gets one stored refresh and one fresh read", async (t) => {
+  const { db } = await setup(t);
+  await setReplying(db, OWNER, true, "111", NOW);
+  const seen: Seen[] = [];
+  const r = await readReplyComments(db, DEK, APP, { tenant: OWNER, xUserId: "111" }, { nowMs: NOW, fetch: scripted([
+    { status: 401 }, token("access-fresh", "refresh-fresh"), { status: 401 },
+  ], seen) });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.failure, "auth");
+  assert.equal(seen.length, 3);
+  assert.equal((await getAccount(db, OWNER))?.status, "revoked");
 });

@@ -40,6 +40,13 @@ import {
   returnAllowance,
   schedulePost,
   setPosting,
+  setReplying,
+  repliesEnabledFor,
+  repliesOptedOut,
+  optOutReplies,
+  replyTargetFor,
+  replyConsentAt,
+  firstReplyConsentAt,
   skipScheduled,
   swapTokens,
   takeAllowance,
@@ -493,6 +500,19 @@ test("every statement the store sends translates to Postgres with matching, bind
   await releaseSpan(db, "gap:111", 20.5, 7.5, 22.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
+  await setReplying(db, OWNER_A, true, "222", 15.5);
+  await repliesEnabledFor(db, OWNER_A, "222");
+  const parent = (await schedulePost(db, post({ xUserId: "222", kind: "buy", dedupeKey: "buy:reply-root", nowMs: 20.5 })))!;
+  await claimPost(db, parent, 21.5);
+  await markPosted(db, parent, "700", 22.5);
+  const reply = (await schedulePost(db, post({ xUserId: "222", kind: "reply", dedupeKey: "reply:222:701", nowMs: 23.5,
+    replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333" })))!;
+  await replyTargetFor(db, { id: reply, tenant: OWNER_A, xUserId: "222" });
+  await replyConsentAt(db, OWNER_A, "222");
+  await firstReplyConsentAt(db, "222");
+  await repliesOptedOut(db, "222", "333");
+  await optOutReplies(db, "222", "333", 24.5);
+  await setReplying(db, OWNER_A, false, "222", 25.5);
   await setPosting(db, OWNER_A, { enabled: false }, 16.5);
   await markRevoked(db, OWNER_A, 3, 17.5);
   await cancelScheduled(db, OWNER_A, 18.5, "turned-off");
@@ -513,7 +533,7 @@ test("every statement the store sends translates to Postgres with matching, bind
       const assignments = pg.split(/DO UPDATE SET/i)[1]!.split(/\bWHERE\b(?![^()]*\))|\bRETURNING\b/i)[0]!;
       for (const part of assignments.split(/,(?![^()]*\))/)) {
         const rhs = part.split("=").slice(1).join("=").trim();
-        assert.ok(/^(excluded\.|CASE WHEN xpost_accounts\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
+        assert.ok(/^(excluded\.|CASE WHEN xpost_(?:accounts|reply_accounts)\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
       }
     }
     for (const p of params) {
@@ -562,4 +582,101 @@ test("a span of an X account's clock is claimed by exactly one of two racing cla
   assert.deepEqual(first, { ok: true, prev: null });
   await releaseSpan(db, "fold:111:pepe", 5, null, 6);
   assert.equal(await readMeta(db, "fold:111:pepe"), null);
+});
+
+
+async function replySetup(db: Db): Promise<NewPost> {
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const root = (await schedulePost(db, post({ kind: "buy", dedupeKey: "buy:root" })))!;
+  await claimPost(db, root, 600);
+  await markPosted(db, root, "700", 700);
+  return post({ kind: "reply", dedupeKey: "reply:111:701", replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333", nowMs: 800 });
+}
+
+test("reply consent is separate, bound to the connected posting account and reset on switches or disconnect", async (t) => {
+  const { db } = await open(t);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 1), false);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 2), false, "posting is off");
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 3);
+  assert.equal(await setReplying(db, OWNER_A, true, "999", 4), false);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), false);
+  await setReplying(db, OWNER_A, true, "111", 5);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true);
+  assert.equal(await setReplying(db, OWNER_A, false, "999", 5), false, "a stale warning cannot disable another X account");
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true);
+  assert.equal(await repliesEnabledFor(db, OWNER_B, "111"), false);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 6 });
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true, "same-account reconnect preserves consent");
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "222", username: "s", tokens: TOKENS, nowMs: 7 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "222" }, 8);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "222"), false);
+  await setReplying(db, OWNER_A, true, "222", 9);
+  await deleteAccount(db, DEK, OWNER_A, 10);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "222", username: "s", tokens: TOKENS, nowMs: 11 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "222" }, 12);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "222"), false);
+});
+
+test("reply targets survive queue reads and cannot reference another tenant, account or unpublished parent", async (t) => {
+  const { db, raw } = await open(t);
+  const p = await replySetup(db);
+  for (const over of [{ replyRootTweetId: "999" }, { replyToTweetId: undefined }, { replyAuthorId: "111" }, { dedupeKey: "anything" }, { replyRootTweetId: "701" }]) {
+    assert.equal(await schedulePost(db, { ...p, ...over }), null);
+  }
+  const id = (await schedulePost(db, p))!;
+  assert.ok(id);
+  assert.equal(await schedulePost(db, p), null, "one reply per account and comment");
+  const loaded = (await postsOf(db, OWNER_A, 0)).find((x) => x.id === id)!;
+  assert.deepEqual(await replyTargetFor(db, loaded), { replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333" });
+  assert.equal((await duePosts(db, [OWNER_A], 2000)).find((x) => x.id === id)?.replyToTweetId, "701");
+  assert.equal((await postsOfXUser(db, "111", 0)).find((x) => x.id === id)?.replyRootTweetId, "700");
+  assert.equal(await replyTargetFor(db, { ...loaded, tenant: OWNER_B }), null);
+  assert.equal(await replyTargetFor(db, { ...loaded, xUserId: "222" }), null);
+  raw.prepare("UPDATE xpost_posts SET tenant = ? WHERE tweet_id = '700'").run(OWNER_B);
+  assert.equal(await replyTargetFor(db, loaded), null, "send rechecks ownership of the parent");
+  assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702" }), null);
+});
+
+test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {
+  const { db } = await open(t);
+  const p = await replySetup(db);
+  await schedulePost(db, p);
+  await schedulePost(db, post({ dedupeKey: "casual:still-on" }));
+  await setReplying(db, OWNER_A, false, "111", 900);
+  assert.equal(await keyStatus(db, p.dedupeKey), "cancelled");
+  assert.equal(await keyStatus(db, "casual:still-on"), "scheduled");
+  assert.equal((await getAccount(db, OWNER_A))?.posting, true);
+  await setReplying(db, OWNER_A, true, "111", 1000);
+  const second = { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702", replyAuthorId: "444", nowMs: 1100 };
+  const id = (await schedulePost(db, second))!;
+  await claimPost(db, id, 1200);
+  await optOutReplies(db, "111", "444", 1300);
+  assert.equal(await repliesOptedOut(db, "111", "444"), true);
+  assert.equal(await repliesOptedOut(db, "222", "444"), false);
+  assert.equal(await replyTargetFor(db, { id, tenant: OWNER_A, xUserId: "111" }), null);
+  assert.equal(await reschedulePost(db, id, 1500, 1400), false, "in-flight rate retry cannot revive an opted-out reply");
+  assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:703", replyToTweetId: "703", nowMs: 1600 }), null);
+  await setPosting(db, OWNER_A, { enabled: false }, 1700);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 1800);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), false, "posting off clears reply consent");
+});
+
+
+test("thread and author reply limits are checked inside the scheduling transaction", async (t) => {
+  const { db } = await open(t);
+  const p = await replySetup(db);
+  const sameAuthor = await Promise.all([
+    schedulePost(db, p),
+    schedulePost(db, { ...p, replyToTweetId: "702", dedupeKey: "reply:111:702" }),
+  ]);
+  assert.equal(sameAuthor.filter((id) => id !== null).length, 1);
+  const race = await Promise.all([
+    schedulePost(db, { ...p, replyToTweetId: "703", dedupeKey: "reply:111:703", replyAuthorId: "444", status: "skipped" }),
+    schedulePost(db, { ...p, replyToTweetId: "704", dedupeKey: "reply:111:704", replyAuthorId: "555" }),
+  ]);
+  assert.equal(race.filter((id) => id !== null).length, 1);
+  assert.equal((await postsOf(db, OWNER_A, 0)).filter((x) => x.kind === "reply").length, 2);
 });

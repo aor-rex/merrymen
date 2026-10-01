@@ -55,6 +55,10 @@ export const BUY_JITTER_MIN = 10;
 export const BUY_JITTER_MAX = 40;
 /** A buy post still waiting this long after it was drafted is stale; one that could not go out within this of the fill is not planned. */
 export const BUY_STALE_MS = 8 * HOUR;
+/** A reply waiting this long is no longer timely. */
+export const REPLY_STALE_MS = 24 * HOUR;
+export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
+export const REPLIES_PER_ROOT = 2;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
 /** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
@@ -389,10 +393,43 @@ export function sendDecision(
   if (account.xUserId !== post.xUserId) return { action: "cancel", reason: "account-changed" };
   if (!account.posting) return { action: "cancel", reason: "account-off" };
   if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
     if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
   }
   if (asleep || post.dueAtMs > nowMs) return { action: "wait" };
   return { action: "send" };
+}
+
+/** Replies share the account's post budget and gap, with a smaller thread cap. */
+export function replyDueAt(input: {
+  parent: XPost;
+  authorId: string;
+  commentAtMs: number;
+  posts: readonly XPost[];
+  tenant: string;
+  xUserId: string;
+  nowMs: number;
+  tz: string | null;
+  clock: PlanClock;
+  perDay: number;
+}): number | null {
+  const { parent, nowMs: now, clock, tz, posts } = input;
+  if (parent.kind !== "buy" || parent.status !== "posted" || !parent.tweetId || parent.sentAtMs === null
+    || parent.tenant !== input.tenant || parent.xUserId !== input.xUserId) return null;
+  if (now - parent.sentAtMs > REPLY_ROOT_MAX_AGE_MS || parent.sentAtMs > input.commentAtMs
+    || input.commentAtMs > now || now - input.commentAtMs > REPLY_STALE_MS) return null;
+  if (clock.isAsleep(tz, input.tenant, now)) return null;
+  // Count every attempted reply, including skips and ambiguous sends. A restart
+  // or model refusal cannot turn one thread into an unlimited drafting loop.
+  const thread = posts.filter((p) => p.kind === "reply" && p.replyRootTweetId === parent.tweetId);
+  if (thread.length >= REPLIES_PER_ROOT || thread.some((p) => p.replyAuthorId === input.authorId)) return null;
+  const slots = posts.filter((p) => LIVE_STATUSES.has(p.status)
+    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? ""))).map(slotOf);
+  const due = pushedPast(now + MIN_LEAD_MS, slots);
+  if (due - input.commentAtMs > REPLY_STALE_MS) return null;
+  const day = clock.localDay(tz, due);
+  if (slots.filter((s) => clock.localDay(tz, s.atMs) === day).length >= input.perDay) return null;
+  return due;
 }
