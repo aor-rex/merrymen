@@ -32,11 +32,17 @@ function sealed(rooms: TgRoom[]): string {
 class FakePg implements PgClientLike {
   sealedState = sealed([room(), room(-1002222222222, "Another room"), room(-1003333333333, "Merrymen", "pending")]);
   name = "Shogun";
+  botClaimHolder: string | null = SHOGUN_TENANT;
+  moveClaimAtInsert = false;
   notices = new Map<string, string>();
   queries: string[] = [];
   async query(sql: string, params: unknown[] = []): Promise<{ rows: Record<string, unknown>[] }> {
     this.queries.push(sql);
     if (sql.includes("FROM grants g")) return { rows: this.name ? [{ name: this.name }] : [] };
+    if (sql.startsWith("SELECT tenant FROM telegram_bot_claims")) {
+      assert.equal(params[0], "123");
+      return { rows: this.botClaimHolder ? [{ tenant: this.botClaimHolder }] : [] };
+    }
     if (sql.startsWith("SELECT sealed FROM") && sql.includes("WHERE tenant = $1")) return { rows: [{ sealed: this.sealedState }] };
     if (sql.startsWith("CREATE TABLE") || sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" ||
         sql.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [] };
@@ -45,6 +51,10 @@ class FakePg implements PgClientLike {
       return { rows: status ? [{ status }] : [] };
     }
     if (sql.startsWith("INSERT INTO tg_group_notices")) {
+      assert.match(sql, /WHERE EXISTS \(SELECT 1 FROM telegram_bot_claims/);
+      assert.equal(params[5], "123");
+      if (this.moveClaimAtInsert) this.botClaimHolder = `0x${"ab".repeat(20)}`;
+      if (this.botClaimHolder !== SHOGUN_TENANT) return { rows: [] };
       const key = `${params[0]}:${params[2]}`;
       if (this.notices.has(key)) return { rows: [] };
       this.notices.set(key, "claimed");
@@ -61,9 +71,12 @@ class FakePg implements PgClientLike {
 function harness() {
   const client = new FakePg();
   const calls: string[] = [];
+  const settingsState = { current: {
+    telegramBotToken: "123:secret", telegramEnabled: true, telegramGroupsEnabled: true,
+  } as MerrymenSettings };
   const settings = { get: async (tenant: `0x${string}`) => {
     assert.equal(tenant, SHOGUN_TENANT);
-    return { telegramBotToken: "123:secret", telegramEnabled: true, telegramGroupsEnabled: true } as MerrymenSettings;
+    return settingsState.current;
   } };
   const deps = {
     client, campaignId: ID, body: BODY, settings, dek: DEK, env: {},
@@ -71,7 +84,7 @@ function harness() {
     inspectChat: async (_opts: unknown, id: number) => { calls.push("chat"); return { chat: { id, title: RECOVERY_ROOM_TITLE, type: "supergroup" as const, isForum: false } }; },
     send: async (_opts: unknown, id: number, text: string, _extra?: unknown) => { calls.push("send"); assert.equal(id, CHAT_ID); assert.equal(text, BODY); return { ok: true, messageId: 123 }; },
   };
-  return { client, calls, deps };
+  return { client, calls, settingsState, deps };
 }
 
 test("dry run lists only approved Shogun rooms titled Merrymen and contacts no Telegram endpoint", async () => {
@@ -127,9 +140,60 @@ test("current bot, chat and tenant identity must all match before a claim", asyn
     inspectBot: async () => ({ bot: { id: 123, username: "Other_bot", isBot: true } }),
   })).status, "refused");
   assert.equal((await runTgGroupRecoveryNotice({ ...options,
+    inspectBot: async () => ({ bot: { id: 999, username: SHOGUN_BOT_USERNAME, isBot: true } }),
+  })).status, "refused");
+  assert.equal((await runTgGroupRecoveryNotice({ ...options,
     inspectChat: async () => ({ chat: { id: CHAT_ID, title: "Other room", type: "supergroup", isForum: false } }),
   })).status, "refused");
   assert.equal(client.notices.size, 0);
+});
+
+test("missing or moved durable bot claim blocks even a dry-run candidate", async () => {
+  const { client, calls, deps } = harness();
+  client.botClaimHolder = null;
+  assert.equal((await runTgGroupRecoveryNotice(deps)).status, "refused");
+  client.botClaimHolder = `0x${"ab".repeat(20)}`;
+  assert.equal((await runTgGroupRecoveryNotice(deps)).status, "refused");
+  assert.deepEqual(calls, []);
+  assert.equal(client.notices.size, 0);
+});
+
+test("settings, token and operator switch are checked again after Telegram responds", async () => {
+  for (const change of ["groups", "telegram", "token", "switch"] as const) {
+    const { client, calls, settingsState, deps } = harness();
+    const env: Record<string, string | undefined> = {};
+    const out = await runTgGroupRecoveryNotice({ ...deps, env, selectedChatId: CHAT_ID, confirmCampaignId: ID,
+      inspectChat: async () => {
+        if (change === "groups") settingsState.current.telegramGroupsEnabled = false;
+        if (change === "telegram") settingsState.current.telegramEnabled = false;
+        if (change === "token") settingsState.current.telegramBotToken = "123:new-secret";
+        if (change === "switch") env.MERRYMEN_TG_GROUPS = "0";
+        return { chat: { id: CHAT_ID, title: RECOVERY_ROOM_TITLE, type: "supergroup", isForum: false } };
+      },
+    });
+    assert.equal(out.status, "refused", change);
+    assert.equal(client.notices.size, 0, change);
+    assert.equal(calls.includes("send"), false, change);
+  }
+});
+
+test("bot claim moved during lookup or at the guarded insert blocks delivery", async () => {
+  const { client, calls, deps } = harness();
+  const opts = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID };
+  const duringLookup = await runTgGroupRecoveryNotice({ ...opts,
+    inspectChat: async () => {
+      client.botClaimHolder = `0x${"ab".repeat(20)}`;
+      return { chat: { id: CHAT_ID, title: RECOVERY_ROOM_TITLE, type: "supergroup", isForum: false } };
+    },
+  });
+  assert.equal(duringLookup.status, "refused");
+  assert.equal(client.notices.size, 0);
+  client.botClaimHolder = SHOGUN_TENANT;
+  client.moveClaimAtInsert = true;
+  const atInsert = await runTgGroupRecoveryNotice(opts);
+  assert.equal(atInsert.status, "refused");
+  assert.equal(client.notices.size, 0);
+  assert.equal(calls.includes("send"), false);
 });
 
 test("an owner switching groups off or removing approval prevents the notice", async () => {

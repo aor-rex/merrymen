@@ -2,11 +2,12 @@
  * One operator recovery notice in Shogun's own approved Telegram room.
  *
  * This never polls updates, changes a room approval or enters a trading path.
- * Dry run reads only Shogun's sealed settings and room state. A real send
+ * Dry run reads Shogun's sealed settings, current bot claim and room state. A real send
  * requires the campaign id twice and the exact numeric chat id, checks the
- * current bot and chat with Telegram, then writes an at-most-once claim before
- * contacting sendMessage. An interrupted/uncertain attempt stays claimed for
- * manual review; silently retrying it could post a duplicate apology.
+ * durable bot holder and the current bot and chat with Telegram, then writes
+ * an at-most-once claim before contacting sendMessage. An interrupted or
+ * uncertain attempt stays claimed for manual review; silently retrying it
+ * could post a duplicate apology.
  */
 import { createHash } from "node:crypto";
 import type { MerrymenSettings } from "../../packages/core/src/index";
@@ -15,6 +16,7 @@ import { mergeSettings } from "./settings";
 import { getSettingsStore } from "./settings-store";
 import { requireDek } from "./store-crypto";
 import { getChat, getMe, sendMessage } from "./telegram/api";
+import { botIdOf } from "./telegram/state";
 import { approvedTgRoomsForTenant } from "./tg-groups-ferry";
 
 export const SHOGUN_TENANT = "0x8e93bad5a60a266b4283855ceffa0979720aed72" as const;
@@ -33,7 +35,7 @@ export const TG_GROUP_NOTICE_DDL = `CREATE TABLE IF NOT EXISTS tg_group_notices 
 )`;
 
 // Distinct from the ferry's schema lock (1_297_692_120). Two orchestrator
-// replicas may run the campaign's dry run on the same deploy.
+// replicas may confirm a campaign on the same deploy.
 const NOTICE_SCHEMA_LOCK = 1_297_692_121;
 
 async function ensureNoticeSchema(client: PgClientLike): Promise<void> {
@@ -51,6 +53,21 @@ async function ensureNoticeSchema(client: PgClientLike): Promise<void> {
 type Room = { chatId: number; title: string; kind: string; isForum: boolean };
 type BotCheck = typeof getMe;
 type ChatCheck = typeof getChat;
+
+/** A missing, moved or unreadable claim is never permission to speak. */
+async function shogunHoldsBot(client: PgClientLike, botId: string): Promise<boolean> {
+  const { rows } = await client.query("SELECT tenant FROM telegram_bot_claims WHERE bot_id = $1", [botId]);
+  return rows.length === 1 && String(rows[0]?.tenant ?? "").toLowerCase() === SHOGUN_TENANT;
+}
+
+async function currentShogunGrant(client: PgClientLike): Promise<boolean> {
+  const account = await client.query(
+    `SELECT a.name AS name FROM grants g
+       JOIN agents a ON LOWER(a.smart_account) = LOWER(g.grant_json->>'smartAccount')
+      WHERE LOWER(g.tenant) = $1 LIMIT 1`, [SHOGUN_TENANT],
+  );
+  return account.rows.length === 1 && String(account.rows[0]?.name ?? "").trim().toLowerCase() === "shogun";
+}
 
 export interface TgGroupNoticeResult {
   dryRun: boolean;
@@ -97,18 +114,17 @@ export async function runTgGroupRecoveryNotice(opts: {
   const env = opts.env ?? process.env;
   if (env.MERRYMEN_TG_GROUPS?.trim() === "0") return refuse("operator group switch is off");
 
-  const settings = await (opts.settings ?? getSettingsStore()).get(SHOGUN_TENANT);
+  const settingsReader = opts.settings ?? getSettingsStore();
+  const settings = await settingsReader.get(SHOGUN_TENANT);
   if (!settings?.telegramBotToken) return refuse("Shogun has no stored bot token");
   const resolved = mergeSettings(settings, env);
   if (!resolved.telegramEnabled || !resolved.telegramGroupsEnabled) return refuse("Shogun has Telegram groups switched off");
   const token = settings.telegramBotToken;
+  const botId = botIdOf(token);
+  if (!botId) return refuse("Shogun's stored bot token is invalid");
+  if (!await shogunHoldsBot(opts.client, botId)) return refuse("Shogun does not hold the durable bot claim");
 
-  const account = await opts.client.query(
-    `SELECT a.name AS name FROM grants g
-       JOIN agents a ON LOWER(a.smart_account) = LOWER(g.grant_json->>'smartAccount')
-      WHERE LOWER(g.tenant) = $1 LIMIT 1`, [SHOGUN_TENANT],
-  );
-  if (account.rows.length !== 1 || String(account.rows[0]?.name ?? "").trim().toLowerCase() !== "shogun") {
+  if (!await currentShogunGrant(opts.client)) {
     return refuse("tenant has no current Shogun grant/account match");
   }
 
@@ -135,7 +151,8 @@ export async function runTgGroupRecoveryNotice(opts: {
 
   // These lookups never read updates, so they cannot steal the child's poll.
   const bot = await (opts.inspectBot ?? getMe)({ token });
-  if (!bot.bot?.isBot || bot.bot.username.toLowerCase() !== SHOGUN_BOT_USERNAME.toLowerCase()) {
+  if (!bot.bot?.isBot || String(bot.bot.id) !== botId ||
+      bot.bot.username.toLowerCase() !== SHOGUN_BOT_USERNAME.toLowerCase()) {
     return refuse("stored token does not identify Shogun's expected bot");
   }
   const chat = await (opts.inspectChat ?? getChat)({ token }, selected!);
@@ -150,15 +167,33 @@ export async function runTgGroupRecoveryNotice(opts: {
   if (!stillApproved?.some((r) => r.chatId === selected && r.title === RECOVERY_ROOM_TITLE && !r.isForum &&
     (r.kind === "group" || r.kind === "supergroup"))) return refuse("room approval changed before send");
 
+  // The network checks can take seconds. Settings and bot ownership are live
+  // owner decisions: do not send with a token or consent captured before them.
+  const freshSettings = await settingsReader.get(SHOGUN_TENANT);
+  if (!freshSettings?.telegramBotToken || freshSettings.telegramBotToken !== token) {
+    return refuse("Shogun's bot token changed before send");
+  }
+  if (env.MERRYMEN_TG_GROUPS?.trim() === "0") return refuse("operator group switch changed before send");
+  const freshResolved = mergeSettings(freshSettings, env);
+  if (!freshResolved.telegramEnabled || !freshResolved.telegramGroupsEnabled) {
+    return refuse("Shogun switched Telegram groups off before send");
+  }
+  if (!await currentShogunGrant(opts.client)) return refuse("Shogun's grant/account changed before send");
+  if (!await shogunHoldsBot(opts.client, botId)) return refuse("Shogun's bot claim changed before send");
+
   const now = opts.now ?? Date.now;
   const bodyHash = createHash("sha256").update(body).digest("hex");
   const claim = await opts.client.query(
     `INSERT INTO tg_group_notices (campaign_id, tenant, chat_id, body_sha256, status, claimed_at)
-     VALUES ($1, $2, $3, $4, 'claimed', $5)
+     SELECT $1, $2, $3, $4, 'claimed', $5
+       WHERE EXISTS (SELECT 1 FROM telegram_bot_claims WHERE bot_id = $6 AND LOWER(tenant) = $2)
      ON CONFLICT DO NOTHING RETURNING status`,
-    [id, SHOGUN_TENANT, selected, bodyHash, Math.floor(now() / 1000)],
+    [id, SHOGUN_TENANT, selected, bodyHash, Math.floor(now() / 1000), botId],
   );
-  if (claim.rows.length !== 1) return { ...out, status: "already-claimed" };
+  if (claim.rows.length !== 1) {
+    if (!await shogunHoldsBot(opts.client, botId)) return refuse("Shogun's bot claim changed during notice claim");
+    return { ...out, status: "already-claimed" };
+  }
 
   try {
     const sent = await (opts.send ?? sendMessage)({ token }, selected!, body, { disablePreview: true });

@@ -21,8 +21,10 @@ Review its claims immediately before a real send.
    Shogun/room state.
 3. Set `MERRYMEN_TG_RECOVERY_CHAT_ID` to **exactly** that negative numeric ID
    and `MERRYMEN_TG_RECOVERY_CONFIRM=recovery-2026-10-01`, then deploy. A real
-   send verifies the tenant's current grant/account name, Telegram settings,
-   bot username, current chat identity, and owner approval again. Both values
+   send verifies the tenant's current grant/account name, durable bot claim,
+   Telegram settings, bot ID and username, current chat identity, and owner
+   approval again. Settings and bot ownership are checked again after the
+   Telegram lookups and at the database notice claim. Both values
    are required; the campaign ID alone remains a dry run.
 4. Check the log outcome. `sent` means Telegram acknowledged the message.
    `already-claimed` means this campaign targeted the room before; it will not
