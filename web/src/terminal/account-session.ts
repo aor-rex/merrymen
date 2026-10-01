@@ -1,4 +1,5 @@
 import type { AccountState } from "./HostedControls";
+import type { ReadState } from "./live";
 import { requestJson } from "./request-json";
 
 type Session = AccountState["session"];
@@ -20,6 +21,12 @@ export function feedMatchesAccount(session: Session | null, feedTenant: string |
   if (feedTenant === undefined) return false;
   if (feedTenant === null) return session.address === null;
   return address(feedTenant) && session.address?.toLowerCase() === feedTenant.toLowerCase();
+}
+
+/** Wait for the first feed answer before treating a missing tenant as a mismatch. */
+export function accountFeedRead(session: Session | null, feedTenant: string | null | undefined, read: ReadState): ReadState {
+  if (read === "unread") return "unread";
+  return feedMatchesAccount(session, feedTenant) ? read : "unreadable";
 }
 
 /**

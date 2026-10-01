@@ -66,7 +66,7 @@ import {
   profileShown,
   realCashOf,
 } from "./account-read";
-import { feedMatchesAccount, readAccountForSession } from "./account-session";
+import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
 import { LoadFailure } from "./LoadFailure";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
@@ -463,9 +463,10 @@ export function App() {
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
-  // THE BOOK'S OWN READ, as it stands. It is on its own clock now, so "unread"
-  // means its first answer has not come back and nothing else — see live-clocks.ts.
-  const portfolioRead = ownerFeedReady ? live.reads.mine : "unreadable";
+  // The grants read can finish before the first feed read. In that window the
+  // feed has no tenant yet because it has no answer; keep its loading state.
+  // Once it answers, a wrong-tenant feed is never shown as this owner's book.
+  const portfolioRead = accountFeedRead(account?.session ?? null, live.feedTenant, live.reads.mine);
   /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
   const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 

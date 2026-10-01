@@ -1,10 +1,27 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { readAccountForSession } from "./account-session";
+import { accountFeedRead, readAccountForSession } from "./account-session";
 import type { AccountState } from "./HostedControls";
 
 const A: AccountState["session"] = { hosted: true, address: `0x${"a".repeat(40)}` };
 const B: AccountState["session"] = { hosted: true, address: `0x${"b".repeat(40)}` };
+
+describe("the owner's feed read after grants answers", () => {
+  it("keeps the loading state when grants wins the first-read race", () => {
+    assert.equal(accountFeedRead(A, undefined, "unread"), "unread");
+  });
+
+  it("shows a completed feed only when it belongs to the confirmed tenant", () => {
+    assert.equal(accountFeedRead(A, A.address, "ok"), "ok");
+    assert.equal(accountFeedRead(A, B.address, "ok"), "unreadable");
+    assert.equal(accountFeedRead(A, undefined, "ok"), "unreadable");
+  });
+
+  it("keeps failed feed reads failed", () => {
+    assert.equal(accountFeedRead(A, undefined, "unreadable"), "unreadable");
+    assert.equal(accountFeedRead(A, A.address, "unreadable"), "unreadable");
+  });
+});
 
 describe("account reads across a session change", () => {
   it("detects another tab's login before a failing grants request can retain the old tenant", async () => {
