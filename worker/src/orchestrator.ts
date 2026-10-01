@@ -6889,6 +6889,66 @@ async function runAnnouncementIfAsked(): Promise<void> {
   }
 }
 
+/** One Shogun-approved Merrymen room, dry-run unless campaign and exact chat id are confirmed. */
+async function runTgGroupRecoveryNoticeIfAsked(): Promise<void> {
+  const id = (process.env.MERRYMEN_TG_RECOVERY_ID ?? "").trim();
+  if (!id) return;
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+    log("tg recovery notice: invalid campaign id — refusing");
+    return;
+  }
+  if (!process.env.DATABASE_URL || !process.env.MERRYMEN_STORE_DEK) {
+    log("tg recovery notice: hosted database or store key missing — refusing");
+    return;
+  }
+  const rawChatId = (process.env.MERRYMEN_TG_RECOVERY_CHAT_ID ?? "").trim();
+  if (rawChatId && !/^-\d+$/.test(rawChatId)) {
+    log("tg recovery notice: chat id is not an exact negative number — refusing");
+    return;
+  }
+  const chatId = rawChatId ? Number(rawChatId) : null;
+  if (chatId !== null && !Number.isSafeInteger(chatId)) {
+    log("tg recovery notice: chat id is outside the safe integer range — refusing");
+    return;
+  }
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { runTgGroupRecoveryNotice } = await import("./tg-group-recovery-notice");
+    const body = readFileSync(path.resolve(ROOT, "docs/announcements", `tg-group-${id}.html`), "utf8");
+    // @ts-expect-error pg is runtime-only here, as in announce-cli.ts
+    const pg = (await import("pg")) as unknown as {
+      Client: new (c: { connectionString: string }) => {
+        query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+        connect(): Promise<void>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      const out = await runTgGroupRecoveryNotice({
+        client, campaignId: id, body, selectedChatId: chatId,
+        confirmCampaignId: (process.env.MERRYMEN_TG_RECOVERY_CONFIRM ?? "").trim(),
+      });
+      // Approved metadata only: the sealed state also holds private chat
+      // history, which the notice path never returns or logs.
+      log(`tg recovery notice ${id}: ${out.status}${out.dryRun ? " (DRY RUN — nothing sent)" : ""} · ${out.rooms.length} approved Merrymen room(s)`);
+      for (const room of out.rooms) log(`tg recovery notice ${id}: candidate chat ${room.chatId} · ${room.title} · ${room.kind}${room.isForum ? " · forum" : ""}`);
+      if (out.reason) log(`tg recovery notice ${id}: ${out.reason}`);
+      if (out.dryRun) {
+        for (const line of out.body.split("\n")) log(`tg recovery notice ${id}: prepared | ${line}`);
+        log(`tg recovery notice ${id}: to send, set MERRYMEN_TG_RECOVERY_CHAT_ID to exactly one candidate id and MERRYMEN_TG_RECOVERY_CONFIRM=${id}`);
+      }
+    } finally {
+      await client.end();
+    }
+  } catch {
+    // pg/fetch exceptions can embed URLs and tokens. The status alone is safe
+    // for deployment logs; troubleshoot inside the service without printing it.
+    log(`tg recovery notice ${id}: failed; nothing sent unless an at-most-once claim was recorded`);
+  }
+}
+
 async function runIdentityAuditIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_IDENTITY_AUDIT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -8357,7 +8417,10 @@ export async function runOrchestrator(): Promise<void> {
       // operator who sets the variable and redeploys is watching the log now,
       // and a dry run that appears twenty minutes later reads as nothing having
       // happened. It is idempotent, so running early costs nothing.
-      if (cohortPasses === 1) await runAnnouncementIfAsked();
+      if (cohortPasses === 1) {
+        await runAnnouncementIfAsked();
+        await runTgGroupRecoveryNoticeIfAsked();
+      }
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
