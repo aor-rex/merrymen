@@ -15,6 +15,7 @@ import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, typ
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { requestJson, RetryButton, SignIn, type AccountState } from "../HostedControls";
+import { fetchAccountForSession } from "../account-session";
 import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
@@ -55,7 +56,7 @@ const EXAMPLES:Record<string,string>={
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
 };
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
-export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
+export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onSignedIn,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
   const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
@@ -124,13 +125,13 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   // A FAILED READ IS NOT A SLOW ONE. Both leave `account` null, and this line
   // said "Loading your account…" for either — for ever, after a failure, with
   // nothing to press. See AccountEntry.
-  if(!account)return accountFailed
+  if(!account || accountFailed)return accountFailed
     ? <section className="create-agent"><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
-  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onRefresh}/></section>;
+  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onSignedIn}/></section>;
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
   async function create() {
-    if(busy || grant)return;
+    if(busy || grant || !account)return;
     // WAS `validAmount`, which took a dot decimal and nothing else — while the
     // field above is `inputMode="decimal"`, which renders a COMMA key on a
     // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
@@ -162,14 +163,20 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     if(!paper&&!ack){setError(t("create.errAck"));return;}
     setBusy(true);setError("");
     try {
-      const current=await requestJson<AccountState["status"]>("/api/grants");
-      if(current.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
+      // The account prop may have been loaded before another tab changed login.
+      // Confirm this tenant and its no-agent status before any settings write.
+      const current=await fetchAccountForSession(account.session);
+      if(current.kind!=="ready"){
+        onRefresh();
+        throw new Error("We couldn't confirm your account. Try again after it reloads.");
+      }
+      if(current.account.status.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
       const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
       const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
       // The market answers ride the settings write that was already happening —
       // one round trip, not four.
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
        * undo the whole point of the step.

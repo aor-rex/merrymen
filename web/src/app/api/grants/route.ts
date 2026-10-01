@@ -46,6 +46,8 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 
 export interface AgentStatus {
   exists: boolean;
+  /** Hosted GET only: the authenticated tenant this status was read for. */
+  tenant?: `0x${string}` | null;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
@@ -449,11 +451,11 @@ export async function DELETE(req: Request) {
 
 export async function GET(req: Request) {
   let grant: StoredGrant;
-  if (isHostedMode()) {
-    const tenant = tenantOf(req);
-    if (!tenant) return NextResponse.json({ exists: false } satisfies AgentStatus);
-    const g = await getGrantStore().get(tenant);
-    if (!g) return NextResponse.json({ exists: false } satisfies AgentStatus);
+  const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
+  if (hostedTenant !== undefined) {
+    if (!hostedTenant) return NextResponse.json({ exists: false, tenant: null } satisfies AgentStatus);
+    const g = await getGrantStore().get(hostedTenant);
+    if (!g) return NextResponse.json({ exists: false, tenant: hostedTenant } satisfies AgentStatus);
     grant = g;
   } else {
     try {
@@ -541,6 +543,8 @@ export async function GET(req: Request) {
 
   const status: AgentStatus = {
     exists: true,
+    // From the verified cookie, never a browser-declared owner or grant field.
+    ...(hostedTenant !== undefined ? { tenant: hostedTenant } : {}),
     grant: publicGrant,
     balances,
     workerAliveAt,

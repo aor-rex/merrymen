@@ -121,7 +121,8 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(shows(wallet, `<button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding}>`));
   // Through /api/grants/discard, which removes it as DELETE /api/grants does and
   // queues the paper reset from it (lib/start-over.ts).
-  assert.ok(wallet.includes(`fetch("/api/grants/discard", { method: "POST", keepalive: true })`), "discard deletes the server-side grant");
+  assert.ok(wallet.includes(`fetch("/api/grants/discard", { method: "POST", keepalive: true,`), "discard sends one keepalive server request");
+  assert.ok(wallet.includes(`body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined })`), "discard binds the request to the verified hosted tenant");
   const startOver = source("web/src/app/api/grants/discard/route.ts");
   assert.ok(startOver.includes("remove: () => getGrantStore().remove(tenant)") && startOver.includes("remove: removeSelfHostedGrant"), "on both deployments");
 

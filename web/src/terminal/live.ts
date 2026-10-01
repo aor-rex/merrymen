@@ -332,6 +332,8 @@ export interface LiveState {
   agents: LiveAgent[];
   theses: Thesis[];
   mine: FeedMine | null;
+  /** Hosted /api/feed tenant; undefined means an unbound or self-hosted feed. */
+  feedTenant?: string | null;
   /**
    * How many accounts the leaderboard folded into a count instead of a row, or
    * null when it could not tell (or did not say). The board prints the count
@@ -502,6 +504,7 @@ export function seedLive(): LiveState {
     agents: [],
     theses: [],
     mine: null,
+    feedTenant: undefined,
     retired: null,
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
@@ -940,6 +943,7 @@ export function liveOf(s: LiveSources): LiveState {
     agents,
     theses,
     mine,
+    feedTenant: feed?.tenant,
     // THE ROWS THE BOARD FOLDED, which this dropped: the fold shipped, the
     // count did not reach a screen, and folded agents left the board without
     // a word. A number only when the server sent one.
@@ -1422,6 +1426,7 @@ interface Disc {
 }
 
 interface Feed {
+  tenant?: string | null;
   /** "none" means the ledger could not be read — see readStateOf. */
   source?: string;
   /**

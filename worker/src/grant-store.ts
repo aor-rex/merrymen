@@ -268,6 +268,26 @@ export class FileGrantStore implements GrantStore {
 /** The slice of a pg client this store uses. Kept minimal so `pg` is a runtime-only dep. */
 interface PgClientLike {
   query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  end?(): Promise<void>;
+  on?(event: "error" | "end", cb: () => void): void;
+}
+
+/** Opens a grant-store connection. A test can supply a stand-in for a refused connection. */
+export type PgGrantConnect = (url: string) => Promise<PgClientLike>;
+
+async function connectPgGrant(url: string): Promise<PgClientLike> {
+  // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
+  const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
+    Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
+  };
+  const c = new pg.Client({ connectionString: url });
+  try {
+    await c.connect();
+    return c;
+  } catch (e) {
+    await Promise.resolve().then(() => c.end?.()).catch(() => {});
+    throw e;
+  }
 }
 
 /**
@@ -286,35 +306,49 @@ interface PgClientLike {
  */
 export class PgGrantStore implements GrantStore {
   private ready: Promise<PgClientLike> | null = null;
-  constructor(private url: string) {
+  constructor(private url: string, private connect: PgGrantConnect = connectPgGrant) {
     requireDek(); // fail fast: hosted Postgres without a DEK is a plaintext-at-rest bug
   }
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
-      this.ready = (async () => {
-        // pg is a RUNTIME-only dependency (installed on the hosted deploy, not
-        // in this repo). The webpackIgnore comment stops Next's bundler from
-        // trying to resolve it at build — the file backend must build with pg
-        // absent — and it is loaded only here, only when DATABASE_URL selected
-        // this backend. The Postgres path is gated on a live integration test
-        // before any deploy (docs/hosted-platform-plan.md).
-        // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
-        const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
-          Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
+      const started = (this.ready = (async () => {
+        const c = await this.connect(this.url);
+        let alive = true;
+        const lost = () => {
+          alive = false;
+          if (this.ready === started) this.ready = null;
         };
-        const c = new pg.Client({ connectionString: this.url });
-        await c.connect();
-        await c.query(
-          `CREATE TABLE IF NOT EXISTS grants (
-             tenant TEXT PRIMARY KEY,
-             chain_id INTEGER NOT NULL,
-             grant_json JSONB NOT NULL,
-             sealed_session_key TEXT NOT NULL,
-             updated_at BIGINT NOT NULL
-           )`,
-        );
+        // A once-healthy connection can also end after a database restart.
+        // Make the next request reconnect; the request that lost it still fails.
+        c.on?.("error", () => {
+          lost();
+          void Promise.resolve().then(() => c.end?.()).catch(() => {});
+        });
+        c.on?.("end", lost);
+        try {
+          await c.query(
+            `CREATE TABLE IF NOT EXISTS grants (
+               tenant TEXT PRIMARY KEY,
+               chain_id INTEGER NOT NULL,
+               grant_json JSONB NOT NULL,
+               sealed_session_key TEXT NOT NULL,
+               updated_at BIGINT NOT NULL
+             )`,
+          );
+          if (!alive) throw new Error("grant store connection ended during setup");
+        } catch (e) {
+          // A failed CREATE must not leave a connection open on every retry.
+          await Promise.resolve().then(() => c.end?.()).catch(() => {});
+          throw e;
+        }
         return c;
-      })();
+      })());
+      // A refused first connection is not the answer for every subsequent
+      // account read (or orchestrator reconcile) for the process's lifetime.
+      // The next independent call retries; no failed financial write is replayed.
+      started.catch(() => {
+        if (this.ready === started) this.ready = null;
+      });
     }
     return this.ready;
   }

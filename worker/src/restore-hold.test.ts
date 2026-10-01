@@ -139,6 +139,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
+      "standDownLostLeasesNow",
       "watchHolder",
     ]);
   });
@@ -193,8 +194,13 @@ describe("held tenants reach only the loops they belong in", () => {
 
   it("EVERY STAND-DOWN STANDS A HOLD PROCESS DOWN TOO", () => {
     const rec = fn("reconcile").body!.getText();
-    // The lease loss.
-    assert.match(rec, /if \(children\.has\(tenant\)\) killChild\(tenant\);\s*(\/\/[^\n]*\n\s*)*standDownHolder\(tenant\);/);
+    // The lease loss now runs immediately on the socket callback, with
+    // reconcile repeating it as a fallback. Both process types are signaled.
+    assert.match(rec, /standDownLostLeasesNow\(\);/);
+    const leaseLoss = fn("standDownLostLeasesNow").body!.getText();
+    assert.match(leaseLoss, /for \(const \[tenant, lease\] of \[\.\.\.leases\]\)/);
+    assert.ok(leaseLoss.indexOf("killChild(tenant)") >= 0 && leaseLoss.indexOf("killChild(tenant)") < leaseLoss.indexOf("standDownHolder(tenant)"));
+    assert.match(leaseLoss, /standDownHolder\(tenant\);/);
     // The kill switch, with the home.
     const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
     assert.ok(kill && /rmSync\(childHome\(tenant\)/.test(kill.statement.getText()) && /wanted\.has\(tenant\)/.test(kill.statement.getText()));

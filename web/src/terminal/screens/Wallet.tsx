@@ -45,6 +45,7 @@ import {
   type SavedWallet,
 } from "@/lib/session";
 import { SignOut } from "../SignOut";
+import { fetchAccountForSession } from "../account-session";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
@@ -414,6 +415,9 @@ export default function GrantPage() {
   // deletes the server file but not this localStorage — so the dashboard shows
   // "no merryman" while this page would happily show a wallet the worker ignores.
   const [serverArmed, setServerArmed] = useState<boolean | null>(null);
+  const [accountReadFailed, setAccountReadFailed] = useState(false);
+  const [accountReadVersion, setAccountReadVersion] = useState(0);
+  const accountReadGeneration = useRef(0);
   /** {hosted,address} from /api/auth/session. null until it resolves. */
   const [session, setSession] = useState<{ hosted: boolean; address: `0x${string}` | null } | null>(null);
   /** Every agent account this browser holds a key for — current and superseded. */
@@ -447,8 +451,9 @@ export default function GrantPage() {
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
 
   useEffect(() => {
+    let active = true;
+    const generation = ++accountReadGeneration.current;
     const stored = loadGrant();
-    setGrant(stored);
     setSavedWallets(listSavedWallets());
     // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
     // SELECTED chain (so the page cannot lie), which makes this sync load-
@@ -463,11 +468,21 @@ export default function GrantPage() {
       setCapText({});
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
-    fetch("/api/grants")
-      .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant }) => {
-        setServerArmed(!!s.exists);
-        if (s.exists && !stored) {
+    void fetchAccountForSession(null)
+      .then((result) => {
+        if (!active || generation !== accountReadGeneration.current) return;
+        if (result.kind !== "ready") throw result.kind === "changed" ? new Error("Account changed while loading.") : result.error;
+        const { session: verifiedSession } = result.account;
+        const s = result.account.status as { exists: boolean; gasSponsored?: boolean | null; grant?: Grant };
+        // A browser's saved key may belong to a different hosted login. Keep it
+        // for recovery, but never display or sign it as this tenant's agent.
+        const trustedStored = !verifiedSession.hosted ? stored :
+          s.exists && stored && s.grant?.smartAccount?.toLowerCase() === stored.smartAccount.toLowerCase() ? stored : null;
+        setGrant(trustedStored);
+        setSession({ hosted: verifiedSession.hosted, address: verifiedSession.address as `0x${string}` | null });
+        setServerArmed(s.exists);
+        setAccountReadFailed(false);
+        if (s.exists && !trustedStored) {
           /**
            * A SECOND BROWSER IS NOT A LOST WALLET.
            *
@@ -548,18 +563,7 @@ export default function GrantPage() {
         }
         setGasSponsored(s.gasSponsored === true);
       })
-      .catch(() => setServerArmed(null));
-    // THE ONLY TRUSTWORTHY hosted signal on the client. isHostedMode() reads
-    // process.env, which Next does not inline into the browser bundle, so it is
-    // false in every browser regardless of how the server is configured. Left
-    // null until this resolves, and creating is blocked meanwhile — signing with
-    // the wrong assumption mints a grant the server will refuse.
-    fetch("/api/auth/session", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((s: { hosted?: boolean; address?: string | null } | null) =>
-        setSession(s ? { hosted: !!s.hosted, address: (s.address ?? null) as `0x${string}` | null } : null),
-      )
-      .catch(() => setSession(null));
+      .catch(() => { if (active && generation === accountReadGeneration.current) { setServerArmed(null); setSession(null); setGrant(null); setAccountReadFailed(true); } });
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
@@ -585,10 +589,30 @@ export default function GrantPage() {
         setCustomTokens([]);
         setBasketSymbols([]);
       });
-  }, []);
+    return () => { active = false; };
+  }, [accountReadVersion]);
+
+  async function verifyCurrentAccount() {
+    const expected = session;
+    const generation = accountReadGeneration.current;
+    if (serverArmed === null || !expected) throw new Error("We couldn't confirm this account. Try again after it reloads.");
+    const result = await fetchAccountForSession(expected);
+    if (generation !== accountReadGeneration.current || result.kind !== "ready" ||
+        (grant && result.account.status.exists &&
+          result.account.status.grant?.smartAccount?.toLowerCase() !== grant.smartAccount.toLowerCase())) {
+      accountReadGeneration.current++;
+      setServerArmed(null);
+      setSession(null);
+      setGrant(null);
+      setAccountReadFailed(true);
+      throw new Error("This account changed. Check the wallet again before signing or discarding.");
+    }
+    return result.account;
+  }
 
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
+    try { await verifyCurrentAccount(); } catch (e) { setError(e instanceof Error ? e.message : "Could not confirm this account."); return; }
     const stored = loadGrant();
     if (!stored) {
       // THE BUTTON THAT DID NOTHING, second edition. Re-arming re-POSTs the
@@ -756,6 +780,7 @@ export default function GrantPage() {
     }
     setStatus("starting…");
     try {
+      await verifyCurrentAccount();
       const { local: g, handoff } = await createAgentWallet({
         caps,
         onStatus: setStatus,
@@ -809,6 +834,7 @@ export default function GrantPage() {
     setRenewed(false);
     setStatus("starting…");
     try {
+      await verifyCurrentAccount();
       const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
         caps,
         onStatus: setStatus,
@@ -881,6 +907,7 @@ export default function GrantPage() {
     setStatus("checking your permission…");
     setRenewing(true);
     try {
+      await verifyCurrentAccount();
       const priorTrencher = grantTrencher(grant);
       if (priorTrencher && (!autonomousTrencher || chainId !== grant.chainId || (TRENCHER_FACTORY && TRENCHER_FACTORY.toLowerCase() !== priorTrencher.factory))) {
         const client = createPublicClient({chain: grant.chainId === MAINNET ? robinhoodChain : robinhoodTestnet, transport: http()});
@@ -1063,7 +1090,9 @@ export default function GrantPage() {
     setDiscarding(true);
     setError(null);
     try {
-      const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true });
+      const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined }) });
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
         setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
@@ -1193,6 +1222,25 @@ export default function GrantPage() {
   const hasGrantRef = useRef(false);
   hasGrantRef.current = grant !== null;
   useEffect(() => {
+    // Returning from another tab may mean the hosted cookie now belongs to a
+    // different owner. Remove the old signing surface before re-reading it.
+    const revalidate = () => {
+      accountReadGeneration.current++;
+      setServerArmed(null);
+      setSession(null);
+      setGrant(null);
+      setAccountReadFailed(false);
+      setAccountReadVersion((n) => n + 1);
+    };
+    const visible = () => { if (document.visibilityState === "visible") revalidate(); };
+    window.addEventListener(SIGNED_IN_EVENT, revalidate);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener(SIGNED_IN_EVENT, revalidate);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, []);
+  useEffect(() => {
     const again = () => {
       let lastAt: number | null = null;
       try {
@@ -1213,6 +1261,22 @@ export default function GrantPage() {
   }, []);
   const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
+
+  // An HTTP error cannot establish that the server discarded this wallet.
+  // Hide server actions until the authenticated status is known, but keep
+  // locally saved recovery keys available during an outage. They need no DB.
+  if (serverArmed === null) return <AppShell><PageHeader title="Wallet & permissions" />
+    <section className="grant-shell" role="status">
+      {accountReadFailed ? <><h1>Couldn&rsquo;t check your agent</h1><p>We can&rsquo;t confirm this wallet&rsquo;s status right now.</p>
+        <button className="flow-secondary" type="button" onClick={() => { accountReadGeneration.current++; setAccountReadFailed(false); setAccountReadVersion((n) => n + 1); }}>Try again</button></>
+        : <p>Checking your agent…</p>}
+      {savedWallets.length > 0 && <div className="saved-wallets">
+        <h2>Wallets saved in this browser</h2>
+        <p>These recovery keys are stored on this device and remain available while the service is down.</p>
+        {savedWallets.map((w) => <WalletRow key={w.smartAccount} w={w} />)}
+      </div>}
+    </section>
+  </AppShell>;
 
   return (
     /*
