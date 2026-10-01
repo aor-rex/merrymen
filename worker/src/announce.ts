@@ -182,7 +182,7 @@ async function ensureAnnouncementAttempts(client: PgClientLike): Promise<void> {
     // Two orchestrator replicas may run the one-shot on the same deployment.
     // Postgres can report a catalog conflict even for IF NOT EXISTS when both
     // create a table concurrently. Accept only a table that now exists.
-    if (!["23505", "42P07", "42710"].includes(String((e as { code?: unknown }).code))) throw e;
+    if (!["23505", "42P07", "42710"].includes(String((e as { code?: unknown } | null)?.code))) throw e;
     const probe = await client.query("SELECT to_regclass('announcement_attempts') AS table_name");
     if (!probe.rows[0]?.table_name) throw e;
   }
@@ -191,7 +191,10 @@ async function ensureAnnouncementAttempts(client: PgClientLike): Promise<void> {
 /** The outage notice has no cached per-agent status line. */
 export const RECOVERY_ANNOUNCE_ID = "recovery-2026-10-01";
 
-/** Approve the exact rendered payload, rather than a reusable campaign name. */
+/** Approve the exact source body or prepared-body set, rather than a reusable campaign name.
+ * Older generic campaigns may append a live blocker line after this digest;
+ * the recovery campaign disables that line, so its digest covers all sent text.
+ */
 export function announcementConfirmation(
   announceId: string,
   payload: string,
