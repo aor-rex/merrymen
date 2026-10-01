@@ -6,7 +6,6 @@ import {
 import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { readDeploymentManifest, recordDeployment } from "../scripts/lib/deployment-manifest";
 
@@ -46,19 +45,22 @@ describe("deployment manifest persistence", () => {
     const children: ChildProcess[] = [];
     let finished = 0;
     const source = `
-      import { readDeploymentManifest, recordDeployment } from ${JSON.stringify(pathToFileURL(path.resolve(__dirname, "../scripts/lib/deployment-manifest.ts")).href)};
+      const { readDeploymentManifest, recordDeployment } = require(${JSON.stringify(path.resolve(__dirname, "../scripts/lib/deployment-manifest.ts"))});
       const [file, chain, contract] = process.argv.slice(1);
-      readDeploymentManifest(file); // Every child starts with the same stale snapshot.
-      process.send({ ready: true });
-      await recordDeployment(file, Number(chain), contract, { address: contract });
-      process.disconnect();
+      (async () => {
+        readDeploymentManifest(file); // Every child starts with the same stale snapshot.
+        process.send({ ready: true });
+        await recordDeployment(file, Number(chain), contract, { address: contract });
+        process.disconnect();
+      })().catch((error) => { console.error(error); process.exit(1); });
     `;
     const ready: Promise<void>[] = [];
     const done: Promise<void>[] = [];
     try {
       for (const [chain, contract] of [["4663", "V4SelfSwap"], ["4663", "PonsSelfTrade"], ["46630", "V4SelfSwap"]]) {
-        const child = spawn(process.execPath, ["--import", require.resolve("tsx"), "--input-type=module", "-e", source, file, chain!, contract!],
-          { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+        // The contracts-only CI install includes ts-node, not the root's tsx.
+        const child = spawn(process.execPath, ["--require", require.resolve("ts-node/register"), "-e", source, file, chain!, contract!],
+          { cwd: path.resolve(__dirname, ".."), stdio: ["ignore", "ignore", "pipe", "ipc"] });
         children.push(child);
         let stderr = "";
         child.stderr!.on("data", (chunk) => { stderr += String(chunk); });
