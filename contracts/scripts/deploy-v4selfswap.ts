@@ -17,10 +17,10 @@
  * the signature, so the setting alone changes nothing.
  */
 import hre from "hardhat";
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { formatEther, getContractAddress, type Hex } from "viem";
 import { V4_POOL_MANAGER, v4DeploymentBuild, verifyV4Runtime } from "./lib/v4-build";
+import { readDeploymentManifest, recordDeployment } from "./lib/deployment-manifest";
 import { claimDeploymentAttempt } from "./lib/deployment-attempt";
 
 /**
@@ -51,8 +51,8 @@ async function main() {
   }
 
   const manifest = path.join(hre.config.paths.root, "deployments.json");
-  const book = JSON.parse(readFileSync(manifest, "utf8"));
-  if (book[String(chainId)]?.V4SelfSwap) {
+  const book = readDeploymentManifest(manifest);
+  if (Object.hasOwn(book[String(chainId)] ?? {}, "V4SelfSwap")) {
     throw new Error("A V4SelfSwap deployment is already recorded for this chain. Verify/reuse it; do not silently replace it.");
   }
   const build = await v4DeploymentBuild(hre, POOL_MANAGER);
@@ -111,17 +111,13 @@ async function main() {
   if (bound.toLowerCase() !== POOL_MANAGER.toLowerCase()) {
     throw new Error(`adapter is bound to ${bound}, expected ${POOL_MANAGER} — do NOT use this deployment.`);
   }
-  const chain = book[String(chainId)] ?? {};
-  book[String(chainId)] = { ...chain, V4SelfSwap: {
+  await recordDeployment(manifest, chainId, "V4SelfSwap", {
     address, transactionHash: hash, blockNumber: receipt.blockNumber.toString(),
     deployedAt: new Date().toISOString(), codeBytes: (code!.length - 2) / 2,
     poolManager: POOL_MANAGER, runtimeHash: build.runtimeHash,
     compiler: build.compiler, compilerInputSha256: build.compilerInputSha256,
     optimizer: build.optimizer, evmVersion: build.evmVersion,
-  } };
-  const temporary = `${manifest}.${process.pid}.tmp`;
-  writeFileSync(temporary, JSON.stringify(book, null, 2) + "\n", { flag: "wx" });
-  renameSync(temporary, manifest);
+  });
 
   console.log("");
   console.log(`✓ V4SelfSwap deployed at ${address}`);

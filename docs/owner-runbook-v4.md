@@ -73,6 +73,11 @@ deployment. Inspect the recorded transaction, or the deployer nonce and expected
 address when the hash is absent, before any manual recovery. Do not remove an
 uncertain attempt just to retry.
 
+All shared manifest writers serialize their final read/merge/write through
+`deployments.json.lock`. A process crash may leave that lock behind. Inspect
+whether a writer is still running and preserve its attempt/transaction evidence
+before manual recovery; the tools never steal an old lock automatically.
+
 For testnet, use `prepare:v4:testnet` and `deploy:v4:testnet` and verify chain
 46630 separately. Testnet gas is available from
 https://faucet.testnet.chain.robinhood.com. The addresses may match or differ;
