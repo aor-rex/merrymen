@@ -24,40 +24,69 @@ indexes those). Without a key, discovery stays silently off.
 - Paste it into `/settings` → `bitqueryApiKey`. Confirm that
   `discoveryEnabled` is on for your account.
 
-## Step 2 — Deploy the adapter (twice)
+## Step 2 — Verify a shared adapter, or deploy once per chain
 
-Deployment spends real gas from a real key, so it is yours to run. The key is
-read from the environment and is not printed by the script; the script does
-print public addresses and the deployer's ETH balance.
+One `V4SelfSwap` contract can serve every Merrymen account on the same chain:
+its payer and recipient are always the caller. Hosted users do not need a
+separate deployment. The platform operator should provide a verified address;
+a user then saves it and signs their own permission. Re-signing while the
+address is missing cannot add v4 permission.
 
-In PowerShell, from `contracts/`:
+Check `contracts/deployments.json` first. A recorded address must still be
+verified on its stated chain against the reviewed contract runtime. Never use
+a mainnet address as proof of a testnet deployment, or vice versa.
 
-```powershell
-$env:MERRYMEN_DEPLOYER_PRIVATE_KEY = "0x…"   # a funded EOA; close this shell after
-npx hardhat run scripts/deploy-v4selfswap.ts --network robinhoodTestnet
-npx hardhat run scripts/deploy-v4selfswap.ts --network robinhood
+From `contracts/`, prepare an unsigned mainnet deployment without any key:
+
+```sh
+npm run prepare:v4:mainnet
 ```
 
-- Testnet gas: free at https://faucet.testnet.chain.robinhood.com
-- Mainnet gas: a small amount of ETH on chain 4663.
-- The two runs may print different addresses. Check each address against its
-  actual chain; never use a testnet address in a mainnet grant.
-- The script refuses unknown chains, missing keys, and an address with no
-  PoolManager code. After deployment, it checks that the adapter has code and
-  that `poolManager()` returns the pinned PoolManager address. These checks do
-  not, by themselves, prove the deployed adapter's code identity.
-- Before saving or signing, independently verify that the deployed address is
-  **this repository's `V4SelfSwap` runtime**, built from the reviewed source
-  with the expected constructor argument, and that its immutable
-  `poolManager()` equals the **canonical PoolManager for that chain**. Cross-check
-  the PoolManager in `contracts/scripts/deploy-v4selfswap.ts` against
-  `packages/core/src/protocols.ts` and independently confirm the chain's
-  intended deployment. Compare deployed runtime bytecode with the
-  corresponding build after immutable substitution, or verify reproducible
-  source and constructor arguments on a trusted explorer. Merely finding
-  non-empty code or a matching `poolManager()` return value is insufficient.
-- Paste only the verified MAINNET adapter address into `/settings` → "v4 adapter
-  contract". Use the verified testnet address only for a testnet grant.
+This compiles the contract, checks chain 4663 and the pinned PoolManager's
+code, estimates gas, and writes a JSON review file. It sends no transaction.
+The file contains constructor data, compiler/input hashes, and expected full
+runtime after substituting the PoolManager immutable. The gas estimate can
+change and may exclude chain-specific data fees. Independently confirm the
+canonical PoolManager against [Uniswap's deployment table](https://developers.uniswap.org/docs/protocols/v4/deployments).
+
+If there is no existing verified adapter, the **operator** signs one deployment
+with their funded deployment wallet. Deployment spends ETH; a hosted user's
+renewal only signs permission. An owner-operated shell can run:
+
+```powershell
+$env:MERRYMEN_DEPLOYER_PRIVATE_KEY = "0x…"   # never send this key to another person
+npm run deploy:v4:mainnet
+Remove-Item Env:MERRYMEN_DEPLOYER_PRIVATE_KEY
+```
+
+The script uses the TypeScript loader required by this repository, refuses
+unknown chains or a missing PoolManager, prints the transaction hash, waits for
+success, compares **all** deployed runtime bytes (including the immutable), and
+checks `poolManager()`. Only then does it record the address, transaction,
+block, runtime hash, and compiler provenance in `contracts/deployments.json`.
+Before broadcasting, it creates an exclusive `deployments.v4-<chain>.attempt.json`
+journal with the deployer, nonce, and expected contract address. It adds the
+transaction hash as soon as available and retains the journal on any failure.
+A retry refuses to broadcast while that journal exists, even if receipt waiting
+or verification was interrupted. It also refuses to overwrite a recorded v4
+deployment. Inspect the recorded transaction, or the deployer nonce and expected
+address when the hash is absent, before any manual recovery. Do not remove an
+uncertain attempt just to retry.
+
+All shared manifest writers serialize their final read/merge/write through
+`deployments.json.lock`. A process crash may leave that lock behind. Inspect
+whether a writer is still running and preserve its attempt/transaction evidence
+before manual recovery; the tools never steal an old lock automatically.
+
+For testnet, use `prepare:v4:testnet` and `deploy:v4:testnet` and verify chain
+46630 separately. Testnet gas is available from
+https://faucet.testnet.chain.robinhood.com. The addresses may match or differ;
+verify each against its actual chain.
+
+Save the verified adapter in `/settings` → **v4 adapter contract** for the
+account that will sign. Setting only `MERRYMEN_V4_ADAPTER_ADDRESS` on the worker
+does not configure the hosted browser's signing settings or add permission to
+an existing grant. Complete step 4 once the correct address is saved.
 
 ## Step 3 — Name your memecoins
 
