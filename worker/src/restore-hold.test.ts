@@ -144,6 +144,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
+      "retireExpiredGrants",
       "retryHold",
       "runOrchestrator",
       "scheduleRestart",
@@ -254,11 +255,15 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.ok(childRefresh && childRefresh.getEnd() < release.getStart(), "after the children's refresh, which would strip the worker's own token");
   });
 
-  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER WANTED, AND ASKS THE GATE AGAIN", () => {
+  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER ELIGIBLE, AND ASKS THE GATE AGAIN", () => {
     const refresh = loopsOver(fn("reconcile"), "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
     assert.ok(refresh && ts.isBlock(refresh.statement));
     const first = refresh.statement.statements[0]!;
-    assert.equal(first.getText(), "if (!wanted.has(tenant)) continue;", "before its settings are written or its token claims a bot");
+    assert.equal(
+      first.getText(),
+      "if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;",
+      "a revoked or expired grant, including one still retiring, claims no bot before its settings are written",
+    );
     assert.match(refresh.statement.getText(), /if \(stored && stored\.paperTradingEnabled !== true\) \{\s*released\.push\(held\);/);
     // The same test spawnChild's gate makes, or the two would disagree about who is held.
     assert.ok(all(fn("spawnChild"), (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true").length === 1);
