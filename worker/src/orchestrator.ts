@@ -8419,10 +8419,8 @@ export async function runOrchestrator(): Promise<void> {
       // operator who sets the variable and redeploys is watching the log now,
       // and a dry run that appears twenty minutes later reads as nothing having
       // happened. It is idempotent, so running early costs nothing.
-      if (cohortPasses === 1) {
-        await runAnnouncementIfAsked();
-        await runTgGroupRecoveryNoticeIfAsked();
-      }
+      if (cohortPasses === 1) await runAnnouncementIfAsked();
+      if (cohortPasses === 1) await runTgGroupRecoveryNoticeIfAsked();
       if (cohortPasses === IDENTITY_AUDIT_AFTER_PASSES) await runIdentityAuditIfAsked();
       if (cohortPasses === COHORT_VET_AFTER_PASSES) {
         await runCohortVettingIfAsked();
