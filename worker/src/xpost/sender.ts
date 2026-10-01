@@ -49,20 +49,24 @@
  * returned: the answer is one short outcome code for the pass summary.
  */
 import type { Db } from "../db";
-import { createPost, refreshTokens, type FetchLike, type XApp } from "./client";
+import { createPost, readMentions, refreshTokens, type FetchLike, type XApp, type XReplyBatch, type XResult } from "./client";
 import {
+  cancelDisabledKind,
   claimPost,
   markFailed,
   markPosted,
   markRevoked,
   readMeta,
   readTokens,
+  repliesEnabledFor,
+  replyTargetFor,
   reschedulePost,
   swapTokens,
   writeMeta,
   type StoredTokens,
   type TokenSetPlain,
   type XPost,
+  type XAccount,
 } from "./store";
 
 /** A token with less than this left is refreshed before it is used. */
@@ -97,6 +101,8 @@ export type SendOutcome =
 export interface SendDeps {
   fetch?: FetchLike;
   nowMs: number;
+  sinceId?: string;
+  startTimeMs?: number;
 }
 
 type Unsent = "revoked" | "retry" | "app";
@@ -106,7 +112,7 @@ type Fresh = { ok: true; tokens: StoredTokens } | { ok: false; outcome: Unsent }
  * A pair fresh enough to post with, refreshed and stored first when needed.
  * `force` refreshes even a token that looks fresh — X just refused it.
  */
-async function freshTokens(db: Db, dek: Buffer, app: XApp, post: XPost, from: StoredTokens, deps: SendDeps, force: boolean): Promise<Fresh> {
+async function freshTokens(db: Db, dek: Buffer, app: XApp, post: Pick<XPost, "tenant" | "xUserId">, from: StoredTokens, deps: SendDeps, force: boolean): Promise<Fresh> {
   const now = deps.nowMs;
   if (!force && from.accessExpiresAtMs - now >= REFRESH_WITHIN_MS) return { ok: true, tokens: from };
   if (!from.refreshToken) {
@@ -162,13 +168,54 @@ async function freshTokens(db: Db, dek: Buffer, app: XApp, post: XPost, from: St
  * still honoured and fresh — and, when X just refused a token, not that same
  * token again.
  */
-function usableWinner(winner: StoredTokens, from: StoredTokens, post: XPost, now: number): boolean {
+function usableWinner(winner: StoredTokens, from: StoredTokens, post: Pick<XPost, "tenant" | "xUserId">, now: number): boolean {
   return (
     winner.status === "ok" &&
     winner.xUserId === post.xUserId &&
     winner.accessExpiresAtMs - now >= REFRESH_WITHIN_MS &&
     winner.accessToken !== from.accessToken
   );
+}
+
+/**
+ * Mentions use the same sealed token rotation/CAS as sends. The planner selects
+ * eligible direct comments; this read includes old threads so opt-outs cannot
+ * age out with buys.
+ */
+export async function readReplyComments(
+  db: Db, dek: Buffer, app: XApp,
+  account: Pick<XAccount, "tenant" | "xUserId">,
+  deps: SendDeps,
+): Promise<XResult<XReplyBatch>> {
+  const failed = (failure: "auth" | "app" | "uncertain" | "forbidden"): XResult<XReplyBatch> => ({ ok: false, failure, status: null });
+  try {
+    if (!(await repliesEnabledFor(db, account.tenant, account.xUserId))) return failed("forbidden");
+    const stored = await readTokens(db, dek, account.tenant);
+    if (!stored || stored.xUserId !== account.xUserId || stored.status !== "ok") return failed("auth");
+    const fresh = await freshTokens(db, dek, app, account, stored, deps, false);
+    const unsent = async (outcome: Unsent): Promise<XResult<XReplyBatch>> => {
+      if (outcome === "app") await writeMeta(db, APP_PAUSE_KEY, String(deps.nowMs + APP_PAUSE_MS), deps.nowMs);
+      return failed(outcome === "revoked" ? "auth" : outcome === "app" ? "app" : "uncertain");
+    };
+    if (!fresh.ok) return unsent(fresh.outcome);
+    let tokens = fresh.tokens;
+    const readNow = async (): Promise<XResult<XReplyBatch>> => {
+      if (!(await repliesEnabledFor(db, account.tenant, account.xUserId))) return failed("forbidden");
+      return readMentions(tokens.accessToken, account.xUserId, { fetch: deps.fetch, nowMs: deps.nowMs, sinceId: deps.sinceId, startTimeMs: deps.startTimeMs });
+    };
+    let answer = await readNow();
+    if (!answer.ok && answer.failure === "auth") {
+      const again = await freshTokens(db, dek, app, account, tokens, deps, true);
+      if (!again.ok) return unsent(again.outcome);
+      tokens = again.tokens;
+      answer = await readNow();
+      if (!answer.ok && answer.failure === "auth") await markRevoked(db, account.tenant, tokens.version, deps.nowMs);
+    }
+    if (!answer.ok && answer.failure === "credits") await writeMeta(db, PAUSE_KEY, String(deps.nowMs + CREDITS_PAUSE_MS), deps.nowMs);
+    return answer;
+  } catch {
+    return failed("uncertain");
+  }
 }
 
 /**
@@ -197,13 +244,30 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     if (!first.ok) return settleUnsent(db, post, first.outcome, now);
 
     let tokens = first.tokens;
-    let answer = await createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now });
+    // Targets are read from storage, never trusted from the in-memory queue.
+    // Recheck after refresh too: an owner or recipient may opt out in flight.
+    const postNow = async () => {
+      if (await cancelDisabledKind(db, post.id, now)) return null;
+      const target = post.kind === "reply" ? await replyTargetFor(db, post) : null;
+      if (post.kind === "reply" && !target) return null;
+      return createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now,
+        ...(target ? { replyToTweetId: target.replyToTweetId } : {}) });
+    };
+    let answer = await postNow();
+    if (!answer) {
+      await markFailed(db, post.id, "reply-ineligible", now);
+      return "cancelled";
+    }
     if (!answer.ok && answer.failure === "auth") {
       // X refused the token and did nothing. One forced refresh, one retry.
       const again = await freshTokens(db, dek, app, post, tokens, deps, true);
       if (!again.ok) return settleUnsent(db, post, again.outcome, now);
       tokens = again.tokens;
-      answer = await createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now });
+      answer = await postNow();
+      if (!answer) {
+        await markFailed(db, post.id, "reply-ineligible", now);
+        return "cancelled";
+      }
       if (!answer.ok && answer.failure === "auth") {
         await markRevoked(db, post.tenant, tokens.version, now);
         await markFailed(db, post.id, "revoked", now);

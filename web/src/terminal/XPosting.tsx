@@ -86,6 +86,8 @@ const COPY = {
   caption:
     "You'll approve it on X. Your Merryman will post from whichever X account you approve there, so check which account you're signed into on X first.",
   toggle: "Let my Merryman post on X",
+  replyToggle: "Reply to comments",
+  repliesUnavailable: "Comment replies aren’t available yet.",
   revoked: "X stopped accepting this connection. Reconnect to keep posting.",
   /** lib/x-connect.ts X_COPY.unavailable, word for word (the routes and iOS say it too). */
   unavailable: "Posting on X isn't available right now.",
@@ -126,8 +128,17 @@ const WARNING_BODY = [
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
 ] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
+const replyWarningTitle = (handle: string) => `Reply to comments as ${handle}?`;
+const replyWarningLead = (handle: string) => `Your Merryman will reply as ${handle} to selected comments on its coin posts.`;
+const REPLY_WARNING_BODY = [
+  "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
+  "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
+] as const;
+const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", reply: "Comment reply" };
+const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
+  ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 
 /**
  * What a Skip button is called to assistive tech: which post it skips, by its
@@ -195,6 +206,8 @@ function accountOf(data: unknown): Shown | null {
     postingEnabled: d.postingEnabled,
     prefs: prefsOf(d.prefs),
     perDayMax: typeof d.perDayMax === "number" && Number.isSafeInteger(d.perDayMax) && d.perDayMax >= 1 && d.perDayMax <= 10 ? d.perDayMax : 3,
+    replyEnabled: d.replyEnabled === true,
+    repliesAvailable: d.repliesAvailable === true,
     upcoming: d.upcoming.filter(
       (p): p is XUpcomingPost => !!p && typeof p.id === "number" && typeof p.body === "string" && typeof p.dueAt === "number",
     ),
@@ -273,7 +286,7 @@ export function XPosting({
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; alert: boolean } | null>(null);
   /** The account the open warning names, captured when the switch was pressed. */
-  const [asking, setAsking] = useState<{ xUserId: string; handle: string } | null>(null);
+  const [asking, setAsking] = useState<{ xUserId: string; handle: string; owner: string; replies?: boolean } | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   /** Whether the Settings group this sits in is open (true when it sits in none). */
   const [open, setOpen] = useState(false);
@@ -423,7 +436,7 @@ export function XPosting({
         return;
       }
       // NOTHING IS SENT HERE. The warning names the account; its button writes.
-      setAsking({ xUserId: account.xUserId, handle });
+      setAsking({ xUserId: account.xUserId, handle, owner });
       return;
     }
     void (async () => {
@@ -434,7 +447,26 @@ export function XPosting({
         setNote({ text: r.ok ? "merrymen didn't confirm that, so posting may still be on." : r.message, alert: true });
         return;
       }
-      patch({ postingEnabled: false, upcoming: [] });
+      patch({ postingEnabled: false, replyEnabled: false, upcoming: [] });
+      void load(true);
+    })();
+  };
+
+  const onReplySwitch = (next: boolean) => {
+    if (busy || !account.connected || !account.xUserId || !handle) return;
+    setNote(null);
+    if (next) {
+      if (!account.repliesAvailable) { setNote({ text: COPY.repliesUnavailable, alert: true }); return; }
+      if (!account.postingEnabled || account.status !== "ok") { setNote({ text: "Turn posting on before enabling comment replies.", alert: true }); return; }
+      setAsking({ xUserId: account.xUserId, handle, owner, replies: true });
+      return;
+    }
+    void (async () => {
+      setBusy(true);
+      const r = await send("POST", "/api/x/account", { action: "disable-replies", xUserId: account.xUserId, owner });
+      setBusy(false);
+      if (r.ok && r.data.replyEnabled === false) patch({ replyEnabled: false, upcoming: account.upcoming.filter((p) => p.kind !== "reply") });
+      else setNote({ text: r.ok ? "merrymen didn't confirm that, so replies may still be on." : r.message, alert: true });
       void load(true);
     })();
   };
@@ -449,11 +481,13 @@ export function XPosting({
     if (!asking || busy) return;
     const named = asking;
     setBusy(true);
-    const r = await send("POST", "/api/x/account", { action: "enable", xUserId: named.xUserId, owner, tz: deviceZone() });
+    const r = await send("POST", "/api/x/account", named.replies
+      ? { action: "enable-replies", xUserId: named.xUserId, owner: named.owner }
+      : { action: "enable", xUserId: named.xUserId, owner: named.owner, tz: deviceZone() });
     setBusy(false);
     closeWarning();
-    if (r.ok && r.data.postingEnabled === true) {
-      patch({ postingEnabled: true });
+    if (r.ok && (named.replies ? r.data.replyEnabled === true : r.data.postingEnabled === true)) {
+      patch(named.replies ? { replyEnabled: true } : { postingEnabled: true });
       void load(true);
       // The hello is drafted on the orchestrator's next plan pass, after this
       // read: read once more when it will be there, open section or not.
@@ -461,7 +495,7 @@ export function XPosting({
       afterEnable.current = setTimeout(() => void load(true), afterEnableMs);
       return;
     }
-    setNote({ text: r.ok ? "merrymen didn't confirm that, so posting is still off." : r.message, alert: true });
+    setNote({ text: r.ok ? `merrymen didn't confirm that, so ${named.replies ? "replies are" : "posting is"} still off.` : r.message, alert: true });
     // A 409 means the connected account is not the one the warning named: show the one that is.
     if (!r.ok && r.status === 409) void load(true);
   };
@@ -508,7 +542,7 @@ export function XPosting({
       setNote({ text: r.message, alert: true });
       return;
     }
-    patch({ connected: false, username: null, xUserId: null, status: null, postingEnabled: false, upcoming: [], recent: [] });
+    patch({ connected: false, username: null, xUserId: null, status: null, postingEnabled: false, replyEnabled: false, upcoming: [], recent: [] });
     void load(true);
   };
 
@@ -603,6 +637,18 @@ export function XPosting({
         </div>
         <Switch on={account.postingEnabled} onChange={onSwitch} label={COPY.toggle} />
       </div>
+      {account.repliesAvailable || account.replyEnabled ? (
+        <div className="xpost-switch">
+          <div>
+            <strong>{COPY.replyToggle}</strong>
+            <small className="mm-hint">{account.postingEnabled
+              ? `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`
+              : "Turn posting on to allow selected comment replies."}</small>
+          </div>
+          <Switch on={account.replyEnabled} onChange={onReplySwitch} label={COPY.replyToggle} />
+        </div>
+      ) : null}
+      {!account.repliesAvailable && <p className="mm-hint">{COPY.repliesUnavailable}</p>}
       {noteLine}
 
       {account.prefs && (
@@ -659,6 +705,7 @@ export function XPosting({
               {account.upcoming.map((p) => (
                 <li key={p.id} className="xpost-post">
                   <p>{p.body}</p>
+                  {commentUrl(p) && <a href={commentUrl(p)!} target="_blank" rel="noreferrer noopener">View comment</a>}
                   <div className="xpost-meta">
                     <span>
                       {KIND_LABEL[p.kind] ?? "Post"} · {p.dueAt <= Date.now() ? "going out soon" : `goes out around ${shortDateTime(p.dueAt)}`}
@@ -681,8 +728,9 @@ export function XPosting({
             {account.recent.map((p) => (
               <li key={p.id} className="xpost-post">
                 <p>{p.body}</p>
+                {commentUrl(p) && <a href={commentUrl(p)!} target="_blank" rel="noreferrer noopener">View comment</a>}
                 <div className="xpost-meta">
-                  <span>{shortDateTime(p.sentAt)}</span>
+                  <span>{p.kind === "reply" ? "Comment reply · " : ""}{shortDateTime(p.sentAt)}</span>
                   {STATUS_URL.test(p.url) && (
                     <a href={p.url} target="_blank" rel="noreferrer noopener">{COPY.viewOnX}</a>
                   )}
@@ -705,16 +753,16 @@ export function XPosting({
           }}
         >
           <div className="portfolio-dialog-header">
-            <h2 id="xpost-warning-title">{warningTitle(asking.handle)}</h2>
+            <h2 id="xpost-warning-title">{asking.replies ? replyWarningTitle(asking.handle) : warningTitle(asking.handle)}</h2>
           </div>
           <div className="portfolio-body">
             <p id="xpost-warning-lead" ref={lead} tabIndex={-1}>
-              <strong>{warningLead(asking.handle)}</strong>
+              <strong>{asking.replies ? replyWarningLead(asking.handle) : warningLead(asking.handle)}</strong>
             </p>
-            {WARNING_BODY.map((line) => <p key={line}>{line}</p>)}
+            {(asking.replies ? REPLY_WARNING_BODY : WARNING_BODY).map((line) => <p key={line}>{line}</p>)}
             <div className="resign-actions">
               <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void confirmWarning()}>
-                {warningYes(asking.handle)}
+                {asking.replies ? replyWarningYes(asking.handle) : warningYes(asking.handle)}
               </button>
               <button type="button" className="mm-btn" disabled={busy} onClick={closeWarning}>{COPY.notNow}</button>
             </div>

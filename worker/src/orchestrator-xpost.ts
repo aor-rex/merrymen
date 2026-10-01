@@ -44,10 +44,11 @@ import { isAsleep, localDay, localMinutes } from "./groupchat/clock";
 import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
-import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
+import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { BUY_COIN_FOLD_MS, GAP_MS, coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
-import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne, type SendOutcome } from "./xpost/sender";
+import { BUY_COIN_FOLD_MS, GAP_MS, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
+import { isReplyOptOut, replyCandidate } from "./xpost/replies";
 import {
   cancelPost,
   claimSpan,
@@ -61,6 +62,12 @@ import {
   lastOutAt,
   postingAccounts,
   postsOfXUser,
+  ownerSendTimesSince,
+  optOutReplies,
+  repliesEnabledFor,
+  replyConsentAt,
+  firstReplyConsentAt,
+  repliesOptedOut,
   readMeta,
   recentBodies,
   releaseSpan,
@@ -68,9 +75,11 @@ import {
   schedulePost,
   skipScheduled,
   takeAllowance,
+  takeOwnerAllowance,
+  writeMeta,
   type XAccount,
 } from "./xpost/store";
-import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -79,6 +88,9 @@ const DAY = 24 * HOUR;
 export const DEFAULT_PER_DAY = 3;
 export const DEFAULT_FLEET_PER_DAY = 1000;
 export const DEFAULT_LLM_PER_DAY = 400;
+export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
+const REPLY_POLL_MS = 30 * MIN;
+const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
 /**
@@ -137,6 +149,9 @@ export interface XPostEnv {
   perDay: number | undefined;
   fleetPerDay: number | undefined;
   llmPerDay: number | undefined;
+  /** Set only after the operator has X's written approval for AI replies. */
+  repliesApproved?: boolean;
+  replyPollsPerDay?: number;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
 }
@@ -183,7 +198,14 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
       llmPerDay = n;
     }
   }
-  return { off: null, perDay, fleetPerDay, llmPerDay, notes };
+  const repliesApproved = env.MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+  const replyRaw = env.MERRYMEN_XPOST_REPLY_POLLS_PER_DAY?.trim();
+  const replyPollsPerDay = replyRaw ? count(replyRaw) : null;
+  if (replyRaw && replyPollsPerDay === null) notes.push("xpost: unreadable MERRYMEN_XPOST_REPLY_POLLS_PER_DAY — comment polling is off");
+  return { off: null, perDay, fleetPerDay, llmPerDay, notes,
+    ...(repliesApproved ? { repliesApproved: true } : {}),
+    ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
+  };
 }
 
 /** Everything the orchestrator needs to start posting, decided once, with the lines that say what was decided. */
@@ -523,10 +545,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   // NO CREDS, NO MODEL, whatever the budget says.
   const llmPerDay = o.creds ? (o.knobs.llmPerDay ?? DEFAULT_LLM_PER_DAY) : 0;
   const creds = llmPerDay > 0 ? o.creds : null;
+  const repliesApproved = o.knobs.repliesApproved === true;
+  const replyPollsPerDay = o.knobs.replyPollsPerDay ?? DEFAULT_REPLY_POLLS_PER_DAY;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
   /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
   let planResumeAt = "";
+  let replyResumeAt = "";
   let running = false;
   let lastFail: { text: string; at: number } | null = null;
   /** Said once per UTC day, and once per pause: a ceiling reached is news, not a line every fifteen seconds. */
@@ -564,7 +589,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const tenants = [...byTenant.keys()];
         if (tenants.length === 0) return { log: null };
         const accounts = (await postingAccounts(shared, tenants)).filter((a) => byTenant.has(a.tenant));
-        const accountOf = new Map(accounts.map((a) => [a.tenant, a] as const));
 
         // The owner's zone, once per pass: the room's, or else the one the
         // owner's device reported when they turned posting on — so an owner
@@ -603,6 +627,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // after the call) keeps its unit, while a send X certainly refused gives
         // its unit back. Read here only to skip planning while it is reached.
         let ceiling = ((await readMeta(shared, `posts:${utcDay(nowMs)}`))?.n ?? 0) >= fleetPerDay;
+        // Process opt-outs before sending, even with no model budget. A reply
+        // sends only on a pass that successfully refreshed this X account's
+        // mentions; a read outage never turns a stale inbox into permission.
+        const comments = !pause && repliesApproved
+          ? await pollComments(shared, accounts, nowMs, at, bump)
+          : new Map<string, XReply[]>();
+        for (const [key, why] of [[APP_PAUSE_KEY, "paused-client-credentials-refused"], [PAUSE_KEY, "paused-for-credits"]] as const) {
+          const until = Number((await readMeta(shared, key))?.v);
+          if (until > at() && until >= (pause?.until ?? 0)) pause = { why, until };
+        }
         // When each X account last posted (not a hello), once per pass and
         // moved on by this pass's own sends.
         const lastOut = new Map<string, number | null>();
@@ -625,7 +659,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           for (const post of page) {
             after = { dueAtMs: post.dueAtMs, id: post.id };
             const t = at();
-            const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
+            if (post.kind === "reply") {
+              if (!repliesApproved || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))) {
+                if (await cancelPost(shared, post.id, "replies-off", t)) bump("cancelled");
+                continue;
+              }
+            }
+            // A pass can spend minutes polling or sending. Use the current
+            // consent and kinds, not the planning snapshot from its start.
+            const account: XAccount | null = await getAccount(shared, post.tenant);
             let asleep = false;
             let dayOf: ((ms: number) => string) | undefined;
             if (account?.posting && account.xUserId === post.xUserId) {
@@ -646,6 +688,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               bump("waiting");
               continue;
             }
+            if (post.kind === "reply" && !comments.has(post.xUserId)) continue;
             if (pause) {
               if (pauseSaidUntil < pause.until) {
                 pauseSaidUntil = pause.until;
@@ -690,15 +733,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               }
               release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
             }
-            // The day is the owner's own, as the planner counts it; the hello counts too.
-            // So is the number: theirs when they chose fewer than the server's.
-            const accountDayKey = `xday:${post.xUserId}:${dayOf ? dayOf(t) : utcDay(t)}`;
-            if (!(await takeAllowance(shared, accountDayKey, Math.min(perDay, account?.prefs.perDay ?? perDay), t))) {
+            // All owners share the server's X-account ceiling. The owner's
+            // smaller choice has its own counter, so someone else's post
+            // cannot spend it. Both count the hello and reply posts too.
+            const localDayKey = dayOf ? dayOf(t) : utcDay(t);
+            const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
+            if (!(await takeAllowance(shared, accountDayKey, perDay, t))) {
               await giveBack();
               bump("account-day-cap");
               continue;
             }
             release.push(() => returnAllowance(shared, accountDayKey, at()));
+            const ownerDayKey = `xownerday:${post.tenant}:${localDayKey}`;
+            // On rollout this counter does not exist yet, but earlier sends
+            // today still count. Include uncertain claims as possible sends.
+            let initialOwnerUsed = 0;
+            if ((await readMeta(shared, ownerDayKey)) === null) {
+              const earlier = await ownerSendTimesSince(shared, post.tenant, t - 2 * DAY);
+              initialOwnerUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
+            }
+            // Reads the latest stored choice under the same account row lock
+            // as a preference save, then reserves one unit atomically.
+            if (!(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, perDay, t, initialOwnerUsed))) {
+              await giveBack();
+              bump("owner-day-cap");
+              continue;
+            }
+            release.push(() => returnAllowance(shared, ownerDayKey, at()));
             if (post.kind === "buy" && post.coin) {
               const foldKey = `fold:${post.xUserId}:${post.coin}`;
               const fold = await claimSpan(shared, foldKey, t, BUY_COIN_FOLD_MS);
@@ -748,7 +809,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // to go out together when the hold lifts.
         if (!pause && !ceiling && accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
           lastPlanAt = nowMs;
-          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf);
+          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments);
         }
 
         return { log: summary(counts, nowMs) };
@@ -765,6 +826,61 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     },
   };
 
+  async function pollComments(
+    shared: Db, accounts: XAccount[], nowMs: number, at: () => number,
+    bump: (k: string, n?: number) => void,
+  ): Promise<Map<string, XReply[]>> {
+    const batches = new Map<string, XReply[]>();
+    const ordered = [...accounts].sort((a, b) => a.tenant.localeCompare(b.tenant));
+    const from = ordered.findIndex((a) => a.tenant >= replyResumeAt);
+    const turn = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
+    replyResumeAt = "";
+    let polls = 0;
+    for (const account of turn) {
+      if (polls >= MAX_REPLY_POLLS_PER_PASS || at() - nowMs > SEND_BUDGET_MS) { replyResumeAt = account.tenant; break; }
+      if (batches.has(account.xUserId)) continue;
+      const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
+      if (consentAt === null) continue;
+      const t = at();
+      const backoff = Number((await readMeta(shared, `reply-backoff:${account.xUserId}`))?.v ?? 0);
+      if (backoff > t || !(await claimSpan(shared, `reply-poll:${account.xUserId}`, t, REPLY_POLL_MS)).ok) continue;
+      if (!(await takeAllowance(shared, `reply-polls:${utcDay(t)}`, replyPollsPerDay, t))) break;
+      polls++;
+      const storedCursor = (await readMeta(shared, `reply-cursor:${account.xUserId}`))?.v;
+      const sinceId = storedCursor && /^\d{1,25}$/.test(storedCursor) ? storedCursor : undefined;
+      const startTimeMs = sinceId ? undefined : (await firstReplyConsentAt(shared, account.xUserId)) ?? consentAt;
+      const result = await readReplyComments(shared, o.dek, o.app, account, {
+        fetch: deps.fetch, nowMs: t, sinceId, startTimeMs,
+      });
+      if (!result.ok) {
+        bump(`reply-read-${result.failure}`);
+        if (result.resetAtMs) await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(result.resetAtMs), at());
+        if (result.failure === "credits" || result.failure === "app") {
+          await writeMeta(shared, result.failure === "credits" ? PAUSE_KEY : APP_PAUSE_KEY,
+            String(at() + (result.failure === "credits" ? CREDITS_PAUSE_MS : APP_PAUSE_MS)), at());
+          break;
+        }
+        continue;
+      }
+      // Never sample opt-outs. They can arrive on an old or nested reply,
+      // contain a handle, or coexist with a new question from the same person.
+      for (const comment of result.value.replies) {
+        if (comment.authorId !== account.xUserId && isReplyOptOut(comment.text)) {
+          await optOutReplies(shared, account.xUserId, comment.authorId, at());
+          bump("reply-opt-out");
+        }
+      }
+      // Save only the cursor, never incoming comment text. Cursor advances
+      // after every opt-out is durable; missing a draft is preferable to
+      // repeating one after a crash.
+      if (result.value.newestId && (!sinceId || BigInt(result.value.newestId) > BigInt(sinceId))) {
+        await writeMeta(shared, `reply-cursor:${account.xUserId}`, result.value.newestId, at());
+      }
+      batches.set(account.xUserId, result.value.replies);
+    }
+    return batches;
+  }
+
   async function planPass(
     shared: Db,
     accounts: XAccount[],
@@ -774,9 +890,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     at: () => number,
     bump: (k: string, n?: number) => void,
     zoneOf: (tenant: string, consentTz: string | null) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
+    comments: Map<string, XReply[]>,
   ): Promise<void> {
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
-    const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), { dialect });
+    const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
+      dialect, ...(comments.size ? { callWindowSec: PLAN_HISTORY_MS / 1000 } : {}),
+    });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
     // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
     // are planned (they fall back to the template pool): a buy or casual
@@ -823,12 +942,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           intros,
           posts,
           calls: f.calls,
-          // The owner's own number a day and kinds, never more than the server's.
-          perDay: Math.min(perDay, account.prefs.perDay ?? perDay),
+          // Shared server cap and tenant preference are counted separately.
+          perDay,
+          ownerPerDay: account.prefs.perDay,
           model,
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
-        if (intents.length === 0) continue;
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
@@ -849,11 +968,75 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             recentFleet.unshift(r.body);
           }
         }
+        if (model && drafts < MAX_DRAFTS_PER_PASS && comments.has(account.xUserId)
+          && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
+          const result = await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
+          if (result) {
+            drafts++;
+            bump(result.body ? "drafted-reply" : "reply-skipped");
+            if (result.body) { recentOwn.unshift(result.body); recentFleet.unshift(result.body); }
+          }
+        }
       } catch (e) {
         bump("owner-failed");
         if (!ownerFailure) ownerFailure = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160);
       }
     }
+  }
+
+  async function writeReply(
+    shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
+    at: () => number, recentOwn: string[], recentFleet: string[],
+  ): Promise<{ body: string | null } | null> {
+    if (!creds) return null;
+    const nowMs = at();
+    const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
+    if (consentAt === null) return null;
+    const posts = await postsOfXUser(shared, account.xUserId, nowMs - PLAN_HISTORY_MS, 200);
+    const roots = new Map(posts.filter((p) => p.tenant === account.tenant && p.kind === "buy" && p.status === "posted" && p.tweetId).map((p) => [p.tweetId!, p]));
+    // The model can pass, and only one comment is considered per owner per
+    // polling pass. Stable ordering does not reward floods of newer comments.
+    const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+    for (const comment of ordered) {
+      if (comment.createdAtMs < consentAt) continue;
+      const parent = roots.get(comment.inReplyToTweetId);
+      if (!parent || !parent.coin) continue;
+      // Use the original publishable fill for the coin and paper/live mode.
+      // A model's old wording cannot establish either, nor can today's mode.
+      const fill = f.calls.find((c) => c.decisionId === parent.decisionId && c.side === "buy");
+      const coin = fill ? coinOf(fill) : null;
+      if (!fill || !coin || coin.key !== parent.coin) continue;
+      const candidate = replyCandidate(comment, { rootTweetId: parent.tweetId!, xUserId: account.xUserId, coin: coin.label });
+      if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
+      const dedupeKey = `reply:${account.xUserId}:${comment.id}`;
+      if (await keyStatus(shared, dedupeKey) !== null) continue;
+      const dueAtMs = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
+      if (dueAtMs === null) continue;
+      if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
+      const facts = writerFacts(f, localDay(tz, nowMs), recentOwn);
+      const paper = fill.paper;
+      const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
+      const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const verdict = raw === null ? null : admitXPost(raw, {
+        kind: "reply", agentName: f.name, mode: paper ? "paper" : "live", coins: [coin.label],
+        paperCoins: paper ? [coin.label] : [], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+      }, BASE_GATE);
+      // Start the owner's full preview window only after the model finishes.
+      // Recheck time-sensitive planning rules in case drafting crossed a limit.
+      const finishedAt = at();
+      const finalDueAt = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
+      const body = finalDueAt !== null && verdict?.ok ? verdict.text : null;
+      const id = await schedulePost(shared, {
+        tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
+        coin: parent.coin, decisionId: parent.decisionId, dueAtMs: finalDueAt ?? dueAtMs, nowMs: finishedAt,
+        replyToTweetId: comment.id, replyRootTweetId: parent.tweetId!, replyAuthorId: comment.authorId,
+        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+      });
+      return id === null ? null : { body };
+    }
+    return null;
   }
 
   /**

@@ -30,8 +30,8 @@
  *   - use a coin label that could be derived from an address. A ticker like
  *     "T7631DACC21B" is an id, not a name anybody would tweet;
  *   - plan a kind the owner turned off (PlanInput.kinds), or more a day than
- *     the owner chose (the glue hands in the smaller of theirs and the
- *     server's). The hello is not a kind they can turn off.
+ *     the owner chose. The owner's cap counts their posts; the server's
+ *     still counts the whole X account. The hello cannot be turned off.
  */
 import type { XAccount, XPost, XPostPrefs, XPostStatus } from "./store";
 
@@ -58,6 +58,10 @@ export const BUY_JITTER_MIN = 10;
 export const BUY_JITTER_MAX = 40;
 /** A buy post still waiting this long after it was drafted is stale; one that could not go out within this of the fill is not planned. */
 export const BUY_STALE_MS = 8 * HOUR;
+/** A reply waiting this long is no longer timely. */
+export const REPLY_STALE_MS = 24 * HOUR;
+export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
+export const REPLIES_PER_ROOT = 2;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
 /** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
@@ -122,6 +126,8 @@ export interface PlanInput {
   calls: readonly PlanCall[];
   /** Posts per owner-local day. */
   perDay?: number;
+  /** Optional smaller allowance for this tenant, separate from the shared X account cap. */
+  ownerPerDay?: number | null;
   /** Whether posts that need a model (buy, casual) may be planned at all. */
   model?: boolean;
   /** The kinds the owner lets it post (XPostPrefs). Absent, or a field absent, is on. */
@@ -247,6 +253,7 @@ export function introState(p: {
 const LIVE_STATUSES: ReadonlySet<XPostStatus> = new Set(["scheduled", "sending", "posted"]);
 
 interface Slot {
+  tenant: string;
   kind: XPost["kind"];
   atMs: number;
   coin: string | null;
@@ -254,7 +261,12 @@ interface Slot {
 }
 
 function slotOf(p: XPost): Slot {
-  return { kind: p.kind, atMs: p.sentAtMs ?? p.dueAtMs, coin: p.coin, createdAtMs: p.createdAtMs };
+  return { tenant: key(p.tenant), kind: p.kind, atMs: p.sentAtMs ?? p.dueAtMs, coin: p.coin, createdAtMs: p.createdAtMs };
+}
+
+/** The owner's optional smaller ceiling never raises the server's ceiling. */
+function ownerLimit(perDay: number, ownerPerDay?: number | null): number {
+  return Number.isSafeInteger(ownerPerDay) && (ownerPerDay ?? 0) >= 1 ? Math.min(perDay, ownerPerDay!) : perDay;
 }
 
 /**
@@ -287,6 +299,7 @@ function pushedPast(due: number, slots: readonly Slot[]): number {
 export function planPosts(input: PlanInput): PlanIntent[] {
   const { tenant, account, tz, nowMs: now, clock } = input;
   const perDay = Number.isFinite(input.perDay) && (input.perDay ?? 0) >= 1 ? Math.floor(input.perDay!) : DEFAULT_PER_DAY;
+  const ownerPerDay = ownerLimit(perDay, input.ownerPerDay);
   if (!account.xUserId || account.consentAtMs === null || account.consentAtMs === undefined) return [];
   // NOTHING IS PLANNED WHILE THE OWNER SLEEPS — the intro included.
   if (clock.isAsleep(tz, key(tenant), now)) return [];
@@ -304,6 +317,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status)).map(slotOf);
   const used = new Set(input.posts.map((p) => p.dedupeKey));
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
+  const ownerOnDay = (day: string) => slots.filter((s) => s.tenant === key(tenant) && dayOf(s.atMs) === day).length;
   const out: PlanIntent[] = [];
 
   // BUYS: fresh, after consent, one per coin in three days, two a day at most —
@@ -323,9 +337,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots);
     if (due > fillMs + BUY_STALE_MS) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") >= BUY_PER_DAY || onDay(day) >= perDay) continue;
+    if (onDay(day, "buy") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
-    slots.push({ kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
+    slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
   }
 
@@ -347,9 +361,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       const lead = CASUAL_LEAD_MIN + (hash32(`casual-lead|${cKey}`) % (CASUAL_LEAD_MAX - CASUAL_LEAD_MIN + 1));
       const due = pushedPast(now + lead * MIN, slots);
       const day = dayOf(due);
-      if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay) {
+      if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
         out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today });
-        slots.push({ kind: "casual", atMs: due, coin: null, createdAtMs: now });
+        slots.push({ tenant: key(tenant), kind: "casual", atMs: due, coin: null, createdAtMs: now });
       }
     }
   }
@@ -399,10 +413,45 @@ export function sendDecision(
     return { action: "cancel", reason: "kind-off" };
   }
   if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
     if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
   }
   if (asleep || post.dueAtMs > nowMs) return { action: "wait" };
   return { action: "send" };
+}
+
+/** Replies share the account's post budget and gap, with a smaller thread cap. */
+export function replyDueAt(input: {
+  parent: XPost;
+  authorId: string;
+  commentAtMs: number;
+  posts: readonly XPost[];
+  tenant: string;
+  xUserId: string;
+  nowMs: number;
+  tz: string | null;
+  clock: PlanClock;
+  perDay: number;
+  ownerPerDay?: number | null;
+}): number | null {
+  const { parent, nowMs: now, clock, tz, posts } = input;
+  if (parent.kind !== "buy" || parent.status !== "posted" || !parent.tweetId || parent.sentAtMs === null
+    || parent.tenant !== input.tenant || parent.xUserId !== input.xUserId) return null;
+  if (now - parent.sentAtMs > REPLY_ROOT_MAX_AGE_MS || parent.sentAtMs > input.commentAtMs
+    || input.commentAtMs > now || now - input.commentAtMs > REPLY_STALE_MS) return null;
+  if (clock.isAsleep(tz, input.tenant, now)) return null;
+  // Count every attempted reply, including skips and ambiguous sends. A restart
+  // or model refusal cannot turn one thread into an unlimited drafting loop.
+  const thread = posts.filter((p) => p.kind === "reply" && p.replyRootTweetId === parent.tweetId);
+  if (thread.length >= REPLIES_PER_ROOT || thread.some((p) => p.replyAuthorId === input.authorId)) return null;
+  const slots = posts.filter((p) => LIVE_STATUSES.has(p.status)
+    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? ""))).map(slotOf);
+  const due = pushedPast(now + MIN_LEAD_MS, slots);
+  if (due - input.commentAtMs > REPLY_STALE_MS) return null;
+  const day = clock.localDay(tz, due);
+  if (slots.filter((s) => clock.localDay(tz, s.atMs) === day).length >= input.perDay) return null;
+  if (slots.filter((s) => s.tenant === key(input.tenant) && clock.localDay(tz, s.atMs) === day).length >= ownerLimit(input.perDay, input.ownerPerDay)) return null;
+  return due;
 }

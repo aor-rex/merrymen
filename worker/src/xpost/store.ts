@@ -1,7 +1,7 @@
 /**
  * THE X-POSTING TABLES, AND THE ONLY CODE THAT READS OR WRITES THEM.
  *
- * docs/x-posting.md is the contract. Four tables, all `xpost_*`:
+ * docs/x-posting.md is the contract. Seven tables, all `xpost_*`:
  *
  *   xpost_accounts — the connected X account per owner: its immutable X user
  *     id, the handle it had when it was connected, the sealed tokens, and the
@@ -11,7 +11,10 @@
  *     cancelled or failed. The UNIQUE dedupe_key and the conditional claim are
  *     what make a post at-most-once across crashes and replicas.
  *   xpost_meta     — fleet counters: the model's daily budget, the day's post
- *     allowance, the fleet's pauses.
+ *     allowance, the fleet's pauses and comment polling cursors.
+ *   xpost_reply_accounts — separate consent for selected comment replies.
+ *   xpost_reply_targets — durable comment, parent and author ids per reply.
+ *   xpost_reply_optouts — recipient opt-outs per posting account and author.
  *
  * NOT THE SETTINGS BLOB, AND THAT IS THE POINT. The orchestrator copies every
  * tenant's decrypted settings into its child's plaintext settings.json each
@@ -80,7 +83,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant TEXT NOT NULL,
   x_user_id TEXT NOT NULL,                 -- the account it was written for
-  kind TEXT NOT NULL,                      -- intro or casual or buy
+  kind TEXT NOT NULL,                      -- intro casual buy or reply
   dedupe_key TEXT NOT NULL UNIQUE,
   body TEXT NOT NULL,
   coin TEXT,                               -- a buy post coin, for the per coin fold
@@ -96,6 +99,23 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
 CREATE INDEX IF NOT EXISTS xpost_posts_tenant ON xpost_posts (tenant, created_at_ms);
 CREATE INDEX IF NOT EXISTS xpost_posts_due ON xpost_posts (status, due_at_ms);
 CREATE INDEX IF NOT EXISTS xpost_posts_x_user ON xpost_posts (x_user_id, created_at_ms);
+CREATE TABLE IF NOT EXISTS xpost_reply_targets (
+  post_id INTEGER PRIMARY KEY,
+  reply_to_tweet_id TEXT NOT NULL,
+  root_tweet_id TEXT NOT NULL,
+  author_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS xpost_reply_accounts (
+  tenant TEXT PRIMARY KEY,
+  x_user_id TEXT NOT NULL,
+  consent_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS xpost_reply_optouts (
+  x_user_id TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (x_user_id, author_id)
+);
 CREATE TABLE IF NOT EXISTS xpost_meta (
   k TEXT PRIMARY KEY,
   n INTEGER NOT NULL DEFAULT 0,
@@ -394,6 +414,72 @@ export async function postingAccounts(db: Db, tenants: readonly string[]): Promi
   return rows.map(accountOf).filter((a) => a.posting);
 }
 
+/** Separate, account-bound consent for replies. Posting consent alone is insufficient. */
+export async function repliesEnabledFor(db: Db, tenant: string, xUserId: string): Promise<boolean> {
+  return (await replyConsentAt(db, tenant, xUserId)) !== null;
+}
+
+/** First polling starts at reply consent, rather than an account's old mention history. */
+export async function replyConsentAt(db: Db, tenant: string, xUserId: string): Promise<number | null> {
+  const row = await db.prepare(`SELECT r.consent_at_ms FROM xpost_reply_accounts r JOIN xpost_accounts a ON a.tenant = r.tenant
+    WHERE r.tenant = ? AND r.x_user_id = ? AND a.x_user_id = r.x_user_id
+      AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id`)
+    .get(tenantKey(tenant), xUserId) as { consent_at_ms: unknown } | undefined;
+  return row ? num(row.consent_at_ms) : null;
+}
+
+/** A shared X inbox must cover every active owner's consent, including opt-outs. */
+export async function firstReplyConsentAt(db: Db, xUserId: string): Promise<number | null> {
+  const row = await db.prepare(`SELECT MIN(r.consent_at_ms) AS consent_at_ms
+    FROM xpost_reply_accounts r JOIN xpost_accounts a ON a.tenant = r.tenant
+    WHERE r.x_user_id = ? AND a.x_user_id = r.x_user_id
+      AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id`)
+    .get(xUserId) as { consent_at_ms: unknown } | undefined;
+  return row?.consent_at_ms === null || row?.consent_at_ms === undefined ? null : num(row.consent_at_ms);
+}
+
+/** Turning replies off leaves ordinary posting on and cancels only waiting replies. */
+export async function setReplying(db: Db, tenant: string, enabled: boolean, seenXUserId: string, nowMs: number): Promise<boolean> {
+  const key = tenantKey(tenant);
+  return db.tx(async (tx) => {
+    // Serialize with account replacement, disconnect and posting switches.
+    const current = await tx.prepare(`UPDATE xpost_accounts SET updated_at_ms = updated_at_ms WHERE tenant = ? AND x_user_id = ?
+      AND (? = 0 OR (posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id))`)
+      .run(key, seenXUserId, enabled ? 1 : 0);
+    if (current.changes !== 1) return false;
+    if (enabled) {
+      await tx.prepare(`INSERT INTO xpost_reply_accounts (tenant, x_user_id, consent_at_ms) VALUES (?, ?, ?)
+        ON CONFLICT (tenant) DO UPDATE SET
+          consent_at_ms = CASE WHEN xpost_reply_accounts.x_user_id = excluded.x_user_id THEN xpost_reply_accounts.consent_at_ms ELSE excluded.consent_at_ms END,
+          x_user_id = excluded.x_user_id`)
+        .run(key, seenXUserId, int(nowMs));
+    } else {
+      await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
+      await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'replies-off', updated_at_ms = ?
+        WHERE tenant = ? AND kind = 'reply' AND status = 'scheduled'`).run(int(nowMs), key);
+    }
+    return true;
+  });
+}
+
+/** Recipient opt-outs are shared by every tenant connected to this X account. */
+export async function repliesOptedOut(db: Db, xUserId: string, authorId: string): Promise<boolean> {
+  return (await db.prepare(`SELECT author_id FROM xpost_reply_optouts WHERE x_user_id = ? AND author_id = ?`)
+    .get(xUserId, authorId)) !== undefined;
+}
+
+export async function optOutReplies(db: Db, xUserId: string, authorId: string, nowMs: number): Promise<void> {
+  if (!X_ID.test(xUserId) || !X_ID.test(authorId)) return;
+  await db.tx(async (tx) => {
+    await tx.prepare(`INSERT INTO xpost_reply_optouts (x_user_id, author_id, created_at_ms) VALUES (?, ?, ?)
+      ON CONFLICT (x_user_id, author_id) DO NOTHING`).run(xUserId, authorId, int(nowMs));
+    await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'recipient-optout', updated_at_ms = ?
+      WHERE x_user_id = ? AND kind = 'reply' AND status = 'scheduled'
+        AND EXISTS (SELECT 1 FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id AND r.author_id = ?)`)
+      .run(int(nowMs), xUserId, authorId);
+  });
+}
+
 export interface TokenSetPlain {
   accessToken: string;
   refreshToken: string | null;
@@ -450,7 +536,10 @@ export async function upsertAccount(
         int(a.nowMs),
         int(a.nowMs),
       );
-    if (changedAccount) await cancelScheduledIn(tx, tenant, a.nowMs, "account-changed");
+    if (changedAccount) {
+      await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(tenant);
+      await cancelScheduledIn(tx, tenant, a.nowMs, "account-changed");
+    }
     return { changedAccount };
   });
 }
@@ -489,6 +578,7 @@ export async function setPosting(
       .prepare(`UPDATE xpost_accounts SET posting_enabled = 0, updated_at_ms = ? WHERE tenant = ?`)
       .run(int(nowMs), key);
     await cancelScheduledIn(tx, key, nowMs, "turned-off");
+    await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
     return r.changes === 1;
   });
 }
@@ -501,6 +591,8 @@ export async function setPosting(
  * right before it is sent (orchestrator-xpost.ts), so no more than the new
  * number goes out. Returns the choices now stored, or null when this owner
  * has no connection.
+ * A claimed post keeps its sending status, but remembers kind-off so a
+ * definite refusal cannot revive it after the owner turns the kind back on.
  *
  * ONE UPDATE, ONLY THE FIELDS GIVEN. A read then a write of all three would
  * let two saves at once (two tabs, or a tab and the app) put back the field
@@ -528,8 +620,10 @@ export async function setPrefs(db: Db, tenant: string, change: Partial<XPostPref
     for (const kind of [...(next.buys ? [] : ["buy"]), ...(next.casual ? [] : ["casual"])]) {
       await tx
         .prepare(
-          `UPDATE xpost_posts SET status = 'cancelled', reason = 'kind-off', updated_at_ms = ?
-            WHERE tenant = ? AND kind = ? AND status = 'scheduled'`,
+          `UPDATE xpost_posts
+              SET status = CASE WHEN status = 'scheduled' THEN 'cancelled' ELSE status END,
+                  reason = 'kind-off', updated_at_ms = ?
+            WHERE tenant = ? AND kind = ? AND status IN ('scheduled', 'sending')`,
         )
         .run(int(nowMs), key, kind);
     }
@@ -553,6 +647,7 @@ export async function deleteAccount(
       .prepare(`DELETE FROM xpost_accounts WHERE tenant = ? RETURNING sealed_access, sealed_refresh`)
       .get(key)) as { sealed_access: unknown; sealed_refresh: unknown } | undefined;
     await cancelScheduledIn(tx, key, nowMs, "disconnected");
+    await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
     if (!row) return null;
     return {
       accessToken: openOrNull(row.sealed_access, dek),
@@ -654,7 +749,7 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
 
 // ── posts ───────────────────────────────────────────────────────────────────
 
-export type XPostKind = "intro" | "casual" | "buy";
+export type XPostKind = "intro" | "casual" | "buy" | "reply";
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -672,12 +767,18 @@ export interface XPost {
   dueAtMs: number;
   sentAtMs: number | null;
   tweetId: string | null;
+  replyToTweetId?: string;
+  replyRootTweetId?: string;
+  replyAuthorId?: string;
   updatedAtMs: number;
 }
 
 const POST_COLUMNS =
   "id, tenant, x_user_id, kind, dedupe_key, body, coin, decision_id, status, reason, created_at_ms, due_at_ms, " +
-  "sent_at_ms, tweet_id, updated_at_ms";
+  "sent_at_ms, tweet_id, updated_at_ms, " +
+  "(SELECT reply_to_tweet_id FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id) AS reply_to_tweet_id, " +
+  "(SELECT root_tweet_id FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id) AS reply_root_tweet_id, " +
+  "(SELECT author_id FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id) AS reply_author_id";
 
 interface PostRow {
   id: unknown;
@@ -694,10 +795,13 @@ interface PostRow {
   due_at_ms: unknown;
   sent_at_ms: unknown;
   tweet_id: unknown;
+  reply_to_tweet_id?: unknown;
+  reply_root_tweet_id?: unknown;
+  reply_author_id?: unknown;
   updated_at_ms: unknown;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy"]);
+const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "reply"]);
 const STATUSES: ReadonlySet<string> = new Set(["scheduled", "sending", "posted", "skipped", "cancelled", "failed"]);
 
 function postOf(r: PostRow): XPost {
@@ -717,6 +821,9 @@ function postOf(r: PostRow): XPost {
     dueAtMs: num(r.due_at_ms),
     sentAtMs: r.sent_at_ms === null || r.sent_at_ms === undefined ? null : num(r.sent_at_ms),
     tweetId: strOrNull(r.tweet_id),
+    ...(typeof r.reply_to_tweet_id === "string" ? { replyToTweetId: r.reply_to_tweet_id } : {}),
+    ...(typeof r.reply_root_tweet_id === "string" ? { replyRootTweetId: r.reply_root_tweet_id } : {}),
+    ...(typeof r.reply_author_id === "string" ? { replyAuthorId: r.reply_author_id } : {}),
     updatedAtMs: num(r.updated_at_ms),
   };
 }
@@ -729,6 +836,9 @@ export interface NewPost {
   body: string;
   coin?: string | null;
   decisionId?: string | null;
+  replyToTweetId?: string;
+  replyRootTweetId?: string;
+  replyAuthorId?: string;
   dueAtMs: number;
   nowMs: number;
   /**
@@ -747,6 +857,38 @@ export interface NewPost {
  */
 export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
   if (!p.dedupeKey) throw new Error("a post needs a dedupe key");
+  if (p.kind === "reply") {
+    if (!validReplyIds(p) || p.replyToTweetId === p.replyRootTweetId || p.dedupeKey !== `reply:${p.xUserId}:${p.replyToTweetId}` || p.replyAuthorId === p.xUserId) return null;
+    return db.tx(async (tx) => {
+      // Lock the account row against an overlapping disconnect or switch-off.
+      const current = await tx.prepare(`UPDATE xpost_accounts SET updated_at_ms = updated_at_ms
+        WHERE tenant = ? AND x_user_id = ? AND posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id`)
+        .run(tenantKey(p.tenant), p.xUserId);
+      if (current.changes !== 1 || !(await repliesEnabledFor(tx, p.tenant, p.xUserId)) ||
+          await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
+      const parent = await tx.prepare(`SELECT id FROM xpost_posts WHERE tenant = ? AND x_user_id = ?
+        AND kind = 'buy' AND status = 'posted' AND tweet_id = ?`).get(tenantKey(p.tenant), p.xUserId, p.replyRootTweetId!);
+      if (!parent) return null;
+      // The account lock makes thread limits durable across replicas too.
+      // Skips and ambiguous sends spend their slot: never draft repeatedly.
+      const attempts = await tx.prepare(`SELECT COUNT(*) AS total,
+        SUM(CASE WHEN r.author_id = ? THEN 1 ELSE 0 END) AS by_author
+        FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
+        WHERE sent.x_user_id = ? AND sent.kind = 'reply' AND r.root_tweet_id = ?`)
+        .get(p.replyAuthorId!, p.xUserId, p.replyRootTweetId!) as { total: unknown; by_author: unknown };
+      if (num(attempts.total) >= 2 || num(attempts.by_author) >= 1) return null;
+      const id = await insertPost(tx, p);
+      if (id === null) return null;
+      await tx.prepare(`INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) VALUES (?, ?, ?, ?)`)
+        .run(id, p.replyToTweetId!, p.replyRootTweetId!, p.replyAuthorId!);
+      return id;
+    });
+  }
+  if (p.replyToTweetId || p.replyRootTweetId || p.replyAuthorId) return null;
+  return insertPost(db, p);
+}
+
+async function insertPost(db: Db, p: NewPost): Promise<number | null> {
   const row = (await db
     .prepare(
       `INSERT INTO xpost_posts (
@@ -788,9 +930,23 @@ export async function keyStatus(db: Db, dedupeKey: string): Promise<XPostStatus 
  */
 export async function claimPost(db: Db, id: number, nowMs: number): Promise<boolean> {
   const r = await db
-    .prepare(`UPDATE xpost_posts SET status = 'sending', updated_at_ms = ? WHERE id = ? AND status = 'scheduled'`)
+    .prepare(`UPDATE xpost_posts SET status = 'sending', updated_at_ms = ? WHERE id = ? AND status = 'scheduled'
+      AND NOT EXISTS (
+        SELECT 1 FROM xpost_accounts a WHERE a.tenant = xpost_posts.tenant
+          AND ((xpost_posts.kind = 'buy' AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
+      )`)
     .run(int(nowMs), int(id));
   return r.changes === 1;
+}
+
+/** Before a first send or a definite-refusal retry, honor an intervening kind-off change. */
+export async function cancelDisabledKind(db: Db, id: number, nowMs: number): Promise<boolean> {
+  const result = await db.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'kind-off', updated_at_ms = ?
+    WHERE id = ? AND status = 'sending' AND (reason = 'kind-off' OR EXISTS (
+      SELECT 1 FROM xpost_accounts a WHERE a.tenant = xpost_posts.tenant
+        AND ((xpost_posts.kind = 'buy' AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
+    ))`).run(int(nowMs), int(id));
+  return result.changes === 1;
 }
 
 /** X created it. */
@@ -821,7 +977,9 @@ export async function markFailed(db: Db, id: number, reason: string, nowMs: numb
  * and was left alone. Put back to `scheduled` regardless, it would sit as a
  * live draft while posting is off — and go out if the owner switched on again
  * before it came due, which the owner's "off" was meant to prevent. Such a
- * post is cancelled ("account-off") instead. True when it was put back.
+ * post is cancelled ("account-off") instead. A kind turned off while sending
+ * is marked `kind-off` by setPrefs without changing its claim. That mark also
+ * prevents retry after the owner turns the kind back on. True when put back.
  */
 export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<boolean> {
   return db.tx(async (tx) => {
@@ -829,17 +987,29 @@ export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs:
       .prepare(
         `UPDATE xpost_posts SET status = 'scheduled', due_at_ms = ?, updated_at_ms = ?
           WHERE id = ? AND status = 'sending'
+            AND (reason IS NULL OR reason <> 'kind-off')
             AND EXISTS (
               SELECT 1 FROM xpost_accounts a
                WHERE a.tenant = xpost_posts.tenant AND a.x_user_id = xpost_posts.x_user_id
                  AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
                  AND a.consent_at_ms <= xpost_posts.created_at_ms
-            )`,
+                 AND (xpost_posts.kind <> 'buy' OR a.post_buys = 1)
+                 AND (xpost_posts.kind <> 'casual' OR a.post_casual = 1)
+            )
+            AND (kind <> 'reply' OR EXISTS (
+              SELECT 1 FROM xpost_reply_targets r JOIN xpost_reply_accounts c ON c.tenant = xpost_posts.tenant
+              WHERE r.post_id = xpost_posts.id AND c.x_user_id = xpost_posts.x_user_id
+                AND c.consent_at_ms <= xpost_posts.created_at_ms
+                AND NOT EXISTS (SELECT 1 FROM xpost_reply_optouts o
+                  WHERE o.x_user_id = xpost_posts.x_user_id AND o.author_id = r.author_id)
+            ))`,
       )
       .run(int(dueAtMs), int(nowMs), int(id));
     if (back.changes === 1) return true;
     await tx
-      .prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'account-off', updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
+      .prepare(`UPDATE xpost_posts SET status = 'cancelled',
+        reason = CASE WHEN reason = 'kind-off' THEN reason ELSE 'account-off' END,
+        updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
       .run(int(nowMs), int(id));
     return false;
   });
@@ -1043,6 +1213,35 @@ export async function recentBodies(db: Db, opts: { tenant: string | null; sinceM
   return rows.map((r) => String(r.body ?? "")).filter((b) => b !== "");
 }
 
+const X_ID = /^\d{1,25}$/;
+function validReplyIds(p: Pick<NewPost, "replyToTweetId" | "replyRootTweetId" | "replyAuthorId">): boolean {
+  return [p.replyToTweetId, p.replyRootTweetId, p.replyAuthorId].every((v) => typeof v === "string" && X_ID.test(v));
+}
+
+export interface ReplyTarget { replyToTweetId: string; replyRootTweetId: string; replyAuthorId: string }
+
+/** Read the durable target, consent and parent again immediately before sending. */
+export async function replyTargetFor(db: Db, post: Pick<XPost, "id" | "tenant" | "xUserId">): Promise<ReplyTarget | null> {
+  const row = await db.prepare(`SELECT r.reply_to_tweet_id, r.root_tweet_id, r.author_id
+    FROM xpost_reply_targets r JOIN xpost_posts p ON p.id = r.post_id
+    JOIN xpost_accounts a ON a.tenant = p.tenant
+    JOIN xpost_reply_accounts c ON c.tenant = p.tenant
+    WHERE p.id = ? AND p.tenant = ? AND p.x_user_id = ? AND p.kind = 'reply'
+      AND p.status IN ('scheduled', 'sending') AND a.x_user_id = p.x_user_id
+      AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
+      AND a.consent_at_ms <= p.created_at_ms AND c.x_user_id = p.x_user_id AND c.consent_at_ms <= p.created_at_ms
+      AND r.author_id <> p.x_user_id
+      AND p.dedupe_key = 'reply:' || p.x_user_id || ':' || r.reply_to_tweet_id
+      AND EXISTS (SELECT 1 FROM xpost_posts parent WHERE parent.tenant = p.tenant AND parent.x_user_id = p.x_user_id
+        AND parent.kind = 'buy' AND parent.status = 'posted' AND parent.tweet_id = r.root_tweet_id)
+      AND NOT EXISTS (SELECT 1 FROM xpost_reply_optouts o WHERE o.x_user_id = p.x_user_id AND o.author_id = r.author_id)`)
+    .get(int(post.id), tenantKey(post.tenant), post.xUserId) as
+    { reply_to_tweet_id: string; root_tweet_id: string; author_id: string } | undefined;
+  if (!row) return null;
+  const target = { replyToTweetId: row.reply_to_tweet_id, replyRootTweetId: row.root_tweet_id, replyAuthorId: row.author_id };
+  return validReplyIds(target) ? target : null;
+}
+
 // ── meta ────────────────────────────────────────────────────────────────────
 
 /**
@@ -1062,6 +1261,45 @@ export async function takeAllowance(db: Db, key: string, limit: number, nowMs: n
     )
     .get(key, int(nowMs), int(limit))) as { n: unknown } | undefined;
   return row !== undefined;
+}
+
+/**
+ * Reserve an owner's daily allowance using the preference stored now. The
+ * account row is locked before reading its limit, in the same order as
+ * setPrefs, so a concurrent save cannot be missed by a cached pass snapshot.
+ * Count even without a chosen limit: lowering it later still includes earlier
+ * sends. The caller separately reserves the shared X account's server limit,
+ * and returns this reservation only when the post certainly did not happen.
+ */
+export async function takeOwnerAllowance(db: Db, tenant: string, dayKey: string, serverLimit: number, nowMs: number, initialUsed = 0): Promise<boolean> {
+  if (!(serverLimit >= 1)) return false;
+  return db.tx(async (tx) => {
+    const account = await tx.prepare(`UPDATE xpost_accounts SET per_day = per_day
+      WHERE tenant = ? AND posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id
+      RETURNING per_day`).get(tenantKey(tenant)) as { per_day: unknown } | undefined;
+    if (!account) return false;
+    const limit = Math.min(int(serverLimit), ownerPerDay(account.per_day) ?? int(serverLimit));
+    // Seed a newly introduced counter from durable send history before taking
+    // a unit. ON CONFLICT leaves an already-existing reservation count alone.
+    await tx.prepare(`INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)
+      ON CONFLICT (k) DO NOTHING`).run(dayKey, Math.max(0, int(initialUsed)), int(nowMs));
+    return takeAllowance(tx, dayKey, limit, nowMs);
+  });
+}
+
+/**
+ * Send times used to seed an owner's first daily counter after an upgrade.
+ * Old drafts can be sent today, so filter by send/claim time, not creation.
+ * Include uncertain outcomes conservatively, just as a live reservation is
+ * retained when the caller cannot establish that X created nothing.
+ */
+export async function ownerSendTimesSince(db: Db, tenant: string, sinceMs: number): Promise<number[]> {
+  const rows = await db.prepare(`SELECT CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END AS at_ms
+    FROM xpost_posts WHERE tenant = ? AND (
+      (status = 'posted' AND sent_at_ms >= ?)
+      OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
+    )`).all(tenantKey(tenant), int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];
+  return rows.map((row) => num(row.at_ms));
 }
 
 /**

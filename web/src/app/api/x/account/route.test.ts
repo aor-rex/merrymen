@@ -25,6 +25,7 @@ import {
   markPosted,
   markRevoked,
   schedulePost,
+  repliesEnabledFor,
   upsertAccount,
   type NewPost,
 } from "../../../../../../worker/src/xpost/store";
@@ -101,6 +102,8 @@ describe("who may call it", () => {
     for (const body of [
       { action: "enable", xUserId: X_USER.id, owner: OWNER_B },
       { action: "disable", owner: OWNER_B },
+      { action: "enable-replies", xUserId: X_USER.id, owner: OWNER_B },
+      { action: "disable-replies", xUserId: X_USER.id, owner: OWNER_B },
       { action: "skip", id: 1, owner: OWNER_B },
     ]) {
       const res = await post(OWNER_A, body);
@@ -126,6 +129,8 @@ describe("GET", () => {
       postingEnabled: false,
       prefs: { buys: true, casual: true, perDay: null },
       perDayMax: 3,
+      replyEnabled: false,
+      repliesAvailable: false,
       upcoming: [],
       recent: [],
     });
@@ -380,6 +385,79 @@ describe("prefs — what it posts", () => {
     await connect(OWNER_B, { id: "999", username: "other_one" });
     await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, casual: false }));
     assert.deepEqual((await getAccount(w.db, OWNER_B))?.prefs, { buys: true, casual: true, perDay: null });
+  });
+});
+
+describe("comment reply consent", () => {
+  const reply = (enabled: boolean, xUserId = X_USER.id as string, owner = OWNER_A as string) =>
+    post(OWNER_A, { action: enabled ? "enable-replies" : "disable-replies", xUserId, owner });
+  const postingOn = () => post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+  const replyDraft = async () => {
+    const root = await draft(OWNER_A, { kind: "buy" });
+    await claimPost(w.db, root, w.clock.now);
+    await markPosted(w.db, root, "222", w.clock.now);
+    return draft(OWNER_A, { kind: "reply", dedupeKey: `reply:${X_USER.id}:111`, replyToTweetId: "111", replyRootTweetId: "222", replyAuthorId: "333" });
+  };
+
+  it("defaults off and requires the operator gate as well as posting consent", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).replyEnabled, false);
+    assert.equal((await read(await reply(true), 503)).error, X_COPY.repliesUnavailable);
+    assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    await post(OWNER_A, { action: "disable", owner: OWNER_A });
+    assert.equal((await read(await reply(true), 409)).error, X_COPY.repliesNeedPosting);
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesAvailable, true);
+  });
+
+  it("binds the confirmation to both the signed-in owner and immutable X account", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    assert.equal((await reply(true, X_USER.id, OWNER_B)).status, 409);
+    assert.equal((await reply(true, "999")).status, 409);
+    assert.equal((await post(null, { action: "enable-replies", xUserId: X_USER.id, owner: OWNER_A })).status, 401);
+    assert.equal((await post(OWNER_A, { action: "enable-replies", xUserId: X_USER.id })).status, 400);
+    assert.equal((await reply(true, "not-an-id")).status, 400);
+    assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
+    assert.deepEqual(await read(await reply(true)), { ok: true, replyEnabled: true });
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).replyEnabled, true);
+    await connect(OWNER_A, { id: "777", username: "another_owner" });
+    assert.equal((await reply(true)).status, 409);
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).replyEnabled, false);
+  });
+
+  it("turns replies off without the gate or app and cancels only waiting replies", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    await reply(true);
+    const waiting = await replyDraft();
+    const ordinary = await draft(OWNER_A);
+    delete w.env.MERRYMEN_XPOST_REPLIES_APPROVED;
+    delete w.env.MERRYMEN_X_CLIENT_ID;
+    assert.deepEqual(await read(await reply(false)), { ok: true, replyEnabled: false });
+    assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
+    assert.equal(statusOf(waiting), "cancelled");
+    assert.equal(statusOf(ordinary), "scheduled");
+  });
+
+  it("returns validated comment context for upcoming and posted replies", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    await reply(true);
+    const id = await replyDraft();
+    let body = await read<XAccountBody>(await get(OWNER_A));
+    assert.equal(body.upcoming[0]?.replyToTweetId, "111");
+    assert.equal(body.upcoming[0]?.replyRootTweetId, "222");
+    assert.ok(!JSON.stringify(body).includes("replyAuthorId"));
+    await claimPost(w.db, id, w.clock.now);
+    await markPosted(w.db, id, "444", w.clock.now);
+    body = await read<XAccountBody>(await get(OWNER_A));
+    assert.equal(body.recent[0]?.kind, "reply");
+    assert.equal(body.recent[0]?.replyToTweetId, "111");
   });
 });
 

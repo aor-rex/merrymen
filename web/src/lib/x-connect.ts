@@ -112,6 +112,11 @@ export function xpostAvailable(hosted: boolean): boolean {
   return app !== null && app.redirectUri !== null;
 }
 
+/** Reply consent is available only after the operator has enabled this feature. */
+export function xpostRepliesAvailable(hosted: boolean): boolean {
+  return xpostAvailable(hosted) && (seam?.env ?? process.env).MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+}
+
 /**
  * Run `fn` against the X-posting tables, or against null when this deploy has
  * nowhere to keep them. The schema is ensured once per Db for the life of the
@@ -143,6 +148,8 @@ export const X_PRIVATE_HEADERS = { "Cache-Control": "private, no-store" } as con
  */
 export const X_COPY = {
   unavailable: "Posting on X isn't available right now.",
+  repliesUnavailable: "Comment replies aren’t available yet.",
+  repliesNeedPosting: "Turn posting on for this X account before enabling comment replies.",
   storeDown: "Couldn't reach merrymen just now — try again in a moment.",
   expired: "That sign-in link expired or was already used — start again.",
   wrongOwner:
@@ -243,6 +250,8 @@ export interface XUpcomingPost {
   kind: XPostKind;
   body: string;
   dueAt: number;
+  replyToTweetId?: string;
+  replyRootTweetId?: string;
 }
 
 export interface XRecentPost {
@@ -251,6 +260,8 @@ export interface XRecentPost {
   body: string;
   sentAt: number;
   url: string;
+  replyToTweetId?: string;
+  replyRootTweetId?: string;
 }
 
 /** GET /api/x/account, exactly. Shared by the route and the Settings section. */
@@ -269,6 +280,8 @@ export interface XAccountBody {
   prefs: XPostPrefs;
   /** The most posts a day an owner may choose (store.ts OWNER_PER_DAY_MAX). */
   perDayMax: number;
+  replyEnabled: boolean;
+  repliesAvailable: boolean;
   upcoming: XUpcomingPost[];
   recent: XRecentPost[];
 }
@@ -292,7 +305,7 @@ const TWEET_ID = /^\d{1,25}$/;
  * stop); "Posted" is only `posted` with an id X gave, linked through a handle
  * that passes X's own rule — anything else is left out rather than linked.
  */
-export function accountBody(available: boolean, account: XAccount | null, posts: readonly XPost[]): XAccountBody {
+export function accountBody(available: boolean, account: XAccount | null, posts: readonly XPost[], replies: { enabled: boolean; available: boolean } = { enabled: false, available: false }): XAccountBody {
   if (!account) {
     return {
       available,
@@ -303,6 +316,8 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
       postingEnabled: false,
       prefs: { ...DEFAULT_PREFS },
       perDayMax: OWNER_PER_DAY_MAX,
+      replyEnabled: false,
+      repliesAvailable: replies.available,
       upcoming: [],
       recent: [],
     };
@@ -317,7 +332,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
     .filter((p) => p.status === "scheduled" && allowed(p.kind))
     .sort((a, b) => a.dueAtMs - b.dueAtMs || a.id - b.id)
     .slice(0, UPCOMING_MAX)
-    .map((p) => ({ id: p.id, kind: p.kind, body: p.body, dueAt: p.dueAtMs }));
+    .map((p) => ({ id: p.id, kind: p.kind, body: p.body, dueAt: p.dueAtMs, ...replyContext(p) }));
   const recent = handle
     ? mine
         .filter((p) => p.status === "posted" && p.tweetId !== null && TWEET_ID.test(p.tweetId) && p.sentAtMs !== null)
@@ -329,6 +344,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
           body: p.body,
           sentAt: p.sentAtMs ?? 0,
           url: `https://x.com/${handle}/status/${p.tweetId}`,
+          ...replyContext(p),
         }))
     : [];
   return {
@@ -340,7 +356,16 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
     postingEnabled: account.posting,
     prefs: { ...account.prefs },
     perDayMax: OWNER_PER_DAY_MAX,
+    replyEnabled: account.posting && replies.enabled,
+    repliesAvailable: replies.available,
     upcoming,
     recent,
+  };
+}
+
+function replyContext(post: XPost): { replyToTweetId?: string; replyRootTweetId?: string } {
+  return {
+    ...(post.replyToTweetId && TWEET_ID.test(post.replyToTweetId) ? { replyToTweetId: post.replyToTweetId } : {}),
+    ...(post.replyRootTweetId && TWEET_ID.test(post.replyRootTweetId) ? { replyRootTweetId: post.replyRootTweetId } : {}),
   };
 }

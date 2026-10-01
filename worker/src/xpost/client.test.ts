@@ -16,6 +16,7 @@ import {
   pkceChallenge,
   pkcePair,
   refreshTokens,
+  readMentions,
   revokeToken,
   stateClient,
   xAppFromEnv,
@@ -224,4 +225,110 @@ test("length is counted the way X counts it", () => {
   assert.equal(xWeightedLength("日本"), 4);
   assert.equal(xWeightedLength("ok 🙂"), 5);
   assert.equal(xWeightedLength("é"), 1, "normalised first");
+});
+
+
+test("reply creation preserves its target and rejects malformed targets without a network call", async () => {
+  const seen: Seen[] = [];
+  const f = scripted(201, { data: { id: "999" } }, {}, seen);
+  assert.equal((await createPost("token", "a reply", { fetch: f, replyToTweetId: "123" })).ok, true);
+  assert.deepEqual(JSON.parse(seen[0]!.body!), { text: "a reply", reply: { in_reply_to_tweet_id: "123" } });
+  assert.equal((await createPost("token", "a reply", { fetch: f, replyToTweetId: "123?evil" })).ok, false);
+  assert.equal(seen.length, 1);
+});
+
+const MENTION_NOW = Date.parse("2026-09-30T12:00:00Z");
+const mention = (id: string, over: Record<string, unknown> = {}) => ({ id, text: "why this coin?", author_id: "222", conversation_id: "100",
+  referenced_tweets: [{ type: "replied_to", id: "100" }], created_at: "2026-09-30T11:00:00Z", ...over });
+
+test("mentions paginate completely and retain nested old-thread opt-outs while excluding self and retaining plain opt-out mentions", async () => {
+  const seen: Seen[] = [];
+  const pages = [
+    { data: [mention("300"), mention("299", { text: "STOP", conversation_id: "50", referenced_tweets: [{ type: "replied_to", id: "51" }], created_at: "2026-09-01T12:00:00Z" })], meta: { result_count: 2, next_token: "next" } },
+    { data: [mention("298", { author_id: "111" }), mention("297", { text: "STOP", referenced_tweets: [], conversation_id: "297" })], meta: { result_count: 2 } },
+  ];
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, sinceId: "200", fetch: async (u, i) => scripted(200, pages.shift(), {}, seen)(u, i) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.inReplyToTweetId]), [["300", "100"], ["299", "51"], ["297", ""]]);
+  assert.equal(r.value.newestId, "300");
+  assert.equal(new URL(seen[0]!.url).pathname, "/2/users/111/mentions");
+  assert.equal(new URL(seen[0]!.url).searchParams.get("since_id"), "200");
+  assert.equal(new URL(seen[1]!.url).searchParams.get("pagination_token"), "next");
+  assert.ok(seen.every((x) => x.method === "GET" && x.headers.authorization === "Bearer token"));
+});
+
+test("mentions fail closed for incomplete pages, broken reply metadata and repeated cursors", async () => {
+  const cases = [
+    { data: [mention("300", { author_id: undefined })], meta: { result_count: 1 } },
+    { data: [mention("300", { created_at: "not time" })], meta: { result_count: 1 } },
+    { data: [mention("300", { conversation_id: "bad" })], meta: { result_count: 1 } },
+    { data: [mention("300")], meta: { result_count: 2 } },
+    { data: [mention("300")], meta: { result_count: 1 }, errors: [{ detail: "partial read" }] },
+    { data: [mention("300")], meta: { result_count: 1, next_token: "same" } },
+  ];
+  for (const body of cases) assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) })).ok, false);
+  let calls = 0;
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: async (u, i) => {
+    calls++;
+    return scripted(calls === 1 ? 200 : 429, calls === 1 ? { data: [mention("300")], meta: { result_count: 1, next_token: "next" } } : {})(u, i);
+  } });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.failure, "rate");
+  assert.equal(calls, 2);
+  assert.deepEqual(await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, { meta: { result_count: 0 } }) }), { ok: true, value: { replies: [], newestId: null } });
+});
+
+test("mentions stop after eight pages and never return a partial successful batch", async () => {
+  let calls = 0;
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: async (u, i) => {
+    calls++;
+    return scripted(200, { data: [mention(String(500 - calls))], meta: { result_count: 1, next_token: `page-${calls}` } })(u, i);
+  } });
+  assert.equal(calls, 8);
+  assert.equal(r.ok, false);
+});
+
+
+test("a full mentions page uses a bounded size budget that fits multibyte text", async () => {
+  const data = Array.from({ length: 100 }, (_, i) => mention(String(1000 + i), { text: "🙂".repeat(140) }));
+  const body = JSON.stringify({ data, meta: { result_count: 100 } });
+  assert.ok(Buffer.byteLength(body) > 64 * 1024, "ordinary emoji posts can exceed the token response budget");
+  const fetch: FetchLike = async () => new Response(body, { status: 200 });
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.replies.length, 100);
+  const tooLarge: FetchLike = async () => new Response("x".repeat(2 * 1024 * 1024 + 1), { status: 200 });
+  assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: tooLarge })).ok, false);
+  assert.equal((await createPost("token", "post", { fetch })).ok, false, "ordinary post responses still use the smaller budget");
+});
+
+test("mentions arriving during a request are valid, while far-future timestamps fail closed", async () => {
+  const recent = mention("300", { created_at: new Date(MENTION_NOW + 1000).toISOString() });
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    return new Response(JSON.stringify({ data: [recent], meta: { result_count: 1 } }), { status: 200 });
+  } });
+  assert.equal(r.ok, true);
+  const future = mention("301", { created_at: new Date(MENTION_NOW + 60 * 60_000).toISOString() });
+  assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, { data: [future], meta: { result_count: 1 } }) })).ok, false);
+});
+
+
+test("initial mentions polling starts at consent, then a cursor takes precedence", async () => {
+  const seen: Seen[] = [];
+  const fetch = scripted(200, { meta: { result_count: 0 } }, {}, seen);
+  const startTimeMs = MENTION_NOW - 60_001;
+  await readMentions("token", "111", { nowMs: MENTION_NOW, startTimeMs, fetch });
+  const first = new URL(seen[0]!.url).searchParams;
+  assert.equal(first.get("start_time"), new Date(Math.floor(startTimeMs / 1000) * 1000).toISOString());
+  assert.equal(first.has("since_id"), false);
+  await readMentions("token", "111", { nowMs: MENTION_NOW, startTimeMs, sinceId: "300", fetch });
+  const second = new URL(seen[1]!.url).searchParams;
+  assert.equal(second.get("since_id"), "300");
+  assert.equal(second.has("start_time"), false);
+  for (const bad of [NaN, Infinity, -1, MENTION_NOW + 1]) {
+    assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, startTimeMs: bad, fetch })).ok, false);
+  }
+  assert.equal(seen.length, 2);
 });

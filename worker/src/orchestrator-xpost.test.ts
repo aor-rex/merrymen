@@ -834,7 +834,60 @@ describe("fleet guards", () => {
     await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0);
     const second = (await poster(v, { perDay: 3 }).step(v.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
     assert.equal(v.tweets.length, 1, "the owner's one post today");
-    assert.match(second ?? "", /account-day-cap 1/);
+    assert.match(second ?? "", /owner-day-cap 1/);
+  });
+
+  it("each owner's smaller allowance is separate while the X account keeps its shared server ceiling", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 - 10 * MIN);
+    await store.setPrefs(w.db, OTHER, { perDay: 1 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:other-owner-first", { tenant: OTHER });
+    await dueCasual(w, "casual:my-first", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await dueCasual(w, "casual:my-second", { dueAtMs: T0 + 8 * HOUR - MIN });
+    await poster(w).step(w.db, BOTH, new Map(), T0);
+    await poster(w).step(w.db, BOTH, new Map(), T0 + 4 * HOUR);
+    assert.equal(w.tweets.length, 2, "both owners can use their own first slot");
+    const later = (await poster(w).step(w.db, BOTH, new Map(), T0 + 8 * HOUR)).log;
+    assert.equal(w.tweets.length, 2, "this owner's second post stays held");
+    assert.match(later ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 2, "holding the owner returns the shared unit");
+    assert.equal((await store.readMeta(w.db, `xownerday:${TENANT}:2026-09-28`))?.n, 1);
+    assert.equal((await store.readMeta(w.db, `xownerday:${OTHER}:2026-09-28`))?.n, 1);
+  });
+
+  it("a lower owner limit saved during the pass is enforced before reserving the next send", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await store.setPrefs(w.db, TENANT, { perDay: 3 }, T0 - 10 * MIN);
+    await dueCasual(w, "casual:before-lowering");
+    await dueCasual(w, "casual:after-lowering", { dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(w).step(w.db, ROSTER, new Map(), T0);
+    const later = poster(w, { member: async () => {
+      // Both the pass's account list and this send's account read happened.
+      // The reservation must still use this newly confirmed preference.
+      await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 + 4 * HOUR);
+      return { tz: null };
+    } });
+    const log = (await later.step(w.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(w.tweets.length, 1);
+    assert.equal(await store.keyStatus(w.db, "casual:after-lowering"), "scheduled");
+    assert.match(log ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 1);
+  });
+
+  it("a new owner counter includes sends recorded before the owner-cap rollout", async (t) => {
+    const w = await world(t, T0 - 8 * HOUR);
+    await introDealtWith(w);
+    await wentOut(w, "casual:before-upgrade", { atMs: T0 - 4 * HOUR });
+    await store.takeAllowance(w.db, "xday:111:2026-09-28", 3, T0 - 4 * HOUR);
+    await store.setPrefs(w.db, TENANT, { perDay: 1 }, T0 - MIN);
+    await dueCasual(w, "casual:after-upgrade");
+    const log = (await poster(w).step(w.db, ROSTER, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 0, "the earlier recorded send already consumed the owner's slot");
+    assert.match(log ?? "", /owner-day-cap 1/);
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 1);
   });
 
   it("an owner can choose fewer posts a day than the server allows, never more", async (t) => {
