@@ -7,6 +7,7 @@ type V4Grant = Pick<StoredGrant, "grantFeatures" | "v4AdapterAddress">;
 export function V4PermissionLine({ grant, configuredAdapter }: { grant: V4Grant; configuredAdapter?: string }) {
   const adapter = grantV4Adapter(grant);
   const legacy = grantHasV4(grant);
+  const settingsMismatch = adapter && configuredAdapter && adapter.toLowerCase() !== configuredAdapter.toLowerCase();
   return (
     <li>
       <b>Uniswap v4</b> —{" "}
@@ -20,6 +21,9 @@ export function V4PermissionLine({ grant, configuredAdapter }: { grant: V4Grant;
         <>
           adapter permission sealed to <code style={{ overflowWrap: "anywhere" }}>{adapter}</code>.
           The agent checks that contract is deployed on this network before using it.
+          {settingsMismatch && (
+            <>{" "}Settings now names a different adapter. The agent cannot use v4 until the address in Settings and this signed key match. Verify the intended deployed address, then re-sign.</>
+          )}
         </>
       ) : legacy ? null : configuredAdapter ? (
         <>
