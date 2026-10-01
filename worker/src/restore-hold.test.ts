@@ -84,7 +84,17 @@ describe("the restore gate holds instead of returning", () => {
     // Under the lease spawnChild checked, asked again after the last await.
     const late = calls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
-    for (const a of all(hold, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "no await after the late check");
+    for (const a of all(hold, ts.isAwaitExpression)) {
+      if (ts.isAwaitExpression(a) && a.expression.getText() === "startHolderProcess(held)") continue;
+      assert.ok(a.getEnd() < late.getStart(), "preparation finishes before the first late check");
+    }
+    // Pacing adds a wait inside startHolderProcess. It checks the same lease,
+    // halt and kill conditions again after that wait and before the OS fork.
+    const started = fn("startHolderProcess");
+    const slot = calls(started, "waitForSpawnSlot")[0];
+    const last = calls(started, "lateSpawnRefusal")[0];
+    const fork = calls(started, "spawn")[0];
+    assert.ok(slot && last && fork && slot.getEnd() < last.getStart() && last.getEnd() < fork.getStart());
     // A tenant with no bot is still recorded, so reconcile stops retrying it every pass.
     const recorded = all(hold, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.set")[0];
     const noBot = all(hold, (n) => ts.isIfStatement(n) && n.expression.getText() === "!holderBotReady(settings)")[0];
@@ -130,6 +140,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "handHoldBack",
       "honourFleetHalt",
       "isHeldForTest",
+      "localChildProcessCount",
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
@@ -140,6 +151,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "spawnHolder",
       "standDownHolder",
       "standDownLostLeasesNow",
+      "startHolderProcess",
       "watchHolder",
     ]);
   });
