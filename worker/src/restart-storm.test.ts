@@ -55,12 +55,13 @@ describe("there is exactly one restart policy", () => {
 
   it("and so does an exit — of a child that is still its own", () => {
     const src = orch();
-    assert.match(src, /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`\)/);
+    assert.match(src, /scheduleRestart\(tenant, freshRestarts, restartReason\)/);
     // An exit whose entry is gone or replaced was stood down by somebody who
     // already decided (stop-the-loop.test.ts, A2).
-    const exitAt = src.indexOf('proc.on("exit"');
-    const handler = src.slice(exitAt, src.indexOf("});", exitAt));
+    const stoppedAt = src.indexOf("const childStopped = (", src.indexOf("async function spawnChild("));
+    const handler = src.slice(stoppedAt, src.indexOf('proc.on("error"', stoppedAt));
     const standAside = handler.indexOf("if (!ours) {");
+    assert.match(src, /proc\.on\("exit", \(code, signal\) => childStopped\(`exited \(\$\{code\}\)`, `exit \$\{code\}`/);
     assert.ok(
       standAside > 0 && handler.indexOf("return;", standAside) < handler.indexOf("scheduleRestart(tenant, freshRestarts"),
       "only its own child's exit reaches the policy",
@@ -240,7 +241,19 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
     const late = calls(spawn, "lateSpawnRefusal")[0];
     const started = calls(spawn, "spawn")[0];
     assert.ok(late && started, "spawnChild asks again, and spawns");
-    for (const a of all(spawn, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "after every await");
+    const lateAwaits = all(spawn, ts.isAwaitExpression).filter((a) => a.getEnd() > late.getStart());
+    const capRefusal = all(spawn, ts.isIfStatement).find(
+      (node): node is ts.IfStatement => ts.isIfStatement(node) && node.expression.getText() === "localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES",
+    );
+    assert.ok(capRefusal, "the only post-guard await belongs to the process-cap refusal");
+    assert.deepEqual(lateAwaits.map((a) => a.getText()), ["await releaseLease(tenant)"], "no await that can reach spawn follows the final guard");
+    const release = lateAwaits[0];
+    assert.ok(release);
+    assert.ok(
+      release.getStart() > capRefusal.thenStatement.getStart() && release.getEnd() < capRefusal.thenStatement.getEnd() &&
+      /return;/.test(capRefusal.thenStatement.getText()),
+      "the lease release returns instead of continuing to spawn",
+    );
     assert.ok(late.getEnd() < started.getStart(), "and before the worker starts");
     const refusal = fn("lateSpawnRefusal").body!.getText();
     for (const asked of ["stopping", "haltRequested()", "leases.get(tenant) !== lease", "lease.healthy()", "killRequested(childHome(tenant))"]) {
