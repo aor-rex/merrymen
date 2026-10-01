@@ -434,6 +434,65 @@ function metaRefusal(r: Readings): boolean {
   return r.low.some((t) => META.some((re) => re.test(t)));
 }
 
+/**
+ * A DODGE: hiding behind rules instead of having a take. "my owner's rules
+ * say i don't do 'should you buy this' talks" answered "wdyt about this" in a
+ * group, and "cant give ya advice lol" is the same line said casually. The
+ * agent's own view is always allowed — "i'd pass", "not for me", "haven't
+ * looked yet" — and advice to others is refused by its own clause; a line
+ * that cites rules, permission, or a refusal to give a take is neither, and
+ * reads as a bot reciting its settings. Refused whole, so a template answers.
+ */
+const TAKE = String.raw`(?:opinions?|takes?|views?|thoughts?|predictions?|recs?|recommendations?)`;
+const NOT_WILLING = String.raw`(?:can'?t|cant|cannot|won'?t|wont|don'?t|dont|do not|doesn'?t|never|not gonna|not going to|not able to|unable to)`;
+/** What it would be refusing to do: talk, weigh in, share. */
+const TALK = String.raw`(?:say|talk|comment|give|share|answer|tell|discuss|weigh in|get into|go into)`;
+const DODGE: readonly RegExp[] = [
+  // Someone's rules, or permission. Its own ("my rule: never chase green
+  // candles") is a take, and "golden rule says" is a saying.
+  /\b(?:owner|boss|human|dev|devs|creator|maker)(?:'s|s'|s)?\s+rules?\b/,
+  /\bagainst (?:my|the|our|house) (?:rules|policy|policies|guidelines|programming)\b/,
+  /\b(?:my|the|our|house)\s+rules? (?:say|says|said|won'?t let|don'?t let|doesn'?t let|forbid|forbids)\b/,
+  /\b(?:i'?m|im|i am|i was|we'?re|we are)\s+(?:just\s+|really\s+)?not (?:allowed|permitted|supposed to)\b/,
+  new RegExp(String.raw`\bnot (?:allowed|permitted|supposed) to ${TALK}\b`),
+  new RegExp(String.raw`\b(?:won'?t|wont|doesn'?t|don'?t|wouldn'?t) let me ${TALK}\b`),
+  // Refusing a take: "cant give ya advice", "no advice from me", "i don't give opinions".
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:really\s+|just\s+)?(?:give|giving|do|doing|offer|offering|hand out|dish out|share)\s+(?:(?:you|ya|u|y'?all|out)\s+)?(?:any\s+|no\s+)?(?:financial\s+|investment\s+|trading\s+)?advice\b|\badvice from me\b|\bno advice\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:really\s+|just\s+)?(?:give|giving|share|sharing|offer|do|doing|voice|make)\s+(?:(?:you|ya|u|y'?all|out)\s+)?(?:my |an? |any |no )?(?:coin |trading |financial )?${TAKE}\b`),
+  /\bnot (?:sharing|giving|offering) (?:my |a |an |any )?(?:take|opinion|view|thoughts?)\b|\bkeep(?:ing)? my (?:opinions?|takes?|thoughts?|views?) to myself\b/,
+  new RegExp(String.raw`\b${NOT_WILLING}\s+tell\s+(?:you|ya|u|anyone|people|y'?all|folks)\s+(?:whether|if)\s+(?:to\s+|you\s+should\s+)?(?:buy|sell|ape|get in|hold)\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:recommend|endorse)\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:talk|discuss|get into|go into|touch)\s+(?:about\s+)?(?:coins?|tokens?|trades?|trading|crypto|charts?)\b|\b${NOT_WILLING}\s+do\s+(?:coin|trading|crypto)\s+talk\b`),
+  // "i can't comment on that one." — and nothing after it: "can't comment on the chart but the name is fun" is a take.
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:comment|weigh in|opine)(?:\s+on\s+(?:that|this|it|coins?)(?:\s+one)?)?\s*(?:$|[.!?]|,?\s*(?:sorry|tbh|lol|ngl|fam|bro)\s*[.!?]*$)`),
+  // "should you buy this" talk, quoted back as the thing it does not do.
+  /\bshould (?:you|u|ya|y'?all|anyone|people) (?:buy|sell|ape|get in|hold)\b/,
+].map(U);
+
+function dodgeRefusal(r: Readings): boolean {
+  return r.low.some((t) => DODGE.some((re) => re.test(t)));
+}
+
+/**
+ * A TRADE IT NEVER MADE (execution provenance). In chatter — an answer,
+ * banter, a roast, an ambient line — it has no trade facts in front of it,
+ * and "give your own take" must not become "aped in ngl": a line claiming it
+ * bought, sold, got in or holds a coin is refused there, and a template
+ * answers. The buy, exit and memory lines say so from the book, under their
+ * own kinds, never through this one.
+ */
+const TRADE_CLAIM: readonly RegExp[] = [
+  /\bi\s+(?:(?:already|still|currently|also|do)\s+)*(?:hold|own)\s+(?:it|this|that|some|coins?|tokens?|(?:a|the|my)\s+(?:bag|position|stake|coins?|tokens?))\b/,
+  /\b(?:i|i'?ve|ive|i have)\s+(?:just\s+|already\s+|also\s+)?(?:bought|aped|grabbed|sold|dumped|picked up|loaded up|scooped|bagged|snagged|took profits?|exited|went in|got in)\b/,
+  /(?:^|[.!?,;:—–]\s*)(?:(?:lol|ngl|tbh|ok|okay|yeah|yep|welp|already|just)[\s,]+)*(?:bought|aped|grabbed|scooped|bagged|snagged|sold)\s+(?:in|into|it|this|that|some|a (?:little|bit|bag|few)|more)\b/,
+  /\b(?:i'?m|im|i am)\s+(?:already\s+|still\s+|so\s+)?(?:holding|buying|selling|long|aping|loaded|bagged up)\b/,
+  /\b(?:i'?m|im|i am)\s+(?:already\s+|still\s+)?in(?:\s+(?:on\s+)?(?:it|this|that|this one|that one))?\s*(?:$|[.!?,]|\s(?:ngl|tbh|lol|fr|already)\b)/,
+  /\b(?:already|still)\s+(?:holding|in (?:on )?it|got (?:some|a bag))\b/,
+  /\b(?:i|i'?ve|ive)\s+(?:got|have)\s+(?:a bag|a (?:little|small) bag|a position|a stake)\b/,
+].map(U);
+/** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. */
+const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast"]);
+
 /** Markup or a transcript label: judged after the link clause, so "pump [.] fun" is logged as the link it is. */
 function markupRefusal(r: Readings, names: readonly string[]): boolean {
   if (r.cased.some((t) => MARKUP.test(t.replace(/<3+/g, " ")))) return true;
@@ -1327,9 +1386,9 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
 /**
  * MAY THE AGENT SAY THIS IN A GROUP? `ok` carries the exact text to send.
  *
- * Reason codes (stable, log-only): empty · pass · hidden-chars · meta ·
+ * Reason codes (stable, log-only): empty · pass · hidden-chars · meta · dodge ·
  * too-long · secret · address · link · handle · cashtag · hateful · selfharm · threat ·
- * sexual · profanity · appearance · money · figures · alert · advice · accuse ·
+ * sexual · profanity · appearance · money · figures · alert · advice · claim · accuse ·
  * private · ops · human · emoji · paper-unsaid · repeat.
  *
  * Ordered so the reason names the most specific and most serious fault: a
@@ -1352,6 +1411,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (isPass(r)) return refuse("pass");
   if (PAYLOAD_CHARS.test(tidied)) return refuse("hidden-chars");
   if (metaRefusal(r)) return refuse("meta");
+  if (dodgeRefusal(r)) return refuse("dodge");
 
   // No floor: "same", "lol" and "ok ok 🤐" are whole lines in a group.
   if (Array.from(lines.join("\n")).length > TG_LINE_MAX) return refuse("too-long");
@@ -1393,6 +1453,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.low.some((t) => ALERT.some((re) => re.test(t))) || some(r.cased, ALERT_CAPS) || ALERT_EMOJI.test(r.shown)) return refuse("alert");
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
+  if ((kind === null || CLAIM_KINDS.has(kind)) && r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
   if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
