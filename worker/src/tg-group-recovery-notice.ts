@@ -72,6 +72,8 @@ async function currentShogunGrant(client: PgClientLike): Promise<boolean> {
 export interface TgGroupNoticeResult {
   dryRun: boolean;
   campaignId: string;
+  /** SHA-256 of the trimmed body that sendMessage would receive. */
+  bodySha256: string;
   rooms: Room[];
   selectedChatId: number | null;
   status: "preview" | "sent" | "already-claimed" | "refused" | "uncertain";
@@ -84,9 +86,10 @@ export async function runTgGroupRecoveryNotice(opts: {
   client: PgClientLike;
   campaignId: string;
   body: string;
-  /** A real send needs this exact id AND confirmCampaignId. */
+  /** A real send needs this exact id, confirmCampaignId and confirmBodySha256. */
   selectedChatId?: number | null;
   confirmCampaignId?: string | null;
+  confirmBodySha256?: string | null;
   settings?: { get(tenant: `0x${string}`): Promise<MerrymenSettings | null> };
   dek?: Buffer;
   env?: Record<string, string | undefined>;
@@ -105,12 +108,15 @@ export async function runTgGroupRecoveryNotice(opts: {
   if (selected !== null && (!Number.isSafeInteger(selected) || selected >= 0)) {
     throw new Error("selected chat id must be an exact negative Telegram group id");
   }
-  const confirmed = opts.confirmCampaignId === id && selected !== null;
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  const campaignAndChatConfirmed = opts.confirmCampaignId === id && selected !== null;
+  const confirmed = campaignAndChatConfirmed && opts.confirmBodySha256 === bodyHash;
   const out: TgGroupNoticeResult = {
-    dryRun: !confirmed, campaignId: id, rooms: [], selectedChatId: selected,
+    dryRun: !confirmed, campaignId: id, bodySha256: bodyHash, rooms: [], selectedChatId: selected,
     status: "preview", body,
   };
   const refuse = (reason: string): TgGroupNoticeResult => ({ ...out, status: "refused", reason });
+  if (campaignAndChatConfirmed && !confirmed) return refuse("body SHA-256 does not match the reviewed dry run");
   const env = opts.env ?? process.env;
   if (env.MERRYMEN_TG_GROUPS?.trim() === "0") return refuse("operator group switch is off");
 
@@ -182,7 +188,6 @@ export async function runTgGroupRecoveryNotice(opts: {
   if (!await shogunHoldsBot(opts.client, botId)) return refuse("Shogun's bot claim changed before send");
 
   const now = opts.now ?? Date.now;
-  const bodyHash = createHash("sha256").update(body).digest("hex");
   const claim = await opts.client.query(
     `INSERT INTO tg_group_notices (campaign_id, tenant, chat_id, body_sha256, status, claimed_at)
      SELECT $1, $2, $3, $4, 'claimed', $5

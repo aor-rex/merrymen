@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import type { MerrymenSettings } from "../../packages/core/src/index";
 import type { PgClientLike } from "./announce";
@@ -13,6 +13,7 @@ import {
 const CHAT_ID = -1001234567890;
 const DEK = randomBytes(32);
 const BODY = "Hey, I’m back. Sorry I went quiet. Sign up at https://app.merrymen.dev.";
+const BODY_SHA256 = createHash("sha256").update(BODY).digest("hex");
 const ID = "recovery-2026-10-01";
 
 function room(chatId = CHAT_ID, title = RECOVERY_ROOM_TITLE, status: TgRoom["status"] = "approved"): TgRoom {
@@ -92,24 +93,40 @@ test("dry run lists only approved Shogun rooms titled Merrymen and contacts no T
   const out = await runTgGroupRecoveryNotice(deps);
   assert.equal(out.status, "preview");
   assert.equal(out.dryRun, true);
+  assert.equal(out.bodySha256, BODY_SHA256);
   assert.deepEqual(out.rooms.map((r) => r.chatId), [CHAT_ID]);
   assert.deepEqual(calls, []);
   assert.equal(client.queries.some((sql) => sql.startsWith("CREATE TABLE")), false);
   assert.equal(JSON.stringify(out).includes("Private"), false);
 });
 
-test("a real send needs both the same campaign id and exact approved chat id", async () => {
+test("a real send needs campaign id, exact approved chat id and reviewed body digest", async () => {
   const { calls, deps } = harness();
-  const wrongConfirm = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: "another-campaign" });
+  const wrongConfirm = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: "another-campaign", confirmBodySha256: BODY_SHA256 });
   assert.equal(wrongConfirm.dryRun, true);
-  const wrongChat = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: -1009999999999, confirmCampaignId: ID });
+  const wrongChat = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: -1009999999999, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256 });
   assert.equal(wrongChat.status, "refused");
+  assert.deepEqual(calls, []);
+});
+
+test("missing or stale body digest refuses before a database claim or Telegram call", async () => {
+  const { client, calls, deps } = harness();
+  const selected = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID };
+  const missing = await runTgGroupRecoveryNotice(selected);
+  assert.equal(missing.status, "refused");
+  assert.equal(missing.bodySha256, BODY_SHA256);
+  const changed = await runTgGroupRecoveryNotice({ ...selected,
+    body: `${BODY} One more sentence.`, confirmBodySha256: BODY_SHA256,
+  });
+  assert.equal(changed.status, "refused");
+  assert.notEqual(changed.bodySha256, BODY_SHA256);
+  assert.deepEqual(client.queries, []);
   assert.deepEqual(calls, []);
 });
 
 test("claim is durable before send and a rerun cannot post again", async () => {
   const { calls, client, deps } = harness();
-  const opts = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID };
+  const opts = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256 };
   const sent = await runTgGroupRecoveryNotice({ ...opts, send: async (...args) => {
     assert.equal(client.notices.get(`${ID}:${CHAT_ID}`), "claimed");
     return deps.send(...args);
@@ -123,7 +140,7 @@ test("claim is durable before send and a rerun cannot post again", async () => {
 
 test("an uncertain Telegram result retains the claim for manual review", async () => {
   const { client, deps } = harness();
-  const out = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID,
+  const out = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256,
     send: async () => ({ ok: false, reason: "request failed: timed out" }),
   });
   assert.equal(out.status, "uncertain");
@@ -132,7 +149,7 @@ test("an uncertain Telegram result retains the claim for manual review", async (
 
 test("current bot, chat and tenant identity must all match before a claim", async () => {
   const { client, deps } = harness();
-  const options = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID };
+  const options = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256 };
   client.name = "Another agent";
   assert.equal((await runTgGroupRecoveryNotice(options)).status, "refused");
   client.name = "Shogun";
@@ -162,7 +179,7 @@ test("settings, token and operator switch are checked again after Telegram respo
   for (const change of ["groups", "telegram", "token", "switch"] as const) {
     const { client, calls, settingsState, deps } = harness();
     const env: Record<string, string | undefined> = {};
-    const out = await runTgGroupRecoveryNotice({ ...deps, env, selectedChatId: CHAT_ID, confirmCampaignId: ID,
+    const out = await runTgGroupRecoveryNotice({ ...deps, env, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256,
       inspectChat: async () => {
         if (change === "groups") settingsState.current.telegramGroupsEnabled = false;
         if (change === "telegram") settingsState.current.telegramEnabled = false;
@@ -179,7 +196,7 @@ test("settings, token and operator switch are checked again after Telegram respo
 
 test("bot claim moved during lookup or at the guarded insert blocks delivery", async () => {
   const { client, calls, deps } = harness();
-  const opts = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID };
+  const opts = { ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256 };
   const duringLookup = await runTgGroupRecoveryNotice({ ...opts,
     inspectChat: async () => {
       client.botClaimHolder = `0x${"ab".repeat(20)}`;
@@ -200,13 +217,13 @@ test("an owner switching groups off or removing approval prevents the notice", a
   const { client, deps } = harness();
   assert.equal((await runTgGroupRecoveryNotice({ ...deps, env: { MERRYMEN_TG_GROUPS: "0" } })).status, "refused");
   client.sealedState = sealed([room(CHAT_ID, RECOVERY_ROOM_TITLE, "left")]);
-  assert.equal((await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID })).status, "refused");
+  assert.equal((await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256 })).status, "refused");
   assert.equal(client.notices.size, 0);
 });
 
 test("approval withdrawn during the live Telegram checks prevents the claim", async () => {
   const { client, deps } = harness();
-  const out = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID,
+  const out = await runTgGroupRecoveryNotice({ ...deps, selectedChatId: CHAT_ID, confirmCampaignId: ID, confirmBodySha256: BODY_SHA256,
     inspectChat: async () => {
       client.sealedState = sealed([room(CHAT_ID, RECOVERY_ROOM_TITLE, "left")]);
       return { chat: { id: CHAT_ID, title: RECOVERY_ROOM_TITLE, type: "supergroup", isForum: false } };

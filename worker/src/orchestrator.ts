@@ -6929,15 +6929,17 @@ async function runTgGroupRecoveryNoticeIfAsked(): Promise<void> {
       const out = await runTgGroupRecoveryNotice({
         client, campaignId: id, body, selectedChatId: chatId,
         confirmCampaignId: (process.env.MERRYMEN_TG_RECOVERY_CONFIRM ?? "").trim(),
+        confirmBodySha256: (process.env.MERRYMEN_TG_RECOVERY_BODY_SHA256 ?? "").trim(),
       });
       // Approved metadata only: the sealed state also holds private chat
       // history, which the notice path never returns or logs.
       log(`tg recovery notice ${id}: ${out.status}${out.dryRun ? " (DRY RUN — nothing sent)" : ""} · ${out.rooms.length} approved Merrymen room(s)`);
+      log(`tg recovery notice ${id}: prepared body SHA-256 ${out.bodySha256}`);
       for (const room of out.rooms) log(`tg recovery notice ${id}: candidate chat ${room.chatId} · ${room.title} · ${room.kind}${room.isForum ? " · forum" : ""}`);
       if (out.reason) log(`tg recovery notice ${id}: ${out.reason}`);
       if (out.dryRun) {
         for (const line of out.body.split("\n")) log(`tg recovery notice ${id}: prepared | ${line}`);
-        log(`tg recovery notice ${id}: to send, set MERRYMEN_TG_RECOVERY_CHAT_ID to exactly one candidate id and MERRYMEN_TG_RECOVERY_CONFIRM=${id}`);
+        log(`tg recovery notice ${id}: to send, set MERRYMEN_TG_RECOVERY_CHAT_ID to exactly one candidate id, MERRYMEN_TG_RECOVERY_CONFIRM=${id}, and MERRYMEN_TG_RECOVERY_BODY_SHA256=${out.bodySha256}`);
       }
     } finally {
       await client.end();
