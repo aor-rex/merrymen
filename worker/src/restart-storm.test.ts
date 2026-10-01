@@ -288,12 +288,12 @@ describe("a stood-down tenant's home goes with it", () => {
   const AST = ts.createSourceFile("orchestrator.ts", orch(), ts.ScriptTarget.Latest, true);
   const rec = AST.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "reconcile")!;
 
-  it("RECONCILE WALKS THE HOMES ON DISK, AND SKIPS ONLY THE WANTED, THE RUNNING AND THE PREPARING", () => {
+  it("RECONCILE WALKS THE HOMES ON DISK, AND KEEPS HOMES WITH AN EXIT OR EXPIRY DRAIN", () => {
     const text = rec.body!.getText();
     const walk = text.indexOf("for (const tenant of childHomeTenants())");
     assert.ok(walk > 0, "the homes on disk, not the running set");
     const loop = text.slice(walk);
-    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\)\) continue;/);
+    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\) \|\| retiringExpired\.has\(tenant\) \|\| exitingChildren\.has\(tenant\) \|\| holders\.has\(tenant\)\) continue;/);
     // Its restart is cancelled before anything awaits, so no timer starts a
     // spawn in the home while it is being read and wiped.
     const cancel = loop.indexOf("cancelRestart(tenant);");
@@ -301,7 +301,7 @@ describe("a stood-down tenant's home goes with it", () => {
     const wipe = loop.indexOf("rmSync(childHome(tenant)");
     assert.ok(cancel > 0 && cancel < firstAwait && firstAwait < wipe, "cancel, carry the ledger up, then wipe");
     // Asked again after the await: a spawn that started meanwhile keeps its home.
-    const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant)) continue;", firstAwait);
+    const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;", firstAwait);
     assert.ok(recheck > firstAwait && recheck < wipe, "and it looks again before the wipe");
   });
 
