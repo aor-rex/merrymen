@@ -84,7 +84,17 @@ describe("the restore gate holds instead of returning", () => {
     // Under the lease spawnChild checked, asked again after the last await.
     const late = calls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
-    for (const a of all(hold, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "no await after the late check");
+    for (const a of all(hold, ts.isAwaitExpression)) {
+      if (ts.isAwaitExpression(a) && a.expression.getText() === "startHolderProcess(held)") continue;
+      assert.ok(a.getEnd() < late.getStart(), "preparation finishes before the first late check");
+    }
+    // Pacing adds a wait inside startHolderProcess. It checks the same lease,
+    // halt and kill conditions again after that wait and before the OS fork.
+    const started = fn("startHolderProcess");
+    const slot = calls(started, "waitForSpawnSlot")[0];
+    const last = calls(started, "lateSpawnRefusal")[0];
+    const fork = calls(started, "spawn")[0];
+    assert.ok(slot && last && fork && slot.getEnd() < last.getStart() && last.getEnd() < fork.getStart());
     // A tenant with no bot is still recorded, so reconcile stops retrying it every pass.
     const recorded = all(hold, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.set")[0];
     const noBot = all(hold, (n) => ts.isIfStatement(n) && n.expression.getText() === "!holderBotReady(settings)")[0];
@@ -130,9 +140,11 @@ describe("held tenants reach only the loops they belong in", () => {
       "handHoldBack",
       "honourFleetHalt",
       "isHeldForTest",
+      "localChildProcessCount",
       "mirrorLedgers",
       "reconcile",
       "refreshGrantForChild",
+      "retireExpiredGrants",
       "retryHold",
       "runOrchestrator",
       "scheduleRestart",
@@ -140,6 +152,7 @@ describe("held tenants reach only the loops they belong in", () => {
       "spawnHolder",
       "standDownHolder",
       "standDownLostLeasesNow",
+      "startHolderProcess",
       "watchHolder",
     ]);
   });
@@ -242,11 +255,15 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.ok(childRefresh && childRefresh.getEnd() < release.getStart(), "after the children's refresh, which would strip the worker's own token");
   });
 
-  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER WANTED, AND ASKS THE GATE AGAIN", () => {
+  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER ELIGIBLE, AND ASKS THE GATE AGAIN", () => {
     const refresh = loopsOver(fn("reconcile"), "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
     assert.ok(refresh && ts.isBlock(refresh.statement));
     const first = refresh.statement.statements[0]!;
-    assert.equal(first.getText(), "if (!wanted.has(tenant)) continue;", "before its settings are written or its token claims a bot");
+    assert.equal(
+      first.getText(),
+      "if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;",
+      "a revoked or expired grant, including one still retiring, claims no bot before its settings are written",
+    );
     assert.match(refresh.statement.getText(), /if \(stored && stored\.paperTradingEnabled !== true\) \{\s*released\.push\(held\);/);
     // The same test spawnChild's gate makes, or the two would disagree about who is held.
     assert.ok(all(fn("spawnChild"), (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true").length === 1);

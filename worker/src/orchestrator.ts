@@ -217,6 +217,51 @@ export function firstBeatGraceSec(tickSeconds: number): number {
 }
 /** Cap a child's heap well below the container so an OOM kills the offender, not the box. */
 const CHILD_MAX_OLD_SPACE_MB = 384;
+/** 48 Node children leave headroom under the hosted container's 1000 PID/thread limit. */
+const MAX_LOCAL_CHILD_PROCESSES = 48;
+/** Space process creation across the fleet instead of forking every tenant at boot. */
+const SPAWN_SPACING_MS = 2_000;
+/** Resource exhaustion affects the whole container, not just the tenant that hit it. */
+const SPAWN_PRESSURE_FIRST_MS = 30_000;
+const SPAWN_PRESSURE_MAX_MS = 2 * 60_000;
+let spawnPacingForTest = false;
+let spawnSpacingMs = SPAWN_SPACING_MS;
+let spawnPressureFirstMs = SPAWN_PRESSURE_FIRST_MS;
+let nextSpawnAt = 0;
+let spawnPressureUntil = 0;
+let spawnPressureFailures = 0;
+
+function spawnErrorCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "unknown";
+}
+
+function noteSpawnPressure(error: unknown): void {
+  const code = spawnErrorCode(error);
+  if (code !== "EAGAIN" && code !== "EMFILE" && code !== "ENFILE" && code !== "ENOMEM") return;
+  spawnPressureFailures += 1;
+  const delay = Math.min(SPAWN_PRESSURE_MAX_MS, spawnPressureFirstMs * 2 ** Math.min(spawnPressureFailures - 1, 3));
+  spawnPressureUntil = Math.max(spawnPressureUntil, Date.now() + delay);
+  log(`[alert] process creation refused (${code}); pausing all new children for ${Math.round(delay / 1000)}s`);
+}
+
+/**
+ * Reserve a process-creation slot before the final lease/kill check. Restarts
+ * and the normal roster pass share this clock. If a different child receives
+ * EAGAIN while we wait, observe its new cooldown before trying to fork.
+ */
+async function waitForSpawnSlot(): Promise<void> {
+  // Existing integration tests substitute fake processes and mock timers.
+  // Exercise the real pacing only in its dedicated test.
+  if (spawn !== nodeSpawn && !spawnPacingForTest) return;
+  for (;;) {
+    const at = Math.max(Date.now(), nextSpawnAt, spawnPressureUntil);
+    nextSpawnAt = at + spawnSpacingMs;
+    if (at > Date.now()) await new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()));
+    if (Date.now() >= spawnPressureUntil) return;
+  }
+}
 /** Give up restarting a child that keeps dying right after start. */
 const MAX_RESTARTS = 8;
 
@@ -560,6 +605,21 @@ export function staleThresholdSec(tickSeconds: number): number {
 
 const children = new Map<string, Child>();
 
+/** Count processes still alive, including ones that have been told to exit. */
+function localChildProcessCount(): number {
+  const processes = new Set<ChildProcess>();
+  for (const child of children.values()) processes.add(child.proc);
+  for (const held of holders.values()) {
+    if (held.proc) processes.add(held.proc);
+    if (held.leaving) processes.add(held.leaving);
+  }
+  for (const exiting of exitingChildren.values()) for (const proc of exiting) processes.add(proc);
+  return processes.size;
+}
+export function localChildProcessCountForTest(): number {
+  return localChildProcessCount();
+}
+
 /**
  * TENANTS WHOSE spawnChild IS STILL PREPARING — claimed before its first await.
  *
@@ -625,6 +685,16 @@ let spawn: (command: string, args: readonly string[], options: SpawnOptions) => 
 /** Test seam: start children with `fn` instead of node's `spawn`. */
 export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
+}
+
+/** Test seam: run the production spawn gate with short, real waits. */
+export function setSpawnPacingForTest(spacingMs: number, pressureMs: number): void {
+  spawnPacingForTest = true;
+  spawnSpacingMs = spacingMs;
+  spawnPressureFirstMs = pressureMs;
+  nextSpawnAt = 0;
+  spawnPressureUntil = 0;
+  spawnPressureFailures = 0;
 }
 
 /**
@@ -794,6 +864,13 @@ const leases = new Map<string, TenantLease>();
 let stopping = false;
 /** A lease-lost child must exit before THIS replica may arm the tenant again. */
 const leaseLossDraining = new Set<string>();
+/** An expired grant's process must exit and its final ledger must settle before re-sign can arm. */
+const retiringExpired = new Map<string, { mirror: boolean; lease: TenantLease | null }>();
+export function isRetiringExpiredForTest(tenant: string): boolean {
+  return retiringExpired.has(tenant.toLowerCase());
+}
+let lastRosterLog: { active: number; expired: number; at: number } | null = null;
+let lastCapacityLog: { deferred: number; at: number } | null = null;
 /** Includes children already removed by the watchdog or another stand-down. */
 const exitingChildren = new Map<string, Set<ChildProcess>>();
 
@@ -812,14 +889,18 @@ function trackExitingChild(tenant: string, proc: ChildProcess): void {
   }
   if (pending.has(proc)) return;
   pending.add(proc);
-  proc.once("exit", () => {
+  const exited = () => {
     const current = exitingChildren.get(tenant);
     current?.delete(proc);
     if (current?.size === 0) {
       exitingChildren.delete(tenant);
       leaseLossDraining.delete(tenant);
     }
-  });
+  };
+  proc.once("exit", exited);
+  // A child that never spawned can emit `error` without `exit`. Its failed
+  // process cannot still be trading, so it must not hold the local barrier.
+  proc.once("error", () => { if (proc.pid === undefined) exited(); });
 }
 
 /** Release and forget a tenant's lease. Best-effort; safe if none is held. */
@@ -1367,7 +1448,7 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
 }
 
 /** Write the tenant's session-key-only grant into its child's grant.json. */
-async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
+async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount: `0x${string}`; expiresAt: number } | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
   if (killRequested(childHome(tenant))) return null;
   const grant = await getGrantStore().get(tenant);
@@ -1406,7 +1487,7 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
   // ledger table is on, the caller needs it to derive the accounting anchor, and
   // the grant is the only place the orchestrator can learn it without a second
   // decrypting read.
-  return grant.smartAccount as `0x${string}`;
+  return { smartAccount: grant.smartAccount as `0x${string}`, expiresAt: grant.expiresAt };
 }
 
 /**
@@ -2351,7 +2432,9 @@ export async function writeBootstrapForChild(
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
   if (haltRequested()) return "FLEET_HALT is present";
+  if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
   if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
+  if (exitingChildren.has(tenant)) return "the previous child is still exiting";
   if (leases.get(tenant) !== lease || !lease.healthy()) return "its lease was lost";
   if (killRequested(childHome(tenant))) return "a Telegram kill is pending";
   if (children.has(tenant)) return "a child is already running";
@@ -2360,6 +2443,7 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  if (retiringExpired.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
@@ -2389,6 +2473,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
       return;
     }
+    if (exitingChildren.has(tenant)) {
+      log(`${tenant}: previous child still exiting — not spawning a second`);
+      return;
+    }
     // FLEET_HALT means spawn none, and a restart timer can fire in the pass
     // before the main loop gets round to releasing the leases.
     if (haltRequested()) {
@@ -2401,14 +2489,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: a Telegram kill is pending — not spawning`);
       return;
     }
-    const smartAccount = await writeGrantForChild(tenant);
-    if (!smartAccount) {
-      log(`${tenant}: no grant in the store — not spawning`);
+    const grantForChild = await writeGrantForChild(tenant);
+    if (!grantForChild) {
+      log(`${tenant}: no usable signed grant in the store — not spawning`);
       // THE GRANT IS GONE, and its group memory goes with it now. A crash
       // restart lands here with no reconcile kill branch to do it, because the
       // tenant is no longer in `children`. The sweep would also catch it on the
       // next pass.
       await forgetTgGroups(tenant);
+      return;
+    }
+    const { smartAccount } = grantForChild;
+    if (!Number.isFinite(grantForChild.expiresAt) || grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
+      log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
     }
     // The settings the child will actually read, so the watchdog can size its
@@ -2466,6 +2559,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
     await restoreTgGroupsForChild(tenant);
+    // This wait is shared by the roster and crash-restart paths. It also lets
+    // a resource failure in another tenant pause forks across the container.
+    await waitForSpawnSlot();
+    if (grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
+      log(`${tenant}: signed grant expired during worker preparation — not spawning`);
+      return;
+    }
     // THE LAST AWAIT IS ABOVE THIS LINE, so what is true here is still true at
     // `spawn()`. See lateSpawnRefusal.
     const late = lateSpawnRefusal(tenant, lease);
@@ -2473,18 +2573,60 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: ${late} — not spawning (it changed while the child was being prepared)`);
       return;
     }
+    if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+      log(`[alert] ${tenant}: worker deferred; local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached`);
+      await releaseLease(tenant);
+      return;
+    }
     void writeHistoryForChild(tenant, smartAccount);
     const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
     const staleSec = staleThresholdSec(tickSeconds);
     const firstBeatSec = firstBeatGraceSec(tickSeconds);
-    const proc = spawn(
-      process.execPath,
-      [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
-      // Groups held off when the restore above could not put them back.
-      { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
-    );
+    let proc: ChildProcess;
+    try {
+      proc = spawn(
+        process.execPath,
+        [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
+        // Groups held off when the restore above could not put them back.
+        { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch (error) {
+      noteSpawnPressure(error);
+      log(`${tenant}: worker spawn threw (${spawnErrorCode(error)}) — ${error instanceof Error ? error.message : String(error)}`);
+      scheduleRestart(tenant, restarts + 1, `spawn ${spawnErrorCode(error)}`);
+      return;
+    }
     const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
     children.set(tenant, child);
+    let stopped = false;
+    const childStopped = (reason: string, restartReason: string, stoodDownReason: string): void => {
+      // A failed spawn emits `error`, and some ChildProcess implementations
+      // also emit `exit`. Only the first event may release the entry or queue
+      // a restart. Keep the identity guard for watchdog and stand-down races.
+      if (stopped) return;
+      stopped = true;
+      const ours = children.get(tenant) === child;
+      if (ours) children.delete(tenant);
+      if (stopping) return;
+      if (!ours) {
+        log(`${tenant} stood-down child (pid ${proc.pid}) ${stoodDownReason} — no restart from its exit`);
+        return;
+      }
+      log(`${tenant} ${reason}`);
+      const freshRestarts = nextRung(child, Date.now());
+      scheduleRestart(tenant, freshRestarts, restartReason);
+    };
+    proc.on("error", (error: Error) => {
+      // `kill()` can also emit an error while a real process is still alive.
+      // Never release that child's slot and start a second trader beside it.
+      if (proc.pid !== undefined) {
+        log(`[alert] ${tenant}: child process error with pid ${proc.pid} — ${error.message}; waiting for its exit`);
+        return;
+      }
+      noteSpawnPressure(error);
+      childStopped(`worker spawn failed (${spawnErrorCode(error)}): ${error.message}`, `spawn ${spawnErrorCode(error)}`, `failed to spawn (${spawnErrorCode(error)})`);
+    });
+    proc.on("exit", (code, signal) => childStopped(`exited (${code})`, `exit ${code}`, `exited with ${code ?? signal}`));
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -2496,43 +2638,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stdout, process.stdout);
     pipe(proc.stderr, process.stderr);
 
-    proc.on("exit", (code, signal) => {
-      // ONLY IF THIS ENTRY IS STILL OURS.
-      //
-      // `children.delete(tenant)` unconditionally was a double-spawn generator.
-      // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
-      // NEW entry under the same key — and then this handler, running for the
-      // corpse, deleted the replacement. A second later the `!children.has`
-      // guard below was true and a SECOND child spawned. The first replacement
-      // was orphaned: still ticking, still hitting the RPC, invisible to the
-      // watchdog, never mirrored, sharing one home and one sqlite file with its
-      // own replacement. Measured: 105 spawns against 61 exits in one window.
-      //
-      // AND ONLY THEN IS THE RESTART OURS. An entry that is gone or replaced was
-      // stood down by someone who has already decided what happens next: the
-      // watchdog scheduled its own restart on the rung it judged, and
-      // killChild's callers — the kill switch, a lost lease, FLEET_HALT — want
-      // none. This handler used to schedule another one regardless, usually at
-      // one second with the ladder back at zero, so the watchdog's backoff and
-      // the MAX_RESTARTS ceiling never applied; and two timers for one tenant
-      // are two chances to spawn it twice.
-      const ours = children.get(tenant) === child;
-      if (ours) children.delete(tenant);
-      if (stopping) return;
-      if (!ours) {
-        // SAID, AND NOTHING MORE. This line is the only record that a child
-        // somebody stood down really went: one that ignored SIGTERM and kept
-        // the home or its sqlite file open shows up as a stand-down with no
-        // exit after it, and the signal says whether SIGKILL was needed.
-        log(`${tenant} stood-down child (pid ${proc.pid}) exited with ${code ?? signal} — no restart from its exit`);
-        return;
-      }
-      log(`${tenant} exited (${code})`);
-      // A long healthy run that then dies is a fresh incident, not a crash loop.
-      const freshRestarts = nextRung(child, Date.now());
-      scheduleRestart(tenant, freshRestarts, `exit ${code}`);
-    });
-    log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+    log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
   } finally {
     spawning.delete(tenant);
   }
@@ -2787,7 +2893,7 @@ async function spawnHolder(
     log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
     return;
   }
-  startHolderProcess(held);
+  await startHolderProcess(held);
 }
 
 /**
@@ -2804,14 +2910,30 @@ function keepResetOffer(held: Holder, settings: MerrymenSettings): void {
   if (block) writeRestoreBlocked(home, { ...block, resettable });
 }
 
-/** Start the hold process for a held tenant. Its caller has checked the lease and the rest. */
-function startHolderProcess(held: Holder): void {
+/** Start the hold process for a held tenant, under the shared spawn pace. */
+async function startHolderProcess(held: Holder): Promise<void> {
   const tenant = held.tenant;
-  const holderProc = spawn(
-    process.execPath,
-    [`--max-old-space-size=${HOLDER_MAX_OLD_SPACE_MB}`, "--import", "tsx", HOLD_ENTRY],
-    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  await waitForSpawnSlot();
+  const lease = leases.get(tenant);
+  if (holders.get(tenant) !== held || held.proc || held.leaving || held.stoodDown || !lease || lateSpawnRefusal(tenant, lease)) return;
+  if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+    log(`[alert] ${tenant}: hold process deferred; local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached`);
+    return;
+  }
+  let holderProc: ChildProcess;
+  try {
+    holderProc = spawn(
+      process.execPath,
+      [`--max-old-space-size=${HOLDER_MAX_OLD_SPACE_MB}`, "--import", "tsx", HOLD_ENTRY],
+      { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    noteSpawnPressure(error);
+    if (holders.get(tenant) === held) holders.delete(tenant);
+    log(`${tenant}: hold process spawn threw (${spawnErrorCode(error)}) — ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  watchHolder(held, holderProc);
   const tag = `[${tenant.slice(0, 8)} hold]`;
   const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
     stream?.on("data", (c: Buffer) =>
@@ -2822,8 +2944,7 @@ function startHolderProcess(held: Holder): void {
     );
   pipe(holderProc.stdout, process.stdout);
   pipe(holderProc.stderr, process.stderr);
-  watchHolder(held, holderProc);
-  log(`${tenant} held (pid ${holderProc.pid}) — trading stays off, the bot answers`);
+  log(`${tenant} held (pid ${holderProc.pid ?? "pending"}) — trading stays off, the bot answers`);
 }
 
 /**
@@ -2843,8 +2964,13 @@ function startHolderProcess(held: Holder): void {
 function watchHolder(held: Holder, proc: ChildProcess): void {
   const tenant = held.tenant;
   held.proc = proc;
-  held.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
-  proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+  let resolveExited!: () => void;
+  held.exited = new Promise<void>((resolve) => { resolveExited = resolve; });
+  let stopped = false;
+  const holderStopped = (code: number | null, signal: NodeJS.Signals | null): void => {
+    if (stopped) return;
+    stopped = true;
+    resolveExited();
     const ours = holders.get(tenant) === held && held.proc === proc;
     if (ours) holders.delete(tenant);
     // Gone at last: nothing polls the bot for this tenant now. A stand-down
@@ -2858,7 +2984,7 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
         // And the lease kept for as long as it might poll (reconcile's last
         // loop, honourFleetHalt): a grant signed again takes it afresh, and a
         // lost lease is already gone.
-        void releaseLease(tenant);
+        if (!retiringExpired.has(tenant)) void releaseLease(tenant);
       }
     }
     if (stopping) return;
@@ -2880,7 +3006,17 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
     }
     holderCrashes.set(tenant, recent);
     log(`${tenant} hold process exited (${code ?? signal}) — the next pass tries the restore again`);
+  };
+  proc.on("error", (error: Error) => {
+    if (proc.pid !== undefined) {
+      log(`[alert] ${tenant}: hold process error with pid ${proc.pid} — ${error.message}; waiting for its exit`);
+      return;
+    }
+    noteSpawnPressure(error);
+    log(`${tenant}: hold process spawn failed (${spawnErrorCode(error)}): ${error.message}`);
+    holderStopped(null, null);
   });
+  proc.on("exit", holderStopped);
 }
 
 /**
@@ -2959,7 +3095,7 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
   const lease = leases.get(tenant);
-  return !stopping && !haltRequested() && !!lease && lease.healthy() && !killRequested(childHome(tenant));
+  return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
 
 /**
@@ -3322,6 +3458,114 @@ function killChild(tenant: string): void {
   }, 3_000);
 }
 
+let retirementMirrorForTest: ((tenant: string) => Promise<boolean>) | null = null;
+
+/** Test seam for a failed or delayed final mirror, without a production database. */
+export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<boolean>) | null): void {
+  retirementMirrorForTest = fn;
+}
+
+/** A stopped worker's local ledger must be durable before its expiry barrier can leave. */
+async function mirrorRetiredWorker(tenant: string, lease: TenantLease): Promise<boolean> {
+  if (retirementMirrorForTest) return retirementMirrorForTest(tenant);
+  const file = path.join(childHome(tenant), "merrymen.db");
+  if (!existsSync(file)) return true;
+  const url = process.env.DATABASE_URL;
+  // A file-only deployment keeps this home as its ledger. There is no shared
+  // destination to copy to, and expiry never deletes the home.
+  if (!url) return true;
+  const handle = openChildLedger(childHome(tenant));
+  if (!handle) {
+    log(`[alert] ${tenant}: expired worker's ledger exists but cannot be opened; retaining its lease and home`);
+    return false;
+  }
+  try {
+    const shared = await makePgDb(url);
+    await applyLedgerSchema(shared);
+    await shared.exec(translateSchema(MIRROR_STATE_DDL));
+    try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+    if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    if (r.failed) {
+      log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
+      return false;
+    }
+    if (r.hasMore) {
+      log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
+      return false;
+    }
+    const counts = mirrorCountsLine(tenant, r);
+    if (counts) log(`${counts} (expired worker's final pass)`);
+    return true;
+  } catch (error) {
+    log(`[alert] ${tenant}: expired worker's final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
+    return false;
+  } finally {
+    handle.close();
+  }
+}
+
+/** Stop expired processes, then wait for exit and a complete final ledger copy. */
+async function retireExpiredGrants(
+  tenants: readonly `0x${string}`[],
+  expiries: Map<string, number | null>,
+  nowSec: number,
+): Promise<void> {
+  for (const tenant of tenants) {
+    const lc = tenant.toLowerCase() as `0x${string}`;
+    const expiry = expiries.get(lc);
+    if (typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec) continue;
+    if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
+    // A re-sign may have landed since listTenantExpiries. Do not retire that
+    // fresh grant just because the roster snapshot was old.
+    try {
+      const latest = (await getGrantStore().get(lc))?.expiresAt;
+      if (typeof latest === "number" && Number.isFinite(latest) && latest > nowSec) {
+        expiries.set(lc, latest);
+        continue;
+      }
+    } catch (error) {
+      log(`${lc}: expiry recheck failed — ${error instanceof Error ? error.message : String(error)}; standing down on the expired roster`);
+    }
+    if (!retiringExpired.has(lc)) {
+      // A held practice book may leave a sqlite file from the worker that
+      // preceded the hold. Its restore failed, so copying its snapshots here
+      // could erase the durable book. The hold marker survives a bot crash.
+      const wasHeld = holders.has(lc) || readRestoreBlocked(childHome(lc)) !== null;
+      retiringExpired.set(lc, {
+        mirror: children.has(lc) || exitingChildren.has(lc) || (!wasHeld && existsSync(path.join(childHome(lc), "merrymen.db"))),
+        lease: leases.get(lc) ?? null,
+      });
+      log(`${lc}: signed grant expired — retiring its process before freeing capacity; grant and home remain stored`);
+    }
+    cancelRestart(lc);
+    killChild(lc);
+    standDownHolder(lc);
+  }
+
+  for (const [tenant, retirement] of [...retiringExpired]) {
+    cancelRestart(tenant);
+    // Even a re-sign in the middle of retirement cannot start in this home.
+    // Wait for the old process and any preparing spawn to finish first.
+    if (children.has(tenant)) killChild(tenant);
+    if (holders.has(tenant)) standDownHolder(tenant);
+    if (children.has(tenant) || exitingChildren.has(tenant) || spawning.has(tenant) || holders.has(tenant)) continue;
+    const lease = leases.get(tenant);
+    if (retirement.mirror) {
+      if (!lease || lease !== retirement.lease || !lease.healthy()) {
+        log(`[alert] ${tenant}: expired worker's lease unavailable before its final mirror; keeping the local re-arm barrier`);
+        continue;
+      }
+      if (!(await mirrorRetiredWorker(tenant, lease))) continue;
+      if (leases.get(tenant) !== lease || !lease.healthy()) continue;
+    }
+    if (lease && lease !== retirement.lease) continue;
+    await releaseLease(tenant);
+    retiringExpired.delete(tenant);
+    log(`${tenant}: expired process exited and final mirror pass completed — capacity released; stored grant can be re-signed`);
+  }
+}
+
 /**
  * A shard session losing its socket releases all its Postgres locks at once.
  * Signal every affected process in the same event turn, not up to one reconcile
@@ -3447,11 +3691,19 @@ export async function reconcile(): Promise<void> {
   if (stopping) return;
   const store = getGrantStore();
   let tenants: `0x${string}`[];
+  let expiresAtByTenant: Map<string, number | null>;
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
   const listedAtMs = Date.now();
   try {
-    tenants = await store.listTenants();
+    const roster = store.listTenantExpiries
+      ? await store.listTenantExpiries()
+      : await Promise.all((await store.listTenants()).map(async (tenant) => ({
+          tenant,
+          expiresAt: (await store.get(tenant))?.expiresAt ?? null,
+        })));
+    tenants = roster.map((entry) => entry.tenant);
+    expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -3472,6 +3724,21 @@ export async function reconcile(): Promise<void> {
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
+  // A stored but expired key is still wanted for revocation, home and Telegram
+  // memory cleanup. It cannot sign another operation, so it does not need an
+  // OS worker. The worker enforces this same expiry when it arms; the fetched
+  // grant is checked again in spawnChild after this roster snapshot.
+  const eligibleToSpawn = tenants.filter((tenant) => {
+    const expiry = expiresAtByTenant.get(tenant.toLowerCase());
+    return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
+  });
+  const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  const expiredCount = tenants.length - eligibleToSpawn.length;
+  if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
+    log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
+    lastRosterLog = { active: eligibleToSpawn.length, expired: expiredCount, at: Date.now() };
+  }
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
   // has released the lock and another replica may hold it. Stand the child down
@@ -3484,9 +3751,10 @@ export async function reconcile(): Promise<void> {
   // one first (unless we already hold it from a previous reconcile / across a
   // crash restart); if another replica holds it, skip this tenant and try again
   // next reconcile.
-  for (const tenant of tenants) {
+  let capacityDeferred = 0;
+  for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (leaseLossDraining.has(lc)) continue;
+    if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
     // restart already scheduled is the timer's to make, on its rung, not this
@@ -3521,6 +3789,13 @@ export async function reconcile(): Promise<void> {
       gaveUpUntil.delete(lc);
       log(`${lc}: stand-down over — trying once more`);
     }
+    if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
+      capacityDeferred += 1;
+      // A tenant that cannot run here must not keep a lease that would keep
+      // another replica with free capacity from taking it.
+      await releaseLease(lc);
+      continue;
+    }
     if (!leases.has(lc)) {
       let lease: TenantLease | null;
       try {
@@ -3537,6 +3812,12 @@ export async function reconcile(): Promise<void> {
     }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
+  if (capacityDeferred > 0 && (!lastCapacityLog || lastCapacityLog.deferred !== capacityDeferred || Date.now() - lastCapacityLog.at > 60_000)) {
+    log(`[alert] local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached: ${capacityDeferred} unexpired grants deferred; capacity review required`);
+    lastCapacityLog = { deferred: capacityDeferred, at: Date.now() };
+  } else if (capacityDeferred === 0) {
+    lastCapacityLog = null;
+  }
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
   // it takes. See retryHold.
   //
@@ -3548,7 +3829,7 @@ export async function reconcile(): Promise<void> {
   // refused does not put the restore back on every pass. Counted only once
   // the retry has really run: one that holdMayLeave turned away looked at
   // nothing, and the press is still owed its early look on the next pass.
-  const asked = await heldResetsAsked([...holders.values()].filter((h) => wanted.has(h.tenant)).map((h) => h.smartAccount));
+  const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
@@ -3560,14 +3841,14 @@ export async function reconcile(): Promise<void> {
     // AND ONCE IT HAS, THE HANDOVER IT HELD UP. Decided already: the restore
     // took, or the gate let the tenant go, and spawnChild asks both again.
     if (held.handingBack) {
-      if (!wanted.has(held.tenant) || held.retrying || !holdMayLeave(held.tenant)) continue;
+      if (!eligible.has(held.tenant) || retiringExpired.has(held.tenant) || held.retrying || !holdMayLeave(held.tenant)) continue;
       log(`${held.tenant}: its hold process has gone — handing the bot back to trading`);
       await handHoldBack(held);
       continue;
     }
     const ask = asked.get(held.smartAccount);
     const early = ask !== undefined && ask !== held.resetSeen;
-    if (!wanted.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
+    if (!eligible.has(held.tenant) || retiringExpired.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
     if ((await retryHold(held)) && early) held.resetSeen = ask;
   }
   // Refresh every running child's settings.json so a tenant's config change
@@ -3617,7 +3898,7 @@ export async function reconcile(): Promise<void> {
     // not refreshed, its token claims no bot beyond what its process may
     // still be polling (counted above), and no hold process is started only
     // to be killed a few lines later in a home that is about to be wiped.
-    if (!wanted.has(tenant)) continue;
+    if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;
     // STOOD DOWN, waiting only for a process that would not go: its lease is
     // gone, the fleet halted or its grant removed, so nothing is ours to write
     // or claim for it beyond the bot that process reads (counted above).
@@ -3654,7 +3935,7 @@ export async function reconcile(): Promise<void> {
     if (held.proc || !lease || !holderBotReady(stored)) continue;
     const late = lateSpawnRefusal(tenant as `0x${string}`, lease);
     if (late) continue;
-    startHolderProcess(held);
+    await startHolderProcess(held);
   }
   for (const tenant of children.keys()) {
     await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
@@ -3742,7 +4023,7 @@ export async function reconcile(): Promise<void> {
    * regardless, as the spawn path derives its anchor regardless.
    */
   for (const tenant of childHomeTenants()) {
-    if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant)) continue;
+    if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
     // Before the await, so no restart timer can start a spawn in this home
     // while its ledger is being read.
     cancelRestart(tenant);
@@ -3756,7 +4037,7 @@ export async function reconcile(): Promise<void> {
         log(`${tenant}: last mirror before wiping its home failed — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (children.has(tenant) || spawning.has(tenant)) continue;
+    if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
     log(`${tenant} grant removed — wiping the home it left with no child running`);
     try {
       rmSync(childHome(tenant), { recursive: true, force: true });
@@ -3779,7 +4060,7 @@ export async function reconcile(): Promise<void> {
   // lease is what stops another replica, in a deploy overlap say, from arming
   // a grant signed again beside it. It goes when the exit does (watchHolder).
   for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
+    if (!wanted.has(tenant) && !retiringExpired.has(tenant) && !exitingChildren.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
   }
 }
 
@@ -7932,7 +8213,7 @@ function haltRequested(): boolean {
 export async function honourFleetHalt(): Promise<void> {
   // A lease kept for a hold process that has not exited (below) is waited
   // for, like its process, and not a reason to say all this again.
-  const kept = (t: string) => !!holders.get(t)?.leaving;
+  const kept = (t: string) => !!holders.get(t)?.leaving || retiringExpired.has(t);
   if (children.size > 0 || [...holders.values()].some((h) => !h.stoodDown) || [...leases.keys()].some((t) => !kept(t))) {
     log("FLEET_HALT present — standing every child down and releasing leases");
     for (const t of [...children.keys()]) killChild(t);

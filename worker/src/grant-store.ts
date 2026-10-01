@@ -54,6 +54,8 @@ export interface GrantStore {
   get(tenant: `0x${string}`): Promise<StoredGrant | null>;
   /** Every tenant with a grant — for the orchestrator to lease and arm. */
   listTenants(): Promise<`0x${string}`[]>;
+  /** Public grant expiry for process scheduling; no session key is decrypted. */
+  listTenantExpiries?(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>>;
   /**
    * Which tenant already holds this smart account, or null.
    *
@@ -222,6 +224,20 @@ export class FileGrantStore implements GrantStore {
       return [];
     }
   }
+  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>> {
+    const tenants = await this.listTenants();
+    return Promise.all(tenants.map(async (tenant) => {
+      try {
+        const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
+        const expiry = rec.grant.expiresAt;
+        return { tenant, expiresAt: typeof expiry === "number" && Number.isFinite(expiry) ? expiry : null };
+      } catch {
+        // An unreadable grant must not be treated as armed. Leave its row in
+        // the roster so existing cleanup and repair paths can still find it.
+        return { tenant, expiresAt: null };
+      }
+    }));
+  }
   async remove(tenant: `0x${string}`): Promise<void> {
     await this.locked(tenant, () => rm(this.file(tenant), { force: true }));
   }
@@ -385,6 +401,17 @@ export class PgGrantStore implements GrantStore {
     const c = await this.client();
     const { rows } = await c.query(`SELECT tenant FROM grants`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
+  }
+  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>> {
+    const c = await this.client();
+    const { rows } = await c.query(`SELECT tenant, grant_json->>'expiresAt' AS expires_at FROM grants`);
+    return rows.map((row) => {
+      const expiry = Number(row.expires_at);
+      return {
+        tenant: String(row.tenant) as `0x${string}`,
+        expiresAt: row.expires_at !== null && Number.isFinite(expiry) ? expiry : null,
+      };
+    });
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();

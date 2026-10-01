@@ -193,6 +193,22 @@ describe("the ledger mirror", () => {
     assert.equal(await count(shared, "events"), 6);
   });
 
+  it("reports source backlog even when a trade batch is entirely deduplicated", async () => {
+    const child = seedChild();
+    const shared = mem(DEST);
+    await child.prepare("UPDATE trades SET user_op_hash = ?").run("0xsame-operation");
+    const first = await mirrorTenant({ tenant: "0xten", child, shared, batch: 1 });
+    assert.equal(first.hasMore, true);
+    const second = await mirrorTenant({ tenant: "0xten", child, shared, batch: 1 });
+    assert.equal(second.copied.trades, 0, "the duplicate operation creates no new destination row");
+    assert.equal(second.copied.trades_already_mirrored, 1);
+    assert.equal(second.hasMore, true, "the source still has rows beyond the copied count");
+    for (let i = 0; i < 3; i++) await mirrorTenant({ tenant: "0xten", child, shared, batch: 1 });
+    const drained = await mirrorTenant({ tenant: "0xten", child, shared, batch: 1 });
+    assert.equal(drained.hasMore, undefined);
+    assert.equal(await count(shared, "trades"), 1);
+  });
+
   it("keeps two tenants' ledgers apart despite colliding source ids", async () => {
     // Both children have event id 1. If the source id were the destination key
     // the second tenant's tape would collide with the first's — which is why

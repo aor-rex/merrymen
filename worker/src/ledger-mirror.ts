@@ -253,6 +253,8 @@ export interface MirrorReport {
    * exactly how it went unnoticed.
    */
   failed?: Record<string, string>;
+  /** An ID-cursored source still has rows beyond this pass's batch. */
+  hasMore?: boolean;
   /** Set when the child's ledger could not be opened at all. */
   skipped?: string;
 }
@@ -389,6 +391,7 @@ export async function mirrorTenant(args: {
   const copied: Record<string, number> = {};
   const failed: Record<string, string> = {};
   const restarted: Record<string, { was: number }> = {};
+  let hasMore = false;
 
   // ── append-only tables ────────────────────────────────────────────────────
   for (const { table, cols, stamp, probe } of LOG_TABLES) {
@@ -509,9 +512,11 @@ export async function mirrorTenant(args: {
           }
         }
       }
-      const rows = (await child
+      const fetched = (await child
         .prepare(`SELECT id, ${cols.join(", ")} FROM ${table} WHERE id > ? ORDER BY id ASC LIMIT ?`)
-        .all(from, batch)) as Record<string, unknown>[];
+        .all(from, batch + 1)) as Record<string, unknown>[];
+      if (fetched.length > batch) hasMore = true;
+      const rows = fetched.slice(0, batch);
       if (!rows.length) {
         // RECORD THE ZERO. Leaving it absent is what made a wedged cursor
         // indistinguishable from a quiet table for as long as this bug lived:
@@ -1287,6 +1292,7 @@ export async function mirrorTenant(args: {
   return {
     tenant,
     copied,
+    ...(hasMore ? { hasMore } : {}),
     ...(Object.keys(restarted).length ? { restarted } : {}),
     ...(Object.keys(failed).length ? { failed } : {}),
   };
