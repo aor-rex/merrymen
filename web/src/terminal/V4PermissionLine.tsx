@@ -22,7 +22,7 @@ export function V4PermissionLine({ grant, configuredAdapter }: { grant: V4Grant;
           adapter permission sealed to <code style={{ overflowWrap: "anywhere" }}>{adapter}</code>.
           The agent checks that contract is deployed on this network before using it.
           {settingsMismatch && (
-            <>{" "}Settings now names a different adapter. The agent cannot use v4 until the address in Settings and this signed key match. Verify the intended deployed address, then re-sign.</>
+            <>{" "}Settings now names a different adapter. The agent still uses the adapter sealed in this signed key if it is deployed on this network. Verify the intended contract, then re-sign to switch adapters.</>
           )}
         </>
       ) : legacy ? null : configuredAdapter ? (
