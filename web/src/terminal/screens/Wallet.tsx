@@ -12,7 +12,6 @@ import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
-  grantHasV4,
   grantTrencher,
   TRENCHER_VAULT_ABI,
   CASH,
@@ -47,6 +46,7 @@ import {
 import { SignOut } from "../SignOut";
 import { fetchAccountForSession } from "../account-session";
 import { conceptTooltip } from "@merrymen/core";
+import { V4PermissionLine } from "../V4PermissionLine";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
@@ -2072,16 +2072,7 @@ export default function GrantPage() {
                 <li>
                   <b>Withdrawals</b> — use your recovery key in Profile. Renewing removes any older agent transfer permission.
                 </li>
-                <li>
-                  <b>Uniswap v4</b> —{" "}
-                  {grantHasV4(grant) ? (
-                    <span style={{ color: "var(--red)" }}>
-                      unrestricted transfer access. <b>Renew below</b> to remove it.
-                    </span>
-                  ) : (
-                    "not granted."
-                  )}
-                </li>
+                <V4PermissionLine grant={grant} configuredAdapter={v4Adapter} />
                 {/*
                   TWO VENUES THIS LIST NEVER MENTIONED. The block above says
                   "capability drift you cannot see is capability drift you
