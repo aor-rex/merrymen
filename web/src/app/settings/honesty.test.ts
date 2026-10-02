@@ -353,7 +353,10 @@ describe("nothing is left behind after a save", () => {
     assert.ok(refetch > 0 && saved > refetch && resetEnd > saved, "saved values must be read back before clearing the draft");
     const reset = save.slice(saved, resetEnd);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
-    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    // 27 on this branch: main's 26 plus autoConvertEnabled, guarded and reset
+    // with the consent flags — unguarded a save would silently reset the
+    // convert toggle, unreset it would keep showing the local value.
+    assert.equal(guarded.length, 27, "every guard has the `if (x !== null) body.key = x;` shape");
     const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
     assert.deepEqual(left, [], "sent by save() but not reset after it");
   });

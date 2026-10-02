@@ -546,6 +546,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setDeskEnabled(null);
       setClassSnipe(null);
       setOfficialCoins(null);
+      // The auto-convert toggle rides its own hook like the consent flags
+      // above, not the string draft — so it is cleared with them, or after a
+      // save the screen keeps showing the local value while `view` holds the
+      // server's. (The reserve pct rides the draft, cleared by setDraft({}).)
+      setAutoConvertEnabled(null);
       void loadTelegram();
       if (statusTimer.current) clearTimeout(statusTimer.current);
       statusTimer.current = setTimeout(() => setStatus(null), 4000);
