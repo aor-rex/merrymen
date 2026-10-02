@@ -75,6 +75,7 @@ import {
   wallShape,
   buildCallPermissions,
   grantWallOptions,
+  grantV4AdapterReaches,
   tokenCoverage,
   uncoveredBasketSymbols,
   type CircleTier,
@@ -8449,7 +8450,16 @@ async function main() {
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: intent.custody !== "trencher" && (grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null)),
+          // And when the ADAPTER is what will execute (buildTradeCalls takes it
+          // whenever it is live), only for a pair its legs cover: a scoped wall
+          // (GRANT_SCOPED_SPENDERS) trades stocks on v3 only, and on any wall a
+          // coin added since signing is on no leg at all. The legacy Permit2
+          // route is reached only when no live adapter is sealed.
+          v4:
+            intent.custody !== "trencher" &&
+            (active.v4AdapterLive && grantV4Adapter(active.grant) !== null
+              ? grantV4AdapterReaches(active.grant, intent.sellToken, intent.buyToken)
+              : grantHasV4(active.grant)),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
@@ -8785,7 +8795,11 @@ async function main() {
               tokenOut: intent.buyToken,
               amountIn: probeIn,
               via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
-              v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+              // The same gate as the quote above, legs included.
+              v4:
+                active.v4AdapterLive && grantV4Adapter(active.grant) !== null
+                  ? grantV4AdapterReaches(active.grant, intent.sellToken, intent.buyToken)
+                  : grantHasV4(active.grant),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.

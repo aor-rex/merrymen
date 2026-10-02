@@ -83,8 +83,29 @@ test("a wall too wide to install with its trade says to re-sign narrower, once",
   const row = { id: 10, kind: "swap", amount_usdg: 5, status: "rejected", reject_rule: "enable-too-wide", tx_hash: null };
   const first = tradeLine(row, null, true, { label: "ORBIO", side: "buy" });
   assert.match(first, /too wide to install together with this trade/);
-  assert.match(first, /Re-sign at \/grant with fewer custom tokens or capabilities/);
+  assert.match(first, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
   assert.doesNotMatch(tradeLine(row, null, false), /\/grant/, "repeats carry no instruction");
+});
+
+test("NOR IS THE MARKET — the UBIK line an owner was sent", () => {
+  // Reported: "🛡 the wall turned back a buy of UBIK — no route to trade it.
+  // 10.00 USDG stayed home (no-route)". UBIK trades only on Uniswap v4, and the
+  // owner's key did not carry the v4 adapter — a fact about where the coin
+  // trades, which the line blamed on the permissions they signed.
+  const row = { id: 11, kind: "swap", amount_usdg: 10, status: "rejected", reject_rule: "no-route", tx_hash: null };
+  const first = tradeLine(row, null, true, { label: "UBIK", side: "buy" });
+  assert.doesNotMatch(first, /the wall/, "not the owner's wall");
+  assert.match(first, /^🚫 a buy of UBIK didn't go out — no route to trade it\. Nothing was spent\./);
+  assert.match(first, /If it trades only on Uniswap v4 and your key doesn't carry the v4 adapter yet, save the V4SelfSwap adapter in \/settings and re-sign at \/grant/);
+  assert.match(first, /10\.00 USDG stayed home \(no-route\)$/);
+  assert.doesNotMatch(tradeLine(row, null, false, { label: "UBIK", side: "buy" }), /\/grant/, "repeats carry no instruction");
+
+  for (const rule of ["no-quote", "no-liquidity", "slippage", "curve-graduated", "insufficient-balance"]) {
+    const l = tradeLine({ ...row, reject_rule: rule }, null, true);
+    assert.doesNotMatch(l, /the wall/, rule);
+    assert.doesNotMatch(l, /\/grant/, `${rule} has no owner remedy, so none is invented`);
+    assert.match(l, new RegExp(`\\(${rule}\\)$`), rule);
+  }
 });
 
 test("a real wall refusal still says so, and now says WHAT", () => {
@@ -395,7 +416,7 @@ test("the count line says how many, over how long, how recently — and how to f
     line.startsWith("↻ the buy of LARP was refused 59 more times in the last 60 min (enable-too-wide), the last just now. "),
     line,
   );
-  assert.match(line, /Re-sign at \/grant with fewer custom tokens or capabilities/);
+  assert.match(line, /Re-sign at \/grant on the web — a new signature there seals a narrower permission set/);
   const stopped = refusalCountLine(rec({ held: 1, lastAt: 1_000 + 5 * 60 }), 1_000 + REFUSAL_REMIND_LATER_SEC);
   assert.match(stopped, /refused 1 more time in the last 6 hours \(enable-too-wide\), the last 6 hours ago\./);
   assert.doesNotMatch(
