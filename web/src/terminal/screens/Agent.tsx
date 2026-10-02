@@ -381,18 +381,45 @@ export function Agent({
         // no navigation. The picture comes from GET /api/pnl (the same
         // renderer Telegram sends); this branch only finds WHICH trade.
         on.say({ role: "owner", text: "✓ Confirmed" });
-        const latest = (await fetch("/api/pnl/latest", {
-          headers: { "content-type": "application/json" },
-        })
-          .then((r) => (r.ok ? r.json() : null))
+        // FOR THE OWNER WHO CONFIRMED, like fetchOpenOrder: the lookup names
+        // the owner who tapped, so a session another tab switched meanwhile
+        // is refused rather than read (see OWNER_CHANGED_PNL_LOOKUP).
+        const latest = (await fetch(
+          on.owner ? `/api/pnl/latest?owner=${encodeURIComponent(on.owner)}` : "/api/pnl/latest",
+          {
+            headers: { "content-type": "application/json" },
+          },
+        )
+          .then((r) => r.json().catch(() => null))
           .catch(() => null)) as {
           none?: boolean;
+          incomplete?: boolean;
+          unavailable?: boolean;
+          error?: string;
           tradeId?: number;
           symbol?: string;
           status?: string | null;
           realizedPnlUsdg?: number;
         } | null;
-        if (!latest || latest.none || typeof latest.tradeId !== "number") {
+        if (!latest || latest.unavailable) {
+          on.say({
+            role: "agent",
+            text: "I couldn't read your trades just now — the ledger didn't answer. Try again in a moment; this is me not seeing, not you having none.",
+          });
+          return;
+        }
+        if (typeof latest.error === "string" && latest.error) {
+          on.say({ role: "agent", text: latest.error });
+          return;
+        }
+        if (latest.incomplete) {
+          on.say({
+            role: "agent",
+            text: "I looked back through your recent closes and couldn't reach one with a card to draw — there's more history than I searched. Ask again later or check the trades screen for the older ones.",
+          });
+          return;
+        }
+        if (latest.none || typeof latest.tradeId !== "number") {
           on.say({
             role: "agent",
             text: "No closed trades with a card to draw yet — closes land here with their picture once they happen.",

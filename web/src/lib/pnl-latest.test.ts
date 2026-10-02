@@ -85,9 +85,10 @@ describe("findLatestCardableInDb — the sell predicate lives in SQL", () => {
     try {
       insertTrade(raw, 1, { side: "sell", cash: 120, realized: 20 });
       for (let id = 2; id <= 26; id++) insertTrade(raw, id, { side: "buy" });
-      const found = await findLatestCardableInDb(db, "agent-1");
-      assert.equal(found?.tradeId, 1);
-      assert.equal(found?.symbol, "NEON");
+      const result = await findLatestCardableInDb(db, "agent-1");
+      assert.equal(result.outcome, "found");
+      assert.equal(result.outcome === "found" && result.trade.tradeId, 1);
+      assert.equal(result.outcome === "found" && result.trade.symbol, "NEON");
     } finally {
       raw.close();
     }
@@ -100,20 +101,41 @@ describe("findLatestCardableInDb — the sell predicate lives in SQL", () => {
       insertTrade(raw, 2, { side: "sell", cash: 0.005, realized: -0.001 });
       insertTrade(raw, 3, { side: "sell", cash: null, realized: null });
       // Small pages force the cursor path after only two rows.
-      const found = await findLatestCardableInDb(db, "agent-1", 2);
-      assert.equal(found?.tradeId, 1);
+      const result = await findLatestCardableInDb(db, "agent-1", 2);
+      assert.equal(result.outcome, "found");
+      assert.equal(result.outcome === "found" && result.trade.tradeId, 1);
     } finally {
       raw.close();
     }
   });
 
-  it("returns null when no sell is cardable, and scopes to the agent", async () => {
+  it("returns none when no sell is cardable, and scopes to the agent", async () => {
     const { raw, db } = memoryLedger();
     try {
       insertTrade(raw, 1, { side: "buy" });
       insertTrade(raw, 2, { side: "sell", cash: 0.005, realized: -0.001 });
-      assert.equal(await findLatestCardableInDb(db, "agent-1"), null);
-      assert.equal(await findLatestCardableInDb(db, "agent-2"), null);
+      assert.deepEqual(await findLatestCardableInDb(db, "agent-1"), { outcome: "none" });
+      assert.deepEqual(await findLatestCardableInDb(db, "agent-2"), { outcome: "none" });
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("says incomplete, never none, when the budget runs out with rows unexamined", async () => {
+    const { raw, db } = memoryLedger();
+    try {
+      // The only cardable close sits beneath more uncardable sells than one
+      // page of two holds — a capped search must admit it stopped looking.
+      insertTrade(raw, 1, { side: "sell", cash: 120, realized: 20 });
+      insertTrade(raw, 2, { side: "sell", cash: 0.005, realized: -0.001 });
+      insertTrade(raw, 3, { side: "sell", cash: null, realized: null });
+      insertTrade(raw, 4, { side: "sell", cash: 0.004, realized: -0.002 });
+      insertTrade(raw, 5, { side: "sell", cash: null, realized: 10 });
+      assert.deepEqual(await findLatestCardableInDb(db, "agent-1", 2, 1), { outcome: "incomplete" });
+      // ...while the same ledger with room to finish finds trade 1.
+      const finished = await findLatestCardableInDb(db, "agent-1", 2, 10);
+      assert.equal(finished.outcome, "found");
+      assert.equal(finished.outcome === "found" && finished.trade.tradeId, 1);
     } finally {
       raw.close();
     }

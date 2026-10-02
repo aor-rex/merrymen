@@ -75,13 +75,24 @@ const LOOKUP_JOIN = `FROM trades t LEFT JOIN decisions d ON d.id = t.decision_id
  * Keyset pagination (`id < ?`) walks back past uncardable sells (dust,
  * unbacked, unnameable) until a cardable one or exhaustion — bounded by
  * maxPages so a pathological ledger cannot page forever.
+ *
+ * THREE answers, never two: `found`, `none` (the ledger was read to its end
+ * and holds nothing cardable), or `incomplete` (the page budget ran out with
+ * rows unexamined). An exhausted search and a capped one are different facts
+ * and the chat describes them differently — "no closed trades" for a search
+ * that merely stopped looking is the lie this exists to prevent.
  */
+export type LatestCardableOutcome =
+  | { outcome: "found"; trade: LatestCardable }
+  | { outcome: "none" }
+  | { outcome: "incomplete" };
+
 export async function findLatestCardableInDb(
   db: CardableDb,
   agent: string,
   pageSize = 50,
   maxPages = 10,
-): Promise<LatestCardable | null> {
+): Promise<LatestCardableOutcome> {
   let cursor: number | null = null;
   for (let page = 0; page < maxPages; page++) {
     const rows = (await db
@@ -95,11 +106,11 @@ export async function findLatestCardableInDb(
       )
       .all(...(cursor === null ? [agent, pageSize] : [agent, cursor, pageSize]))) as unknown as LatestTradeRow[];
     const found = findLatestCardable(rows);
-    if (found) return found;
-    if (rows.length < pageSize) return null;
+    if (found) return { outcome: "found", trade: found };
+    if (rows.length < pageSize) return { outcome: "none" };
     const last = rows[rows.length - 1]!;
-    if (!Number.isInteger(last.id)) return null;
+    if (!Number.isInteger(last.id)) return { outcome: "none" };
     cursor = last.id;
   }
-  return null;
+  return { outcome: "incomplete" };
 }
