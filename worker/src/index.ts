@@ -1342,12 +1342,17 @@ async function main() {
       sellAmountRaw: amountEth,
       notionalUsdg: expect6,
     } as const;
+    // Equity comes from the ledger read, not a tick closure: the main loop's
+    // lastEquityUsdg binding is gone on this base, and a preview must not
+    // depend on tick timing anyway. Unknown equity fails the policy check
+    // closed (state.equityKnown !== false is what lets it pass).
+    const knownEquity = await lastKnownEquityUsdg(agentId);
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
       highWaterMarkUsdg,
-      equityUsdg: lastEquityUsdg,
-      equityKnown: lastEquityKnown,
+      equityUsdg: knownEquity === null ? 0n : BigInt(Math.round(knownEquity * 1_000_000)),
+      equityKnown: knownEquity !== null,
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, convertPolicyLimits(active.limits), state, await scoutContextFor(intent));
