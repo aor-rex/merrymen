@@ -281,7 +281,9 @@ import {
   latchFromRow,
   latchToRow,
   parseManualSwap,
+  manualTicketAllows,
   ratchetMarkerDown,
+  readConvertTicket,
   recordFire,
   recordSwapId,
   swapIdCompleted,
@@ -5209,6 +5211,31 @@ async function main() {
         ).catch(() => {});
         return;
       }
+      // HOSTED TICKET — the last gate before the spend, and the only one that
+      // survives a redeploy. The orchestrator claims the id in shared storage
+      // and ferries an "ok" ticket naming it; without that ticket this tick
+      // spends nothing. Self-hosted skips it (DATABASE_URL present — the local
+      // ledger is the truth and no orchestrator ferries tickets).
+      if (!process.env.DATABASE_URL) {
+        let ticket: ReturnType<typeof readConvertTicket> = null;
+        try {
+          ticket = readConvertTicket(readFileSync(homePaths.convertTicket(), "utf8"));
+        } catch {
+          ticket = null;
+        }
+        const allow = manualTicketAllows(ticket, manualSwap.id);
+        if (allow !== "go") {
+          if (allow === "blocked" && !ticketBlockedAlerted.has(manualSwap.id)) {
+            ticketBlockedAlerted.add(manualSwap.id);
+            await addEvent(
+              agentId,
+              "warn",
+              `${manualTag} cannot run — its authorization was lost across a restart and the spend may already have happened. Refusing to retry; submit again with a fresh request to be sure.`,
+            ).catch(() => {});
+          }
+          return;
+        }
+      }
       await submitConvertLeg({
         client: active.client,
         executor: active.executor,
@@ -5493,6 +5520,9 @@ async function main() {
   // in-memory copy still gates when a write fails, and the next tick retries
   // the write.
   let convertLatch: ConvertLatch = emptyLatch();
+  // Manual-swap ids already reported as blocked (ambiguous ticket) this run —
+  // the alert fires once per id, not once per tick.
+  const ticketBlockedAlerted = new Set<string>();
   const persistLatch = () => {
     if (!active) return;
     putConvertState(active.agentId, latchToRow(convertLatch)).catch(() => {});

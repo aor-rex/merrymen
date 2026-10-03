@@ -40,6 +40,12 @@ export const homePaths = {
    * of starting empty. Absent self-hosted, where the ledger row itself is the
    * truth. */
   convertSeed: () => path.join(merrymenHome(), "convert-seed.json"),
+  /** Convert ticket — written by the orchestrator at spawn and every pass,
+   * read by the worker before any manual-swap broadcast. Single-use spend
+   * authorization: only an "ok" ticket naming this handoff id lets the spend
+   * proceed (hosted). Unlike the seed it is NOT consumed — the orchestrator
+   * removes it once the completion mirrors up. Absent self-hosted. */
+  convertTicket: () => path.join(merrymenHome(), "convert-ticket.json"),
   /** Pause marker — present = trading halted (toggled from Telegram/dashboard). */
   paused: () => path.join(merrymenHome(), "paused"),
   /** Scratch dir for transient PC-control artifacts (screenshots, voice notes). */

@@ -295,6 +295,21 @@ const SQLITE_SCHEMA = `
       -- state — the sync only flows toward newer updated_at_ms.
       updated_at_ms INTEGER NOT NULL DEFAULT 0
     );
+    -- Convert tickets: single-use spend authorizations for manual swaps.
+    -- The orchestrator is the ONLY writer (it holds the shared database; a
+    -- hosted child cannot). Claimed here, at spawn and every pass, BEFORE the
+    -- child may broadcast — never by the child itself, whose own writes die
+    -- with a fresh home. completed_ids stays the execution record (mirrored
+    -- up from the child); claimed_ids is the authorization record (written
+    -- down from the orchestrator). An id in claimed but never completed after
+    -- a redeploy is AMBIGUOUS and fails closed: no re-ticket, owner alerted.
+    CREATE TABLE IF NOT EXISTS convert_claims (
+      agent_id TEXT PRIMARY KEY,
+      -- Manual swap ids authorized to execute once: JSON array, newest last,
+      -- bounded at 50 by the writer, pruned against completed on every claim.
+      claimed_ids TEXT NOT NULL DEFAULT '[]',
+      updated_at_ms INTEGER NOT NULL DEFAULT 0
+    );
     -- Conversation turns, so the merryman doesn't lose the thread on restart.
     -- Lives in sqlite rather than a json file because the db is already open and
     -- single-writer; a file would need its own read-modify-write and would race
@@ -2785,6 +2800,89 @@ export async function putConvertState(agentId: string, row: ConvertStateRow): Pr
     return false;
   }
 }
+/**
+ * Read this agent's authorized-but-uncompleted manual swap ids, or null when
+ * the claims table is unreachable (storage failure — the caller must treat
+ * null as "unknown", never as "unclaimed").
+ */export async function getConvertClaimIds(agentId: string): Promise<string[] | null> {
+  try {
+    const r = (await getDb()
+      .prepare(`SELECT claimed_ids FROM convert_claims WHERE agent_id = ?`)
+      .get(agentId)) as Record<string, unknown> | undefined;
+    if (!r) return [];
+    return parseConvertIdList(r.claimed_ids);
+  } catch {
+    return null;
+  }
+}
+
+/** Parse a JSON id array defensively: garbage in, empty list out. */
+function parseConvertIdList(v: unknown): string[] {
+  if (typeof v !== "string") return [];
+  try {
+    const ids = JSON.parse(v) as unknown;
+    return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Authorize one manual swap id, exactly once. The orchestrator is the only
+ * caller (it holds the shared database). Idempotent: claiming an already
+ * claimed id succeeds without duplicating. Prunes ids the child has since
+ * completed and caps at 50, newest last. The write is guarded on
+ * updated_at_ms so two orchestrator passes racing (spawn + tick pass) cannot
+ * both believe they issued the ticket — the loser gets "contended" and
+ * re-reads rather than writing a second authorization.
+ *
+ * Returns "claimed" (this call authorized it), "already" (it was authorized
+ * before — consult the ticket file, not this answer, to decide re-issue), or
+ * "failed" (storage unreachable or contended — spend nothing on this answer).
+ */
+export async function claimConvertSwapId(
+  agentId: string,
+  id: string,
+  completedIds: string[],
+): Promise<"claimed" | "already" | "failed"> {
+  try {
+    const db = getDb();
+    const r = (await db
+      .prepare(`SELECT claimed_ids, updated_at_ms FROM convert_claims WHERE agent_id = ?`)
+      .get(agentId)) as Record<string, unknown> | undefined;
+    const prevMs = Number(r?.updated_at_ms ?? 0);
+    const prev = parseConvertIdList(r?.claimed_ids);
+    if (prev.includes(id)) return "already";
+    const done = new Set(completedIds);
+    const next = [...prev.filter((x) => !done.has(x)), id].slice(-50);
+    const nowMs = Date.now();
+    let res;
+    if (!r) {
+      try {
+        res = await db
+          .prepare(
+            `INSERT INTO convert_claims (agent_id, claimed_ids, updated_at_ms) VALUES (?, ?, ?)`,
+          )
+          .run(agentId, JSON.stringify(next), nowMs);
+      } catch {
+        // Lost the insert race with a concurrent first claim — fall through
+        // to the guarded update below, which re-checks against the winner.
+        res = { changes: 0 };
+      }
+      if ((res.changes ?? 0) > 0) return "claimed";
+    }
+    res = await db
+      .prepare(
+        `UPDATE convert_claims SET claimed_ids = ?, updated_at_ms = ?
+          WHERE agent_id = ? AND updated_at_ms = ?`,
+      )
+      .run(JSON.stringify(next), nowMs, agentId, prevMs);
+    return (res.changes ?? 0) > 0 ? "claimed" : "failed";
+  } catch {
+    return "failed";
+  }
+}
+
 /**
  * Record what the worker is doing, for surfaces that cannot read its files.
  *

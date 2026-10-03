@@ -147,6 +147,18 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
+import {
+  claimConvertSwapId,
+  getConvertClaimIds,
+  getConvertState,
+  initStore,
+} from "./store";
+import {
+  decideConvertTicket,
+  parseCompletedIds,
+  parseManualSwap,
+  readConvertTicket,
+} from "./convert-latch";
 import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
@@ -385,6 +397,9 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
 const WORKER_ENTRY = path.join(fileURLToPath(new URL(".", import.meta.url)), "index.ts");
 /** Convert-latch seed filename in a child's home — consumed once at arm. */
 const CONVERT_SEED_FILE = "convert-seed.json";
+/** Convert ticket filename in a child's home — the single-use manual-swap
+ * authorization. Written at spawn and every pass, removed once honoured. */
+const CONVERT_TICKET_FILE = "convert-ticket.json";
 /** Repo root (…/worker/src → up two), the cwd children need to resolve tsx + deps. */
 const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 /**
@@ -2518,6 +2533,107 @@ async function writeConvertSeedForChild(
   }
 }
 
+/**
+ * THE TICKET WINDOW — the orchestrator side of at-most-once manual swaps.
+ *
+ * A hosted child cannot read shared Postgres, and its own sqlite dies with a
+ * fresh home — so a pre-spend "already did this" check by the child is worth
+ * nothing across a redeploy. The check moves HERE, where the shared database
+ * is reachable, and the verdict travels down as a ticket FILE the worker must
+ * hold before broadcasting:
+ *
+ * - fresh handoff, never claimed → claim the id in shared convert_claims
+ *   (atomic, guarded write) and ferry an "ok" ticket. The worker may spend.
+ * - ticket already in the home for this id → execution in flight; touch nothing.
+ * - id completed (mirrored up) or handoff gone → remove any ticket; touch nothing.
+ * - claimed before but no ticket in the home → AMBIGUOUS: the claim landed
+ *   and the ticket didn't (crash between claim and ferry), or the swap
+ *   broadcast and the home died before the mirror (redeploy before mirror).
+ *   Either way the spend may already have happened: fail closed, ferry a
+ *   "blocked" ticket so the worker alerts the owner, never re-issue.
+ *
+ * Storage failure anywhere in this path means no ticket, which means no
+ * spend — the worker treats a missing ticket as "not authorized", never as
+ * "free to go". Runs at spawn and every pass (after the mirror, so completed
+ * ids are fresh and a just-mirrored settle doesn't false-block for a pass).
+ */
+async function refreshConvertTicketForChild(
+  tenant: `0x${string}`,
+  smartAccount: string,
+): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return; // self-hosted: the worker's own ledger is the truth
+  const home = childHome(tenant);
+  const ticketPath = path.join(home, CONVERT_TICKET_FILE);
+  try {
+    await initStore(); // no-op after the first call; routes store reads to shared PG
+    const settings = await getSettingsStore().get(tenant);
+    const handoff = parseManualSwap({
+      manualSwapWei: settings?.manualSwapWei,
+      manualSwapId: settings?.manualSwapId,
+    });
+    const handoffId = handoff ? handoff.id : null;
+    const state = await getConvertState(smartAccount);
+    const completed = state ? parseCompletedIds(state.completedIds) : [];
+    let ticketInHome: { id: string; status: "ok" | "blocked" } | null = null;
+    try {
+      const raw = readFileSync(ticketPath, "utf8");
+      ticketInHome = readConvertTicket(raw);
+    } catch {
+      ticketInHome = null;
+    }
+    const claimed = await getConvertClaimIds(smartAccount);
+    const decision = decideConvertTicket({ handoffId, completedIds: completed, claimedIds: claimed, ticketInHome });
+    mkdirSync(home, { recursive: true });
+    if (decision.action === "done") {
+      try {
+        rmSync(ticketPath, { force: true });
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
+    if (decision.action === "pending") return; // execution in flight — touch nothing
+    if (decision.action === "blocked") {
+      if (ticketInHome?.status === "blocked" && ticketInHome.id === handoffId) return;
+      writeFileSync(
+        ticketPath,
+        JSON.stringify({ status: "blocked", id: handoffId, issuedAtMs: Date.now() }, null, 2),
+        "utf8",
+      );
+      log(`${tenant}: manual swap ${handoffId} claimed but unticketed — ambiguous, blocked; owner must resubmit`);
+      return;
+    }
+    // "issue": claim first, ticket second. A crash between the two fails
+    // closed (next pass sees claimed-without-ticket and blocks) — a burned id
+    // the owner resubmits, never a replayed spend.
+    const verdict = await claimConvertSwapId(smartAccount, handoffId as string, completed);
+    if (verdict === "failed") {
+      log(`${tenant}: could not claim manual swap ${handoffId} — no ticket, no spend until storage answers`);
+      return;
+    }
+    writeFileSync(
+      ticketPath,
+      JSON.stringify({ status: "ok", id: handoffId, issuedAtMs: Date.now() }, null, 2),
+      "utf8",
+    );
+  } catch (e) {
+    log(`${tenant}: convert ticket refresh failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** One ticket refresh per live trading child, behind the lease like history. */
+async function refreshConvertTicketsForLiveChildren(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  for (const [tenant, child] of [...children]) {
+    if (stopping) return;
+    const held = leases.get(tenant);
+    if (!held || !held.healthy()) continue;
+    if (children.get(tenant) !== child) continue;
+    await refreshConvertTicketForChild(tenant as `0x${string}`, child.smartAccount);
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
   if (accountingTenantHeld(tenant)) return;
@@ -2663,6 +2779,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // the history ferry above — a child that arms without a seed starts an
     // empty latch, which may convert once more than ideal, never less safely.
     await writeConvertSeedForChild(tenant, smartAccount);
+    // Ticket BEFORE the child arms: a handoff submitted while the child was
+    // down must already be claimed when its first tick reads settings.
+    await refreshConvertTicketForChild(tenant, smartAccount);
     const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
     const staleSec = staleThresholdSec(tickSeconds);
     const firstBeatSec = firstBeatGraceSec(tickSeconds);
@@ -8533,6 +8652,10 @@ export async function runOrchestrator(): Promise<void> {
       // Beside the watchdog, and nothing like it: this one only speaks.
       telegramLiveness();
       await mirrorLedgers();
+      // AFTER the mirror, so completed ids are fresh: a settle the mirror just
+      // carried up must read as done, not as claimed-without-ticket (which
+      // would false-block for a pass and scare the owner).
+      await refreshConvertTicketsForLiveChildren();
       startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this

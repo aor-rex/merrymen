@@ -180,3 +180,97 @@ export function parseManualSwap(s: {
   if (wei <= 0n) return null;
   return { wei, id: s.manualSwapId };
 }
+
+/**
+ * The convert ticket — a single-use spend authorization for one manual swap,
+ * ferried by the orchestrator into the child home (convert-ticket.json).
+ *
+ * WHY A FILE, NOT THE SHARED DB. A hosted child cannot read shared Postgres
+ * (DATABASE_URL is stripped by design), and its own sqlite dies with a fresh
+ * home — so neither is a trustworthy pre-spend read. The ticket file is the
+ * orchestrator's signed word, written at spawn and every pass, AFTER the
+ * orchestrator atomically claimed the id in shared convert_claims. No ticket
+ * for this id means the spend is not authorized: either the claim never
+ * landed (storage failure — wait, don't spend) or it landed and the ticket
+ * was lost (crash before ferry — ambiguous, fail closed, owner resubmits).
+ */
+export interface ConvertTicket {
+  /** "ok" authorizes exactly this id; "blocked" names an id that must NOT execute. */
+  status: "ok" | "blocked";
+  /** The manual swap id this ticket speaks about. */
+  id: string;
+  /** ms epoch the orchestrator wrote the ticket — for the alert copy, not a TTL. */
+  issuedAtMs: number;
+}
+
+/** Read and validate a ticket file. Garbage, wrong shape, or missing: null. */
+export function readConvertTicket(raw: string | null | undefined): ConvertTicket | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const t = JSON.parse(raw) as Record<string, unknown>;
+    if ((t.status !== "ok" && t.status !== "blocked") || typeof t.id !== "string") return null;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(t.id)) return null;
+    return { status: t.status, id: t.id, issuedAtMs: typeof t.issuedAtMs === "number" ? t.issuedAtMs : 0 };
+  } catch {
+    return null;
+  }
+}
+
+/** Parse a JSON id array defensively: garbage in, empty list out. Shared by
+ * the orchestrator (shared completed_ids) and tests. */
+export function parseCompletedIds(v: unknown): string[] {
+  if (typeof v !== "string") return [];
+  try {
+    const ids = JSON.parse(v) as unknown;
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The worker's half of the ticket gate — pure, tested. "go" spends;
+ * "wait" holds silently (no ticket yet, or a ticket for another id — the
+ * orchestrator decides next pass); "blocked" holds AND alerts the owner once
+ * (ambiguous: claimed without a ticket, the spend may already have happened).
+ */
+export function manualTicketAllows(
+  ticket: ConvertTicket | null,
+  handoffId: string,
+): "go" | "wait" | "blocked" {
+  if (ticket && ticket.id === handoffId) {
+    return ticket.status === "ok" ? "go" : "blocked";
+  }
+  return "wait";
+}
+
+export type TicketDecision =
+  /** Fresh handoff: claim it in shared storage, then write an "ok" ticket. */
+  | { action: "issue" }
+  /** Ticket already in the home for this id: execution in flight, leave it. */
+  | { action: "pending" }
+  /** Nothing to authorize (no handoff, or id completed): remove any ticket. */
+  | { action: "done" }
+  /** Claimed before but no ticket in the home: ambiguous (crash between claim
+   * and ferry, or redeploy after broadcast before mirror). Fail closed: write
+   * a "blocked" ticket and alert the owner — never re-issue. */
+  | { action: "blocked" };
+
+/**
+ * Pure ticket decision — the orchestrator's per-tenant rule, exported for
+ * tests. Inputs are all shared-durable except ticketInHome (the file the
+ * last pass ferried, if it survived).
+ */
+export function decideConvertTicket(args: {
+  handoffId: string | null;
+  completedIds: string[];
+  claimedIds: string[] | null;
+  ticketInHome: { id: string; status: "ok" | "blocked" } | null;
+}): TicketDecision {
+  const { handoffId, completedIds, claimedIds, ticketInHome } = args;
+  if (!handoffId || completedIds.includes(handoffId)) return { action: "done" };
+  if (claimedIds === null) return { action: "done" }; // storage unreachable: change nothing, spend nothing
+  if (ticketInHome?.status === "ok" && ticketInHome.id === handoffId) return { action: "pending" };
+  if (claimedIds.includes(handoffId)) return { action: "blocked" };
+  return { action: "issue" };
+}
