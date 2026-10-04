@@ -22,7 +22,20 @@ import type { LocaleTag } from "../locale";
 /** Locales whose catalogue covers every English key. Extend per language PR. */
 const COMPLETE: LocaleTag[] = ["es"];
 
-const EN_KEYS = Object.keys(EN);
+/**
+ * Namespaces English keeps but NO locale ships — translated once, then
+ * withdrawn (see web/src/terminal/strip-i18n.test.ts for strip: Home and the
+ * desktop rail are still English, so a translated strip would strand the
+ * reader half in each language). Parity locks what ships, not what was
+ * withdrawn; the withdrawal tests lock the rest.
+ */
+const WITHDRAWN = ["strip"];
+const EN_KEYS = Object.keys(EN).filter((k) => !WITHDRAWN.some((ns) => k === ns || k.startsWith(`${ns}.`)));
+
+/** Every withdrawn namespace must have a test saying so — or this silently rots. */
+const WITHDRAWAL_TESTS: Record<string, string> = {
+  strip: "web/src/terminal/strip-i18n.test.ts",
+};
 
 function placeholders(s: string): string[] {
   return [...s.matchAll(/\{([a-zA-Z]+)\}/g)].map((m) => m[1]).sort();
@@ -40,6 +53,10 @@ function placeholderGaps(tag: string, catalogue: Partial<Record<string, string>>
 }
 
 describe("complete locales carry the whole English catalogue", () => {
+  it("every withdrawn namespace names its withdrawal test", () => {
+    assert.deepEqual(Object.keys(WITHDRAWAL_TESTS).sort(), WITHDRAWN.sort());
+  });
+
   for (const tag of COMPLETE) {
     const catalogue = CATALOGUES[tag] ?? {};
     it(`${tag}: no missing keys`, () => {
