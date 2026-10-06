@@ -83,31 +83,31 @@ export function colorwayKey(slug: string | null | undefined): string {
 /**
  * KIND: which figurine the owner picked — memoji-style, the head is the
  * character. Kind is pure dress like paint: it never touches trim, fins or
- * ring. Unknown stored values fall back to robot, never blank.
+ * ring. Unknown stored values fall back to cat, never blank.
  */
-export type FigureKind = "robot" | "fox" | "wolf" | "deer";
+export type FigureKind = "cat" | "monkey" | "fox" | "bear";
 
-export const KINDS: readonly FigureKind[] = ["robot", "fox", "wolf", "deer"];
+export const KINDS: readonly FigureKind[] = ["cat", "monkey", "fox", "bear"];
 
 /** Emoji for the kind picker. Emoji only — no words to translate. */
 export function kindEmoji(kind: FigureKind): string {
   switch (kind) {
-    case "robot":
-      return "🤖";
+    case "cat":
+      return "🐱";
+    case "monkey":
+      return "🐵";
     case "fox":
       return "🦊";
-    case "wolf":
-      return "🐺";
-    case "deer":
-      return "🦌";
+    case "bear":
+      return "🐻";
   }
 }
 
-/** Read back a stored kind choice. Anything unrecognised is robot. */
+/** Read back a stored kind choice. Anything unrecognised is cat. */
 export function kindFromStored(stored: string | null | undefined): FigureKind {
-  return stored === "fox" || stored === "wolf" || stored === "deer" || stored === "robot"
+  return stored === "monkey" || stored === "fox" || stored === "bear" || stored === "cat"
     ? stored
-    : "robot";
+    : "cat";
 }
 
 /** localStorage key for one agent's kind. */

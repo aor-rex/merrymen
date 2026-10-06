@@ -56,15 +56,15 @@ describe("dress changes the body colour only, never the state", () => {
 });
 
 describe("kind is dress: the head is the character, never the state", () => {
-  it("unknown stored kinds fall back to robot, never blank", () => {
-    assert.equal(kindFromStored(null), "robot");
-    assert.equal(kindFromStored(undefined), "robot");
-    assert.equal(kindFromStored("live"), "robot");
+  it("unknown stored kinds fall back to cat, never blank", () => {
+    assert.equal(kindFromStored(null), "cat");
+    assert.equal(kindFromStored(undefined), "cat");
+    assert.equal(kindFromStored("live"), "cat");
+    assert.equal(kindFromStored("robot"), "cat");
+    assert.equal(kindFromStored("wolf"), "cat");
     assert.equal(kindFromStored("fox"), "fox");
-    assert.equal(kindFromStored("wolf"), "wolf");
-    assert.equal(kindFromStored("deer"), "deer");
-    assert.equal(kindFromStored("cat"), "robot");
-    assert.equal(kindFromStored("bear"), "robot");
+    assert.equal(kindFromStored("monkey"), "monkey");
+    assert.equal(kindFromStored("bear"), "bear");
   });
 
   it("the kind key is per agent", () => {

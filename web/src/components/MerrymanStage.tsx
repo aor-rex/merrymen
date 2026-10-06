@@ -52,7 +52,7 @@ export function MerrymanStage({
   const key = colorwayKey(slug);
   const kkey = kindKey(slug);
   const [colorway, setColorway] = useState<FigureColorway>("spectre");
-  const [kind, setKind] = useState<FigureKind>("robot");
+  const [kind, setKind] = useState<FigureKind>("cat");
   const [open, setOpen] = useState(false);
 
   // Dress survives reloads, per agent, in this browser only.
@@ -62,7 +62,7 @@ export function MerrymanStage({
       setKind(kindFromStored(window.localStorage.getItem(kkey)));
     } catch {
       setColorway("spectre");
-      setKind("robot");
+      setKind("cat");
     }
   }, [key, kkey]);
 

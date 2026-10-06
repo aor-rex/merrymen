@@ -34,8 +34,9 @@ export function MerrymanFigure({
   strategy,
   wired = false,
   colorway = "spectre",
-  kind = "robot",
+  kind = "cat",
   yaw = 0,
+  turntable = true,
   size = 220,
   onTap,
 }: {
@@ -49,6 +50,8 @@ export function MerrymanFigure({
   kind?: FigureKind;
   /** Starting turn, radians. Useful for thumbnails; drag adds to it. */
   yaw?: number;
+  /** Slow turntable when idle. Drag always turns. */
+  turntable?: boolean;
   size?: number;
   /** Tap (not drag) on the figure. The screen decides what opens. */
   onTap?: () => void;
@@ -156,11 +159,58 @@ export function MerrymanFigure({
         wrap.scale.setScalar(s);
         wrap.position.y = -1.46;
         bot.add(wrap);
-        // Play something idle: prefer a clip with idle in the name.
+        // KIT: animal traits bolted to the BONES, so they follow the idle
+        // animation. Offsets are world units, divided by the bone's own
+        // world scale (armatures carry a large internal scale). Dress.
+        wrap.updateMatrixWorld(true);
+        const boneScale = (bone: THREE.Object3D) => {
+          const v = new THREE.Vector3();
+          bone.getWorldScale(v);
+          return v.x || 1;
+        };
+        const hardware = new THREE.MeshStandardMaterial({ color: 0x1a2029, metalness: 0.6, roughness: 0.4 });
+        const headBone = model.getObjectByName("Head");
+        const bodyBone =
+          model.getObjectByName("Hips") ?? model.getObjectByName("Body") ?? model;
+        const KIT: Record<FigureKind, { earX: number; earY: number; pointed: boolean; earR: number; tail?: [number, number, number][]; thick: number; tailYaw: number }> = {
+          cat: { earX: 0.32, earY: 1.15, pointed: true, earR: 0.34, thick: 0.05, tailYaw: 0, tail: [[0, 0.05, -0.3], [0.1, -0.2, -0.6], [0.2, 0.2, -0.75], [0.15, 0.55, -0.5]] },
+          monkey: { earX: 0.2, earY: 0.18, pointed: false, earR: 0.2, thick: 0.06, tailYaw: -0.47, tail: [[0, 0, -0.05], [0.03, -0.15, -0.2], [0.06, 0.1, -0.28], [0.04, 0.35, -0.15]] },
+          fox: { earX: 0.45, earY: 1.3, pointed: true, earR: 0.44, thick: 0.12, tailYaw: 0, tail: [[0, 0.05, -0.5], [0.05, -0.15, -0.9], [0.1, 0.25, -1.1], [0.08, 0.6, -0.85]] },
+          bear: { earX: 0.5, earY: 1.55, pointed: false, earR: 0.3, thick: 0, tailYaw: 0 },
+        };
+        const spec = KIT[kind];
+        if (headBone) {
+          const k = boneScale(headBone);
+          const earGeo = spec.pointed
+            ? new THREE.ConeGeometry(spec.earR * 0.4 / k, spec.earR / k, 4)
+            : new THREE.SphereGeometry(spec.earR / k, 14, 14);
+          for (const side of [-1, 1]) {
+            const ear = new THREE.Mesh(earGeo, hardware);
+            ear.position.set((side * spec.earX) / k, spec.earY / k, 0);
+            if (spec.pointed) ear.rotation.z = -side * 0.2;
+            else ear.scale.z = 0.6;
+            headBone.add(ear);
+          }
+        }
+        if (spec.tail) {
+          const k2 = boneScale(bodyBone);
+          // Unwind the body's rest yaw so "behind" really means behind.
+          const cy = Math.cos(spec.tailYaw);
+          const sy = Math.sin(spec.tailYaw);
+          const curve = new THREE.CatmullRomCurve3(
+            spec.tail.map(([x, y, z]) => new THREE.Vector3((x * cy - z * sy) / k2, y / k2, (x * sy + z * cy) / k2)),
+          );
+          bodyBone.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, spec.thick / k2, 8), hardware));
+        }
+        // Play something idle: exact Idle first, then any idle, then clip one.
         if (gltf.animations.length > 0) {
           mixer = new THREE.AnimationMixer(model);
+          const clips = gltf.animations;
           const idle =
-            gltf.animations.find((c) => /idle|survey/i.test(c.name)) ?? gltf.animations[0];
+            clips.find((c) => /(^|\|)Idle$/i.test(c.name)) ??
+            clips.find((c) => /(^|\|)Idle_Neutral$/i.test(c.name)) ??
+            clips.find((c) => /idle|survey/i.test(c.name)) ??
+            clips[0];
           mixer.clipAction(idle).play();
         }
       },
@@ -212,7 +262,7 @@ export function MerrymanFigure({
       raf = requestAnimationFrame(tick);
       const t = clock.getElapsedTime();
       mixer?.update(0.016);
-      if (!dragging) spin += 0.003;
+      if (!dragging && turntable) spin += 0.003;
       bot.rotation.y = spin;
       // Tap hop, plus a breath when the file brings no animation.
       if (hop > 0) hop = Math.max(0, hop - 0.03);
@@ -240,7 +290,7 @@ export function MerrymanFigure({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [hex, paint, trim, shell, wired, kind, yaw, size]);
+  }, [hex, paint, trim, shell, wired, kind, yaw, turntable, size]);
 
   return (
     <figure style={{ margin: 0, width: size, flex: "none" }} aria-label={`your merryman: ${figureLabel(trim)}`}>
