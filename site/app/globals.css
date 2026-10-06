@@ -314,6 +314,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 
 /* ---------- docs / legal ---------- */
 .doc-shell { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 56px; padding: 52px 0 96px; align-items: start; }
+.doc-shell > * { min-width: 0; }
 .doc-side { position: sticky; top: 88px; }
 .doc-side h6 { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-faint); margin: 20px 0 10px; font-weight: 500; }
 .doc-side a { display: block; color: var(--text-dim); font-size: 14px; padding: 5px 0 5px 14px; border-left: 1px solid var(--border); margin-left: -1px; transition: color .15s, border-color .15s; }
