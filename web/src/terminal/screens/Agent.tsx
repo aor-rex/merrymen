@@ -27,6 +27,8 @@ import {
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
+import { MerrymanFigure } from "@/components/MerrymanFigure";
+import { useWired } from "@/components/WiredProvider";
 import { NameChip } from "../NameChip";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
@@ -120,6 +122,8 @@ export function Agent({
 }) {
   const ask = chat.draft;
   const setAsk = chat.setDraft;
+  // The figure's ring comes from the viewer, same as Face — see ui.tsx.
+  const { wired: wiredSlugs } = useWired();
   /**
    * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
    *
@@ -587,6 +591,16 @@ export function Agent({
           {mine.statusLabel ?? "Offline"}
         </span>
       </header>
+      {/* YOUR MERRYMAN, in the round — see components/MerrymanFigure. Trim is
+          the autonomy verdict, fins are the trencher strategy, the ring is the
+          wire. Dressing that claims something the agent isn't is worse than
+          none, so this reads state, never settings-as-wishes. */}
+      <MerrymanFigure
+        mode={mine.autonomy ?? mine.mode}
+        strategy={mine.glance.id}
+        wired={(mine.slug ?? null) !== null && wiredSlugs.includes(mine.slug as string)}
+        size={168}
+      />
       <section className="desk-portfolio">
         <button
           type="button"
