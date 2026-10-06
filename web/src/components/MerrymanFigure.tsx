@@ -9,6 +9,7 @@ import {
   trimFor,
   trimHex,
   type FigureColorway,
+  type FigureKind,
 } from "@/lib/merryman-figure";
 
 /**
@@ -31,6 +32,8 @@ export function MerrymanFigure({
   strategy,
   wired = false,
   colorway = "spectre",
+  kind = "robot",
+  yaw = 0,
   size = 220,
   onTap,
 }: {
@@ -40,6 +43,10 @@ export function MerrymanFigure({
   wired?: boolean;
   /** Dress: owner-chosen body colour. Never state. */
   colorway?: FigureColorway;
+  /** Dress: which figurine. The head is the character. Never state. */
+  kind?: FigureKind;
+  /** Starting turn, radians. Useful for thumbnails; drag adds to it. */
+  yaw?: number;
   size?: number;
   /** Tap (not drag) on the figure. The screen decides what opens. */
   onTap?: () => void;
@@ -85,6 +92,8 @@ export function MerrymanFigure({
     // body is a lit plastic instead. Dress lives here and only here.
     const suit = new THREE.MeshStandardMaterial({ color: new THREE.Color(body), metalness: 0.25, roughness: 0.45 });
     const joint = new THREE.MeshStandardMaterial({ color: 0x0b0e13, metalness: 0.3, roughness: 0.6 });
+    // Muzzle light grey: foxes wear a pale muzzle. Part of the kind, not state.
+    const muzzle = new THREE.MeshStandardMaterial({ color: 0x9aa4b2, metalness: 0.2, roughness: 0.5 });
     const glow = new THREE.MeshStandardMaterial({
       color: 0x000000,
       emissive: color,
@@ -167,8 +176,10 @@ export function MerrymanFigure({
     bot.add(armL, armR);
 
     // HEAD: neck, skull, jaw, visor, two glowing eyes. The trim lives here.
+    // Chibi scale: the head runs big, like a collectible figurine.
     const head = new THREE.Group();
     head.position.y = 0.92;
+    head.scale.setScalar(1.22);
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.18, 14), joint);
     neck.position.y = -0.32;
     const skull = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 24), suit);
@@ -183,6 +194,64 @@ export function MerrymanFigure({
     const eyeR = new THREE.Mesh(eyeGeo, glow);
     eyeR.position.set(0.105, 0.05, 0.32);
     head.add(neck, skull, jaw, visor, eyeL, eyeR);
+    // KIND: the head is the character. Ears, snouts and tails only — the
+    // visor eyes and trim glow stay identical on every kind.
+    if (kind === "robot") {
+      // Antenna stalk with a trim-lit tip.
+      const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.22, 8), joint);
+      stalk.position.y = 0.42;
+      const tip = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), glow);
+      tip.position.y = 0.55;
+      head.add(stalk, tip);
+    }
+    if (kind === "cat" || kind === "fox") {
+      // Pointed ears, angled slightly outward.
+      const earGeo = new THREE.ConeGeometry(0.11, 0.24, 4);
+      const earL = new THREE.Mesh(earGeo, suit);
+      earL.position.set(-0.2, 0.38, 0);
+      earL.rotation.z = 0.25;
+      const earR = new THREE.Mesh(earGeo, suit);
+      earR.position.set(0.2, 0.38, 0);
+      earR.rotation.z = -0.25;
+      head.add(earL, earR);
+    }
+    if (kind === "bear") {
+      // Round ears on the sides of the skull.
+      const earGeo = new THREE.SphereGeometry(0.11, 14, 14);
+      const earL = new THREE.Mesh(earGeo, suit);
+      earL.position.set(-0.28, 0.22, 0);
+      earL.scale.z = 0.6;
+      const earR = new THREE.Mesh(earGeo, suit);
+      earR.position.set(0.28, 0.22, 0);
+      earR.scale.z = 0.6;
+      head.add(earL, earR);
+    }
+    if (kind === "fox") {
+      // Pale protruding muzzle with a dark nose — reads front-on by colour
+      // and in profile by silhouette.
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.15, 0.24), muzzle);
+      snout.position.set(0, -0.15, 0.36);
+      const nose = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.07, 0.05), joint);
+      nose.position.set(0, -0.13, 0.49);
+      head.add(snout, nose);
+    }
+    // Tails: cat a whip, fox a brush. Robot and bear are tailless.
+    if (kind === "cat" || kind === "fox") {
+      const thick = kind === "fox" ? 0.09 : 0.045;
+      const curve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0.25, -0.6, -0.25),
+        new THREE.Vector3(0.55, -0.7, -0.5),
+        new THREE.Vector3(0.7, -0.3, -0.55),
+        new THREE.Vector3(0.62, 0.05, -0.45),
+      ]);
+      const tail = new THREE.Mesh(new THREE.TubeGeometry(curve, 16, thick, 8), suit);
+      bot.add(tail);
+      if (kind === "fox") {
+        const brush = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.3, 10), suit);
+        brush.position.set(0.62, 0.2, -0.45);
+        bot.add(brush);
+      }
+    }
     const gaze = new THREE.PointLight(color, 5, 4);
     gaze.position.set(0, 0.9, 1.2);
     bot.add(head, gaze);
@@ -213,7 +282,7 @@ export function MerrymanFigure({
     }
 
     // Drag turns it; a tap (not a drag) calls onTap and waves.
-    let spin = 0;
+    let spin = yaw;
     let dragging = false;
     let moved = 0;
     let wave = 0;
@@ -278,7 +347,7 @@ export function MerrymanFigure({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [hex, body, trim, shell, wired, size]);
+  }, [hex, body, trim, shell, wired, kind, yaw, size]);
 
   return (
     <figure style={{ margin: 0, width: size, flex: "none" }} aria-label={`your merryman: ${figureLabel(trim)}`}>

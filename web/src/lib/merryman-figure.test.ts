@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { colorwayFromStored, colorwayHex, colorwayKey, figureLabel, shellFor, trimFor, trimHex } from "./merryman-figure";
+import { colorwayFromStored, colorwayHex, colorwayKey, figureLabel, kindFromStored, kindKey, shellFor, trimFor, trimHex } from "./merryman-figure";
 
 describe("the figure trims from the worker's mode, never from a wardrobe", () => {
   it("live is green, paper is lime", () => {
@@ -52,5 +52,19 @@ describe("dress changes the body colour only, never the state", () => {
   it("the key is per agent, and unclaimed agents share one", () => {
     assert.equal(colorwayKey("abc"), "merryman-shell:abc");
     assert.equal(colorwayKey(null), "merryman-shell:unclaimed");
+  });
+});
+
+describe("kind is dress: the head is the character, never the state", () => {
+  it("unknown stored kinds fall back to robot, never blank", () => {
+    assert.equal(kindFromStored(null), "robot");
+    assert.equal(kindFromStored(undefined), "robot");
+    assert.equal(kindFromStored("live"), "robot");
+    assert.equal(kindFromStored("fox"), "fox");
+  });
+
+  it("the kind key is per agent", () => {
+    assert.equal(kindKey("abc"), "merryman-kind:abc");
+    assert.equal(kindKey(null), "merryman-kind:unclaimed");
   });
 });

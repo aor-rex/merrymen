@@ -79,3 +79,38 @@ export function colorwayFromStored(stored: string | null | undefined): FigureCol
 export function colorwayKey(slug: string | null | undefined): string {
   return `merryman-shell:${slug ?? "unclaimed"}`;
 }
+
+/**
+ * KIND: which figurine the owner picked — memoji-style, the head is the
+ * character. Kind is pure dress like paint: it never touches trim, fins or
+ * ring. Unknown stored values fall back to robot, never blank.
+ */
+export type FigureKind = "robot" | "cat" | "fox" | "bear";
+
+export const KINDS: readonly FigureKind[] = ["robot", "cat", "fox", "bear"];
+
+/** Emoji for the kind picker. Emoji only — no words to translate. */
+export function kindEmoji(kind: FigureKind): string {
+  switch (kind) {
+    case "robot":
+      return "🤖";
+    case "cat":
+      return "🐱";
+    case "fox":
+      return "🦊";
+    case "bear":
+      return "🐻";
+  }
+}
+
+/** Read back a stored kind choice. Anything unrecognised is robot. */
+export function kindFromStored(stored: string | null | undefined): FigureKind {
+  return stored === "cat" || stored === "fox" || stored === "bear" || stored === "robot"
+    ? stored
+    : "robot";
+}
+
+/** localStorage key for one agent's kind. */
+export function kindKey(slug: string | null | undefined): string {
+  return `merryman-kind:${slug ?? "unclaimed"}`;
+}

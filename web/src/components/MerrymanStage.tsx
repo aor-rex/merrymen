@@ -4,10 +4,15 @@ import { useEffect, useState } from "react";
 import { MerrymanFigure } from "./MerrymanFigure";
 import {
   COLORWAYS,
+  KINDS,
   colorwayFromStored,
   colorwayHex,
   colorwayKey,
+  kindEmoji,
+  kindFromStored,
+  kindKey,
   type FigureColorway,
+  type FigureKind,
 } from "@/lib/merryman-figure";
 
 /**
@@ -45,17 +50,21 @@ export function MerrymanStage({
   };
 }) {
   const key = colorwayKey(slug);
+  const kkey = kindKey(slug);
   const [colorway, setColorway] = useState<FigureColorway>("spectre");
+  const [kind, setKind] = useState<FigureKind>("robot");
   const [open, setOpen] = useState(false);
 
   // Dress survives reloads, per agent, in this browser only.
   useEffect(() => {
     try {
       setColorway(colorwayFromStored(window.localStorage.getItem(key)));
+      setKind(kindFromStored(window.localStorage.getItem(kkey)));
     } catch {
       setColorway("spectre");
+      setKind("robot");
     }
-  }, [key]);
+  }, [key, kkey]);
 
   const dress = (next: FigureColorway) => {
     setColorway(next);
@@ -66,6 +75,14 @@ export function MerrymanStage({
     }
   };
 
+  const pickKind = (next: FigureKind) => {
+    setKind(next);
+    try {
+      window.localStorage.setItem(kkey, next);
+    } catch {
+      // Private browsing: the kind just doesn't survive. Nothing breaks.
+    }
+  };
   const order = (
     label: string,
     run: () => void,
@@ -98,9 +115,36 @@ export function MerrymanStage({
         strategy={strategy}
         wired={wired}
         colorway={colorway}
+        kind={kind}
         size={size}
         onTap={() => setOpen((v) => !v)}
       />
+      {/* KIND: which figurine. The head is the character, never the state. */}
+      <div role="group" aria-label={`kind of ${name}`} style={{ display: "flex", gap: 8 }}>
+        {KINDS.map((k) => (
+          <button
+            key={k}
+            type="button"
+            title={k}
+            aria-label={`${name} as ${k}`}
+            aria-pressed={kind === k}
+            onClick={() => pickKind(k)}
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: "50%",
+              background: kind === k ? "#1c2530" : "transparent",
+              border: kind === k ? "2px solid #22c55e" : "2px solid #232c38",
+              fontSize: 17,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: 0,
+            }}
+          >
+            {kindEmoji(k)}
+          </button>
+        ))}
+      </div>
       {/* DRESS: paint, not state. Three shells, the house black first. */}
       <div role="group" aria-label={`dress ${name}`} style={{ display: "flex", gap: 8 }}>
         {COLORWAYS.map((c) => (
