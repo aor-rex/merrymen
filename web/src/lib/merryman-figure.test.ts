@@ -61,6 +61,10 @@ describe("kind is dress: the head is the character, never the state", () => {
     assert.equal(kindFromStored(undefined), "robot");
     assert.equal(kindFromStored("live"), "robot");
     assert.equal(kindFromStored("fox"), "fox");
+    assert.equal(kindFromStored("wolf"), "wolf");
+    assert.equal(kindFromStored("deer"), "deer");
+    assert.equal(kindFromStored("cat"), "robot");
+    assert.equal(kindFromStored("bear"), "robot");
   });
 
   it("the kind key is per agent", () => {

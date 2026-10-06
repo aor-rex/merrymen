@@ -85,27 +85,27 @@ export function colorwayKey(slug: string | null | undefined): string {
  * character. Kind is pure dress like paint: it never touches trim, fins or
  * ring. Unknown stored values fall back to robot, never blank.
  */
-export type FigureKind = "robot" | "cat" | "fox" | "bear";
+export type FigureKind = "robot" | "fox" | "wolf" | "deer";
 
-export const KINDS: readonly FigureKind[] = ["robot", "cat", "fox", "bear"];
+export const KINDS: readonly FigureKind[] = ["robot", "fox", "wolf", "deer"];
 
 /** Emoji for the kind picker. Emoji only — no words to translate. */
 export function kindEmoji(kind: FigureKind): string {
   switch (kind) {
     case "robot":
       return "🤖";
-    case "cat":
-      return "🐱";
     case "fox":
       return "🦊";
-    case "bear":
-      return "🐻";
+    case "wolf":
+      return "🐺";
+    case "deer":
+      return "🦌";
   }
 }
 
 /** Read back a stored kind choice. Anything unrecognised is robot. */
 export function kindFromStored(stored: string | null | undefined): FigureKind {
-  return stored === "cat" || stored === "fox" || stored === "bear" || stored === "robot"
+  return stored === "fox" || stored === "wolf" || stored === "deer" || stored === "robot"
     ? stored
     : "robot";
 }

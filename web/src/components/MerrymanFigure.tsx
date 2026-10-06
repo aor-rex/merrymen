@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import {
   colorwayHex,
   figureLabel,
@@ -13,19 +14,20 @@ import {
 } from "@/lib/merryman-figure";
 
 /**
- * YOUR MERRYMAN, standing up.
+ * YOUR MERRYMAN, as a real model.
  *
- * A procedural humanoid robot — no model file, no new host to trust. The
- * trim colour is the worker's mode (lib/merryman-figure.ts), the shoulder
- * fins appear only on the trencher strategy, and the ring only when wired.
- * The shell prop is dress: body colour only, chosen by the owner, and it can
- * never touch trim, fins or ring. Every state difference is a state the
- * agent is actually in; every dress difference is paint.
+ * Each kind is a CC0 model file vendored under web/public/figures (no new
+ * host to trust): the robot is RobotExpressive by Tomas Laulhe, the animals
+ * are Quaternius. Procedural survives only as the load-failure fallback, so
+ * the face never breaks.
  *
- * It idles (breath, arm sway, head scan), it turns when dragged, and a tap
- * calls onTap — the screen owns what that opens. Styled inline, not in a
- * sheet: styles/scoped.test.ts pins every rule in web/src/styles under .mm,
- * and this leaf needs none of that machinery.
+ * State still rules the trim: the plinth rim glows the worker's mode
+ * (lib/merryman-figure.ts), dorsal fins appear only on the trencher
+ * strategy, the ring only when wired. Kind and plinth paint are dress —
+ * they never touch trim, fins or ring.
+ *
+ * Styled inline, not in a sheet: styles/scoped.test.ts pins every rule in
+ * web/src/styles under .mm, and this leaf needs none of that machinery.
  */
 export function MerrymanFigure({
   mode,
@@ -41,9 +43,9 @@ export function MerrymanFigure({
   mode: string | null | undefined;
   strategy?: string | null;
   wired?: boolean;
-  /** Dress: owner-chosen body colour. Never state. */
+  /** Dress: owner-chosen plinth paint. Never state. */
   colorway?: FigureColorway;
-  /** Dress: which figurine. The head is the character. Never state. */
+  /** Dress: which model file. Never state. */
   kind?: FigureKind;
   /** Starting turn, radians. Useful for thumbnails; drag adds to it. */
   yaw?: number;
@@ -57,12 +59,13 @@ export function MerrymanFigure({
   const trim = trimFor(mode);
   const shell = shellFor(strategy);
   const hex = trimHex(trim);
-  const body = colorwayHex(colorway);
+  const paint = colorwayHex(colorway);
 
   useEffect(() => {
     const el = mount.current;
     if (!el) return;
     const color = new THREE.Color(hex);
+    let dead = false;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -71,14 +74,13 @@ export function MerrymanFigure({
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 30);
-    camera.position.set(0, 0.1, 7.2);
-    camera.lookAt(0, -0.1, 0);
+    camera.position.set(0, 0.4, 7.6);
+    camera.lookAt(0, 0, 0);
 
     scene.add(new THREE.HemisphereLight(0x9fb4cc, 0x11131a, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 2.2);
     key.position.set(2.5, 3, 3);
     scene.add(key);
-    // Rim: separates a dark body from a black page. Fill: lifts the face.
     const rim = new THREE.DirectionalLight(0x86a8ff, 1.6);
     rim.position.set(-3, 2, -3);
     scene.add(rim);
@@ -88,188 +90,42 @@ export function MerrymanFigure({
 
     const bot = new THREE.Group();
     scene.add(bot);
-    // No environment map on this stage, so true metals render black — the
-    // body is a lit plastic instead. Dress lives here and only here.
-    const suit = new THREE.MeshStandardMaterial({ color: new THREE.Color(body), metalness: 0.25, roughness: 0.45 });
-    const joint = new THREE.MeshStandardMaterial({ color: 0x0b0e13, metalness: 0.3, roughness: 0.6 });
-    // Muzzle light grey: foxes wear a pale muzzle. Part of the kind, not state.
-    const muzzle = new THREE.MeshStandardMaterial({ color: 0x9aa4b2, metalness: 0.2, roughness: 0.5 });
-    const glow = new THREE.MeshStandardMaterial({
-      color: 0x000000,
-      emissive: color,
-      // Idle is off: its eyes sit dim, never lit.
-      emissiveIntensity: trim === "idle" ? 0.45 : 2.4,
-    });
 
-    // Plinth it stands on.
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.1, 0.18, 32), suit);
-    base.position.y = -1.95;
-    scene.add(base);
+    // Plinth it stands on, in the owner's paint. The rim glows the trim.
+    const plinth = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.95, 1.1, 0.18, 32),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color(paint), metalness: 0.25, roughness: 0.45 }),
+    );
+    plinth.position.y = -1.55;
+    scene.add(plinth);
+    const trimRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.02, 0.035, 10, 64),
+      new THREE.MeshStandardMaterial({
+        color: 0x000000,
+        emissive: color,
+        emissiveIntensity: trim === "idle" ? 0.4 : 1.8,
+      }),
+    );
+    trimRing.rotation.x = Math.PI / 2;
+    trimRing.position.y = -1.46;
+    scene.add(trimRing);
 
-    // LEGS: shoe, shin, knee, thigh. Feet planted, slightly apart.
-    const leg = (x: number) => {
-      const g = new THREE.Group();
-      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.14, 0.55, 16), suit);
-      thigh.position.y = -1.0;
-      const knee = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 14), joint);
-      knee.position.y = -1.3;
-      const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.11, 0.5, 16), suit);
-      shin.position.y = -1.58;
-      const ankle = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), joint);
-      ankle.position.y = -1.82;
-      // Shoe: longer than it is wide, toe forward.
-      const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.46), joint);
-      shoe.position.set(0, -1.86, 0.09);
-      g.add(thigh, knee, shin, ankle, shoe);
-      g.position.x = x;
-      return g;
-    };
-    bot.add(leg(-0.26), leg(0.26));
-
-    // HIPS and WAIST: pelvis block tapering into a narrower waist.
-    const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.28, 0.38), suit);
-    pelvis.position.y = -0.62;
-    const waist = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 0.3, 16), joint);
-    waist.position.y = -0.36;
-    bot.add(pelvis, waist);
-
-    // CHEST: broad at the shoulders, tapering down. The trim lives here.
-    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.28, 0.62, 20), suit);
-    chest.position.y = 0.08;
-    chest.scale.z = 0.72;
-    const core = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.03, 12, 32), glow);
-    core.position.set(0, 0.12, 0.3);
-    // Trapezius slope from neck out to the shoulders.
-    const traps = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.46, 0.22, 4, 1), suit);
-    traps.position.y = 0.44;
-    traps.rotation.y = Math.PI / 4;
-    traps.scale.z = 0.7;
-    bot.add(chest, core, traps);
-
-    // ARMS: deltoid, upper arm, elbow, forearm, palm, fingers. Pivot at the
-    // shoulder so the wave and the sway read from the right joint.
-    const arm = (x: number) => {
-      const g = new THREE.Group();
-      g.position.set(x, 0.4, 0);
-      const delt = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), suit);
-      delt.scale.set(1, 1.15, 1);
-      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.1, 0.42, 14), suit);
-      upper.position.y = -0.3;
-      const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), joint);
-      elbow.position.y = -0.52;
-      const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.085, 0.38, 14), suit);
-      fore.position.y = -0.74;
-      // Hand: palm block plus three finger stubs.
-      const palm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.06), joint);
-      palm.position.y = -1.0;
-      const fingers = new THREE.Group();
-      for (let i = -1; i <= 1; i++) {
-        const f = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.12, 0.05), joint);
-        f.position.set(i * 0.05, -1.12, 0);
-        fingers.add(f);
-      }
-      g.add(delt, upper, elbow, fore, palm, fingers);
-      return g;
-    };
-    const armL = arm(-0.56);
-    const armR = arm(0.56);
-    bot.add(armL, armR);
-
-    // HEAD: neck, skull, jaw, visor, two glowing eyes. The trim lives here.
-    // Chibi scale: the head runs big, like a collectible figurine.
-    const head = new THREE.Group();
-    head.position.y = 0.92;
-    head.scale.setScalar(1.22);
-    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.18, 14), joint);
-    neck.position.y = -0.32;
-    const skull = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 24), suit);
-    skull.scale.set(0.92, 1.08, 0.98);
-    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.16, 0.3), suit);
-    jaw.position.set(0, -0.24, 0.04);
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.16, 0.18), joint);
-    visor.position.set(0, 0.04, 0.22);
-    const eyeGeo = new THREE.BoxGeometry(0.12, 0.04, 0.03);
-    const eyeL = new THREE.Mesh(eyeGeo, glow);
-    eyeL.position.set(-0.105, 0.05, 0.32);
-    const eyeR = new THREE.Mesh(eyeGeo, glow);
-    eyeR.position.set(0.105, 0.05, 0.32);
-    head.add(neck, skull, jaw, visor, eyeL, eyeR);
-    // KIND: the head is the character. Ears, snouts and tails only — the
-    // visor eyes and trim glow stay identical on every kind.
-    if (kind === "robot") {
-      // Antenna stalk with a trim-lit tip.
-      const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.22, 8), joint);
-      stalk.position.y = 0.42;
-      const tip = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), glow);
-      tip.position.y = 0.55;
-      head.add(stalk, tip);
-    }
-    if (kind === "cat" || kind === "fox") {
-      // Pointed ears, angled slightly outward.
-      const earGeo = new THREE.ConeGeometry(0.11, 0.24, 4);
-      const earL = new THREE.Mesh(earGeo, suit);
-      earL.position.set(-0.2, 0.38, 0);
-      earL.rotation.z = 0.25;
-      const earR = new THREE.Mesh(earGeo, suit);
-      earR.position.set(0.2, 0.38, 0);
-      earR.rotation.z = -0.25;
-      head.add(earL, earR);
-    }
-    if (kind === "bear") {
-      // Round ears on the sides of the skull.
-      const earGeo = new THREE.SphereGeometry(0.11, 14, 14);
-      const earL = new THREE.Mesh(earGeo, suit);
-      earL.position.set(-0.28, 0.22, 0);
-      earL.scale.z = 0.6;
-      const earR = new THREE.Mesh(earGeo, suit);
-      earR.position.set(0.28, 0.22, 0);
-      earR.scale.z = 0.6;
-      head.add(earL, earR);
-    }
-    if (kind === "fox") {
-      // Pale protruding muzzle with a dark nose — reads front-on by colour
-      // and in profile by silhouette.
-      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.15, 0.24), muzzle);
-      snout.position.set(0, -0.15, 0.36);
-      const nose = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.07, 0.05), joint);
-      nose.position.set(0, -0.13, 0.49);
-      head.add(snout, nose);
-    }
-    // Tails: cat a whip, fox a brush. Robot and bear are tailless.
-    if (kind === "cat" || kind === "fox") {
-      const thick = kind === "fox" ? 0.09 : 0.045;
-      const curve = new THREE.CatmullRomCurve3([
-        new THREE.Vector3(0.25, -0.6, -0.25),
-        new THREE.Vector3(0.55, -0.7, -0.5),
-        new THREE.Vector3(0.7, -0.3, -0.55),
-        new THREE.Vector3(0.62, 0.05, -0.45),
-      ]);
-      const tail = new THREE.Mesh(new THREE.TubeGeometry(curve, 16, thick, 8), suit);
-      bot.add(tail);
-      if (kind === "fox") {
-        const brush = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.3, 10), suit);
-        brush.position.set(0.62, 0.2, -0.45);
-        bot.add(brush);
-      }
-    }
-    const gaze = new THREE.PointLight(color, 5, 4);
-    gaze.position.set(0, 0.9, 1.2);
-    bot.add(head, gaze);
-
-    // Trencher shell: shoulder fins. Strategy, not fashion.
+    // Trencher shell: dorsal fins. Strategy, not fashion.
     if (shell === "trencher") {
-      const finGeo = new THREE.BoxGeometry(0.1, 0.55, 0.3);
-      const finL = new THREE.Mesh(finGeo, suit);
-      finL.position.set(-0.66, 0.55, -0.1);
-      finL.rotation.z = 0.18;
-      const finR = new THREE.Mesh(finGeo, suit);
-      finR.position.set(0.66, 0.55, -0.1);
-      finR.rotation.z = -0.18;
-      bot.add(finL, finR);
+      const fins = new THREE.Group();
+      const finGeo = new THREE.BoxGeometry(0.1, 0.5, 0.28);
+      const finMat = new THREE.MeshStandardMaterial({ color: 0x3a4350, metalness: 0.3, roughness: 0.5 });
+      const finL = new THREE.Mesh(finGeo, finMat);
+      finL.position.set(-0.3, 1.0, -0.35);
+      finL.rotation.z = 0.15;
+      const finR = new THREE.Mesh(finGeo, finMat);
+      finR.position.set(0.3, 1.0, -0.35);
+      finR.rotation.z = -0.15;
+      fins.add(finL, finR);
+      bot.add(fins);
     }
 
-    // The wired ring: the same ring the feed draws, in the round. Wide enough
-    // to orbit the body, never to cut through the head.
+    // The wired ring: the same ring the feed draws, in the round.
     let ring: THREE.Mesh | null = null;
     if (wired) {
       ring = new THREE.Mesh(
@@ -277,15 +133,54 @@ export function MerrymanFigure({
         new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0x22c55e, emissiveIntensity: 1.4 }),
       );
       ring.rotation.x = Math.PI / 2.8;
-      ring.position.y = 0;
       scene.add(ring);
     }
 
-    // Drag turns it; a tap (not a drag) calls onTap and waves.
+    let mixer: THREE.AnimationMixer | null = null;
+
+    new GLTFLoader().load(
+      `/figures/${kind}.glb`,
+      (gltf) => {
+        if (dead) return;
+        const model = gltf.scene;
+        // Auto-fit: every model stands ~2.6 tall with feet on the plinth.
+        const box = new THREE.Box3().setFromObject(model);
+        const dims = new THREE.Vector3();
+        box.getSize(dims);
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        const s = 2.6 / Math.max(dims.y, 0.001);
+        const wrap = new THREE.Group();
+        wrap.add(model);
+        model.position.set(-center.x, -box.min.y, -center.z);
+        wrap.scale.setScalar(s);
+        wrap.position.y = -1.46;
+        bot.add(wrap);
+        // Play something idle: prefer a clip with idle in the name.
+        if (gltf.animations.length > 0) {
+          mixer = new THREE.AnimationMixer(model);
+          const idle =
+            gltf.animations.find((c) => /idle|survey/i.test(c.name)) ?? gltf.animations[0];
+          mixer.clipAction(idle).play();
+        }
+      },
+      undefined,
+      () => {
+        // Never a broken face: a trim-glowing stone when the file fails.
+        if (dead) return;
+        const stone = new THREE.Mesh(
+          new THREE.IcosahedronGeometry(0.9, 1),
+          new THREE.MeshStandardMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 1.2 }),
+        );
+        bot.add(stone);
+      },
+    );
+
+    // Drag turns it; a tap (not a drag) calls onTap and hops.
     let spin = yaw;
     let dragging = false;
     let moved = 0;
-    let wave = 0;
+    let hop = 0;
     const down = (e: PointerEvent) => {
       dragging = true;
       moved = 0;
@@ -301,7 +196,7 @@ export function MerrymanFigure({
       dragging = false;
       if (moved < 6) {
         tap.current?.();
-        wave = 1;
+        hop = 1;
       }
     };
     const canvas = renderer.domElement;
@@ -316,26 +211,24 @@ export function MerrymanFigure({
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const t = clock.getElapsedTime();
-      // Idle: breath, sway, slow head scan. Drag adds its own turn.
+      mixer?.update(0.016);
       if (!dragging) spin += 0.003;
       bot.rotation.y = spin;
-      bot.position.y = Math.sin(t * 1.6) * 0.03;
-      armL.rotation.z = 0.08 + Math.sin(t * 1.6) * 0.05;
-      // The wave: right arm up, then settles back.
-      if (wave > 0) wave = Math.max(0, wave - 0.02);
-      armR.rotation.z = -(0.08 + Math.sin(t * 1.6) * 0.05) - wave * 2.2;
-      head.rotation.y = Math.sin(t * 0.5) * 0.4;
-      glow.emissiveIntensity = (trim === "idle" ? 0.45 : 2.4) + Math.sin(t * 2.2) * 0.25;
+      // Tap hop, plus a breath when the file brings no animation.
+      if (hop > 0) hop = Math.max(0, hop - 0.03);
+      bot.position.y = Math.sin(t * 1.6) * 0.03 + Math.sin(hop * Math.PI) * 0.35;
       if (ring) ring.rotation.z -= 0.004;
       renderer.render(scene, camera);
     };
     tick();
 
     return () => {
+      dead = true;
       cancelAnimationFrame(raf);
       canvas.removeEventListener("pointerdown", down);
       canvas.removeEventListener("pointermove", move);
       canvas.removeEventListener("pointerup", up);
+      mixer?.stopAllAction();
       scene.traverse((o: THREE.Object3D) => {
         const mesh = o as THREE.Mesh;
         if (mesh.isMesh) {
@@ -347,7 +240,7 @@ export function MerrymanFigure({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [hex, body, trim, shell, wired, kind, yaw, size]);
+  }, [hex, paint, trim, shell, wired, kind, yaw, size]);
 
   return (
     <figure style={{ margin: 0, width: size, flex: "none" }} aria-label={`your merryman: ${figureLabel(trim)}`}>
