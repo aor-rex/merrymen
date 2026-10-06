@@ -14,7 +14,7 @@ import {
 /**
  * YOUR MERRYMAN, standing up.
  *
- * A procedural full-body robot — no model file, no new host to trust. The
+ * A procedural humanoid robot — no model file, no new host to trust. The
  * trim colour is the worker's mode (lib/merryman-figure.ts), the shoulder
  * fins appear only on the trencher strategy, and the ring only when wired.
  * The shell prop is dress: body colour only, chosen by the owner, and it can
@@ -64,8 +64,8 @@ export function MerrymanFigure({
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 30);
-    camera.position.set(0, 0.3, 6.4);
-    camera.lookAt(0, 0, 0);
+    camera.position.set(0, 0.1, 7.2);
+    camera.lookAt(0, -0.1, 0);
 
     scene.add(new THREE.HemisphereLight(0x9fb4cc, 0x11131a, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -84,7 +84,7 @@ export function MerrymanFigure({
     // No environment map on this stage, so true metals render black — the
     // body is a lit plastic instead. Dress lives here and only here.
     const suit = new THREE.MeshStandardMaterial({ color: new THREE.Color(body), metalness: 0.25, roughness: 0.45 });
-    const black = new THREE.MeshStandardMaterial({ color: 0x020304, metalness: 0.3, roughness: 0.6 });
+    const joint = new THREE.MeshStandardMaterial({ color: 0x0b0e13, metalness: 0.3, roughness: 0.6 });
     const glow = new THREE.MeshStandardMaterial({
       color: 0x000000,
       emissive: color,
@@ -93,81 +93,108 @@ export function MerrymanFigure({
     });
 
     // Plinth it stands on.
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.0, 0.18, 32), suit);
-    base.position.y = -1.75;
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.1, 0.18, 32), suit);
+    base.position.y = -1.95;
     scene.add(base);
 
-    // Legs: thigh, shin, foot. Feet planted, slightly apart.
+    // LEGS: shoe, shin, knee, thigh. Feet planted, slightly apart.
     const leg = (x: number) => {
       const g = new THREE.Group();
-      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.14, 0.6, 16), suit);
-      thigh.position.y = -0.85;
-      const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.55, 16), suit);
-      shin.position.y = -1.35;
-      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.42), black);
-      foot.position.set(0, -1.62, 0.08);
-      g.add(thigh, shin, foot);
+      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.14, 0.55, 16), suit);
+      thigh.position.y = -1.0;
+      const knee = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 14), joint);
+      knee.position.y = -1.3;
+      const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.11, 0.5, 16), suit);
+      shin.position.y = -1.58;
+      const ankle = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), joint);
+      ankle.position.y = -1.82;
+      // Shoe: longer than it is wide, toe forward.
+      const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.46), joint);
+      shoe.position.set(0, -1.86, 0.09);
+      g.add(thigh, knee, shin, ankle, shoe);
       g.position.x = x;
       return g;
     };
-    const legL = leg(-0.24);
-    const legR = leg(0.24);
-    bot.add(legL, legR);
+    bot.add(leg(-0.26), leg(0.26));
 
-    // Hips and torso, chest core glowing with the trim.
-    const hips = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.25, 0.35), suit);
-    hips.position.y = -0.5;
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.5, 8, 20), suit);
-    torso.position.y = 0.05;
+    // HIPS and WAIST: pelvis block tapering into a narrower waist.
+    const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.28, 0.38), suit);
+    pelvis.position.y = -0.62;
+    const waist = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 0.3, 16), joint);
+    waist.position.y = -0.36;
+    bot.add(pelvis, waist);
+
+    // CHEST: broad at the shoulders, tapering down. The trim lives here.
+    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.28, 0.62, 20), suit);
+    chest.position.y = 0.08;
+    chest.scale.z = 0.72;
     const core = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.03, 12, 32), glow);
-    core.position.set(0, 0.1, 0.32);
-    bot.add(hips, torso, core);
+    core.position.set(0, 0.12, 0.3);
+    // Trapezius slope from neck out to the shoulders.
+    const traps = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.46, 0.22, 4, 1), suit);
+    traps.position.y = 0.44;
+    traps.rotation.y = Math.PI / 4;
+    traps.scale.z = 0.7;
+    bot.add(chest, core, traps);
 
-    // Arms: shoulder joint, upper arm, forearm, hand. Pivot at the shoulder
-    // so the wave and the sway read from the right joint.
+    // ARMS: deltoid, upper arm, elbow, forearm, palm, fingers. Pivot at the
+    // shoulder so the wave and the sway read from the right joint.
     const arm = (x: number) => {
       const g = new THREE.Group();
-      g.position.set(x, 0.32, 0);
-      const joint = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 16), suit);
-      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.09, 0.45, 14), suit);
-      upper.position.y = -0.28;
-      const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.09, 0.4, 14), suit);
-      fore.position.y = -0.68;
-      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.1, 14, 14), black);
-      hand.position.y = -0.95;
-      g.add(joint, upper, fore, hand);
+      g.position.set(x, 0.4, 0);
+      const delt = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), suit);
+      delt.scale.set(1, 1.15, 1);
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.1, 0.42, 14), suit);
+      upper.position.y = -0.3;
+      const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), joint);
+      elbow.position.y = -0.52;
+      const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.085, 0.38, 14), suit);
+      fore.position.y = -0.74;
+      // Hand: palm block plus three finger stubs.
+      const palm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.06), joint);
+      palm.position.y = -1.0;
+      const fingers = new THREE.Group();
+      for (let i = -1; i <= 1; i++) {
+        const f = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.12, 0.05), joint);
+        f.position.set(i * 0.05, -1.12, 0);
+        fingers.add(f);
+      }
+      g.add(delt, upper, elbow, fore, palm, fingers);
       return g;
     };
-    const armL = arm(-0.5);
-    const armR = arm(0.5);
+    const armL = arm(-0.56);
+    const armR = arm(0.56);
     bot.add(armL, armR);
 
-    // Head: neck, helm, visor, two glowing eyes. The trim lives here.
+    // HEAD: neck, skull, jaw, visor, two glowing eyes. The trim lives here.
     const head = new THREE.Group();
-    head.position.y = 0.78;
-    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.15, 14), black);
-    neck.position.y = -0.28;
-    const helm = new THREE.Mesh(new THREE.SphereGeometry(0.32, 24, 24), suit);
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.18, 0.2), black);
-    visor.position.set(0, 0.03, 0.22);
-    const eyeGeo = new THREE.BoxGeometry(0.13, 0.045, 0.03);
+    head.position.y = 0.92;
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.18, 14), joint);
+    neck.position.y = -0.32;
+    const skull = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 24), suit);
+    skull.scale.set(0.92, 1.08, 0.98);
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.16, 0.3), suit);
+    jaw.position.set(0, -0.24, 0.04);
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.16, 0.18), joint);
+    visor.position.set(0, 0.04, 0.22);
+    const eyeGeo = new THREE.BoxGeometry(0.12, 0.04, 0.03);
     const eyeL = new THREE.Mesh(eyeGeo, glow);
-    eyeL.position.set(-0.11, 0.04, 0.33);
+    eyeL.position.set(-0.105, 0.05, 0.32);
     const eyeR = new THREE.Mesh(eyeGeo, glow);
-    eyeR.position.set(0.11, 0.04, 0.33);
-    head.add(neck, helm, visor, eyeL, eyeR);
+    eyeR.position.set(0.105, 0.05, 0.32);
+    head.add(neck, skull, jaw, visor, eyeL, eyeR);
     const gaze = new THREE.PointLight(color, 5, 4);
-    gaze.position.set(0, 0.8, 1.1);
+    gaze.position.set(0, 0.9, 1.2);
     bot.add(head, gaze);
 
     // Trencher shell: shoulder fins. Strategy, not fashion.
     if (shell === "trencher") {
-      const finGeo = new THREE.BoxGeometry(0.1, 0.5, 0.28);
+      const finGeo = new THREE.BoxGeometry(0.1, 0.55, 0.3);
       const finL = new THREE.Mesh(finGeo, suit);
-      finL.position.set(-0.62, 0.45, 0);
+      finL.position.set(-0.66, 0.55, -0.1);
       finL.rotation.z = 0.18;
       const finR = new THREE.Mesh(finGeo, suit);
-      finR.position.set(0.62, 0.45, 0);
+      finR.position.set(0.66, 0.55, -0.1);
       finR.rotation.z = -0.18;
       bot.add(finL, finR);
     }
@@ -177,11 +204,11 @@ export function MerrymanFigure({
     let ring: THREE.Mesh | null = null;
     if (wired) {
       ring = new THREE.Mesh(
-        new THREE.TorusGeometry(1.5, 0.025, 8, 90),
+        new THREE.TorusGeometry(1.6, 0.025, 8, 90),
         new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0x22c55e, emissiveIntensity: 1.4 }),
       );
       ring.rotation.x = Math.PI / 2.8;
-      ring.position.y = 0.1;
+      ring.position.y = 0;
       scene.add(ring);
     }
 
