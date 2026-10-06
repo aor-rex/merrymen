@@ -33,6 +33,7 @@ import {
   understandSettingsText,
   type Proposal,
 } from "@merrymen/core";
+import { useT } from "@/lib/i18n";
 
 export interface SettingsProposalProps {
   /** The saved values, as GET /api/settings returned them. */
@@ -76,6 +77,7 @@ export function glanceLines(v: Readonly<Record<string, unknown>>): string[] {
 }
 
 export function SettingsProposal(props: SettingsProposalProps) {
+  const t = useT();
   const current = useMemo(() => ({ ...props.defaults, ...props.values }), [props.defaults, props.values]);
   const [text, setText] = useState("");
   const [proposal, setProposal] = useState<Proposal | null>(null);
@@ -141,7 +143,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
       const j = (await res.json().catch(() => ({}))) as { ok?: boolean; errors?: string[]; error?: string; ignored?: string[] };
       if (!res.ok || !j.ok) {
         setStatus("idle");
-        setError(j.errors?.join(" ") || j.error || "Nothing was saved. Try again, or change it below.");
+        setError(j.errors?.join(" ") || j.error || t("settings.proposal.saveFailed"));
         return;
       }
       const ignored = new Set(j.ignored ?? []);
@@ -152,7 +154,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
       props.onApplied();
     } catch {
       setStatus("idle");
-      setError("Couldn't reach the server — nothing was saved.");
+      setError(t("settings.proposal.unreachable"));
     }
   };
 
@@ -162,12 +164,11 @@ export function SettingsProposal(props: SettingsProposalProps) {
 
   return (
     <section className="mm-wrap" aria-labelledby="tell-your-agent" style={{ marginBottom: 16 }}>
-      <div className="mm-section" id="tell-your-agent">Tell your agent how to work</div>
+      <div className="mm-section" id="tell-your-agent">{t("settings.proposal.title")}</div>
       <p className="mm-hint" style={{ marginTop: 0 }}>
-        Say it in your own words and approve the changes in one tap. This works in Telegram and in Chat too — just tell
-        your agent.
+        {t("settings.proposal.hint")}
       </p>
-      <ul className="mm-hint" aria-label="At a glance" style={{ margin: "0 0 10px", paddingLeft: 18 }}>
+      <ul className="mm-hint" aria-label={t("settings.proposal.glanceLabel")} style={{ margin: "0 0 10px", paddingLeft: 18 }}>
         {glanceLines(current).map((line) => (
           <li key={line}>{line}</li>
         ))}
@@ -180,17 +181,17 @@ export function SettingsProposal(props: SettingsProposalProps) {
         style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
       >
         <input
-          aria-label="Tell your agent how to work"
+          aria-label={t("settings.proposal.title")}
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={`e.g. “${EXAMPLES[0]}”`}
           style={{ flex: "1 1 260px", minWidth: 0 }}
         />
         <button className="mm-btn" type="submit" disabled={!text.trim()}>
-          Show me the changes
+          {t("settings.proposal.showChanges")}
         </button>
       </form>
-      <div className="mm-chips" aria-label="Examples" style={{ marginTop: 8 }}>
+      <div className="mm-chips" aria-label={t("settings.proposal.examplesLabel")} style={{ marginTop: 8 }}>
         {EXAMPLES.slice(1).map((ex) => (
           <button key={ex} type="button" className="mm-chip" onClick={() => setText(ex)}>
             {ex}
@@ -200,24 +201,22 @@ export function SettingsProposal(props: SettingsProposalProps) {
 
       {status === "applied" && applied.length > 0 && (
         <p role="status" className="mm-note">
-          ✓ Saved — {applied.join(" · ")}. It takes effect within a minute.
+          {t("settings.proposal.saved", { changes: applied.join(" · ") })}
         </p>
       )}
 
       {nothing && (
         <p role="status" className="mm-note">
-          I couldn&apos;t find a setting to change in that. Try something like “each buy $20, stop loss 8%”, or ask your
-          agent in Chat.
+          {t("settings.proposal.nothingFound")}
         </p>
       )}
 
       {proposal && (rows.length > 0 || refused.length > 0) && (
-        <div className="mm-hint" role="region" aria-label="Proposed changes" style={{ border: "1px solid currentColor", borderRadius: 8, padding: 12 }}>
-          <b>{fromLink ? "Your agent suggested these changes" : rows.length === 1 ? "Here's the change" : `Here are the ${rows.length} changes`}</b>
+        <div className="mm-hint" role="region" aria-label={t("settings.proposal.regionLabel")} style={{ border: "1px solid currentColor", borderRadius: 8, padding: 12 }}>
+          <b>{fromLink ? t("settings.proposal.suggested") : rows.length === 1 ? t("settings.proposal.oneChange") : t("settings.proposal.manyChanges", { count: rows.length })}</b>
           {fromLink && (
             <p style={{ margin: "4px 0 0" }}>
-              Check each one before approving — anyone can make a link like this, and nothing changes until you tap
-              Approve.
+              {t("settings.proposal.checkFirst")}
             </p>
           )}
           {rows.length > 0 && (
@@ -234,7 +233,7 @@ export function SettingsProposal(props: SettingsProposalProps) {
             </ul>
           )}
           {refused.length > 0 && (
-            <ul style={{ margin: "8px 0", paddingLeft: 18 }} aria-label="Not included">
+            <ul style={{ margin: "8px 0", paddingLeft: 18 }} aria-label={t("settings.proposal.notIncluded")}>
               {refused.map((r, i) => (
                 <li key={`${r.phrase}-${i}`}>
                   <b>{r.phrase}</b> — {r.reason}
@@ -250,11 +249,11 @@ export function SettingsProposal(props: SettingsProposalProps) {
           <div style={{ display: "flex", gap: 8 }}>
             {rows.length > 0 && (
               <button className="mm-btn" type="button" onClick={approve} disabled={status === "applying"}>
-                {status === "applying" ? "Saving…" : rows.length === 1 ? "Approve" : `Approve all ${rows.length}`}
+                {status === "applying" ? t("settings.proposal.saving") : rows.length === 1 ? t("settings.proposal.approve") : t("settings.proposal.approveAll", { count: rows.length })}
               </button>
             )}
             <button className="mm-btn" type="button" onClick={dismiss}>
-              Dismiss
+              {t("settings.proposal.dismiss")}
             </button>
           </div>
         </div>
