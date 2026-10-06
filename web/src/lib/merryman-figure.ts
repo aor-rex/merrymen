@@ -46,3 +46,36 @@ export function figureLabel(trim: FigureTrim): string {
       return "not running";
   }
 }
+
+/**
+ * DRESS, and what it is allowed to change: the body colour only. Trim glow,
+ * fins and ring stay state-driven — a shell can never dress an idle agent as
+ * a live one. Unknown stored values fall back to spectre, never blank.
+ */
+export type FigureColorway = "spectre" | "aurum" | "glacier";
+
+export const COLORWAYS: readonly FigureColorway[] = ["spectre", "aurum", "glacier"];
+
+/** Body colour per shell. Spectre is the house black. */
+export function colorwayHex(colorway: FigureColorway): string {
+  switch (colorway) {
+    case "spectre":
+      return "#2b3542";
+    case "aurum":
+      return "#4a3d22";
+    case "glacier":
+      return "#31445a";
+  }
+}
+
+/** Read back a stored shell choice. Anything unrecognised is spectre. */
+export function colorwayFromStored(stored: string | null | undefined): FigureColorway {
+  return stored === "aurum" || stored === "glacier" || stored === "spectre"
+    ? stored
+    : "spectre";
+}
+
+/** localStorage key for one agent's shell. Slug may be unknown pre-claim. */
+export function colorwayKey(slug: string | null | undefined): string {
+  return `merryman-shell:${slug ?? "unclaimed"}`;
+}

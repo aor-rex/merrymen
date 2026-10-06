@@ -27,7 +27,7 @@ import {
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
-import { MerrymanFigure } from "@/components/MerrymanFigure";
+import { MerrymanStage } from "@/components/MerrymanStage";
 import { useWired } from "@/components/WiredProvider";
 import { NameChip } from "../NameChip";
 import { BalanceFigure } from "../studio";
@@ -591,15 +591,23 @@ export function Agent({
           {mine.statusLabel ?? "Offline"}
         </span>
       </header>
-      {/* YOUR MERRYMAN, in the round — see components/MerrymanFigure. Trim is
-          the autonomy verdict, fins are the trencher strategy, the ring is the
-          wire. Dressing that claims something the agent isn't is worse than
-          none, so this reads state, never settings-as-wishes. */}
-      <MerrymanFigure
+      {/* YOUR MERRYMAN, standing: see it, dress it, control it — see
+          components/MerrymanStage. Trim is the autonomy verdict, fins are the
+          trencher strategy, the ring is the wire, paint is the owner's. Its
+          orders are this screen's own handlers, no new authority. */}
+      <MerrymanStage
         mode={mine.autonomy ?? mine.mode}
         strategy={mine.glance.id}
         wired={(mine.slug ?? null) !== null && wiredSlugs.includes(mine.slug as string)}
-        size={168}
+        slug={mine.slug ?? null}
+        name={mine.name}
+        size={200}
+        actions={{
+          talk: () => input.current?.focus(),
+          portfolio: () => setExpanded(true),
+          deposit: onDeposit,
+          withdraw: onWithdraw,
+        }}
       />
       <section className="desk-portfolio">
         <button

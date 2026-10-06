@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { figureLabel, shellFor, trimFor, trimHex } from "./merryman-figure";
+import { colorwayFromStored, colorwayHex, colorwayKey, figureLabel, shellFor, trimFor, trimHex } from "./merryman-figure";
 
 describe("the figure trims from the worker's mode, never from a wardrobe", () => {
   it("live is green, paper is lime", () => {
@@ -32,5 +32,25 @@ describe("the shell follows the running strategy", () => {
     assert.equal(shellFor("spot"), "default");
     assert.equal(shellFor(null), "default");
     assert.equal(shellFor(undefined), "default");
+  });
+});
+
+describe("dress changes the body colour only, never the state", () => {
+  it("three shells, spectre is the house black", () => {
+    assert.equal(colorwayHex("spectre"), "#2b3542");
+    assert.equal(colorwayHex("aurum"), "#4a3d22");
+    assert.equal(colorwayHex("glacier"), "#31445a");
+  });
+
+  it("unknown stored values fall back to spectre, never blank", () => {
+    assert.equal(colorwayFromStored(null), "spectre");
+    assert.equal(colorwayFromStored(undefined), "spectre");
+    assert.equal(colorwayFromStored("live"), "spectre");
+    assert.equal(colorwayFromStored("aurum"), "aurum");
+  });
+
+  it("the key is per agent, and unclaimed agents share one", () => {
+    assert.equal(colorwayKey("abc"), "merryman-shell:abc");
+    assert.equal(colorwayKey(null), "merryman-shell:unclaimed");
   });
 });
