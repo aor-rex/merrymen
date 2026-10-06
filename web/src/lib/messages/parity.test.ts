@@ -20,7 +20,7 @@ import { CATALOGUES } from "./index";
 import type { LocaleTag } from "../locale";
 
 /** Locales whose catalogue covers every English key. Extend per language PR. */
-const COMPLETE: LocaleTag[] = ["es"];
+const COMPLETE: LocaleTag[] = ["es", "pt-BR", "id", "vi", "tr", "ru", "th", "zh-CN", "ja", "ko"];
 
 /**
  * Namespaces English keeps but NO locale ships — translated once, then
